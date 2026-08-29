@@ -145,6 +145,11 @@ where
         ) {
             changes.force_full_run();
         }
+        if normalized.rsplit('/').next() == Some("manifest.toml") {
+            // The manifest owns corpus IDs, expectations, and metadata. A change anywhere in a
+            // manifest can therefore affect every discovered test, even when no source path moved.
+            changes.force_full_run();
+        }
         if components.first() == Some(&"crates")
             && let Some(compiler_crate) = components.get(1)
         {
@@ -322,6 +327,35 @@ mod tests {
         assert_eq!(summary.selected, 1);
         assert_eq!(summary.cases.len(), 1);
         assert_eq!(summary.cases[0].path, "guard/g01-spread-symbols");
+    }
+
+    #[test]
+    fn changed_manifest_runs_every_guard_test() {
+        let summary = run(
+            &corpus("conformance/guard"),
+            TestMode::Parse,
+            Some(vec!["conformance/manifest.toml".to_owned()]),
+            Vec::new(),
+        )
+        .expect("the manifest change is runnable");
+
+        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.selected, 20);
+    }
+
+    #[test]
+    fn changed_baseline_does_not_select_ordinary_guard_tests() {
+        let summary = run(
+            &corpus("conformance/guard"),
+            TestMode::Parse,
+            Some(vec!["conformance/results/baseline.json".to_owned()]),
+            Vec::new(),
+        )
+        .expect("the baseline change is runnable");
+
+        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.selected, 0);
+        assert!(summary.cases.is_empty());
     }
 
     #[test]
