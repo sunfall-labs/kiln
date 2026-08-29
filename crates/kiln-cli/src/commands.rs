@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn project_pushes_every_source_it_finds_then_asks_once() {
+    fn project_syncs_first_then_pushes_only_what_is_needed() {
         let dir = std::env::temp_dir().join(format!("kiln-cli-project-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("create dirs");
@@ -720,10 +720,28 @@ mod tests {
         let mut fake = Fake::new();
         let out = project(&mut fake, &dir).expect("project succeeds");
 
+        // One Sync names every discovered file; this Fake answers as a cold daemon that holds
+        // nothing, so both are then pushed. A warm daemon answers with a shorter list and the
+        // SetSource requests disappear, which is the whole point of the handshake.
         assert_eq!(
             fake.names(),
-            ["Stats", "SetSource", "SetSource", "Project", "Stats"],
-            "only the two sources should be pushed"
+            [
+                "Stats",
+                "Sync",
+                "SetSource",
+                "SetSource",
+                "Project",
+                "Stats"
+            ],
+            "the two sources are named once, then pushed because the fake holds nothing"
+        );
+        let Request::Sync { files } = &fake.seen[1] else {
+            panic!("second request must be the sync handshake");
+        };
+        assert_eq!(
+            files.len(),
+            2,
+            "notes.md is not a source and must not be named"
         );
         assert!(out.text.starts_with("project  r2  "), "{}", out.text);
         assert!(out.text.contains("modules         2"), "{}", out.text);
