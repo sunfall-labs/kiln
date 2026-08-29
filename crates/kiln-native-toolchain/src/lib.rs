@@ -1,9 +1,9 @@
 //! Discovery and invocation of a C toolchain used by Kiln's native backend.
 //!
 //! The native backend emits C; this crate owns the small amount of platform-facing behavior needed
-//! to turn those translation units into objects and an executable.  It deliberately does not know
-//! how C is generated or how a runtime is laid out.  Callers provide paths and optional runtime
-//! libraries, while the crate provides:
+//! to turn those translation units into objects, executables, or shared libraries. It deliberately
+//! does not know how C is generated or how a runtime is laid out. Callers provide paths and
+//! optional runtime libraries, while the crate provides:
 //!
 //! * deterministic compiler discovery (`zig cc`, Clang, GCC, or a generic `cc`),
 //! * native-dev/native-check/native-release flags,
@@ -257,6 +257,8 @@ pub struct CompileOptions {
     pub include_dirs: Vec<PathBuf>,
     pub extra_args: Vec<OsString>,
     pub current_dir: Option<PathBuf>,
+    /// Emit position-independent code for objects that will be linked into a shared library.
+    pub position_independent: bool,
 }
 
 impl Default for CompileOptions {
@@ -266,6 +268,7 @@ impl Default for CompileOptions {
             include_dirs: Vec::new(),
             extra_args: Vec::new(),
             current_dir: None,
+            position_independent: false,
         }
     }
 }
@@ -411,6 +414,11 @@ pub enum ToolchainError {
     InputMissing { stage: BuildStage, path: PathBuf },
     /// A successful command did not produce its promised output file.
     OutputMissing { stage: BuildStage, path: PathBuf },
+    /// The requested artifact kind is not supported by this host platform.
+    UnsupportedPlatform {
+        operation: &'static str,
+        platform: String,
+    },
     /// Output metadata could not be read after a successful command.
     OutputMetadata {
         stage: BuildStage,
@@ -427,6 +435,7 @@ impl ToolchainError {
             | Self::InputMissing { stage, .. }
             | Self::OutputMissing { stage, .. }
             | Self::OutputMetadata { stage, .. } => Some(*stage),
+            Self::UnsupportedPlatform { .. } => None,
             Self::ProcessFailed(failure) => Some(failure.stage),
         }
     }
@@ -484,6 +493,13 @@ impl fmt::Display for ToolchainError {
                 formatter,
                 "{stage} succeeded but did not produce output: {}",
                 path.display()
+            ),
+            Self::UnsupportedPlatform {
+                operation,
+                platform,
+            } => write!(
+                formatter,
+                "{operation} is unsupported on platform `{platform}`"
             ),
             Self::OutputMetadata {
                 stage,
@@ -666,6 +682,9 @@ impl Toolchain {
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
         }
+        if options.position_independent {
+            args.push(OsString::from("-fPIC"));
+        }
         for directory in &options.include_dirs {
             args.push(OsString::from("-I"));
             args.push(directory.as_os_str().to_owned());
@@ -690,11 +709,32 @@ impl Toolchain {
         executable: impl AsRef<Path>,
         options: &LinkOptions,
     ) -> Result<ArtifactReport, ToolchainError> {
-        let executable = executable.as_ref();
+        self.link_artifact(objects, executable.as_ref(), options, &[])
+    }
+
+    /// Link object files and optional runtime libraries into a shared library.
+    pub fn link_shared_library(
+        &self,
+        objects: &[PathBuf],
+        library: impl AsRef<Path>,
+        options: &LinkOptions,
+    ) -> Result<ArtifactReport, ToolchainError> {
+        let shared_flags = shared_library_flags(&self.identity.target)?;
+        self.link_artifact(objects, library.as_ref(), options, shared_flags)
+    }
+
+    fn link_artifact(
+        &self,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+        mode_flags: &[&str],
+    ) -> Result<ArtifactReport, ToolchainError> {
         for object in objects {
             require_input(BuildStage::Link, object, options.current_dir.as_deref())?;
         }
         let mut args = self.command_prefix.clone();
+        args.extend(mode_flags.iter().copied().map(OsString::from));
         for flag in options.profile.link_flags() {
             args.push(OsString::from(flag));
         }
@@ -714,12 +754,12 @@ impl Toolchain {
         }
         args.extend(options.extra_args.iter().cloned());
         args.push(OsString::from("-o"));
-        args.push(executable.as_os_str().to_owned());
+        args.push(output.as_os_str().to_owned());
         let command = self.command(args, options.current_dir.clone());
         self.run_artifact(
             BuildStage::Link,
             command,
-            executable,
+            output,
             options.current_dir.as_deref(),
         )
     }
@@ -826,6 +866,23 @@ fn resolve_path(path: &Path, current_dir: Option<&Path>) -> PathBuf {
         current_dir.join(path)
     } else {
         path.to_path_buf()
+    }
+}
+
+fn shared_library_flags(target: &str) -> Result<&'static [&'static str], ToolchainError> {
+    if target.contains("darwin") {
+        Ok(&["-dynamiclib"])
+    } else if target.contains("linux") {
+        Ok(&["-shared"])
+    } else if target == "unknown" && cfg!(target_os = "macos") {
+        Ok(&["-dynamiclib"])
+    } else if target == "unknown" && cfg!(target_os = "linux") {
+        Ok(&["-shared"])
+    } else {
+        Err(ToolchainError::UnsupportedPlatform {
+            operation: "shared-library linking",
+            platform: target.to_owned(),
+        })
     }
 }
 
@@ -991,6 +1048,71 @@ mod tests {
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn fake_shared_link_reports_pic_and_platform_flags() {
+        let directory = temp_dir("shared");
+        let source = directory.join("module.c");
+        let object = directory.join("module.o");
+        let library = directory.join("libkiln-module.dylib");
+        fs::write(&source, "int kiln_value(void) { return 7; }\n").expect("source");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("clang version 18.1\n", ""),
+                ProcessOutput::success("arm64-apple-darwin24.0.0\n", ""),
+                ProcessOutput::success("compile ok\n", "compile note\n"),
+                ProcessOutput::success("link ok\n", "link note\n"),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        let compile_report = toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    position_independent: true,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("PIC compile");
+        let link_report = toolchain
+            .link_shared_library(
+                std::slice::from_ref(&object),
+                &library,
+                &LinkOptions::default(),
+            )
+            .expect("shared link");
+
+        assert_eq!(compile_report.stage, BuildStage::Compile);
+        assert_eq!(compile_report.stdout_lossy(), "compile ok\n");
+        assert_eq!(compile_report.stderr_lossy(), "compile note\n");
+        assert_eq!(link_report.stage, BuildStage::Link);
+        assert_eq!(link_report.stdout_lossy(), "link ok\n");
+        assert_eq!(link_report.stderr_lossy(), "link note\n");
+        let commands = runner_impl.commands();
+        assert_eq!(commands.len(), 4);
+        assert!(commands[2].args.iter().any(|argument| argument == "-fPIC"));
+        assert!(commands[3].args.iter().any(|argument| {
+            shared_library_flags(toolchain.identity().target.as_str())
+                .expect("supported platform")
+                .iter()
+                .any(|flag| argument == flag)
+        }));
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|argument| argument == object.as_os_str())
+        );
+        assert_eq!(link_report.output_path, library);
+        assert_eq!(link_report.output_size, 8);
+
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
     #[test]
     fn zig_driver_inserts_cc_subcommand() {
         let runner: Arc<dyn ProcessRunner> = Arc::new(FakeRunner::new(
@@ -1118,6 +1240,42 @@ mod tests {
             .expect("native compiler round trip");
         assert!(report.objects[0].output_size > 0);
         assert!(report.executable.output_size > 0);
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn real_shared_library_round_trip_or_explicit_skip() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("skipping shared-library round-trip: no supported C compiler found");
+            return;
+        };
+        if !cfg!(any(target_os = "macos", target_os = "linux")) {
+            eprintln!("skipping shared-library round-trip: unsupported host platform");
+            return;
+        }
+        let directory = temp_dir("real-shared");
+        let source = directory.join("module.c");
+        let object = directory.join("module.o");
+        let library = if cfg!(target_os = "macos") {
+            directory.join("libkiln-module.dylib")
+        } else {
+            directory.join("libkiln-module.so")
+        };
+        fs::write(&source, "int kiln_value(void) { return 7; }\n").expect("source");
+        toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    position_independent: true,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("PIC compile");
+        let report = toolchain
+            .link_shared_library(&[object], &library, &LinkOptions::default())
+            .expect("shared link");
+        assert!(report.output_size > 0);
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
     }
 }

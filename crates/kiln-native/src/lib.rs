@@ -22,8 +22,10 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
+pub use kiln_native_runtime::embedding_header;
 use kiln_native_runtime::{
-    NATIVE_RUNTIME_VERSION, RuntimeSourceError, launcher_source, runtime_source,
+    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
+    RuntimeSourceError, launcher_source, runtime_source,
 };
 use kiln_native_toolchain::{
     BuildProfile as ToolchainProfile, CompileOptions, LinkOptions, ToolIdentity, Toolchain,
@@ -33,6 +35,11 @@ use kiln_native_toolchain::{
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
+
+const _: () = {
+    assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
+    assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
+};
 
 /// Native optimization and checking policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -133,6 +140,33 @@ pub struct NativeBuildReport {
     /// Cache status of the generated runtime and graph-launcher C sources.
     pub runtime_generated_c_cache_hit: bool,
     pub launcher_generated_c_cache_hit: bool,
+}
+
+/// Cache facts for an embedded scalar shared library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NativeSharedLibraryCacheHits {
+    pub generated_c: bool,
+    pub object: bool,
+    pub library: bool,
+}
+
+/// Byte sizes of an embedded scalar shared library's material products.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NativeSharedLibrarySizes {
+    pub generated_c: u64,
+    pub object: u64,
+    pub library: u64,
+}
+
+/// Observable result of one cached embedded scalar shared-library build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSharedLibraryReport {
+    pub output: PathBuf,
+    pub module_symbol: String,
+    pub tool: ToolIdentity,
+    pub cache_hits: NativeSharedLibraryCacheHits,
+    pub sizes: NativeSharedLibrarySizes,
+    pub timings: BuildTimings,
 }
 
 /// Captured result of launching a freshly built or cached executable.
@@ -506,6 +540,145 @@ impl NativeBuilder {
             }],
             runtime_generated_c_cache_hit,
             launcher_generated_c_cache_hit,
+        })
+    }
+
+    /// Build one scalar bytecode module as a shared library for an embedding host.
+    ///
+    /// The resulting library exports the module's generated entry point and expects the caller to
+    /// provide the stable `kiln_host` callback ABI. It deliberately does not link the CLI runtime
+    /// or launcher, so host policy remains in the embedding process.
+    pub fn build_shared_library(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeSharedLibraryReport, NativeError> {
+        let total_started = Instant::now();
+        let emit_started = Instant::now();
+        let module = emit_c(program)?;
+        let emit_elapsed = emit_started.elapsed();
+
+        let workspace = WorkDirectory::create()?;
+        let paths = SharedLibraryPaths::new(workspace.path());
+        let identity = self.toolchain.identity().clone();
+        let profile = options.profile;
+        let module_abi = module_abi_identity();
+        let embedding_abi = runtime_abi_identity();
+        let target = target_identity(&identity);
+        let compiler = compiler_identity(&identity);
+        let module_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-c-abi-{C_ABI_VERSION}"),
+            Backend::C,
+            &module_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"deterministic-c11"),
+            [Digest::hash(module.source.as_bytes())],
+        );
+        let (module_source, module_source_digest, generated_c_hit) =
+            self.cached_payload(&module_source_key, module.source.as_bytes())?;
+        let object_options = Digest::hash(
+            format!(
+                "shared-library\0pic\0c11\0{}\0{}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
+        let object_key = key(
+            ArtifactKind::NativeObject,
+            &compiler,
+            Backend::Custom("native-shared-library".to_owned()),
+            &embedding_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [module_source_digest],
+        );
+        let compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            position_independent: true,
+            ..CompileOptions::default()
+        };
+        let compile_started = Instant::now();
+        let (object, object_digest, object_hit, object_elapsed) = self.object(
+            &object_key,
+            &module_source,
+            &paths.module_c,
+            &paths.module_o,
+            &compile_options,
+        )?;
+        let compile_elapsed = if object_hit {
+            Duration::ZERO
+        } else {
+            object_elapsed.max(compile_started.elapsed())
+        };
+
+        let link_options_digest = Digest::hash(
+            format!(
+                "shared-library\0{}\0system-math\0{}\0{}\0{}",
+                profile.as_str(),
+                shared_library_name(),
+                shared_library_link_identity(&options.output),
+                shared_library_link_policy(),
+            )
+            .as_bytes(),
+        );
+        let library_key = key(
+            ArtifactKind::LinkedArtifact,
+            &compiler,
+            Backend::Custom("native-shared-library".to_owned()),
+            &embedding_abi,
+            &target,
+            profile.cache(),
+            link_options_digest,
+            [object_digest],
+        );
+        let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
+            Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
+            Lookup::Miss => {
+                materialize(&paths.module_o, &object, false)?;
+                let mut link_options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    link_options.libraries.push("m".to_owned());
+                }
+                configure_shared_library_link(&mut link_options, &options.output);
+                let report = self.toolchain.link_shared_library(
+                    std::slice::from_ref(&paths.module_o),
+                    &paths.library,
+                    &link_options,
+                )?;
+                let bytes = read(&paths.library, "read linked shared library")?;
+                self.cache.put(&library_key, &bytes)?;
+                (bytes, false, report.elapsed)
+            }
+        };
+        materialize(&options.output, &library, false)?;
+
+        Ok(NativeSharedLibraryReport {
+            output: options.output.clone(),
+            module_symbol: module.symbol,
+            tool: identity,
+            cache_hits: NativeSharedLibraryCacheHits {
+                generated_c: generated_c_hit,
+                object: object_hit,
+                library: library_hit,
+            },
+            sizes: NativeSharedLibrarySizes {
+                generated_c: module_source.len() as u64,
+                object: object.len() as u64,
+                library: library.len() as u64,
+            },
+            timings: BuildTimings {
+                emit: emit_elapsed,
+                compile: compile_elapsed,
+                link: link_elapsed,
+                total: total_started.elapsed(),
+            },
         })
     }
 
@@ -1389,6 +1562,12 @@ struct BuildPaths {
     executable: PathBuf,
 }
 
+struct SharedLibraryPaths {
+    module_c: PathBuf,
+    module_o: PathBuf,
+    library: PathBuf,
+}
+
 struct GraphBuildPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
@@ -1441,6 +1620,67 @@ impl BuildPaths {
     }
 }
 
+impl SharedLibraryPaths {
+    fn new(root: &Path) -> Self {
+        Self {
+            module_c: root.join("module.c"),
+            module_o: root.join("module.o"),
+            library: root.join(shared_library_name()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const fn shared_library_name() -> &'static str {
+    "program.dylib"
+}
+
+#[cfg(target_os = "linux")]
+const fn shared_library_name() -> &'static str {
+    "program.so"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const fn shared_library_name() -> &'static str {
+    "program.so"
+}
+
+fn shared_library_link_identity(output: &Path) -> String {
+    let name = output
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new(shared_library_name()))
+        .to_string_lossy();
+    if cfg!(target_os = "macos") {
+        format!("@rpath/{name}")
+    } else {
+        name.into_owned()
+    }
+}
+
+const fn shared_library_link_policy() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos-dynamiclib-install-name-rpath-v1"
+    } else if cfg!(target_os = "linux") {
+        "linux-shared-soname-v1"
+    } else {
+        "unsupported-shared-link-v1"
+    }
+}
+
+fn configure_shared_library_link(options: &mut LinkOptions, output: &Path) {
+    let identity = shared_library_link_identity(output);
+    #[cfg(target_os = "macos")]
+    options
+        .extra_args
+        .push(format!("-Wl,-install_name,{identity}").into());
+    #[cfg(target_os = "linux")]
+    options
+        .extra_args
+        .push(format!("-Wl,-soname,{identity}").into());
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = (options, identity);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,6 +1689,28 @@ mod tests {
         ModuleProgram,
     };
     use std::sync::{Arc, Barrier};
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                WORK_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create native test directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn a_second_build_reuses_every_material_artifact_and_runs() {
@@ -1515,6 +1777,177 @@ mod tests {
         assert!(second.stderr.is_empty());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping embedded native integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping embedded native integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-embedded-test");
+        let cache = root.path.join("cache");
+        let library_path =
+            root.path
+                .join("embedded")
+                .with_extension(if cfg!(target_os = "macos") {
+                    "dylib"
+                } else {
+                    "so"
+                });
+        let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain.clone());
+        let program = stdout_program("embedded\0tail");
+        let options = NativeBuildOptions {
+            output: library_path.clone(),
+            profile: NativeProfile::Dev,
+        };
+        let first = builder
+            .build_shared_library(&program, &options)
+            .expect("first embedded shared-library build succeeds");
+        assert!(!first.cache_hits.generated_c);
+        assert!(!first.cache_hits.object);
+        assert!(!first.cache_hits.library);
+        let executable = builder
+            .build(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join("ordinary-program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("ordinary executable build succeeds after PIC build");
+        assert!(executable.cache_hits.generated_c);
+        assert!(
+            !executable.cache_hits.application_object,
+            "a shared PIC object must not satisfy an executable-object lookup"
+        );
+        let second = builder
+            .build_shared_library(&program, &options)
+            .expect("second embedded shared-library build succeeds");
+        assert!(second.cache_hits.generated_c);
+        assert!(second.cache_hits.object);
+        assert!(second.cache_hits.library);
+        assert_eq!(first.module_symbol, second.module_symbol);
+        assert_eq!(second.output, library_path);
+
+        let renamed_path = root
+            .path
+            .join("renamed")
+            .with_extension(if cfg!(target_os = "macos") {
+                "dylib"
+            } else {
+                "so"
+            });
+        let renamed = builder
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: renamed_path,
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("renamed shared-library build succeeds");
+        assert!(renamed.cache_hits.generated_c);
+        assert!(renamed.cache_hits.object);
+        assert!(
+            !renamed.cache_hits.library,
+            "the embedded install name or SONAME changes with the output basename"
+        );
+
+        let header = root.path.join("kiln-embedding.h");
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        fs::write(&header, embedding_header()).expect("write embedding header");
+        let mut source = String::from(
+            r#"#include "kiln-embedding.h"
+#include <stdio.h>
+#include <string.h>
+
+struct capture {
+    char bytes[256];
+    size_t length;
+    int calls;
+};
+
+"#,
+        );
+        source.push_str("extern int ");
+        source.push_str(&second.module_symbol);
+        source.push_str(
+            r#"(kiln_host *host, kiln_value *result);
+
+static int capture_host_call(void *context, uint16_t operation, uint16_t argc,
+                             const kiln_value *arguments, kiln_value *result) {
+    struct capture *capture = (struct capture *)context;
+    if (capture == NULL || result == NULL || operation != KILN_HOST_OP_WRITE_STDOUT
+        || argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING
+        || arguments[0].ptr == NULL || arguments[0].len >= sizeof(capture->bytes)) {
+        return KILN_C99_HOST_ERROR;
+    }
+    memcpy(capture->bytes, arguments[0].ptr, arguments[0].len);
+    capture->length = arguments[0].len;
+    capture->bytes[capture->length++] = '\n';
+    capture->calls += 1;
+    *result = (kiln_value){KILN_VALUE_UNDEFINED, 0, 0, NULL, 0};
+    return KILN_C99_OK;
+}
+
+int main(void) {
+    struct capture capture = {{0}, 0, 0};
+    kiln_host host = {capture_host_call, &capture};
+    kiln_value result;
+    int status = "#,
+        );
+        source.push_str(&second.module_symbol);
+        source.push_str(
+            r#"(&host, &result);
+    if (status != KILN_C99_OK || capture.calls != 1) {
+        return 2;
+    }
+    if (fwrite(capture.bytes, 1, capture.length, stdout) != capture.length) {
+        return 3;
+    }
+    return 0;
+}
+"#,
+        );
+        fs::write(&host_source, source).expect("write embedding host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile embedding host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(library_path.clone());
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+        toolchain
+            .link_executable(
+                std::slice::from_ref(&host_object),
+                &host_executable,
+                &link_options,
+            )
+            .expect("link embedding host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", &root.path);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", &root.path);
+        let output = command.output().expect("run embedding host");
+        assert!(
+            output.status.success(),
+            "embedding host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"embedded\0tail\n");
+        assert!(output.stderr.is_empty());
     }
 
     #[test]

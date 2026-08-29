@@ -60,6 +60,15 @@ requests cannot replace the program another request is about to execute. The CLI
 C numeric locale before module initialization so `strtod` and `snprintf` do not inherit
 locale-dependent semantics.
 
+Embedding uses the same module entry ABI without linking the command-line runtime or launcher.
+`kiln-native-runtime` publishes a deterministic, self-contained C header for the versioned value
+layout, status codes, and HostOps callback. A shared-library build compiles the application unit as
+position-independent code, links only that unit (plus required system libraries), and returns its
+stable module symbol for the embedder to declare and call. PIC objects and shared links have cache
+identities distinct from executable objects and links; an executable cache hit is never accepted as
+an embedding artifact. Shared-library linking is initially supported on macOS and Linux, where the
+toolchain flags and dynamic-loader behavior are exercised by real C-host integration tests.
+
 ## Consequences
 
 - Editing one module body invalidates that module's C and object plus the final link, not the
@@ -70,6 +79,8 @@ locale-dependent semantics.
 - Compiler versions, targets, profiles, and ordered link inputs cannot accidentally share objects.
 - Native build reports can expose cache hits, artifact sizes, and per-stage latency as ordinary
   correctness/performance evidence.
+- Native embedding keeps ownership and I/O policy in the host process: the library exports module
+  computation, while every external effect still crosses the same numeric HostOps callback.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
 - The initial scalar C backend still uses `%.17g` for number-to-string conversion and retains

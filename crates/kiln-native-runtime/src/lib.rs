@@ -1,14 +1,21 @@
-//! The small C runtime used by Kiln's native command-line launcher.
+//! The C embedding contract and small runtime used by Kiln's native command-line launcher.
 //!
 //! The generated program translation units deliberately do not contain host policy.  This crate
 //! emits the stable, reusable callback object that implements the command-line `WriteStdout`
 //! operation, plus a tiny executable launcher for one generated module.  Keeping those sources
-//! separate lets the runtime object be cached independently from application code.
+//! separate lets the runtime object be cached independently from application code. Embedded hosts
+//! consume [`embedding_header`] and supply their own callback policy without linking the CLI code.
 
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
 pub const NATIVE_RUNTIME_VERSION: u32 = 1;
+
+/// C entry-point ABI version declared by [`embedding_header`].
+pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
+
+/// Host callback ABI version declared by [`embedding_header`].
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 1;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -143,8 +150,25 @@ typedef struct kiln_value {
     size_t len;
 } kiln_value;
 
-/* A nonzero callback return is propagated as KILN_C99_HOST_ERROR.  The callback owns any
- * interpretation of operation numbers and may replace *result. */
+#if defined(__cplusplus)
+static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+static_assert(offsetof(kiln_value, reserved) == 4, "kiln_value.reserved ABI offset");
+static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+static_assert(offsetof(kiln_value, ptr) == 16, "kiln_value.ptr ABI offset");
+static_assert(offsetof(kiln_value, len) == 16 + sizeof(void *), "kiln_value.len ABI offset");
+static_assert(sizeof(kiln_value) == 16 + 2 * sizeof(void *), "kiln_value ABI size");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
+_Static_assert(offsetof(kiln_value, reserved) == 4, "kiln_value.reserved ABI offset");
+_Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
+_Static_assert(offsetof(kiln_value, ptr) == 16, "kiln_value.ptr ABI offset");
+_Static_assert(offsetof(kiln_value, len) == 16 + sizeof(void *), "kiln_value.len ABI offset");
+_Static_assert(sizeof(kiln_value) == 16 + 2 * sizeof(void *), "kiln_value ABI size");
+#endif
+
+/* Argument ptr/len values are borrowed for the callback invocation.  A string stored in *result
+ * must remain alive until the module entry point returns.  A nonzero callback return is
+ * propagated as KILN_C99_HOST_ERROR. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
 typedef struct kiln_host {
@@ -308,9 +332,15 @@ mod tests {
     fn embedding_header_is_deterministic_and_contains_the_stable_contract() {
         assert_eq!(embedding_header(), embedding_header());
         assert!(embedding_header().contains("#ifndef KILN_NATIVE_EMBEDDING_H"));
-        assert!(embedding_header().contains("#define KILN_NATIVE_RUNTIME_VERSION 1"));
-        assert!(embedding_header().contains("#define KILN_C_ABI_VERSION 1"));
-        assert!(embedding_header().contains("#define KILN_HOST_ABI_VERSION 1"));
+        assert!(embedding_header().contains(&format!(
+            "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
+        )));
+        assert!(embedding_header().contains(&format!(
+            "#define KILN_C_ABI_VERSION {EMBEDDING_C_ABI_VERSION}"
+        )));
+        assert!(embedding_header().contains(&format!(
+            "#define KILN_HOST_ABI_VERSION {EMBEDDING_HOST_ABI_VERSION}"
+        )));
         assert!(embedding_header().contains("#define KILN_HOST_OP_WRITE_STDOUT 1"));
         assert!(embedding_header().contains("uint32_t tag;"));
         assert!(embedding_header().contains("uint32_t reserved;"));
@@ -319,6 +349,7 @@ mod tests {
         assert!(embedding_header().contains("size_t len;"));
         assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
         assert!(embedding_header().contains("typedef struct kiln_host"));
+        assert!(embedding_header().contains("sizeof(kiln_value) == 16 + 2 * sizeof(void *)"));
         assert!(embedding_header().contains("#endif /* KILN_NATIVE_EMBEDDING_H */"));
     }
 
