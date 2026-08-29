@@ -684,3 +684,98 @@ hand-written, not minified, not synthetic: ~209 KB of the shapes a bundler actua
 Regenerable byte for byte from package-lock.json plus build.sh - verified by building twice and \
 diffing - but committed so that benchmarks need neither a network nor a Node toolchain.\
 """
+
+# Regression probes authored in this repository, not ported. Each one is a bug that was found
+# while implementing the ladder in docs/language-coverage.md and that no ported probe isolates:
+# either nothing in the corpus reached it, or the probe that did reached it through a second
+# missing feature that hid the cause. They are a separate group precisely so the [corpus] counts
+# above keep meaning "what was ported from porffor-effect-findings".
+#
+# Expected output was observed the same way the ported corpus's was: `node v25.9.0` on this
+# machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
+# stderr.
+[regress]
+tests = 4
+authored = "2026-08-29"
+expected_output_method = "Ran `node <probe>.js` and recorded the bytes it printed."
+
+[[test]]
+id = "regress/r01-handler-outlives-frame"
+group = "regress"
+source = "regress/r01-handler-outlives-frame.js"
+status = "runnable"
+features = ["exceptions", "try-finally", "abrupt-completion", "handler-lifetime", "functions"]
+catches = """
+An exception handler outliving the frame that installed it. A `return` out of a `try` jumps past \
+the `PopHandler` that balances its `PushHandler`, so unless handlers are dropped with their \
+frame, the next `throw` with no legitimate handler in between lands on a code offset belonging \
+to a function that has already returned -- and executes whatever instruction happens to live \
+there in the *current* one. Only observable when nothing else is on the handler stack to shadow \
+the leaked entry, which is why the throw here is not wrapped.\
+"""
+expected_stdout = """
+start 1
+caught boom
+"""
+
+[[test]]
+id = "regress/r02-generator-resumed-at-another-depth"
+group = "regress"
+source = "regress/r02-generator-resumed-at-another-depth.js"
+status = "runnable"
+features = ["generators", "try-finally", "iterator-protocol", "abrupt-completion", "generator-return"]
+catches = """
+A generator's saved operand stack is restored wherever the resuming caller's stack happens to \
+end, so any handler position recorded as an absolute index is stale on the next resumption. This \
+resumes at three different depths before unwinding through the `finally`. The equivalent in g14 \
+is reached only through `JSON.stringify`, which hid the cause behind a missing builtin; this \
+probe isolates it.\
+"""
+expected_stdout = """
+1
+2,3
+early true cleanup
+"""
+
+[[test]]
+id = "regress/r03-array-from"
+group = "regress"
+source = "regress/r03-array-from.js"
+status = "runnable"
+features = ["builtins", "iterator-protocol", "array-like", "callbacks", "collections", "strings"]
+catches = """
+`Array.from` in all four of its modes: an iterable walked through the protocol, an array-like \
+read by index up to `length`, a string, and the optional mapping function. It cannot be a pure \
+argument-to-value builtin because two of those call back into the program, so it is the case \
+that decides whether the builtin layer has a way to reach the interpreter at all.\
+"""
+expected_stdout = """
+a,b
+a0,b1
+2,4,6
+h,i
+2 undefined
+1,2
+"""
+
+[[test]]
+id = "regress/r04-iterator-close-paths"
+group = "regress"
+source = "regress/r04-iterator-close-paths.js"
+status = "runnable"
+features = ["iterator-protocol", "iterator-close", "for-of", "abrupt-completion", "try-finally", "exceptions"]
+catches = """
+IteratorClose on every abrupt completion rather than only on `break`: `return` out of the \
+enclosing function, an exception through the body, a `break` from inside a nested `try` (cleanup \
+first, then the close), and an inner `break` in nested loops closing only the inner iterator. It \
+also pins the two cases that must *not* close -- `continue`, and running out of values -- which \
+is the mistake g18's own note records the source project making.\
+"""
+expected_stdout = """
+break: break
+exhaust: (none)
+return: return
+throw: throw boom
+nested try: finally,nested
+nested loops: inner,outer
+"""
