@@ -63,6 +63,7 @@ pub enum Native {
     ArrayPop,
     ArrayIndexOf,
     ArrayIncludes,
+    ArraySlice,
     SetConstructor,
     MapConstructor,
     SetAdd,
@@ -1002,6 +1003,16 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         });
                     }
                     let items = self.stack.split_off(self.stack.len() - count);
+                    self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
+                }
+                Instruction::IterableToArray => {
+                    let source = self.pop(current)?;
+                    // An array is already the right shape; anything else goes through the
+                    // protocol, so `const [a, b] = someSet` binds what iterating it would yield.
+                    let items = match &source {
+                        Value::Array(items) => items.borrow().clone(),
+                        other => self.drain_iterable(other, current)?,
+                    };
                     self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
                 }
                 Instruction::SpreadInto => {
@@ -2361,6 +2372,18 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                 Value::Number(found.map_or(-1.0, |index| index as f64))
             }
         }
+        Native::ArraySlice => match receiver {
+            Value::Array(items) => {
+                let items = items.borrow();
+                // Only the one-argument form the pattern binder needs; a negative or absent
+                // start is not reached from there, and guessing at the rest would be inventing
+                // behaviour nothing exercises.
+                let start = arguments.first().map_or(0.0, Value::as_number).max(0.0) as usize;
+                let rest = items.get(start..).unwrap_or_default().to_vec();
+                Value::Array(Rc::new(RefCell::new(rest)))
+            }
+            _ => Value::Undefined,
+        },
         Native::ArrayJoin => {
             let separator = match arguments.first() {
                 None | Some(Value::Undefined) => ",".to_owned(),
@@ -2807,6 +2830,7 @@ fn array_property(name: &str) -> Value {
         "pop" => Value::Native(Native::ArrayPop),
         "indexOf" => Value::Native(Native::ArrayIndexOf),
         "includes" => Value::Native(Native::ArrayIncludes),
+        "slice" => Value::Native(Native::ArraySlice),
         "values" => Value::Native(Native::ArrayValues),
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,

@@ -265,9 +265,50 @@ pub enum VariableKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableDeclarator {
-    pub name: String,
+    pub pattern: Pattern,
     pub initializer: Option<Expression>,
     pub span: Span,
+}
+
+/// A binding target.
+///
+/// A pattern is a tree because destructuring nests, and defaults are a wrapper rather than a
+/// field on each shape: `[a = 1]`, `{ b = 2 }` and `[[c = 3]]` are the same construct at
+/// different depths, and giving every shape its own optional default would say otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pattern {
+    Identifier(String),
+    /// `{ a, b: renamed, ...rest }`
+    Object {
+        properties: Vec<PatternProperty>,
+        rest: Option<String>,
+    },
+    /// `[a, , b, ...rest]`. `None` is a hole, which binds nothing.
+    Array {
+        elements: Vec<Option<Pattern>>,
+        rest: Option<Box<Pattern>>,
+    },
+    /// `pattern = default`, where the default applies only when the value is `undefined`.
+    WithDefault {
+        inner: Box<Pattern>,
+        default: Box<Expression>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternProperty {
+    pub key: String,
+    pub value: Pattern,
+}
+
+impl Pattern {
+    /// The single name this pattern binds, when it binds exactly one.
+    pub fn as_identifier(&self) -> Option<&str> {
+        match self {
+            Self::Identifier(name) => Some(name),
+            _ => None,
+        }
+    }
 }
 
 /// An owned executable expression.

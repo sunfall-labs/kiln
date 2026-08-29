@@ -410,15 +410,9 @@ impl Lowerer {
             .iter()
             .map(|declarator| {
                 let declarator_span = span(declarator.span);
-                let name = match &declarator.id {
-                    BindingPattern::BindingIdentifier(identifier) => identifier.name.to_string(),
-                    _ => {
-                        self.unsupported("destructuring binding", declarator_span);
-                        String::new()
-                    }
-                };
+                let pattern = self.pattern(&declarator.id, declarator_span);
                 HirVariableDeclarator {
-                    name,
+                    pattern,
                     initializer: declarator
                         .init
                         .as_ref()
@@ -780,6 +774,66 @@ impl Lowerer {
                     span: statement_span,
                 })
             }
+        }
+    }
+
+    /// Lower a binding pattern.
+    ///
+    /// An unsupported shape becomes an identifier binding a name no source can produce, so the
+    /// diagnostic already recorded is the failure the user sees rather than a second, confusing
+    /// one about an unresolved name.
+    fn pattern(&mut self, pattern: &BindingPattern<'_>, span: HirSpan) -> kiln_hir::Pattern {
+        match pattern {
+            BindingPattern::BindingIdentifier(identifier) => {
+                kiln_hir::Pattern::Identifier(identifier.name.to_string())
+            }
+            BindingPattern::AssignmentPattern(assignment) => kiln_hir::Pattern::WithDefault {
+                inner: Box::new(self.pattern(&assignment.left, span)),
+                default: Box::new(self.expression(&assignment.right)),
+            },
+            BindingPattern::ObjectPattern(object) => {
+                let mut properties = Vec::with_capacity(object.properties.len());
+                for property in &object.properties {
+                    if property.computed {
+                        self.unsupported("computed key in a destructuring pattern", span);
+                        return kiln_hir::Pattern::Identifier(String::new());
+                    }
+                    let Some(key) = property.key.static_name() else {
+                        self.unsupported("destructuring key", span);
+                        return kiln_hir::Pattern::Identifier(String::new());
+                    };
+                    properties.push(kiln_hir::PatternProperty {
+                        key: key.to_string(),
+                        value: self.pattern(&property.value, span),
+                    });
+                }
+                let rest = match &object.rest {
+                    None => None,
+                    Some(rest) => match &rest.argument {
+                        BindingPattern::BindingIdentifier(identifier) => {
+                            Some(identifier.name.to_string())
+                        }
+                        // `{ ...{ a } }` is not valid as a binding rest, and anything else here
+                        // would need a nested pattern the rest object does not have.
+                        _ => {
+                            self.unsupported("destructuring rest pattern", span);
+                            return kiln_hir::Pattern::Identifier(String::new());
+                        }
+                    },
+                };
+                kiln_hir::Pattern::Object { properties, rest }
+            }
+            BindingPattern::ArrayPattern(array) => kiln_hir::Pattern::Array {
+                elements: array
+                    .elements
+                    .iter()
+                    .map(|element| element.as_ref().map(|element| self.pattern(element, span)))
+                    .collect(),
+                rest: array
+                    .rest
+                    .as_ref()
+                    .map(|rest| Box::new(self.pattern(&rest.argument, span))),
+            },
         }
     }
 
