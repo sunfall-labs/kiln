@@ -689,6 +689,10 @@ fn stack_effect(
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
+        | Instruction::LoadArguments
+        | Instruction::PushHandler(_)
+        | Instruction::PopHandler
+        | Instruction::Throw
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
@@ -912,6 +916,10 @@ fn emit_instruction(
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
+        | Instruction::LoadArguments
+        | Instruction::PushHandler(_)
+        | Instruction::PopHandler
+        | Instruction::Throw
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
@@ -1097,6 +1105,13 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));
             }
+            Instruction::PushHandler(target) => {
+                byte(&mut hash, 38);
+                word(&mut hash, u64::from(*target));
+            }
+            Instruction::PopHandler => byte(&mut hash, 39),
+            Instruction::Throw => byte(&mut hash, 40),
+            Instruction::LoadArguments => byte(&mut hash, 37),
             Instruction::LoadThis => byte(&mut hash, 33),
             Instruction::Dup2 => byte(&mut hash, 27),
             Instruction::NewArray { count } => {

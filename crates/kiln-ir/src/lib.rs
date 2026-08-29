@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, Class, ClassField, ExportName, ExportOrigin, Expression,
-    ExpressionKind, Function, ImportName, Literal, LogicalOperator, Module, ObjectKey, Span,
-    Statement, StatementKind, UnaryOperator, VariableKind,
+    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
+    Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator, Module, ObjectKey,
+    Span, Statement, StatementKind, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -114,6 +114,11 @@ pub enum Instruction {
     SetComputed,
     /// Push the current `this`.
     LoadThis,
+    /// Register an exception handler at `target`, active until `PopHandler`.
+    PushHandler(u32),
+    PopHandler,
+    /// Throw the value on top of the stack.
+    Throw,
     /// Push this frame's `arguments` as an array.
     ///
     /// Built on demand rather than on every call: most functions never mention it, and
@@ -448,6 +453,9 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
 struct LoopContext {
     breaks: Vec<usize>,
     continues: Vec<usize>,
+    /// How many cleanups were pending when the loop began, so a `break` runs only those entered
+    /// inside it.
+    finalizer_depth: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -503,6 +511,14 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// `finally` blocks enclosing the code being compiled, innermost last. A non-local exit has
+    /// to run each of them on its way out, so it needs their bodies rather than their addresses.
+    finalizers: Vec<Vec<Statement>>,
+    /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
+    pending_finalizers: Vec<Vec<Statement>>,
+    /// Cleanups pending when the current function began. A `return` unwinds to here and no
+    /// further: a `finally` outside the function is not left by returning from it.
+    function_finalizer_depth: usize,
     /// The hidden `super` bindings of the derived classes currently being compiled, innermost
     /// last. A stack rather than a field because class bodies nest.
     super_bindings: Vec<String>,
@@ -535,6 +551,9 @@ impl Compiler {
             captured: names_captured_by_nested_functions(&module.body),
             loops: Vec::new(),
             hidden_bindings: 0,
+            finalizers: Vec::new(),
+            pending_finalizers: Vec::new(),
+            function_finalizer_depth: 0,
             super_bindings: Vec::new(),
             super_binding_count: 0,
             scopes: vec![HashMap::new()],
@@ -652,6 +671,15 @@ impl Compiler {
                 iterable,
                 body,
             } => self.for_of(*kind, name, iterable, body, statement.span),
+            StatementKind::Throw(value) => {
+                self.expression(value);
+                self.code.push(Instruction::Throw);
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => self.try_statement(block, handler.as_ref(), finalizer, statement.span),
             StatementKind::Break { label } => self.jump_out(label.as_deref(), true, statement.span),
             StatementKind::Continue { label } => {
                 self.jump_out(label.as_deref(), false, statement.span)
@@ -797,6 +825,105 @@ impl Compiler {
         }
     }
 
+    /// `try`/`catch`/`finally`.
+    ///
+    /// The cleanup block is emitted once per exit path rather than once with a dispatcher.
+    /// A `finally` has to run on every way out -- falling off the end, `return`, `break`,
+    /// `continue`, and an exception -- and duplicating the block is what lets each of those stay
+    /// an ordinary jump. It costs code size in exchange for no pending-completion register and
+    /// no second dispatch mechanism; if the size ever matters, the shape here is what a
+    /// dispatcher would replace.
+    fn try_statement(
+        &mut self,
+        block: &[Statement],
+        handler: Option<&CatchClause>,
+        finalizer: &[Statement],
+        span: Span,
+    ) {
+        let has_finalizer = !finalizer.is_empty();
+        if has_finalizer {
+            self.finalizers.push(finalizer.to_vec());
+        }
+
+        let handler_jump = self.emit_jump(Instruction::PushHandler(0));
+
+        self.scopes.push(HashMap::new());
+        for statement in block {
+            self.statement(statement);
+        }
+        self.scopes.pop().expect("try scope was just pushed");
+        self.code.push(Instruction::PopHandler);
+
+        // Normal completion runs the cleanup and skips the handler.
+        if has_finalizer {
+            self.finalizers.pop();
+            self.emit_finalizer(finalizer);
+        }
+        let done_jump = self.emit_jump(Instruction::Jump(0));
+
+        // The handler is entered with the thrown value on the stack.
+        self.patch_jump(handler_jump);
+        if has_finalizer {
+            self.finalizers.push(finalizer.to_vec());
+        }
+        match handler {
+            Some(clause) => {
+                self.scopes.push(HashMap::new());
+                match &clause.binding {
+                    Some(name) => self.declare_bound(VariableKind::Let, name, span),
+                    // `catch { }` discards the value rather than binding it.
+                    None => self.code.push(Instruction::Pop),
+                }
+                for statement in &clause.body {
+                    self.statement(statement);
+                }
+                self.scopes.pop().expect("catch scope was just pushed");
+                if has_finalizer {
+                    self.finalizers.pop();
+                    self.emit_finalizer(finalizer);
+                }
+            }
+            None => {
+                // `try`/`finally` with no catch: run the cleanup, then let the exception
+                // continue outwards. The value is still on the stack for `Throw` to take.
+                if has_finalizer {
+                    self.finalizers.pop();
+                    self.emit_finalizer(finalizer);
+                }
+                self.code.push(Instruction::Throw);
+            }
+        }
+
+        self.patch_jump(done_jump);
+    }
+
+    /// Emit a cleanup block inline, with the enclosing cleanups temporarily out of scope.
+    ///
+    /// A `return` inside a `finally` must not re-run the same `finally`, which is what would
+    /// happen if it were still on the stack while its own body compiled.
+    fn emit_finalizer(&mut self, finalizer: &[Statement]) {
+        self.scopes.push(HashMap::new());
+        for statement in finalizer {
+            self.statement(statement);
+        }
+        self.scopes.pop().expect("finalizer scope was just pushed");
+    }
+
+    /// Run every cleanup between here and `depth`, innermost first.
+    fn unwind_finalizers(&mut self, depth: usize) {
+        while self.finalizers.len() > depth {
+            let finalizer = self
+                .finalizers
+                .pop()
+                .expect("checked by the loop condition");
+            self.emit_finalizer(&finalizer);
+            self.pending_finalizers.push(finalizer);
+        }
+        while let Some(finalizer) = self.pending_finalizers.pop() {
+            self.finalizers.push(finalizer);
+        }
+    }
+
     /// `for (const name of iterable) body`.
     ///
     /// Lowered to the protocol rather than to indexed access: the subject may be any iterable,
@@ -851,7 +978,10 @@ impl Compiler {
         self.code.push(Instruction::GetProperty(value));
         self.declare_bound(kind, name, span);
 
-        self.loops.push(LoopContext::default());
+        self.loops.push(LoopContext {
+            finalizer_depth: self.finalizers.len(),
+            ..LoopContext::default()
+        });
         self.statement(body);
         let context = self.loops.pop().expect("this loop pushed its own context");
         self.scopes.pop().expect("iteration scope was just pushed");
@@ -922,7 +1052,10 @@ impl Compiler {
             self.emit_jump(Instruction::JumpIfFalse(0))
         });
 
-        self.loops.push(LoopContext::default());
+        self.loops.push(LoopContext {
+            finalizer_depth: self.finalizers.len(),
+            ..LoopContext::default()
+        });
         self.statement(body);
         let context = self.loops.pop().expect("this loop pushed its own context");
 
@@ -959,6 +1092,14 @@ impl Compiler {
             );
             return;
         }
+        // Only the cleanups entered since the loop began: an outer `finally` is not left by
+        // this jump, so running it here would run it twice.
+        let depth = self
+            .loops
+            .last()
+            .map_or(0, |context| context.finalizer_depth);
+        self.unwind_finalizers(depth);
+
         let jump = self.emit_jump(Instruction::Jump(0));
         let Some(context) = self.loops.last_mut() else {
             self.error(
@@ -983,7 +1124,10 @@ impl Compiler {
             Instruction::Jump(slot)
             | Instruction::JumpIfFalse(slot)
             | Instruction::JumpIfTruthy(slot)
-            | Instruction::JumpIfNotNullish(slot) => *slot = target,
+            | Instruction::JumpIfNotNullish(slot)
+            // A handler's target is patched the same way a jump's is: it is not known until the
+            // handler body has been emitted.
+            | Instruction::PushHandler(slot) => *slot = target,
             other => unreachable!("patched a {other:?}, which is not a jump"),
         }
     }
@@ -1602,6 +1746,8 @@ impl Compiler {
         }
 
         let parameter_count = function.parameters.len() as u32;
+        let outer_finalizer_depth =
+            std::mem::replace(&mut self.function_finalizer_depth, self.finalizers.len());
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -1663,6 +1809,7 @@ impl Compiler {
             upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
         };
         self.scopes = restored.scopes;
+        self.function_finalizer_depth = outer_finalizer_depth;
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
 
@@ -1679,6 +1826,17 @@ impl Compiler {
         match value {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
+        }
+        if !self.finalizers.is_empty() {
+            // The value is computed before the cleanups run -- that is the observable order --
+            // but the cleanups may use the stack, so it is parked in a local across them.
+            let slot = format!("%ret{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+            self.declare_bound(VariableKind::Let, &slot, span);
+            self.unwind_finalizers(self.function_finalizer_depth);
+            self.load_hidden(&slot);
+            self.scopes.pop().expect("return scope was just pushed");
         }
         self.code.push(Instruction::Return);
     }
@@ -2011,8 +2169,11 @@ impl Compiler {
             Instruction::Jump(offset)
             | Instruction::JumpIfFalse(offset)
             | Instruction::JumpIfTruthy(offset)
-            | Instruction::JumpIfNotNullish(offset) => *offset = target,
-            _ => unreachable!("patch_jump called for non-jump instruction"),
+            | Instruction::JumpIfNotNullish(offset)
+            // A handler's target is patched exactly like a jump's: neither is known until the
+            // code it points past has been emitted.
+            | Instruction::PushHandler(offset) => *offset = target,
+            other => unreachable!("patch_jump called for {other:?}, which carries no target"),
         }
     }
 }
@@ -2108,6 +2269,21 @@ fn collect_nested_function_names(
         StatementKind::ForOf { iterable, body, .. } => {
             collect_identifiers(iterable, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::Throw(value) => collect_identifiers(value, names, inside_function),
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            for statement in block.iter().chain(finalizer) {
+                collect_nested_function_names(statement, names, inside_function);
+            }
+            if let Some(handler) = handler {
+                for statement in &handler.body {
+                    collect_nested_function_names(statement, names, inside_function);
+                }
+            }
         }
         StatementKind::Break { .. }
         | StatementKind::Continue { .. }
