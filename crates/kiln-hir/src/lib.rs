@@ -75,18 +75,19 @@ pub struct Function {
     /// A generator. Calling it produces an object rather than running the body.
     pub generator: bool,
     pub parameters: Vec<Parameter>,
+    /// `...rest`, which binds an array of the arguments beyond the declared parameters. Separate
+    /// from `parameters` because it takes no positional slot and its arity is not fixed.
+    pub rest: Option<Pattern>,
     pub body: Vec<Statement>,
     pub span: Span,
 }
 
 /// One declared parameter.
-///
-/// Simple identifier bindings only. Destructuring, defaults and rest are separate features with
-/// their own semantics; representing them as a plain identifier here would be a lie that later
-/// passes could not detect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
-    pub name: String,
+    /// A parameter binds a pattern, not a name: `f(a)`, `f(a = 1)` and `f({ a })` differ only in
+    /// which pattern they bind, and a default is a [`Pattern::WithDefault`] like any other.
+    pub pattern: Pattern,
     pub span: Span,
 }
 
