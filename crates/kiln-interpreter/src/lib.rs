@@ -253,14 +253,29 @@ impl ObjectData {
         self.prototype = Some(prototype);
     }
 
-    /// Insert or overwrite, preserving the position of an existing key.
+    /// Insert or overwrite, keeping the store in enumeration order.
     ///
     /// Re-assigning a property does not move it to the end in JavaScript, so it must not here.
+    /// A *new* key is placed where enumeration would put it rather than simply appended: an
+    /// array index comes before every string key, in ascending numeric order, however it was
+    /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
+    /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
-        match self.properties.iter_mut().find(|(name, _)| name == key) {
-            Some((_, existing)) => *existing = value,
-            None => self.properties.push((key.to_owned(), value)),
+        if let Some((_, existing)) = self.properties.iter_mut().find(|(name, _)| name == key) {
+            *existing = value;
+            return;
         }
+        let Some(index) = index_key(key) else {
+            self.properties.push((key.to_owned(), value));
+            return;
+        };
+        // The indices already form a sorted prefix, so this is where the new one joins it.
+        let position = self
+            .properties
+            .iter()
+            .position(|(name, _)| index_key(name).is_none_or(|other| other > index))
+            .unwrap_or(self.properties.len());
+        self.properties.insert(position, (key.to_owned(), value));
     }
 
     /// Remove an own property, keeping the order of the rest.
@@ -665,6 +680,11 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// `JSON.parse` was given text that is not JSON.
+    ///
+    /// A catchable `SyntaxError` in the specification, and fatal here for the same reason
+    /// [`Self::CyclicJson`] is: a native cannot yet raise a value the program can catch.
+    InvalidJson,
     /// `JSON.stringify` reached a value that contains itself.
     ///
     /// The specification throws a catchable `TypeError` here. A native cannot yet raise a value
@@ -742,6 +762,7 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
+            Self::InvalidJson => write!(formatter, "unexpected token in JSON"),
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
             Self::GeneratorReturned => write!(formatter, "generator returned"),
             Self::Uncaught { message, .. } => write!(formatter, "uncaught {message}"),
@@ -2820,12 +2841,14 @@ fn call_native(
         Native::ArraySlice => match receiver {
             Value::Array(items) => {
                 let items = items.borrow();
-                // Only the one-argument form the pattern binder needs; a negative or absent
-                // start is not reached from there, and guessing at the rest would be inventing
-                // behaviour nothing exercises.
-                let start = arguments.first().map_or(0.0, Value::as_number).max(0.0) as usize;
-                let rest = items.get(start..).unwrap_or_default().to_vec();
-                Value::Array(Rc::new(RefCell::new(rest)))
+                let start = relative_index(arguments.first(), items.len(), 0);
+                let end = relative_index(arguments.get(1), items.len(), items.len());
+                // `slice(3, 1)` is empty rather than an error, so the range is clamped both ways.
+                let taken = items
+                    .get(start..end.max(start))
+                    .unwrap_or_default()
+                    .to_vec();
+                Value::Array(Rc::new(RefCell::new(taken)))
             }
             _ => Value::Undefined,
         },
@@ -2853,10 +2876,25 @@ fn call_native(
                 None => Value::Undefined,
             }
         }
-        // Present so `typeof` reports "function", which is what the corpus checks. Calling one
-        // returns undefined rather than pretending to parse, because a wrong answer here would
-        // be much worse than a missing one.
-        Native::JsonParse | Native::ErrorCaptureStackTrace => Value::Undefined,
+        Native::JsonParse => {
+            let text = match arguments.first() {
+                None | Some(Value::Undefined) => "undefined".to_owned(),
+                Some(value) => value.to_display_string(),
+            };
+            let mut reader = JsonReader {
+                rest: text.as_str(),
+            };
+            reader.skip_whitespace();
+            let value = reader.value()?;
+            reader.skip_whitespace();
+            if !reader.rest.is_empty() {
+                return Err(ExecutionError::InvalidJson);
+            }
+            value
+        }
+        // Present so `typeof` reports "function", which is what the corpus checks. Calling it
+        // returns undefined rather than inventing a stack this VM does not record.
+        Native::ErrorCaptureStackTrace => Value::Undefined,
         // `Array.prototype.values` should return an iterator object. Nothing consumes one yet
         // -- for-of is a later step -- and the corpus only checks the function's identity and
         // type, so returning undefined is the honest placeholder rather than a fake iterator
@@ -3445,6 +3483,206 @@ fn own_properties(value: &Value) -> Vec<(String, Value)> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Resolve one end of a `slice`-style range.
+///
+/// A negative argument counts from the end, which is the whole reason this is not a cast: `-2`
+/// means "two from the end", not "clamp to zero". Both ends are clamped into the array.
+fn relative_index(argument: Option<&Value>, length: usize, default: usize) -> usize {
+    let Some(value) = argument.filter(|value| !matches!(value, Value::Undefined)) else {
+        return default;
+    };
+    let relative = value.as_number();
+    if relative.is_nan() {
+        return 0;
+    }
+    let length = length as f64;
+    let resolved = if relative < 0.0 {
+        (length + relative).max(0.0)
+    } else {
+        relative.min(length)
+    };
+    resolved as usize
+}
+
+/// A reader over JSON text.
+///
+/// Hand-written rather than delegating to serde: the output is a `Value` graph with JavaScript's
+/// own rules -- every number is an `f64`, objects keep insertion order, and duplicate keys take
+/// the last value -- and going through an intermediate representation would mean translating all
+/// three back afterwards.
+struct JsonReader<'text> {
+    rest: &'text str,
+}
+
+impl JsonReader<'_> {
+    fn skip_whitespace(&mut self) {
+        // JSON's whitespace is exactly these four; anything else is a token.
+        self.rest = self.rest.trim_start_matches([' ', '\t', '\n', '\r']);
+    }
+
+    /// Consume `token` if it is next.
+    fn eat(&mut self, token: char) -> bool {
+        match self.rest.strip_prefix(token) {
+            Some(rest) => {
+                self.rest = rest;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn value(&mut self) -> Result<Value, ExecutionError> {
+        self.skip_whitespace();
+        let Some(next) = self.rest.chars().next() else {
+            return Err(ExecutionError::InvalidJson);
+        };
+        match next {
+            '{' => self.object(),
+            '[' => self.array(),
+            '"' => self.string().map(Value::String),
+            't' | 'f' | 'n' => self.keyword(),
+            _ => self.number(),
+        }
+    }
+
+    fn keyword(&mut self) -> Result<Value, ExecutionError> {
+        for (word, value) in [
+            ("true", Value::Boolean(true)),
+            ("false", Value::Boolean(false)),
+            ("null", Value::Null),
+        ] {
+            if let Some(rest) = self.rest.strip_prefix(word) {
+                self.rest = rest;
+                return Ok(value);
+            }
+        }
+        Err(ExecutionError::InvalidJson)
+    }
+
+    fn number(&mut self) -> Result<Value, ExecutionError> {
+        let end = self
+            .rest
+            .find(|character: char| !matches!(character, '0'..='9' | '-' | '+' | '.' | 'e' | 'E'))
+            .unwrap_or(self.rest.len());
+        let (text, rest) = self.rest.split_at(end);
+        // `f64::from_str` accepts more than JSON does -- "inf", "NaN", a leading "+" -- so the
+        // characters were bounded above first and the spellings JSON forbids are rejected here.
+        let number: f64 = text.parse().map_err(|_| ExecutionError::InvalidJson)?;
+        if !number.is_finite() || text.starts_with('+') || text.starts_with(".") {
+            return Err(ExecutionError::InvalidJson);
+        }
+        self.rest = rest;
+        Ok(Value::Number(number))
+    }
+
+    fn string(&mut self) -> Result<String, ExecutionError> {
+        if !self.eat('"') {
+            return Err(ExecutionError::InvalidJson);
+        }
+        let mut text = String::new();
+        loop {
+            let mut characters = self.rest.chars();
+            let Some(character) = characters.next() else {
+                return Err(ExecutionError::InvalidJson);
+            };
+            self.rest = characters.as_str();
+            match character {
+                '"' => return Ok(text),
+                '\\' => text.push(self.escape()?),
+                // A raw control character is not allowed in a JSON string; it has to be escaped.
+                control if control < ' ' => return Err(ExecutionError::InvalidJson),
+                other => text.push(other),
+            }
+        }
+    }
+
+    fn escape(&mut self) -> Result<char, ExecutionError> {
+        let mut characters = self.rest.chars();
+        let Some(marker) = characters.next() else {
+            return Err(ExecutionError::InvalidJson);
+        };
+        self.rest = characters.as_str();
+        Ok(match marker {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'u' => {
+                let (digits, rest) = self
+                    .rest
+                    .split_at_checked(4)
+                    .ok_or(ExecutionError::InvalidJson)?;
+                let code =
+                    u32::from_str_radix(digits, 16).map_err(|_| ExecutionError::InvalidJson)?;
+                self.rest = rest;
+                // A lone surrogate has no scalar value. Replacing it keeps the string readable
+                // rather than failing the whole parse over one unpaired half.
+                char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER)
+            }
+            _ => return Err(ExecutionError::InvalidJson),
+        })
+    }
+
+    fn array(&mut self) -> Result<Value, ExecutionError> {
+        self.eat('[');
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.eat(']') {
+            return Ok(Value::Array(Rc::new(RefCell::new(items))));
+        }
+        loop {
+            items.push(self.value()?);
+            self.skip_whitespace();
+            if self.eat(']') {
+                return Ok(Value::Array(Rc::new(RefCell::new(items))));
+            }
+            if !self.eat(',') {
+                return Err(ExecutionError::InvalidJson);
+            }
+        }
+    }
+
+    fn object(&mut self) -> Result<Value, ExecutionError> {
+        self.eat('{');
+        let mut data = ObjectData::default();
+        self.skip_whitespace();
+        if self.eat('}') {
+            return Ok(Value::Object(Rc::new(RefCell::new(data))));
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.string()?;
+            self.skip_whitespace();
+            if !self.eat(':') {
+                return Err(ExecutionError::InvalidJson);
+            }
+            let value = self.value()?;
+            data.set(&key, value);
+            self.skip_whitespace();
+            if self.eat('}') {
+                return Ok(Value::Object(Rc::new(RefCell::new(data))));
+            }
+            if !self.eat(',') {
+                return Err(ExecutionError::InvalidJson);
+            }
+        }
+    }
+}
+
+/// The numeric value of a property key that is an array index.
+///
+/// An index is a canonical decimal in `0 ..= 2^32 - 2`; `"01"`, `"1.0"`, `"-1"` and `"4294967295"`
+/// are ordinary string keys. Checking the round trip rather than just parsing is what draws that
+/// line, and the line is observable: only an index enumerates early.
+fn index_key(key: &str) -> Option<u32> {
+    let index: u32 = key.parse().ok()?;
+    (index != u32::MAX && index.to_string() == key).then_some(index)
 }
 
 fn strict_equal(left: &Value, right: &Value) -> bool {
@@ -4707,5 +4945,125 @@ mod tests {
         }
         data.remove("b");
         assert_eq!(data.keys().collect::<Vec<_>>(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn an_index_key_enumerates_before_every_string_key() {
+        // The order own keys enumerate in is observable through `Object.keys`, `JSON.stringify`,
+        // spread and `for-in`, and it is not insertion order: indices come first, ascending.
+        let mut data = ObjectData::default();
+        for key in ["b", "10", "a", "2", "0"] {
+            data.set(key, Value::Undefined);
+        }
+        assert_eq!(
+            data.keys().collect::<Vec<_>>(),
+            vec!["0", "2", "10", "b", "a"]
+        );
+    }
+
+    #[test]
+    fn only_a_canonical_index_counts_as_one() {
+        // `"01"` and `"1.0"` name the same property as themselves and not as 1, so they are
+        // ordinary string keys and enumerate in insertion order.
+        assert_eq!(index_key("0"), Some(0));
+        assert_eq!(index_key("10"), Some(10));
+        assert_eq!(index_key("01"), None);
+        assert_eq!(index_key("1.0"), None);
+        assert_eq!(index_key("-1"), None);
+        assert_eq!(index_key(""), None);
+        // 2^32 - 1 is the length, never an index.
+        assert_eq!(index_key("4294967295"), None);
+        assert_eq!(index_key("4294967294"), Some(4_294_967_294));
+    }
+
+    #[test]
+    fn reassigning_a_key_does_not_move_it() {
+        let mut data = ObjectData::default();
+        data.set("b", Value::Number(1.0));
+        data.set("a", Value::Number(2.0));
+        data.set("b", Value::Number(3.0));
+        assert_eq!(data.keys().collect::<Vec<_>>(), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn a_negative_slice_bound_counts_from_the_end() {
+        // The reason this is not a cast: `-2` means two from the end, not clamp-to-zero.
+        assert_eq!(relative_index(Some(&Value::Number(-2.0)), 5, 0), 3);
+        assert_eq!(relative_index(Some(&Value::Number(-99.0)), 5, 0), 0);
+        assert_eq!(relative_index(Some(&Value::Number(2.0)), 5, 0), 2);
+        assert_eq!(relative_index(Some(&Value::Number(99.0)), 5, 0), 5);
+        // An absent or explicitly undefined bound takes the default, not zero.
+        assert_eq!(relative_index(None, 5, 5), 5);
+        assert_eq!(relative_index(Some(&Value::Undefined), 5, 5), 5);
+    }
+
+    fn parse_json(text: &str) -> Result<Value, ExecutionError> {
+        let mut reader = JsonReader { rest: text };
+        let value = reader.value()?;
+        reader.skip_whitespace();
+        if reader.rest.is_empty() {
+            Ok(value)
+        } else {
+            Err(ExecutionError::InvalidJson)
+        }
+    }
+
+    #[test]
+    fn json_parses_each_kind_of_value() {
+        assert!(matches!(parse_json("null"), Ok(Value::Null)));
+        assert!(matches!(parse_json("true"), Ok(Value::Boolean(true))));
+        assert!(matches!(parse_json(" -1.5e2 "), Ok(Value::Number(n)) if n == -150.0));
+        assert!(matches!(parse_json(r#""s""#), Ok(Value::String(s)) if s == "s"));
+        assert!(matches!(parse_json("[]"), Ok(Value::Array(_))));
+        assert!(matches!(parse_json("{}"), Ok(Value::Object(_))));
+    }
+
+    #[test]
+    fn json_parses_escapes_including_surrogates() {
+        let Ok(Value::String(text)) = parse_json(r#""a\"b\\c\u00e9\n""#) else {
+            panic!("expected a string");
+        };
+        assert_eq!(text, "a\"b\\cé\n");
+        // A lone surrogate has no scalar value; replacing it beats failing the whole parse.
+        let Ok(Value::String(lone)) = parse_json(r#""\ud800""#) else {
+            panic!("expected a string");
+        };
+        assert_eq!(lone, "\u{fffd}");
+    }
+
+    #[test]
+    fn json_rejects_what_is_not_json() {
+        // Every one of these is accepted by some more permissive parser, which is why they are
+        // listed: `f64::from_str` alone would take three of them.
+        for text in [
+            "",
+            "{",
+            "[1,]",
+            "{\"a\":}",
+            "'s'",
+            "+1",
+            ".5",
+            "NaN",
+            "inf",
+            "01,",
+            "nul",
+            "{\"a\" 1}",
+            "\"unterminated",
+            "[1] extra",
+        ] {
+            assert!(
+                parse_json(text).is_err(),
+                "{text:?} should not parse as JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parsed_object_keeps_the_last_value_for_a_duplicate_key() {
+        let Ok(Value::Object(object)) = parse_json(r#"{"a":1,"a":2}"#) else {
+            panic!("expected an object");
+        };
+        assert_eq!(object.borrow().keys().count(), 1);
+        assert!(matches!(object.borrow().get_own("a"), Some(Value::Number(n)) if *n == 2.0));
     }
 }

@@ -695,7 +695,7 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 # machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
 # stderr.
 [regress]
-tests = 6
+tests = 7
 authored = "2026-08-29"
 expected_output_method = "Ran `node <probe>.js` and recorded the bytes it printed."
 
@@ -828,4 +828,32 @@ expected_stdout = """
 1 2 9 42
 inner outer
 3 0 2
+"""
+
+[[test]]
+id = "regress/r07-silent-divergences"
+group = "regress"
+source = "regress/r07-silent-divergences.js"
+status = "runnable"
+features = ["closures", "block-scoping", "property-order", "array-methods", "json", "object-statics"]
+catches = """
+Four answers that were wrong with no diagnostic at all, found by diffing small programs against \
+node rather than by any probe failing. A per-iteration `let` binding in a `for` head (closures \
+over 0,1,2 rather than three over 3, while `var` must still give three 3s); own-key enumeration \
+order (indices first and ascending, then insertion order, with the non-canonical spellings not \
+counting as indices); `slice` counting a negative bound from the end rather than clamping it to \
+zero; and `JSON.parse` returning undefined for everything. The class matters more than the four: \
+a refusal is visible in the reason distribution, and a wrong answer is not.\
+"""
+expected_stdout = """
+0,1,2 3,3,3
+0,1,2,10,b,a,01,-1
+{"0":4,"1":3,"2":7,"10":6,"b":1,"a":2,"01":5,"-1":8}
+{"0":4,"1":3,"2":7,"10":6,"b":1,"a":2,"01":5,"-1":8}
+4,5 2,3 3,4
+0 0 1,2,3,4
+2
+true s -150 0
+{"n":"a\"b\\cé\n"}
+true
 """

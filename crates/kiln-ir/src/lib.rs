@@ -1333,6 +1333,10 @@ impl Compiler {
     /// The initialiser gets its own scope so a `let` there belongs to the loop rather than to
     /// the enclosing block, and `continue` jumps to the update rather than to the test -- which
     /// is the difference a `while` desugaring would silently lose.
+    ///
+    /// A `let` in the head is also re-bound on every pass, which is what makes
+    /// `for (let i = 0; i < 3; i++) fs.push(() => i)` collect three closures over 0, 1 and 2
+    /// rather than three over the value the loop ended on.
     fn for_statement(
         &mut self,
         init: Option<&Statement>,
@@ -1346,6 +1350,19 @@ impl Compiler {
         if let Some(init) = init {
             self.statement(init);
         }
+        // Only a captured binding can tell one iteration's copy from another's, and only a
+        // captured binding is boxed -- so the boxed `let`s of the head are exactly the set that
+        // needs re-binding. Sorted by slot because the scope is a hash map and the bytecode is a
+        // cache key: the same source must always produce the same instructions.
+        let mut per_iteration: Vec<u32> = self
+            .scopes
+            .last()
+            .expect("the loop scope was just pushed")
+            .values()
+            .filter(|local| local.celled && !matches!(local.kind, VariableKind::Var))
+            .map(|local| local.slot)
+            .collect();
+        per_iteration.sort_unstable();
 
         let start = self.code.len();
         let exit_jump = test.map(|test| {
@@ -1365,6 +1382,13 @@ impl Compiler {
         let update_target = self.code.len() as u32;
         for jump in context.continues {
             self.patch_jump_to(jump, update_target);
+        }
+        // Re-bind before the update, not after: the update belongs to the *next* iteration, so
+        // it must write the next iteration's cell and leave this one holding what the body saw.
+        for slot in per_iteration {
+            self.code.push(Instruction::LoadCell(slot));
+            self.code.push(Instruction::NewCell(slot));
+            self.code.push(Instruction::StoreCell(slot));
         }
         if let Some(update) = update {
             self.expression(update);
@@ -3901,6 +3925,71 @@ mod tests {
                 .filter(|instruction| matches!(instruction, Instruction::NewObject { .. }))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn a_captured_let_in_a_for_head_is_rebound_each_iteration() {
+        // `for (let i = 0; ...; i++) fs.push(() => i)` must collect closures over 0, 1, 2 -- not
+        // three over the value the loop ended on. The re-binding is a fresh cell per pass, and it
+        // has to sit before the update so the update writes the *next* iteration's cell.
+        let program = compile(&module(vec![statement(StatementKind::For {
+            init: Some(Box::new(statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("i".into()),
+                    initializer: Some(number(0.0)),
+                    span: Span::default(),
+                }],
+            }))),
+            test: None,
+            update: None,
+            body: Box::new(statement(StatementKind::Expression(arrow(
+                &[],
+                vec![statement(StatementKind::Return(Some(Expression {
+                    kind: ExpressionKind::Identifier("i".into()),
+                    span: Span::default(),
+                })))],
+            )))),
+        })]))
+        .expect("compiles");
+        assert!(
+            program.code.windows(3).any(|window| matches!(
+                window,
+                [
+                    Instruction::LoadCell(a),
+                    Instruction::NewCell(b),
+                    Instruction::StoreCell(c)
+                ] if a == b && b == c
+            )),
+            "expected a per-iteration re-binding, got {:?}",
+            program.code
+        );
+    }
+
+    #[test]
+    fn an_uncaptured_let_in_a_for_head_is_not_rebound() {
+        // Nothing can observe the difference without a closure, so nothing should pay for it.
+        let program = compile(&module(vec![statement(StatementKind::For {
+            init: Some(Box::new(statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("i".into()),
+                    initializer: Some(number(0.0)),
+                    span: Span::default(),
+                }],
+            }))),
+            test: None,
+            update: None,
+            body: Box::new(statement(StatementKind::Empty)),
+        })]))
+        .expect("compiles");
+        assert!(
+            !program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::NewCell(_))),
+            "an unboxed loop variable needs no per-iteration cell"
         );
     }
 }
