@@ -136,9 +136,6 @@ pub enum Instruction {
     /// Leaves whatever the caller sends with the next `next(v)` in its place, which is why
     /// `yield` is an expression rather than a statement.
     Yield,
-    /// `yield*`: hand every value the iterable on top of the stack produces to the caller, one
-    /// resumption at a time, and leave that iterable's own return value.
-    YieldDelegate,
     /// Push this frame's `arguments` as an array.
     ///
     /// Built on demand rather than on every call: most functions never mention it, and
@@ -1106,8 +1103,94 @@ impl Compiler {
         self.scopes.pop().expect("loop scope was just pushed");
     }
 
+    /// `yield* iterable`.
+    ///
+    /// Compiled as a loop over the iterator protocol rather than as one instruction. That is not
+    /// an optimisation, it is the only way to get the semantics: each value has to be yielded
+    /// *and suspended on*, and the value the caller sends must be handed to the delegate's own
+    /// `next`. A single instruction cannot do that, because the run loop cannot suspend part-way
+    /// through evaluating one -- an earlier attempt drained the iterable up front, which is
+    /// wrong for a two-way protocol and never terminates on an infinite one.
+    ///
+    /// The shape is the specification's:
+    ///
+    /// ```text
+    /// iterator = iterable[Symbol.iterator]()
+    /// sent = undefined
+    /// loop { step = iterator.next(sent); if step.done { break step.value } sent = yield step.value }
+    /// ```
+    fn yield_delegate(&mut self, value: Option<&Expression>, span: Span) {
+        let iterator_binding = format!("%delegate{}", self.hidden_bindings);
+        let sent_binding = format!("%sent{}", self.hidden_bindings);
+        let step_binding = format!("%step{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+
+        self.scopes.push(HashMap::new());
+
+        match value {
+            Some(value) => self.expression(value),
+            None => self.push_constant(Constant::Undefined),
+        }
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: symbol,
+            argc: 0,
+        });
+        self.declare_hidden(&iterator_binding, span);
+
+        self.push_constant(Constant::Undefined);
+        self.declare_hidden(&sent_binding, span);
+
+        let start = self.code.len();
+        self.load_hidden(&iterator_binding);
+        self.load_hidden(&sent_binding);
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: next,
+            argc: 1,
+        });
+        self.declare_hidden(&step_binding, span);
+
+        self.load_hidden(&step_binding);
+        let done = self.constant_index(Constant::String("done".to_owned()));
+        self.code.push(Instruction::GetProperty(done));
+        let finished = self.emit_jump(Instruction::JumpIfTruthy(0));
+
+        // Not done: yield this value out, and keep what the caller sends back.
+        self.load_hidden(&step_binding);
+        let value_key = self.constant_index(Constant::String("value".to_owned()));
+        self.code.push(Instruction::GetProperty(value_key));
+        self.code.push(Instruction::Yield);
+        self.store_hidden(&sent_binding);
+        self.code.push(Instruction::Jump(start as u32));
+
+        // Done: the delegate's own return value is what `yield*` evaluates to.
+        self.patch_jump(finished);
+        self.load_hidden(&step_binding);
+        self.code.push(Instruction::GetProperty(value_key));
+
+        self.scopes.pop().expect("delegate scope was just pushed");
+    }
+
+    fn store_hidden(&mut self, name: &str) {
+        match self.resolve(name) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::StoreCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::StoreLocal(local.slot)),
+            _ => self.error(None, format!("`{name}` went out of scope")),
+        }
+    }
+
     /// Bind a hidden local to the value on top of the stack.
+    ///
+    /// Reuses the slot when the name is already bound in this scope, because a compiler-
+    /// introduced binding inside a loop body is declared once and assigned on every pass.
     fn declare_hidden(&mut self, name: &str, span: Span) {
+        if matches!(self.resolve(name), Resolution::Local(_)) {
+            self.store_hidden(name);
+            return;
+        }
         self.declare_bound(VariableKind::Let, name, span);
     }
 
@@ -1337,16 +1420,15 @@ impl Compiler {
                 self.call(callee, arguments, expression.span)
             }
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
-            ExpressionKind::Yield { delegate, value } => {
+            ExpressionKind::Yield { delegate, value } if !*delegate => {
                 match value {
                     Some(value) => self.expression(value),
                     None => self.push_constant(Constant::Undefined),
                 }
-                self.code.push(if *delegate {
-                    Instruction::YieldDelegate
-                } else {
-                    Instruction::Yield
-                });
+                self.code.push(Instruction::Yield);
+            }
+            ExpressionKind::Yield { value, .. } => {
+                self.yield_delegate(value.as_deref(), expression.span)
             }
             ExpressionKind::Class(class) => self.class_expression(class, expression.span),
             ExpressionKind::Update {
