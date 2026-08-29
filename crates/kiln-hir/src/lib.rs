@@ -238,6 +238,15 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    /// `super(...)` in a derived constructor: run the parent constructor against this instance
+    /// rather than allocating a new one.
+    SuperCall {
+        arguments: Vec<Expression>,
+    },
+    /// `super.property`, which resolves on the parent's prototype rather than on `this`.
+    SuperMember {
+        property: String,
+    },
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.
     This,

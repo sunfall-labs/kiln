@@ -113,6 +113,16 @@ pub enum Instruction {
     SetComputed,
     /// Push the current `this`.
     LoadThis,
+    /// Set an object's prototype. Stack is object, then prototype; the object is left.
+    SetPrototype,
+    /// Call a function against the current `this` rather than a fresh or absent one.
+    ///
+    /// Used by both halves of `super`: `super(...)` runs the parent constructor against the
+    /// instance being built, and `super.m(...)` runs a parent method against the current
+    /// receiver. Both need the same thing -- an existing `this` threaded into a call.
+    SuperCall {
+        argc: u16,
+    },
     /// Push a built-in global.
     ///
     /// Built-ins are named by index rather than resolved by string at runtime because the
@@ -451,6 +461,13 @@ struct Compiler {
     upvalues: Vec<Upvalue>,
     upvalue_names: HashMap<String, u32>,
     captured: HashSet<String>,
+    /// The hidden `super` bindings of the derived classes currently being compiled, innermost
+    /// last. A stack rather than a field because class bodies nest.
+    super_bindings: Vec<String>,
+    /// Monotonic, so two derived classes in one scope never share a binding. The stack depth
+    /// cannot serve: it returns to zero after each class, and the bindings are siblings in the
+    /// same scope rather than nested.
+    super_binding_count: usize,
     code: Vec<Instruction>,
     /// Lexical scopes of the function being compiled, innermost last. At module level the first
     /// entry is module scope itself.
@@ -471,6 +488,8 @@ impl Compiler {
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
             captured: HashSet::new(),
+            super_bindings: Vec::new(),
+            super_binding_count: 0,
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
@@ -637,10 +656,11 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
-        // Boxed only when a nested function refers to this name. `self.captured` is empty while
-        // compiling the module body, so module bindings -- which functions reach as globals --
-        // never pay for a cell.
-        let celled = self.captured.contains(name);
+        // Boxed only when a nested function refers to this name *and* the name belongs to a
+        // function. A module binding is already shared: `LoadGlobal`/`StoreGlobal` reach the one
+        // slot from every frame, so boxing it would leave the cell itself in the slot and a
+        // global read would hand back the cell rather than its contents.
+        let celled = self.captured.contains(name) && self.compiling_function();
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -776,6 +796,29 @@ impl Compiler {
                 self.call(callee, arguments, expression.span)
             }
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::SuperCall { arguments } => {
+                if arguments.len() > u16::MAX as usize {
+                    self.error(Some(expression.span), "too many arguments to `super`");
+                    return;
+                }
+                self.load_super();
+                for argument in arguments {
+                    self.expression(argument);
+                }
+                // The parent's return value is this expression's value, so `SuperCall` leaves
+                // exactly one thing on the stack and needs no epilogue here.
+                self.code.push(Instruction::SuperCall {
+                    argc: arguments.len() as u16,
+                });
+            }
+            ExpressionKind::SuperMember { property } => {
+                // `super.m` resolves on the parent's prototype, not on `this`.
+                self.load_super();
+                let prototype = self.constant_index(Constant::String("prototype".to_owned()));
+                self.code.push(Instruction::GetProperty(prototype));
+                let name = self.constant_index(Constant::String(property.clone()));
+                self.code.push(Instruction::GetProperty(name));
+            }
             ExpressionKind::Function(function) => {
                 if let Some(index) = self.compile_function(function, expression.span) {
                     self.code.push(Instruction::MakeFunction(index));
@@ -969,15 +1012,19 @@ impl Compiler {
             self.error(Some(class.span), "a class declaration requires a name");
             return;
         };
-        if class.superclass.is_some() {
-            // A derived class needs `super`, a prototype chain between the two prototypes, and a
-            // constructor that cannot touch `this` before calling `super()`. Half of that would
-            // produce instances that look right and inherit nothing.
-            self.error(
-                Some(class.span),
-                "class inheritance (`extends`) is not supported yet",
-            );
-            return;
+        // A derived class evaluates its parent once, into a binding its members capture.
+        //
+        // The name carries a character an identifier cannot contain, so it can never collide
+        // with one the program wrote, and a counter so that two derived classes in one scope get
+        // separate bindings. `super` is syntax rather than a variable, but it resolves exactly
+        // like a captured one -- giving it a real binding lets it reuse the closure machinery
+        // instead of needing a parallel path through every scope.
+        if let Some(superclass) = &class.superclass {
+            let binding = format!("%super{}", self.super_binding_count);
+            self.super_binding_count += 1;
+            self.captured.insert(binding.clone());
+            self.variable(VariableKind::Const, &binding, Some(superclass), class.span);
+            self.super_bindings.push(binding);
         }
 
         // Bound before the body is compiled, so a method can refer to the class by name.
@@ -1011,6 +1058,23 @@ impl Compiler {
         });
 
         let prototype = self.constant_index(Constant::String("prototype".to_owned()));
+
+        // Link the two prototypes so instances inherit the parent's methods, and the two
+        // constructors so static methods are inherited too.
+        if class.superclass.is_some() {
+            self.load_local_or_cell(local);
+            self.code.push(Instruction::GetProperty(prototype));
+            self.load_super();
+            self.code.push(Instruction::GetProperty(prototype));
+            self.code.push(Instruction::SetPrototype);
+            self.code.push(Instruction::Pop);
+
+            self.load_local_or_cell(local);
+            self.load_super();
+            self.code.push(Instruction::SetPrototype);
+            self.code.push(Instruction::Pop);
+        }
+
         for method in &class.methods {
             let Some(body) = self.compile_function(&method.function, class.span) else {
                 return;
@@ -1036,6 +1100,31 @@ impl Compiler {
             }
             // Each assignment leaves its value; nothing consumes it.
             self.code.push(Instruction::Pop);
+        }
+
+        if class.superclass.is_some() {
+            self.super_bindings.pop();
+        }
+    }
+
+    /// Push the parent constructor of the class currently being compiled.
+    fn load_super(&mut self) {
+        let Some(binding) = self.super_bindings.last().cloned() else {
+            self.error(None, "`super` outside of a derived class");
+            self.push_constant(Constant::Undefined);
+            return;
+        };
+        match self.resolve_or_capture(&binding) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::Unresolved => {
+                self.error(None, "`super` outside of a derived class");
+                self.push_constant(Constant::Undefined);
+            }
         }
     }
 
@@ -1290,6 +1379,17 @@ impl Compiler {
 
         // A method call keeps its receiver rather than reading the function out first.
         match &callee.kind {
+            // `super.m(...)` resolves the function on the parent's prototype but runs it against
+            // the current `this` -- that is the whole point of it, and an ordinary call would
+            // lose the receiver.
+            ExpressionKind::SuperMember { .. } => {
+                self.expression(callee);
+                for argument in arguments {
+                    self.expression(argument);
+                }
+                self.code.push(Instruction::SuperCall { argc });
+                return;
+            }
             ExpressionKind::StaticMember { object, property } => {
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.expression(object);
@@ -1565,7 +1665,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 names.insert(name.clone());
             }
         }
-        ExpressionKind::Literal(_) | ExpressionKind::This | ExpressionKind::Unsupported { .. } => {}
+        ExpressionKind::Literal(_)
+        | ExpressionKind::This
+        | ExpressionKind::SuperMember { .. }
+        | ExpressionKind::Unsupported { .. } => {}
+        ExpressionKind::SuperCall { arguments } => {
+            for argument in arguments {
+                collect_identifiers(argument, names, collecting);
+            }
+        }
         ExpressionKind::Unary { argument, .. } => collect_identifiers(argument, names, collecting),
         ExpressionKind::Binary { left, right, .. }
         | ExpressionKind::Logical { left, right, .. } => {
@@ -1687,7 +1795,13 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
         }
-        ExpressionKind::This | ExpressionKind::Function(_) => false,
+        ExpressionKind::This
+        | ExpressionKind::Function(_)
+        | ExpressionKind::SuperMember { .. }
+        | ExpressionKind::Unsupported { .. } => false,
+        ExpressionKind::SuperCall { arguments } => arguments
+            .iter()
+            .any(|argument| expression_references(argument, name)),
         ExpressionKind::Object { properties } => properties.iter().any(|property| {
             expression_references(&property.value, name)
                 || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
