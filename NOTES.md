@@ -141,3 +141,62 @@ compile — I now check both.
 
 Warm no-op on the 320-file example: recomputes **nothing**, ~20-30ms wall. The remaining cost is
 the filesystem walk and read, not the wire and not recompute.
+
+---
+
+## Measured backlog: what actually blocks the 20 guard probes
+
+Taken by running every probe through `kiln --one-shot run` against `28a2f63`, recording the
+**first** refusal each one hits. This is observation, not inference.
+
+```
+  7  unsupported expression: expression        <- see the diagnostics defect below
+  4  unsupported statement: class declaration
+  3  unsupported statement: function declaration
+  2  unsupported expression: unary operator `X`
+  2  only console.log(...) calls are supported
+  1  unsupported expression: binary operator `X`
+  1  unresolved identifier `X`
+```
+
+Two things this corrects, both of which I had wrong before measuring:
+
+**Calls are already lowered.** `frontend-oxc/src/lib.rs:419` handles non-optional
+`CallExpression` and produces real HIR. The `only console.log(...) calls are supported` refusal
+comes from `kiln-ir`, downstream — it special-cases `console.log` rather than compiling a call.
+So "add function calls" is not frontend work at all; it is call frames and function values in
+the bytecode compiler and VM. Only 2 of 20 probes are blocked on it *first*, though far more are
+blocked on it eventually.
+
+**Nothing is blocked on a missing parser.** Every refusal in that histogram is a lowering or
+compilation limit, not a parse failure. Oxc is doing its job.
+
+### Diagnostics defect (frontend-oxc, not mine to fix — flagging it)
+
+`crates/frontend-oxc/src/lib.rs:448`
+
+```rust
+_ => return self.unsupported_expression("expression", expression_span),
+```
+
+The catch-all reports the literal word "expression" as the feature name, so the single largest
+bucket in the backlog above — 7 of 20 probes, a third of the corpus — says nothing about what is
+actually unsupported. The neighbouring arms do this properly ("computed property access",
+"private property access", `unary operator \`X\``), which is what makes the gap conspicuous.
+
+Worth naming the remaining variants: `ObjectExpression`, `ArrayExpression`,
+`ArrowFunctionExpression`, `FunctionExpression`, `ClassExpression`, `NewExpression`,
+`TemplateLiteral`, `AwaitExpression`, `YieldExpression`, `UpdateExpression`, `ThisExpression`,
+`SequenceExpression`, keeping a genuine last-resort arm. Cheap, and it turns a third of the
+corpus from "something is unsupported" into a sorted work queue.
+
+I did not make this change because `frontend-oxc/src/lib.rs` and `kiln-ir/src/lib.rs` are both
+dirty with your uncommitted work, and editing underneath you is how we lost time earlier. Take
+it, or tell me here that the files are free and I will.
+
+### Verified state at 28a2f63
+
+Workspace builds, **226 tests pass**, clippy clean across all targets, `cargo deny` passes all
+four checks. `kiln-bench` on the small workload: implementation edit 0.046 ms, interface edit
+0.054 ms, early cutoff held on the implementation edit, 89.5% hit rate. Debug build, so those
+are shape rather than absolute figures.
