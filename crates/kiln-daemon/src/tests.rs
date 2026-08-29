@@ -354,6 +354,10 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         .join("native-shared")
         .with_extension(extension);
     assert_eq!(first.output_path, expected_output.to_string_lossy());
+    let expected_header = expected_output.with_extension("h");
+    assert_eq!(first.header_path, expected_header.to_string_lossy());
+    let header = std::fs::read_to_string(&first.header_path).expect("read shared build header");
+    assert!(header.contains(&format!("int {}(", first.module_symbol)));
     assert!(!first.generated_c_cache_hit);
     assert!(!first.object_cache_hit);
     assert!(!first.library_cache_hit);
@@ -365,6 +369,7 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         panic!("expected cached shared build");
     };
     assert_eq!(second.output_path, first.output_path);
+    assert_eq!(second.header_path, first.header_path);
     assert!(second.generated_c_cache_hit);
     assert!(second.object_cache_hit);
     assert!(second.library_cache_hit);
@@ -372,6 +377,51 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn native_shared_build_rejects_header_source_and_output_collisions() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+
+    client
+        .request(&Request::SetSource {
+            path: "embed.h".into(),
+            text: "console.log('embedded');\n".into(),
+        })
+        .expect("upload header-named source");
+    let response = client
+        .request(&Request::NativeSharedBuild {
+            path: "embed.h".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            output: Some("embed".into()),
+            profile: NativeProfile::Dev,
+        })
+        .expect("header/source collision response");
+    assert!(
+        matches!(&response, Response::Error { message } if message.contains("header") && message.contains("overwrite source")),
+        "got {response:?}"
+    );
+
+    client
+        .request(&Request::SetSource {
+            path: "embed.js".into(),
+            text: "console.log('embedded');\n".into(),
+        })
+        .expect("upload source");
+    let response = client
+        .request(&Request::NativeSharedBuild {
+            path: "embed.js".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            output: Some("embed.H".into()),
+            profile: NativeProfile::Dev,
+        })
+        .expect("header/output collision response");
+    assert!(
+        matches!(&response, Response::Error { message } if message.contains("header path") && message.contains("differ")),
+        "got {response:?}"
+    );
 }
 
 #[test]

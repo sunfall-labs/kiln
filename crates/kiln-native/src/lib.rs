@@ -22,11 +22,11 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
-pub use kiln_native_runtime::embedding_header;
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
     RuntimeSourceError, launcher_source, runtime_source,
 };
+pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
     BuildProfile as ToolchainProfile, CompileOptions, LinkOptions, ToolIdentity, Toolchain,
     ToolchainError,
@@ -162,6 +162,8 @@ pub struct NativeSharedLibrarySizes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeSharedLibraryReport {
     pub output: PathBuf,
+    /// Program-specific C header declaring `module_symbol` against the stable embedding ABI.
+    pub header: PathBuf,
     pub module_symbol: String,
     pub tool: ToolIdentity,
     pub cache_hits: NativeSharedLibraryCacheHits,
@@ -207,6 +209,10 @@ pub enum NativeError {
     SymbolCollision {
         symbol: String,
     },
+    ArtifactPathCollision {
+        first: PathBuf,
+        second: PathBuf,
+    },
 }
 
 impl fmt::Display for NativeError {
@@ -237,6 +243,12 @@ impl fmt::Display for NativeError {
             Self::SymbolCollision { symbol } => {
                 write!(formatter, "native module symbol collision: {symbol}")
             }
+            Self::ArtifactPathCollision { first, second } => write!(
+                formatter,
+                "native artifacts would overwrite the same path: {} and {}",
+                first.display(),
+                second.display()
+            ),
         }
     }
 }
@@ -250,7 +262,9 @@ impl std::error::Error for NativeError {
             Self::Cache(error) => Some(error),
             Self::Toolchain(error) => Some(error),
             Self::Io { source, .. } | Self::Launch { source, .. } => Some(source),
-            Self::WorkerPanic { .. } | Self::SymbolCollision { .. } => None,
+            Self::WorkerPanic { .. }
+            | Self::SymbolCollision { .. }
+            | Self::ArtifactPathCollision { .. } => None,
         }
     }
 }
@@ -556,6 +570,18 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let module = emit_c(program)?;
+        let header = shared_library_header_path(&options.output);
+        if options
+            .output
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("h"))
+        {
+            return Err(NativeError::ArtifactPathCollision {
+                first: options.output.clone(),
+                second: header,
+            });
+        }
+        let header_source = embedding_module_header(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
 
         let workspace = WorkDirectory::create()?;
@@ -657,10 +683,15 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
+        // Publish the declaration first so the library is the final ready signal for consumers.
+        // Each file is replaced atomically; a future versioned package directory can make the
+        // pair transactional as a unit.
+        materialize(&header, header_source.as_bytes(), false)?;
         materialize(&options.output, &library, false)?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
+            header,
             module_symbol: module.symbol,
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
@@ -1645,6 +1676,14 @@ const fn shared_library_name() -> &'static str {
     "program.so"
 }
 
+/// Derive the public C header paired with a shared-library output.
+///
+/// This is intentionally a pure path transform so CLI and daemon preflight checks can protect
+/// source files before invoking the native toolchain.
+pub fn shared_library_header_path(output: &Path) -> PathBuf {
+    output.with_extension("h")
+}
+
 fn shared_library_link_identity(output: &Path) -> String {
     let name = output
         .file_name()
@@ -1802,6 +1841,21 @@ mod tests {
                 });
         let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain.clone());
         let program = stdout_program("embedded\0tail");
+        let colliding_output = root.path.join("embedded-header.H");
+        let collision = builder
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: colliding_output.clone(),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect_err("a library output cannot alias its derived header");
+        assert!(matches!(
+            collision,
+            NativeError::ArtifactPathCollision { .. }
+        ));
+        assert!(!colliding_output.exists());
         let options = NativeBuildOptions {
             output: library_path.clone(),
             profile: NativeProfile::Dev,
@@ -1834,6 +1888,10 @@ mod tests {
         assert!(second.cache_hits.library);
         assert_eq!(first.module_symbol, second.module_symbol);
         assert_eq!(second.output, library_path);
+        assert_eq!(first.header, library_path.with_extension("h"));
+        assert_eq!(second.header, first.header);
+        let published_header = fs::read_to_string(&second.header).expect("read embedding header");
+        assert!(published_header.contains(&format!("int {}(", second.module_symbol)));
 
         let renamed_path = root
             .path
@@ -1858,14 +1916,21 @@ mod tests {
             !renamed.cache_hits.library,
             "the embedded install name or SONAME changes with the output basename"
         );
+        assert_eq!(renamed.header, renamed.output.with_extension("h"));
 
-        let header = root.path.join("kiln-embedding.h");
         let host_source = root.path.join("host.c");
         let host_object = root.path.join("host.o");
         let host_executable = root.path.join("host");
-        fs::write(&header, embedding_header()).expect("write embedding header");
-        let mut source = String::from(
-            r#"#include "kiln-embedding.h"
+        let mut source = String::from("#include \"");
+        source.push_str(
+            second
+                .header
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("embedding header has a UTF-8 file name"),
+        );
+        source.push_str(
+            r#""
 #include <stdio.h>
 #include <string.h>
 
@@ -1877,12 +1942,8 @@ struct capture {
 
 "#,
         );
-        source.push_str("extern int ");
-        source.push_str(&second.module_symbol);
         source.push_str(
-            r#"(kiln_host *host, kiln_value *result);
-
-static int capture_host_call(void *context, uint16_t operation, uint16_t argc,
+            r#"static int capture_host_call(void *context, uint16_t operation, uint16_t argc,
                              const kiln_value *arguments, kiln_value *result) {
     struct capture *capture = (struct capture *)context;
     if (capture == NULL || result == NULL || operation != KILN_HOST_OP_WRITE_STDOUT

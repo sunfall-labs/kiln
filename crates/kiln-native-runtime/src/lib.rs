@@ -29,6 +29,37 @@ pub fn embedding_header() -> &'static str {
     EMBEDDING_HEADER
 }
 
+/// Return the canonical embedding ABI plus a declaration for one generated module.
+///
+/// The module declaration has its own symbol-specific include guard so callers can safely
+/// compose headers for several modules. C++ consumers receive C linkage for the generated
+/// entry point, matching the C object emitted by `kiln-backend-c`.
+pub fn embedding_module_header(symbol: &str) -> Result<String, RuntimeSourceError> {
+    validate_symbol(symbol)?;
+    let guard = format!("KILN_NATIVE_MODULE_{symbol}_H");
+    let mut header = String::with_capacity(
+        embedding_header().len()
+            + MODULE_HEADER_PREFIX.len()
+            + 3 * guard.len()
+            + MODULE_HEADER_DEFINE.len()
+            + MODULE_HEADER_DECL_PREFIX.len()
+            + symbol.len()
+            + MODULE_HEADER_DECL_SUFFIX.len()
+            + " */\n".len(),
+    );
+    header.push_str(embedding_header());
+    header.push_str(MODULE_HEADER_PREFIX);
+    header.push_str(&guard);
+    header.push_str(MODULE_HEADER_DEFINE);
+    header.push_str(&guard);
+    header.push_str(MODULE_HEADER_DECL_PREFIX);
+    header.push_str(symbol);
+    header.push_str(MODULE_HEADER_DECL_SUFFIX);
+    header.push_str(&guard);
+    header.push_str(" */\n");
+    Ok(header)
+}
+
 /// Why a native runtime source request was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSourceError {
@@ -179,6 +210,27 @@ typedef struct kiln_host {
 #endif /* KILN_NATIVE_EMBEDDING_H */
 "#;
 
+const MODULE_HEADER_PREFIX: &str = r#"
+/* Kiln native module embedding declaration. */
+#ifndef "#;
+
+const MODULE_HEADER_DEFINE: &str = r#"
+#define "#;
+
+const MODULE_HEADER_DECL_PREFIX: &str = r#"
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
+extern int "#;
+
+const MODULE_HEADER_DECL_SUFFIX: &str = r#"(kiln_host *host, kiln_value *result);
+#if defined(__cplusplus)
+} /* extern "C" */
+#endif
+
+#endif /* "#;
+
 static RUNTIME_SOURCE: OnceLock<String> = OnceLock::new();
 
 const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
@@ -320,6 +372,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn runtime_is_deterministic_and_does_not_name_a_module() {
@@ -409,6 +464,80 @@ int main(void) {
             assert!(
                 compile.status.success(),
                 "embedding header failed to compile with {compiler}:\n{}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn embedding_module_header_is_deterministic_and_symbol_guarded() {
+        let symbol = "kiln_module_deadbeef";
+        let one = embedding_module_header(symbol).expect("valid symbol");
+        assert_eq!(one, embedding_module_header(symbol).unwrap());
+        assert!(one.starts_with(embedding_header()));
+        assert!(one.contains("#ifndef KILN_NATIVE_MODULE_kiln_module_deadbeef_H"));
+        assert!(one.contains("#define KILN_NATIVE_MODULE_kiln_module_deadbeef_H"));
+        assert!(one.contains("extern \"C\" {"));
+        assert!(
+            one.contains("extern int kiln_module_deadbeef(kiln_host *host, kiln_value *result);")
+        );
+        assert!(one.contains("#endif /* KILN_NATIVE_MODULE_kiln_module_deadbeef_H */"));
+    }
+
+    #[test]
+    fn embedding_module_header_rejects_invalid_symbols() {
+        for symbol in ["", "9module", "module-name", "module name", "méthode"] {
+            assert!(matches!(
+                embedding_module_header(symbol),
+                Err(RuntimeSourceError::InvalidSymbol { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn embedding_module_header_compiles_as_c_and_cxx() {
+        let Some(cc) = find_cc() else {
+            return;
+        };
+        let Some(cxx) = find_cxx() else {
+            return;
+        };
+        let root = test_directory();
+        std::fs::create_dir(&root).expect("create test directory");
+        let header = root.join("kiln_module.h");
+        let c_source = root.join("probe.c");
+        let cxx_source = root.join("probe.cc");
+        let module_header = embedding_module_header("kiln_module_probe").expect("valid symbol");
+        std::fs::write(&header, module_header).expect("write module header");
+        let probe = r#"
+#include "kiln_module.h"
+#include "kiln_module.h"
+
+int main(void) {
+    kiln_host host = {0, 0};
+    kiln_value result = {0, 0, 0, 0, 0};
+    return kiln_module_probe(&host, &result);
+}
+"#;
+        std::fs::write(&c_source, probe).expect("write C probe");
+        std::fs::write(&cxx_source, probe).expect("write C++ probe");
+
+        for (compiler, standard, source, object) in [
+            (cc, "-std=c11", &c_source, root.join("probe-c.o")),
+            (cxx, "-std=c++11", &cxx_source, root.join("probe-cxx.o")),
+        ] {
+            let compile = Command::new(compiler)
+                .args([standard, "-pedantic", "-Wall", "-Wextra", "-Werror"])
+                .arg("-c")
+                .arg(source)
+                .arg("-o")
+                .arg(&object)
+                .output()
+                .expect("invoke C compiler");
+            assert!(
+                compile.status.success(),
+                "module embedding header failed to compile with {compiler}:\n{}",
                 String::from_utf8_lossy(&compile.stderr)
             );
         }
@@ -506,12 +635,13 @@ int main(void) {
     fn test_directory() -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "kiln-native-runtime-{}-{}",
+            "kiln-native-runtime-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock")
-                .as_nanos()
+                .as_nanos(),
+            TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         path
     }

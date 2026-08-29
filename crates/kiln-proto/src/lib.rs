@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on every wire-shape change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -163,6 +163,7 @@ pub struct NativeBuildSummary {
 pub struct NativeSharedLibrarySummary {
     pub module_symbol: String,
     pub output_path: String,
+    pub header_path: String,
     pub compiler_identity: String,
     pub generated_c_cache_hit: bool,
     pub object_cache_hit: bool,

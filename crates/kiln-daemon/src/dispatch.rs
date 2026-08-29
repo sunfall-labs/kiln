@@ -422,13 +422,46 @@ pub(crate) fn native_build_shared_program(
     let project_root = PathBuf::from(project_root);
     let output = output.map_or_else(
         || default_native_shared_output(&project_root, &path),
-        PathBuf::from,
+        |output| {
+            let output = PathBuf::from(output);
+            if output.is_absolute() {
+                output
+            } else {
+                project_root.join(output)
+            }
+        },
     );
-    if output == Path::new(&path)
-        || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&path))
-    {
+    let source = PathBuf::from(&path);
+    let project_source = if source.is_absolute() {
+        source.clone()
+    } else {
+        project_root.join(&source)
+    };
+    let canonical_source = std::fs::canonicalize(&project_source).ok();
+    let same_source = |candidate: &Path| {
+        candidate == source.as_path()
+            || candidate == project_source.as_path()
+            || canonical_source.as_ref().is_some_and(|source| {
+                std::fs::canonicalize(candidate).is_ok_and(|resolved| resolved == *source)
+            })
+    };
+    let header = kiln_native::shared_library_header_path(&output);
+    if same_source(&output) {
         return Response::Error {
             message: format!("native output would overwrite source file {path}"),
+        };
+    }
+    if same_source(&header) {
+        return Response::Error {
+            message: format!("native shared-library header would overwrite source file {path}"),
+        };
+    }
+    if output
+        .extension()
+        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("h"))
+    {
+        return Response::Error {
+            message: "native shared-library header path must differ from library output".to_owned(),
         };
     }
     let builder =
@@ -660,6 +693,7 @@ fn native_shared_summary(
     NativeSharedLibrarySummary {
         module_symbol: report.module_symbol,
         output_path: report.output.to_string_lossy().into_owned(),
+        header_path: report.header.to_string_lossy().into_owned(),
         compiler_identity: format!(
             "{} {} targeting {} ({})",
             report.tool.kind,
