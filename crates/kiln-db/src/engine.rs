@@ -17,8 +17,12 @@
 
 use std::collections::HashMap;
 
-use crate::hash::{Fnv1a, content_hash, hash_names};
-use crate::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
+#[cfg(test)]
+use crate::hash::content_hash;
+use crate::hash::{Fnv1a, hash_names};
+use crate::{Compiled, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision, Stats};
+#[cfg(test)]
+use kiln_hir::{Export, Item, ItemKind, Module, SourceKind, Span};
 
 /// The engine's internal validity clock.
 ///
@@ -46,6 +50,7 @@ enum QueryKey {
     /// Input: which files exist at all. Only `project()` reads it.
     FileSet,
     Parse(FileId),
+    Ir(FileId),
     Interface(FileId),
     Project,
     /// Test-only query whose dependency is the other `Cyclic`. The v0 graph is acyclic by
@@ -78,17 +83,21 @@ struct Memo<T> {
 struct FileState {
     path: String,
     source: String,
+    source_set: bool,
     source_changed_at: Epoch,
     parse: Option<Memo<Parsed>>,
+    ir: Option<Memo<Compiled>>,
     interface: Option<Memo<Interface>>,
 }
 
 /// An in-memory, single-threaded [`QueryEngine`].
 ///
-/// Deliberately dependency-free: this crate is on the rebuild path of everything else, and a
-/// slow `cargo check` here is a tax on every other workstream (docs/adr/0004).
-#[derive(Debug, Default)]
+/// Deliberately free of third-party dependencies: this crate is on the rebuild path of
+/// everything else, and a slow `cargo check` here is a tax on every other workstream
+/// (docs/adr/0004, docs/adr/0006).
+#[derive(Debug)]
 pub struct MemoEngine {
+    frontend: Frontend,
     files: Vec<FileState>,
     by_path: HashMap<String, FileId>,
     project: Option<Memo<Project>>,
@@ -104,8 +113,20 @@ pub struct MemoEngine {
 }
 
 impl MemoEngine {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(frontend: Frontend) -> Self {
+        Self {
+            frontend,
+            files: Vec::new(),
+            by_path: HashMap::new(),
+            project: None,
+            file_set_changed_at: Epoch::default(),
+            epoch: Epoch::default(),
+            revision: Revision::default(),
+            stats: Stats::default(),
+            active: Vec::new(),
+            #[cfg(test)]
+            cyclic: [None, None],
+        }
     }
 
     fn file(&self, file: FileId) -> &FileState {
@@ -188,6 +209,12 @@ impl MemoEngine {
                     &mut self.stats,
                 )
             }
+            QueryKey::Ir(file) => {
+                let (value, deps) = self.compute_ir(file);
+                self.stats.ir_computed += 1;
+                let index = file.0 as usize;
+                store(&mut self.files[index].ir, value, deps, now, &mut self.stats)
+            }
             QueryKey::Interface(file) => {
                 let (value, deps) = self.compute_interface(file);
                 self.stats.interface_computed += 1;
@@ -223,7 +250,16 @@ impl MemoEngine {
     fn compute_parse(&mut self, file: FileId) -> (Parsed, Vec<QueryKey>) {
         let dep = QueryKey::Source(file);
         self.force(dep);
-        (parse_text(&self.file(file).source), vec![dep])
+        let state = self.file(file);
+        let module = (self.frontend)(&state.path, &state.source);
+        (Parsed::new(&state.source, module), vec![dep])
+    }
+
+    fn compute_ir(&mut self, file: FileId) -> (Compiled, Vec<QueryKey>) {
+        let dep = QueryKey::Parse(file);
+        self.force(dep);
+        let parsed = self.file(file).parse.as_ref().expect(FORCED);
+        (kiln_ir::compile(&parsed.value.module), vec![dep])
     }
 
     fn compute_interface(&mut self, file: FileId) -> (Interface, Vec<QueryKey>) {
@@ -277,6 +313,7 @@ impl MemoEngine {
         match key {
             QueryKey::Source(_) | QueryKey::FileSet => None,
             QueryKey::Parse(file) => self.file(file).parse.as_ref().map(|memo| &memo.meta),
+            QueryKey::Ir(file) => self.file(file).ir.as_ref().map(|memo| &memo.meta),
             QueryKey::Interface(file) => self.file(file).interface.as_ref().map(|memo| &memo.meta),
             QueryKey::Project => self.project.as_ref().map(|memo| &memo.meta),
             #[cfg(test)]
@@ -292,6 +329,7 @@ impl MemoEngine {
                 .parse
                 .as_mut()
                 .map(|memo| &mut memo.meta),
+            QueryKey::Ir(file) => self.file_mut(file).ir.as_mut().map(|memo| &mut memo.meta),
             QueryKey::Interface(file) => self
                 .file_mut(file)
                 .interface
@@ -336,6 +374,7 @@ impl MemoEngine {
             QueryKey::Source(file) => format!("source({})", path(file)),
             QueryKey::FileSet => "file_set()".to_string(),
             QueryKey::Parse(file) => format!("parse({})", path(file)),
+            QueryKey::Ir(file) => format!("ir({})", path(file)),
             QueryKey::Interface(file) => format!("interface({})", path(file)),
             QueryKey::Project => "project()".to_string(),
             #[cfg(test)]
@@ -376,13 +415,12 @@ fn store<T: PartialEq>(
     changed_at
 }
 
-/// Line-oriented export extraction: a placeholder for the Oxc frontend (design.md §14.4).
+/// Tiny deterministic frontend used only by this crate's query-engine tests.
 ///
-/// It is deliberately dumb - it does not know about strings, comments or multi-line
-/// declarations - because what v0 has to get right is the dependency graph, not the parser.
-/// Everything downstream depends only on the *shape* of this result, so replacing it with a real
-/// parse is a local change.
-fn parse_text(text: &str) -> Parsed {
+/// Production callers inject `frontend_oxc::parse`; keeping the fixture here lets the foundational
+/// database test red-green invalidation without putting Oxc on its own test dependency path.
+#[cfg(test)]
+fn fixture_frontend(_path: &str, text: &str) -> Module {
     // `export default ...` really does export the name "default", so the bare fallthrough below
     // gets that case right without special handling.
     const DECLARATIONS: [&str; 6] = [
@@ -414,10 +452,30 @@ fn parse_text(text: &str) -> Parsed {
         }
     }
 
-    Parsed {
-        implementation_hash: content_hash(text),
-        exports,
-        lines: text.lines().count(),
+    Module {
+        source_kind: SourceKind::JavaScript,
+        source_goal: kiln_hir::SourceGoal::Module,
+        items: text
+            .lines()
+            .enumerate()
+            .map(|(line, _)| Item {
+                kind: ItemKind::Other,
+                span: Span::new(line as u32, line as u32 + 1),
+            })
+            .collect(),
+        body: Vec::new(),
+        requested_modules: Vec::new(),
+        exports: exports
+            .into_iter()
+            .map(|name| Export {
+                name: Some(name),
+                source: None,
+                type_only: false,
+                span: Span::default(),
+            })
+            .collect(),
+        diagnostics: Vec::new(),
+        panicked: false,
     }
 }
 
@@ -434,8 +492,10 @@ impl QueryEngine for MemoEngine {
         self.files.push(FileState {
             path: path.to_string(),
             source: String::new(),
+            source_set: false,
             source_changed_at: self.epoch,
             parse: None,
+            ir: None,
             interface: None,
         });
         self.by_path.insert(path.to_string(), file);
@@ -449,7 +509,7 @@ impl QueryEngine for MemoEngine {
         // that re-ingests the whole project on every command made every command reparse every
         // file; early cutoff contained the damage at the interface, so the rollup stayed
         // correct and the waste sat one layer below anything that was asserting on it.
-        if self.file(file).source == text {
+        if self.file(file).source_set && self.file(file).source == text {
             return;
         }
         self.epoch = self.epoch.next();
@@ -457,18 +517,24 @@ impl QueryEngine for MemoEngine {
         let epoch = self.epoch;
         let state = self.file_mut(file);
         state.source = text;
+        state.source_set = true;
         state.source_changed_at = epoch;
     }
 
     fn source(&self, file: FileId) -> Option<&str> {
         self.files
             .get(file.0 as usize)
-            .map(|state| state.source.as_str())
+            .and_then(|state| state.source_set.then_some(state.source.as_str()))
     }
 
     fn parse(&mut self, file: FileId) -> Parsed {
         self.force(QueryKey::Parse(file));
         self.file(file).parse.as_ref().expect(FORCED).value.clone()
+    }
+
+    fn ir(&mut self, file: FileId) -> Compiled {
+        self.force(QueryKey::Ir(file));
+        self.file(file).ir.as_ref().expect(FORCED).value.clone()
     }
 
     fn interface(&mut self, file: FileId) -> Interface {
@@ -516,7 +582,7 @@ mod tests {
     const B_V1: &str = "export const beta = 2;\n";
 
     fn engine(files: &[(&str, &str)]) -> (MemoEngine, Vec<FileId>) {
-        let mut db = MemoEngine::new();
+        let mut db = MemoEngine::new(fixture_frontend);
         let ids = files
             .iter()
             .map(|(path, text)| {
@@ -548,6 +614,7 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 2,
+                ir_computed: 0,
                 interface_computed: 2,
                 project_computed: 1,
                 validated: 0,
@@ -563,6 +630,7 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 2,
+                ir_computed: 0,
                 interface_computed: 2,
                 project_computed: 1,
                 validated: 2,
@@ -586,12 +654,33 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 0,
+                ir_computed: 0,
                 interface_computed: 0,
                 project_computed: 0,
                 validated: 4,
                 early_cutoff: 0,
             }
         );
+    }
+
+    #[test]
+    fn bytecode_is_a_memoized_parse_dependent() {
+        let (mut db, files) = engine(&[("a.js", A_V1)]);
+        let first = db.ir(files[0]).expect("fixture HIR compiles");
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+
+        db.reset_stats();
+        assert_eq!(db.ir(files[0]).expect("cached IR remains valid"), first);
+        assert_eq!(db.stats().ir_computed, 0);
+        assert_eq!(db.stats().validated, 1);
+
+        db.reset_stats();
+        db.set_source(files[0], A_BODY_EDIT.to_string());
+        assert_eq!(db.ir(files[0]).expect("edited fixture HIR compiles"), first);
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+        assert_eq!(db.stats().early_cutoff, 1);
     }
 
     /// The headline property: an edit that does not change the interface does not reach the
@@ -612,6 +701,7 @@ mod tests {
             Stats {
                 revision: 3,
                 parse_computed: 1,
+                ir_computed: 0,
                 interface_computed: 1,
                 project_computed: 0,
                 validated: 4,
@@ -643,6 +733,7 @@ mod tests {
             Stats {
                 revision: 3,
                 parse_computed: 1,
+                ir_computed: 0,
                 interface_computed: 1,
                 project_computed: 1,
                 validated: 4,
@@ -694,6 +785,7 @@ mod tests {
             Stats {
                 revision: 2,
                 parse_computed: 0,
+                ir_computed: 0,
                 interface_computed: 0,
                 project_computed: 0,
                 validated: 1,
@@ -748,7 +840,7 @@ mod tests {
 
     #[test]
     fn interning_is_idempotent() {
-        let mut db = MemoEngine::new();
+        let mut db = MemoEngine::new(fixture_frontend);
         let first = db.intern("a.js");
         assert_eq!(db.intern("a.js"), first);
         db.set_source(first, A_V1.to_string());
@@ -779,7 +871,7 @@ mod tests {
     /// must report itself rather than recursing until the stack runs out.
     #[test]
     fn a_cycle_is_reported_rather_than_hanging() {
-        let mut db = MemoEngine::new();
+        let mut db = MemoEngine::new(fixture_frontend);
 
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -815,7 +907,7 @@ mod tests {
             "let hidden = 2;\n",
         );
 
-        let parsed = parse_text(SAMPLE);
+        let parsed = Parsed::new(SAMPLE, fixture_frontend("sample.js", SAMPLE));
         assert_eq!(parsed.exports, ["f", "g", "h", "i", "j", "K", "default"]);
         assert_eq!(parsed.lines, 9);
         assert_eq!(parsed.implementation_hash, content_hash(SAMPLE));
@@ -855,7 +947,7 @@ mod tests {
 
     #[test]
     fn empty_project_is_well_defined() {
-        let mut db = MemoEngine::new();
+        let mut db = MemoEngine::new(fixture_frontend);
         assert_eq!(
             db.project(),
             Project {

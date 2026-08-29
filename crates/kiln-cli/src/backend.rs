@@ -4,7 +4,10 @@
 //! `--one-shot` is used. The commands are written against this trait so neither mode is the
 //! special case, and so the tests can drive them without either.
 
-use kiln_proto::{ModuleSummary, ProjectSummary, Request, Response, Stats};
+use kiln_proto::{
+    ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, ProjectSummary, Request,
+    Response, RunSummary, Stats, TestMode, TestSummary,
+};
 
 use crate::error::{Error, Result};
 
@@ -24,6 +27,65 @@ pub trait Backend {
         match self.request(Request::Check { path })? {
             Response::Checked(summary) => Ok(summary),
             other => Err(mismatch("Check", &other)),
+        }
+    }
+
+    fn run(&mut self, path: String) -> Result<RunSummary> {
+        match self.request(Request::Run { path })? {
+            Response::Ran(summary) => Ok(summary),
+            other => Err(mismatch("Run", &other)),
+        }
+    }
+
+    fn native_build(
+        &mut self,
+        path: String,
+        project_root: String,
+        output: Option<String>,
+        profile: NativeProfile,
+    ) -> Result<NativeBuildSummary> {
+        match self.request(Request::NativeBuild {
+            path,
+            project_root,
+            output,
+            profile,
+        })? {
+            Response::NativeBuilt(summary) => Ok(summary),
+            other => Err(mismatch("NativeBuild", &other)),
+        }
+    }
+
+    fn native_run(
+        &mut self,
+        path: String,
+        project_root: String,
+        profile: NativeProfile,
+    ) -> Result<NativeRunSummary> {
+        match self.request(Request::NativeRun {
+            path,
+            project_root,
+            profile,
+        })? {
+            Response::NativeRan(summary) => Ok(summary),
+            other => Err(mismatch("NativeRun", &other)),
+        }
+    }
+
+    fn test(
+        &mut self,
+        root: String,
+        mode: TestMode,
+        changed_paths: Option<Vec<String>>,
+        previously_failed: Vec<String>,
+    ) -> Result<TestSummary> {
+        match self.request(Request::Test {
+            root,
+            mode,
+            changed_paths,
+            previously_failed,
+        })? {
+            Response::Tested(summary) => Ok(summary),
+            other => Err(mismatch("Test", &other)),
         }
     }
 
@@ -59,6 +121,10 @@ fn name_of(response: &Response) -> &'static str {
     match response {
         Response::Pong { .. } => "Pong",
         Response::Checked(_) => "Checked",
+        Response::Ran(_) => "Ran",
+        Response::NativeBuilt(_) => "NativeBuilt",
+        Response::NativeRan(_) => "NativeRan",
+        Response::Tested(_) => "Tested",
         Response::Project(_) => "Project",
         Response::Stats(_) => "Stats",
         Response::Ok => "Ok",

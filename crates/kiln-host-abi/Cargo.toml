@@ -1,0 +1,9 @@
+[package]
+name = "kiln-host-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate is the stable, dependency-free boundary between compiled programs and their host.
+[dependencies]

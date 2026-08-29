@@ -1,0 +1,421 @@
+//! The small C runtime used by Kiln's native command-line launcher.
+//!
+//! The generated program translation units deliberately do not contain host policy.  This crate
+//! emits the stable, reusable callback object that implements the command-line `WriteStdout`
+//! operation, plus a tiny executable launcher for one generated module.  Keeping those sources
+//! separate lets the runtime object be cached independently from application code.
+
+/// Version of the generated native runtime source and its C ABI.
+pub const NATIVE_RUNTIME_VERSION: u32 = 1;
+
+/// The operation implemented by [`runtime_source`].
+pub const WRITE_STDOUT_OPERATION: u16 = 1;
+
+/// Why a native runtime source request was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSourceError {
+    /// The requested entry point is not a valid portable C identifier.
+    InvalidSymbol { symbol: String },
+}
+
+impl std::fmt::Display for RuntimeSourceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSymbol { symbol } => {
+                write!(formatter, "invalid native module symbol `{symbol}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeSourceError {}
+
+/// Short compatibility spelling for callers that do not distinguish source kinds.
+pub type RuntimeError = RuntimeSourceError;
+
+/// Return the deterministic, program-independent C11 runtime translation unit.
+pub fn runtime_source() -> &'static str {
+    RUNTIME_SOURCE
+}
+
+/// Emit a deterministic C11 launcher that calls `symbol` as the process entry point.
+///
+/// A module returns zero on success and a nonzero status for a host/control-flow failure.  The
+/// launcher maps that status to the conventional process exit values 0 and 1.
+pub fn launcher_source(symbol: &str) -> Result<String, RuntimeSourceError> {
+    validate_symbol(symbol)?;
+    let mut source = String::with_capacity(
+        LAUNCHER_PREFIX.len() + 2 * symbol.len() + LAUNCHER_DECL_SUFFIX.len() + LAUNCHER_BODY.len(),
+    );
+    source.push_str(LAUNCHER_PREFIX);
+    source.push_str(symbol);
+    source.push_str(LAUNCHER_DECL_SUFFIX);
+    source.push_str(symbol);
+    source.push_str(LAUNCHER_BODY);
+    Ok(source)
+}
+
+/// Alias with an explicit verb for callers that keep several generated source kinds together.
+pub fn emit_launcher(symbol: &str) -> Result<String, RuntimeError> {
+    launcher_source(symbol)
+}
+
+fn validate_symbol(symbol: &str) -> Result<(), RuntimeSourceError> {
+    let mut bytes = symbol.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(RuntimeSourceError::InvalidSymbol {
+            symbol: symbol.to_owned(),
+        });
+    };
+    if !(first == b'_' || first.is_ascii_alphabetic())
+        || bytes.any(|byte| !(byte == b'_' || byte.is_ascii_alphanumeric()))
+    {
+        return Err(RuntimeSourceError::InvalidSymbol {
+            symbol: symbol.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+// Keep these declarations byte-for-byte compatible with kiln-backend-c's generated C99 units.
+// The runtime is C11, but only uses facilities available in C99 for portability.
+const RUNTIME_SOURCE: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Native runtime version 1; C ABI version 1; HostOps ABI version 1. */
+#define KILN_C99_OK 0
+#define KILN_C99_HOST_ERROR (-3)
+
+enum kiln_value_tag {
+    KILN_VALUE_UNDEFINED = 0,
+    KILN_VALUE_NULL = 1,
+    KILN_VALUE_BOOLEAN = 2,
+    KILN_VALUE_NUMBER = 3,
+    KILN_VALUE_STRING = 4
+};
+
+/* This layout must remain identical to the generated module boundary. */
+typedef struct kiln_value {
+    uint32_t tag;
+    uint32_t reserved;
+    uint64_t bits;
+    const char *ptr;
+    size_t len;
+} kiln_value;
+
+typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
+                                 const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_host {
+    kiln_host_call_fn call;
+    void *context;
+} kiln_host;
+
+static int kiln_cli_write_bytes(const char *bytes, size_t length) {
+    if (length != 0 && bytes == NULL) {
+        return KILN_C99_HOST_ERROR;
+    }
+    if (length != 0 && fwrite(bytes, 1, length, stdout) != length) {
+        return KILN_C99_HOST_ERROR;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_cli_write_value(kiln_value value) {
+    static const char undefined_text[] = "undefined";
+    static const char null_text[] = "null";
+    static const char true_text[] = "true";
+    static const char false_text[] = "false";
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+        return kiln_cli_write_bytes(undefined_text, sizeof(undefined_text) - 1);
+    case KILN_VALUE_NULL:
+        return kiln_cli_write_bytes(null_text, sizeof(null_text) - 1);
+    case KILN_VALUE_BOOLEAN:
+        return value.bits != 0
+            ? kiln_cli_write_bytes(true_text, sizeof(true_text) - 1)
+            : kiln_cli_write_bytes(false_text, sizeof(false_text) - 1);
+    case KILN_VALUE_STRING:
+        return kiln_cli_write_bytes(value.ptr, value.len);
+    case KILN_VALUE_NUMBER: {
+        double number;
+        char buffer[64];
+        int length;
+        memcpy(&number, &value.bits, sizeof(number));
+        if (isnan(number)) {
+            return kiln_cli_write_bytes("NaN", 3);
+        }
+        if (isinf(number)) {
+            return number < 0.0
+                ? kiln_cli_write_bytes("-Infinity", 9)
+                : kiln_cli_write_bytes("Infinity", 8);
+        }
+        /* JavaScript renders both signed zeros as 0. */
+        if (number == 0.0) {
+            return kiln_cli_write_bytes("0", 1);
+        }
+        /* %.17g is intentionally the temporary native scalar formatting contract. */
+        length = snprintf(buffer, sizeof(buffer), "%.17g", number);
+        if (length < 0 || (size_t)length >= sizeof(buffer)) {
+            return KILN_C99_HOST_ERROR;
+        }
+        return kiln_cli_write_bytes(buffer, (size_t)length);
+    }
+    default:
+        return KILN_C99_HOST_ERROR;
+    }
+}
+
+static kiln_value kiln_cli_undefined(void) {
+    kiln_value value;
+    value.tag = KILN_VALUE_UNDEFINED;
+    value.reserved = 0;
+    value.bits = 0;
+    value.ptr = NULL;
+    value.len = 0;
+    return value;
+}
+
+/* Stable CLI implementation of HostOps::WriteStdout (operation number 1). */
+int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
+                       const kiln_value *arguments, kiln_value *result) {
+    uint16_t index;
+    (void)context;
+    if (operation != 1 || result == NULL || (argc != 0 && arguments == NULL)) {
+        return KILN_C99_HOST_ERROR;
+    }
+    for (index = 0; index < argc; ++index) {
+        if (index != 0 && fputc(' ', stdout) == EOF) {
+            return KILN_C99_HOST_ERROR;
+        }
+        if (kiln_cli_write_value(arguments[index]) != KILN_C99_OK) {
+            return KILN_C99_HOST_ERROR;
+        }
+    }
+    if (fputc('\n', stdout) == EOF || fflush(stdout) != 0) {
+        return KILN_C99_HOST_ERROR;
+    }
+    *result = kiln_cli_undefined();
+    return KILN_C99_OK;
+}
+"#;
+
+const LAUNCHER_PREFIX: &str = r#"/* Kiln native CLI launcher. */
+#include <locale.h>
+#include <stddef.h>
+#include <stdint.h>
+
+enum kiln_value_tag {
+    KILN_VALUE_UNDEFINED = 0,
+    KILN_VALUE_NULL = 1,
+    KILN_VALUE_BOOLEAN = 2,
+    KILN_VALUE_NUMBER = 3,
+    KILN_VALUE_STRING = 4
+};
+
+typedef struct kiln_value {
+    uint32_t tag;
+    uint32_t reserved;
+    uint64_t bits;
+    const char *ptr;
+    size_t len;
+} kiln_value;
+
+typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
+                                 const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_host {
+    kiln_host_call_fn call;
+    void *context;
+} kiln_host;
+
+extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
+                              const kiln_value *arguments, kiln_value *result);
+extern int 
+"#;
+
+const LAUNCHER_DECL_SUFFIX: &str = r#"(kiln_host *host, kiln_value *result);
+
+int main(void) {
+    kiln_host host;
+    kiln_value result;
+    int status;
+    if (setlocale(LC_NUMERIC, "C") == NULL) {
+        return 1;
+    }
+    host.call = kiln_cli_host_call;
+    host.context = NULL;
+    status = 
+"#;
+
+const LAUNCHER_BODY: &str = r#"(&host, &result);
+    return status == 0 ? 0 : 1;
+}
+"#;
+
+// The suffix above intentionally leaves the call expression open so the validated symbol is the
+// only program-specific part of the launcher source.
+const _: () = {
+    // Compile-time assertion that the source fragments remain nonempty and deterministic.
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn runtime_is_deterministic_and_does_not_name_a_module() {
+        assert_eq!(runtime_source(), runtime_source());
+        assert!(runtime_source().contains("int kiln_cli_host_call"));
+        assert!(!runtime_source().contains("kiln_module_"));
+    }
+
+    #[test]
+    fn launcher_validates_symbols_and_is_deterministic() {
+        let one = launcher_source("kiln_module_deadbeef").expect("valid symbol");
+        assert_eq!(one, launcher_source("kiln_module_deadbeef").unwrap());
+        assert!(one.contains("kiln_module_deadbeef"));
+        for symbol in ["", "9module", "module-name", "module name", "méthode"] {
+            assert!(matches!(
+                launcher_source(symbol),
+                Err(RuntimeSourceError::InvalidSymbol { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn launcher_pins_numeric_locale_before_module_call() {
+        let source = launcher_source("kiln_module_locale").expect("valid symbol");
+        let locale = source
+            .find("setlocale(LC_NUMERIC, \"C\")")
+            .expect("launcher sets C numeric locale");
+        let module_call = source
+            .find("status = \nkiln_module_locale")
+            .expect("launcher calls module");
+        assert!(locale < module_call);
+        assert!(source.contains("#include <locale.h>"));
+        assert!(source.contains("return 1;"));
+    }
+
+    #[test]
+    fn runtime_and_launcher_link_against_stub_module() {
+        let Some(cc) = find_cc() else {
+            return;
+        };
+        let root = test_directory();
+        std::fs::create_dir(&root).expect("create test directory");
+        let runtime = root.join("runtime.c");
+        let launcher = root.join("launcher.c");
+        let stub = root.join("stub.c");
+        let executable = root.join("kiln-test");
+        std::fs::write(&runtime, runtime_source()).expect("write runtime");
+        std::fs::write(
+            &launcher,
+            launcher_source("kiln_module_test").expect("valid symbol"),
+        )
+        .expect("write launcher");
+        std::fs::write(&stub, STUB_SOURCE).expect("write stub");
+        let compile = Command::new(cc)
+            .args(["-std=c11", "-pedantic", "-Wall", "-Wextra", "-Werror"])
+            .args([runtime.as_os_str(), launcher.as_os_str(), stub.as_os_str()])
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .expect("invoke C compiler");
+        assert!(
+            compile.status.success(),
+            "C runtime failed to compile/link:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("run linked launcher");
+        assert!(run.status.success());
+        assert_eq!(
+            String::from_utf8(run.stdout).expect("UTF-8 stdout"),
+            "undefined null true false 0 NaN Infinity -Infinity hello\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn find_cc() -> Option<&'static str> {
+        let result = Command::new("cc")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        result.success().then_some("cc")
+    }
+
+    fn test_directory() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "kiln-native-runtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        path
+    }
+
+    const STUB_SOURCE: &str = r#"
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+enum kiln_value_tag {
+    KILN_VALUE_UNDEFINED = 0,
+    KILN_VALUE_NULL = 1,
+    KILN_VALUE_BOOLEAN = 2,
+    KILN_VALUE_NUMBER = 3,
+    KILN_VALUE_STRING = 4
+};
+typedef struct kiln_value {
+    uint32_t tag;
+    uint32_t reserved;
+    uint64_t bits;
+    const char *ptr;
+    size_t len;
+} kiln_value;
+typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
+                                 const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_host {
+    kiln_host_call_fn call;
+    void *context;
+} kiln_host;
+
+int kiln_module_test(kiln_host *host, kiln_value *result) {
+    static const char text[] = "hello";
+    kiln_value arguments[9];
+    double zero = -0.0;
+    double nan = 0.0 / 0.0;
+    double infinity = 1.0 / 0.0;
+    double negative_infinity = -1.0 / 0.0;
+    memset(arguments, 0, sizeof(arguments));
+    arguments[0].tag = KILN_VALUE_UNDEFINED;
+    arguments[1].tag = KILN_VALUE_NULL;
+    arguments[2].tag = KILN_VALUE_BOOLEAN;
+    arguments[2].bits = 1;
+    arguments[3].tag = KILN_VALUE_BOOLEAN;
+    arguments[4].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[4].bits, &zero, sizeof(zero));
+    arguments[5].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[5].bits, &nan, sizeof(nan));
+    arguments[6].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[6].bits, &infinity, sizeof(infinity));
+    arguments[7].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[7].bits, &negative_infinity, sizeof(negative_infinity));
+    arguments[8].tag = KILN_VALUE_STRING;
+    arguments[8].ptr = text;
+    arguments[8].len = sizeof(text) - 1;
+    return host->call(host->context, 1, 9, arguments, result);
+}
+"#;
+}

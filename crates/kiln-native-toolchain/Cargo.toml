@@ -1,0 +1,11 @@
+[package]
+name = "kiln-native-toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Native compilation is intentionally kept at the edge of the compiler graph.  The toolchain
+# wrapper has no dependency on the frontend, IR, runtime, or daemon and can therefore be tested
+# independently (including with an injected process runner).
+[dependencies]

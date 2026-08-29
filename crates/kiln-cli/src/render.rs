@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use kiln_proto::{ModuleSummary, ProjectSummary, Stats};
+use kiln_proto::{ModuleSummary, NativeBuildSummary, ProjectSummary, Stats};
 
 /// Width of the indented label column, sized to the longest label ("implementation").
 const LABEL: usize = 16;
@@ -23,6 +23,7 @@ const MAX_EXPORTS_SHOWN: usize = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Work {
     pub parse: u64,
+    pub ir: u64,
     pub interface: u64,
     pub project: u64,
     pub validated: u64,
@@ -33,6 +34,7 @@ impl Work {
     pub fn between(before: &Stats, after: &Stats) -> Work {
         Work {
             parse: after.parse_computed.saturating_sub(before.parse_computed),
+            ir: after.ir_computed.saturating_sub(before.ir_computed),
             interface: after
                 .interface_computed
                 .saturating_sub(before.interface_computed),
@@ -48,6 +50,7 @@ impl Work {
         let mut parts = Vec::new();
         for (name, count) in [
             ("parse", self.parse),
+            ("ir", self.ir),
             ("interface", self.interface),
             ("project", self.project),
         ] {
@@ -81,14 +84,10 @@ pub fn check(
     display_path: &str,
     summary: &ModuleSummary,
     work: &Work,
-    stats: &Stats,
+    revision: u64,
     elapsed: Duration,
 ) -> String {
-    let mut out = format!(
-        "{display_path}  r{}  {}\n",
-        stats.revision,
-        duration(elapsed)
-    );
+    let mut out = format!("{display_path}  r{revision}  {}\n", duration(elapsed));
     row(&mut out, "interface", &hash(summary.interface_hash));
     row(
         &mut out,
@@ -96,14 +95,21 @@ pub fn check(
         &hash(summary.implementation_hash),
     );
     row(&mut out, "exports", &exports(&summary.exports));
+    if !summary.diagnostics.is_empty() {
+        row(
+            &mut out,
+            "diagnostics",
+            &summary.diagnostics.len().to_string(),
+        );
+    }
     work_rows(&mut out, work);
     out
 }
 
 /// `kiln project` output. The project rollup depends on every module interface, so the
 /// work report is the evidence that an unrelated edit did not disturb it.
-pub fn project(summary: &ProjectSummary, work: &Work, stats: &Stats, elapsed: Duration) -> String {
-    let mut out = format!("project  r{}  {}\n", stats.revision, duration(elapsed));
+pub fn project(summary: &ProjectSummary, work: &Work, revision: u64, elapsed: Duration) -> String {
+    let mut out = format!("project  r{revision}  {}\n", duration(elapsed));
     row(&mut out, "modules", &summary.modules.to_string());
     row(&mut out, "exports", &summary.exports.to_string());
     row(&mut out, "interface", &hash(summary.interface_hash));
@@ -118,6 +124,7 @@ pub fn stats(stats: &Stats) -> String {
     for (label, value) in [
         ("revision", stats.revision),
         ("parse computed", stats.parse_computed),
+        ("ir computed", stats.ir_computed),
         ("interface computed", stats.interface_computed),
         ("project computed", stats.project_computed),
         ("validated", stats.validated),
@@ -125,6 +132,70 @@ pub fn stats(stats: &Stats) -> String {
     ] {
         let _ = writeln!(out, "{label:<width$}  {value}");
     }
+    out
+}
+
+/// `kiln build` output. Cache decisions are deliberately visible so a build can be diagnosed
+/// without turning on tracing or inspecting the cache directory.
+pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
+    let hit = |value: bool| if value { "hit" } else { "built" };
+    let mut out = format!("native build {source}  {}ms\n", summary.total_millis);
+    row(&mut out, "module", &summary.module_symbol);
+    row(&mut out, "output", &summary.output_path);
+    row(&mut out, "compiler", &summary.compiler_identity);
+    row(
+        &mut out,
+        "generated C",
+        &format!(
+            "{} bytes ({})",
+            summary.generated_c_bytes,
+            hit(summary.generated_c_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "app object",
+        &format!(
+            "{} bytes ({})",
+            summary.app_object_bytes,
+            hit(summary.app_object_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "runtime object",
+        &format!(
+            "{} bytes ({})",
+            summary.runtime_object_bytes,
+            hit(summary.runtime_object_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "launcher object",
+        &format!(
+            "{} bytes ({})",
+            summary.launcher_object_bytes,
+            hit(summary.launcher_object_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "executable",
+        &format!(
+            "{} bytes ({})",
+            summary.executable_bytes,
+            hit(summary.executable_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "timing",
+        &format!(
+            "emit {}ms, compile {}ms, link {}ms",
+            summary.emit_millis, summary.compile_millis, summary.link_millis
+        ),
+    );
     out
 }
 
@@ -181,6 +252,7 @@ mod tests {
             implementation_hash: 0x1122_3344_5566_7788,
             interface_hash: 0x9f3c_1d2e_4a5b_6c7d,
             exports: vec!["greet".to_string(), "main".to_string()],
+            diagnostics: Vec::new(),
         }
     }
 
@@ -195,6 +267,7 @@ mod tests {
         Stats {
             revision,
             parse_computed: parse,
+            ir_computed: 0,
             interface_computed: interface,
             project_computed: project,
             validated,
@@ -210,6 +283,7 @@ mod tests {
             Work::between(&before, &after),
             Work {
                 parse: 1,
+                ir: 0,
                 interface: 1,
                 project: 0,
                 validated: 2,
@@ -222,18 +296,13 @@ mod tests {
     fn a_body_only_edit_reads_as_early_cutoff() {
         let work = Work {
             parse: 1,
+            ir: 0,
             interface: 1,
             project: 0,
             validated: 2,
             early_cutoff: 1,
         };
-        let out = check(
-            "a.js",
-            &summary(),
-            &work,
-            &stats_at(2, 0, 0, 0, 0, 0),
-            Duration::from_micros(420),
-        );
+        let out = check("a.js", &summary(), &work, 2, Duration::from_micros(420));
         assert!(out.starts_with("a.js  r2  0.42ms\n"), "{out}");
         assert!(
             out.contains("recomputed      parse 1, interface 1\n"),
@@ -251,18 +320,13 @@ mod tests {
     fn a_no_op_check_says_so_loudly() {
         let work = Work {
             parse: 0,
+            ir: 0,
             interface: 0,
             project: 0,
             validated: 3,
             early_cutoff: 0,
         };
-        let out = check(
-            "a.js",
-            &summary(),
-            &work,
-            &stats_at(2, 0, 0, 0, 0, 0),
-            Duration::ZERO,
-        );
+        let out = check("a.js", &summary(), &work, 2, Duration::ZERO);
         assert!(out.contains("recomputed      nothing\n"), "{out}");
     }
 
@@ -270,18 +334,13 @@ mod tests {
     fn reused_row_is_omitted_when_there_was_no_reuse() {
         let work = Work {
             parse: 1,
+            ir: 0,
             interface: 1,
             project: 1,
             validated: 0,
             early_cutoff: 0,
         };
-        let out = check(
-            "a.js",
-            &summary(),
-            &work,
-            &stats_at(1, 0, 0, 0, 0, 0),
-            Duration::ZERO,
-        );
+        let out = check("a.js", &summary(), &work, 1, Duration::ZERO);
         assert!(!out.contains("reused"), "{out}");
         assert!(
             out.contains("recomputed      parse 1, interface 1, project 1\n"),
@@ -298,12 +357,13 @@ mod tests {
             &small,
             &Work {
                 parse: 0,
+                ir: 0,
                 interface: 0,
                 project: 0,
                 validated: 0,
                 early_cutoff: 0,
             },
-            &stats_at(1, 0, 0, 0, 0, 0),
+            1,
             Duration::ZERO,
         );
         assert!(

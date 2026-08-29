@@ -1,0 +1,10 @@
+[package]
+name = "kiln-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Compiler-owned values crossing the frontend boundary. Keep this crate dependency-free:
+# every frontend and every downstream compiler pass sits above it.
+[dependencies]

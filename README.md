@@ -10,29 +10,42 @@ is built before the compiler gets large, not retrofitted once it hurts. The inte
 is a tool that feels like an interpreter or a modern dev server while still producing
 aggressively optimized native binaries.
 
-## Status: kiln does not compile anything yet
+## Status: first interpreter and native slices work
 
-This repository is at v0, which is the substrate the design says to build first (§14, items one
-through three). It contains a query engine, a daemon, a CLI and a timing harness. It does not
-contain a compiler.
+This repository is at v0. It now has a production Oxc frontend, owned executable HIR, memoized
+stack bytecode, a scalar interpreter, deterministic C emission, a versioned HostOps boundary, and
+a layered native artifact cache. `kiln run` executes a deliberately small but real
+JavaScript/TypeScript subset immediately; `kiln build` and `kiln run --native` compile that same
+bytecode to a native executable through Zig, Clang, `cc`, or GCC.
 
 What exists today:
 
 | Crate | What it is |
 | --- | --- |
-| `crates/kiln-db` | The incremental query database. Defines the `QueryEngine` trait and the values the compiler exchanges with it, and ships `MemoEngine`, a hand-written memoizing implementation with early cutoff. Zero dependencies, deliberately. |
-| `crates/kiln-proto` | The CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 1. Request and response types plus the `Stats` counters. |
+| `crates/kiln-hir` | Dependency-free, compiler-owned module and executable HIR. No Oxc type or arena lifetime crosses this boundary. |
+| `crates/frontend-oxc` | The Oxc adapter. Parses JS, JSX, TS and TSX and lowers into owned HIR. |
+| `crates/kiln-ir` | Parser-independent, versioned stack bytecode and HIR compiler. |
+| `crates/kiln-interpreter` | Deterministic scalar VM with bounded execution. |
+| `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
+| `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
+| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
+| `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
+| `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
+| `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
+| `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
+| `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 5, including structured interpreter, native-build, native-run, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
 
-What does not exist: there is no parser, no HIR, no IR, no interpreter, no C backend, no linker
-integration, no runtime library, no HostOps ABI, no built-ins, no test selection engine and no
-Test262 runner. Nothing here turns JavaScript into a program. The `Parsed` value that the engine
-caches is a stand-in shaped like a parse result, present so that the incremental machinery can
-be built and tested against the shape it will eventually carry: its export list comes from a
-line-oriented scan that knows nothing about strings, comments or multi-line declarations, and it
-is not a parser in any sense. The Oxc frontend is §14 item four and has not started.
+The executable subset currently covers scalar literals, variables, arithmetic, strict equality
+and comparisons, assignment, blocks, `if`/`else`, `while`, short-circuit expressions,
+conditionals, and `console.log`. Unsupported valid syntax is rejected with a source range during
+IR compilation. Module linking, functions, objects, exceptions, async behavior, built-ins, the
+Test262 harness, realms, and broad language coverage remain to be implemented. The initial native
+runtime's number-to-string edge cases and process-lifetime string allocations are also explicit
+equivalence/ownership work; they are not treated as conformance successes.
 
 The useful thing that does work is the invalidation behavior. Editing a file's contents
 reparses that file; if the edit does not change what the module exports, the project-level query
@@ -74,25 +87,35 @@ The compiler user edits JS/TS and runs the program. This loop is served by the d
 database and the interpreter-first execution path (§1, §2, §4), with native compilation happening
 in the background rather than on the critical path.
 
-Today only the first loop is genuinely served, because only the first loop exists.
+All three loops now have a first end-to-end slice. The language-developer loop discovers an
+external Test262 tree, prioritizes prior failures and smoke/affected tests, and executes the
+selected variants in one resident daemon request. Unsupported semantics remain visible rather
+than being counted as passes.
 
 ## Running it
 
 Rust 1.97.1 and edition 2024. The toolchain is pinned in `rust-toolchain.toml`, so `rustup` will
-fetch the right one on first build. Cargo is the only prerequisite.
+fetch the right one on first build. Cargo is enough for interpreter development; native commands
+also need Zig, Clang, a compatible `cc`, or GCC on `PATH`.
 
 ```sh
 cargo build              # build the workspace
 cargo test               # the invalidation tests are the interesting ones
-cargo run -p kiln-cli    # the `kiln` binary
+cargo run -p kiln-cli -- --one-shot run examples/hello.ts
+cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native
+cargo run -p kiln-cli -- --one-shot build examples/hello.ts --profile native-dev
+cargo run -p kiln-cli -- --one-shot test tests/conformance/smoke
+cargo run -p kiln-cli -- test /path/to/test262/test --changed
 cargo run -p kiln-bench  # the timing harness; results land in bench/results/
 cargo build --timings    # the compiler developer's loop, measured (ADR 0004)
 ```
 
 The daemon speaks the request set in `crates/kiln-proto/src/lib.rs`: `Ping` for liveness and
 protocol negotiation, `SetSource` to replace a file's contents, `Check` for one module's
-summary, `Project` for the whole-project rollup, and `Stats` / `ResetStats` for the recompute
-counters. The exact CLI spelling of each is in `kiln --help`; the wire types are the contract.
+summary, `Run` for interpreted execution, `NativeBuild` / `NativeRun` for cached native work,
+`Test` for resident conformance batches, `Project` for the whole-project rollup, and `Stats` /
+`ResetStats` for the recompute counters. Test failures and native artifacts are remembered under
+`.kiln/`. The exact CLI spelling is in `kiln --help`.
 
 ## Design and decisions
 
@@ -109,6 +132,16 @@ is visible next to the reasoning for it.
   enforceable rules, with a stated cost for breaking one.
 - [0005](docs/adr/0005-builtins-in-js-bootstrap-risk.md) — keeping built-ins in JS/TS, and the
   bootstrap risk that comes with a compiler depending on its own output.
+- [0006](docs/adr/0006-owned-hir-and-injected-frontends.md) — Oxc lowers into dependency-free,
+  compiler-owned HIR and is injected into the query engine rather than becoming its dependency.
+- [0007](docs/adr/0007-interpreter-bytecode-and-hostops-boundary.md) — interpreter bytecode is a
+  memoized parser-independent query, while side-effecting execution crosses a versioned HostOps
+  boundary and is replayed on every run.
+- [0008](docs/adr/0008-test262-is-an-external-explicit-conformance-input.md) — Test262 remains an
+  external corpus and every execution variant and unsupported outcome stays explicit.
+- [0009](docs/adr/0009-native-c-units-have-layered-content-addressed-artifacts.md) — deterministic
+  per-module C, the HostOps runtime, launcher, objects, and executable are separately keyed native
+  artifacts behind a portable compiler boundary.
 
 ## License
 

@@ -1,0 +1,10 @@
+[package]
+name = "kiln-interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-host-abi = { workspace = true }
+kiln-ir = { workspace = true }

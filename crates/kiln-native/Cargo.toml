@@ -1,0 +1,18 @@
+[package]
+name = "kiln-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-artifact-cache = { workspace = true }
+kiln-backend-c = { workspace = true }
+kiln-host-abi = { workspace = true }
+kiln-ir = { workspace = true }
+kiln-native-runtime = { workspace = true }
+kiln-native-toolchain = { workspace = true }
+
+[dev-dependencies]
+kiln-interpreter = { workspace = true }
+kiln-runtime = { workspace = true }

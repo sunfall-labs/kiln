@@ -3,3 +3,7 @@
 /bench/results/*.json
 !/bench/results/baseline.json
 .DS_Store
+/.kiln/
+
+# agent worktrees and session state
+.claude/

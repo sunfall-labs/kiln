@@ -1,0 +1,8 @@
+[package]
+name = "kiln-test262"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sunfall-labs/kiln"
+
+[dependencies]

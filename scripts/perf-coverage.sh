@@ -17,19 +17,19 @@ kiln_block <<'EOF'
 
 | Measurement | Recorded by |
 |---|---|
-| Clean Rust build | `Build timings` job |
-| No-op compiler rebuild | `Build timings` job |
-| Incremental Rust build after leaf edit | `Build timings` job |
-| Incremental Rust build after IR edit | `Build timings` job, using `kiln-db` as v0's central type crate |
+| Clean Rust build | `Clean build` job, on pushes to main |
+| No-op compiler rebuild | `Incremental rebuilds` job |
+| Incremental Rust build after leaf edit | `Incremental rebuilds` job |
+| Incremental Rust build after IR edit | `Incremental rebuilds` job, editing `kiln-hir` |
 | Compiler daemon startup | `kiln-bench` |
 | Warm parse/lower latency | `kiln-bench` |
 | Cache hit rate | `kiln-bench`, from the recompute counters in `kiln_proto::Stats` |
-| Warm interpreted execution latency | not yet — needs §14 step 5, the IR interpreter |
-| Warm native object rebuild | not yet — needs §14 step 8, the C backend |
-| Link latency | not yet — needs §14 step 8 |
-| Generated C size | not yet — needs §14 step 8 |
-| Targeted Test262 latency | not yet — needs §14 step 7 |
-| Full Test262 throughput | not yet — needs §14 step 7 |
+| Warm interpreted execution latency | `kiln-bench`, including warm parse, IR rebuild and VM launch |
+| Warm native object rebuild | `kiln-bench`, validating all generated-source/object/link cache layers |
+| Link latency | `kiln-bench`, repeated links over warm native objects |
+| Generated C size | `kiln-bench`, alongside object and executable bytes |
+| Targeted Test262 latency | `kiln-bench`, parser/interpreter batch with explicit variants |
+| Full Test262 throughput | not yet — needs a pinned external Test262 checkout and harness support |
 
 The `kiln-bench` rows are the harness's to produce. This table says where each measurement
 belongs; the `Performance` block above says what the harness actually emitted on this run.

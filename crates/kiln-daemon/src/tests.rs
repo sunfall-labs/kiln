@@ -7,7 +7,7 @@
 use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
-use kiln_proto::{PROTOCOL_VERSION, Request, Response};
+use kiln_proto::{NativeProfile, PROTOCOL_VERSION, Request, Response};
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -82,9 +82,16 @@ impl QueryEngine for StubEngine {
             implementation_hash: hash(text.as_bytes()),
             exports: exports_of(text),
             lines: text.lines().count(),
+            module: frontend_oxc::parse("stub.js", text),
         };
         self.stats.parse_computed += 1;
         parsed
+    }
+
+    fn ir(&mut self, file: FileId) -> kiln_db::Compiled {
+        let parsed = self.parse(file);
+        self.stats.ir_computed += 1;
+        kiln_ir::compile(&parsed.module)
     }
 
     fn interface(&mut self, file: FileId) -> Interface {
@@ -250,6 +257,52 @@ fn request_and_response_round_trip_over_a_socket() {
     };
     assert_eq!(stats.parse_computed, 0, "reset clears counters");
     assert_eq!(stats.revision, 1, "but not the revision");
+}
+
+#[test]
+fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let source_path = fixture.dir.join("native.js");
+    let path = source_path.to_string_lossy().into_owned();
+    let project_root = fixture.dir.to_string_lossy().into_owned();
+    client
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "console.log('native daemon', 6 * 7);".to_owned(),
+        })
+        .expect("upload native source");
+
+    let request = Request::NativeRun {
+        path,
+        project_root,
+        profile: NativeProfile::Dev,
+    };
+    let first = client.request(&request).expect("first native request");
+    let Response::NativeRan(first) = first else {
+        if let Response::Error { ref message } = first
+            && message.contains("no supported C compiler")
+        {
+            eprintln!("skipping native daemon integration: {message}");
+            return;
+        }
+        panic!("expected native run, got {first:?}");
+    };
+    assert_eq!(first.exit_code, Some(0));
+    assert_eq!(first.stdout, "native daemon 42\n");
+    assert!(!first.build.app_object_cache_hit);
+
+    let Response::NativeRan(second) = client.request(&request).expect("cached native request")
+    else {
+        panic!("expected cached native run");
+    };
+    assert_eq!(second.stdout, first.stdout);
+    assert!(second.build.generated_c_cache_hit);
+    assert!(second.build.app_object_cache_hit);
+    assert!(second.build.runtime_object_cache_hit);
+    assert!(second.build.launcher_object_cache_hit);
+    assert!(second.build.executable_cache_hit);
 }
 
 #[test]
@@ -564,16 +617,168 @@ fn the_default_daemon_serves_the_real_query_engine() {
     client.handshake().expect("handshake");
     client
         .request(&Request::SetSource {
-            path: "real.js".into(),
-            text: "export const a = 1;\n".into(),
+            path: "real.ts".into(),
+            text: concat!(
+                "export interface Shape { width: number }\n",
+                "const decoy = 'export const fake = 0';\n",
+                "export const answer: number = 1;\n",
+            )
+            .into(),
         })
         .expect("set source");
     let response = client
         .request(&Request::Check {
-            path: "real.js".into(),
+            path: "real.ts".into(),
         })
         .expect("check");
-    assert!(matches!(response, Response::Checked(_)), "got {response:?}");
+    let Response::Checked(summary) = response else {
+        panic!("expected checked response, got {response:?}");
+    };
+    assert_eq!(summary.exports, ["answer"]);
+    assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
+
+    // Prime the whole-project query, then prove a body-only edit parsed by Oxc still cuts off at
+    // the interface exactly as the original query-engine contract requires.
+    assert!(matches!(
+        client.request(&Request::Project).expect("project"),
+        Response::Project(_)
+    ));
+    client
+        .request(&Request::ResetStats)
+        .expect("reset counters");
+    client
+        .request(&Request::SetSource {
+            path: "real.ts".into(),
+            text: concat!(
+                "export interface Shape { width: number }\n",
+                "const decoy = 'export const fake = 0';\n",
+                "export const answer: number = 2;\n",
+            )
+            .into(),
+        })
+        .expect("edit source");
+    client
+        .request(&Request::Project)
+        .expect("project after edit");
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats");
+    };
+    assert_eq!(stats.parse_computed, 1);
+    assert_eq!(stats.interface_computed, 1);
+    assert_eq!(stats.project_computed, 0);
+    assert_eq!(stats.early_cutoff, 1);
+
+    client
+        .request(&Request::SetSource {
+            path: "real.ts".into(),
+            text: "export const answer: = ;".into(),
+        })
+        .expect("set malformed source");
+    let Response::Checked(summary) = client
+        .request(&Request::Check {
+            path: "real.ts".into(),
+        })
+        .expect("check malformed source")
+    else {
+        panic!("expected checked response");
+    };
+    assert!(
+        !summary.diagnostics.is_empty(),
+        "syntax diagnostics must cross the daemon protocol"
+    );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() {
+    let fixture = Fixture::empty();
+    let disk_module = fixture.dir.join("production-disk.ts");
+    std::fs::write(&disk_module, "export const loaded = 1;\n").expect("write disk module");
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let Response::Checked(disk_summary) = client
+        .request(&Request::Check {
+            path: disk_module.to_string_lossy().into_owned(),
+        })
+        .expect("production check reads disk")
+    else {
+        panic!("expected checked response");
+    };
+    assert_eq!(disk_summary.exports, ["loaded"]);
+
+    let path = "run.ts".to_string();
+    client
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: concat!(
+                "let n: number = 0;\n",
+                "while (n < 3) n += 1;\n",
+                "{ let n = 9; console.log('inner', n); }\n",
+                "{ let undefined = 7; console.log('shadow', undefined); }\n",
+                "console.log('kiln', n);\n",
+            )
+            .into(),
+        })
+        .expect("set source");
+    let Response::Ran(first) = client
+        .request(&Request::Run { path: path.clone() })
+        .expect("run")
+    else {
+        panic!("expected run response");
+    };
+    assert!(first.succeeded, "{:?}", first.diagnostics);
+    assert_eq!(first.stdout, "inner 9\nshadow 7\nkiln 3\n");
+    assert!(first.instructions > 0);
+
+    client
+        .request(&Request::ResetStats)
+        .expect("reset counters");
+    let Response::Ran(second) = client
+        .request(&Request::Run { path: path.clone() })
+        .expect("warm run")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(
+        second.stdout, first.stdout,
+        "side effects replay on every run"
+    );
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats");
+    };
+    assert_eq!(stats.parse_computed, 0);
+    assert_eq!(stats.ir_computed, 0);
+    assert_eq!(stats.validated, 1, "the bytecode query should be reused");
+
+    client
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "function main() {}\nmain();\n".into(),
+        })
+        .expect("set unsupported source");
+    let Response::Ran(failed) = client
+        .request(&Request::Run { path })
+        .expect("compile failure is a response")
+    else {
+        panic!("expected run response");
+    };
+    assert!(!failed.succeeded);
+    assert!(failed.stdout.is_empty());
+    assert!(
+        failed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.start.is_some()
+                && diagnostic.message.contains("function declaration")),
+        "{:?}",
+        failed.diagnostics
+    );
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");

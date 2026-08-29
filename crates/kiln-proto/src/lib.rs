@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any non-additive change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A source file, interned by the daemon. Stable for the lifetime of a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -17,11 +17,46 @@ pub struct FileId(pub u32);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Liveness plus version negotiation.
-    Ping { protocol: u32 },
+    Ping {
+        protocol: u32,
+    },
     /// Replace a file's contents. Bumps the database revision.
-    SetSource { path: String, text: String },
+    SetSource {
+        path: String,
+        text: String,
+    },
     /// Run the query pipeline for a file and return its summary.
-    Check { path: String },
+    Check {
+        path: String,
+    },
+    /// Compile the cached HIR and execute one module through the interpreter.
+    Run {
+        path: String,
+    },
+    /// Emit, compile, and link one module through the native backend.
+    NativeBuild {
+        path: String,
+        project_root: String,
+        /// Requested output path. The client supplies the default so daemon and one-shot
+        /// invocations produce the same artifact location.
+        output: Option<String>,
+        profile: NativeProfile,
+    },
+    /// Emit, compile, link, and execute one module through the native backend.
+    NativeRun {
+        path: String,
+        project_root: String,
+        profile: NativeProfile,
+    },
+    /// Discover, select, and execute a conformance corpus in this resident process.
+    Test {
+        root: String,
+        mode: TestMode,
+        /// `None` requests the complete corpus; `Some` requests failures, smoke, and tests
+        /// affected by these repository-relative paths.
+        changed_paths: Option<Vec<String>>,
+        previously_failed: Vec<String>,
+    },
     /// Whole-project summary, which depends on every module interface.
     Project,
     /// Recompute counters, so callers can assert what was and was not invalidated.
@@ -35,10 +70,105 @@ pub enum Request {
 pub enum Response {
     Pong { protocol: u32, pid: u32 },
     Checked(ModuleSummary),
+    Ran(RunSummary),
+    NativeBuilt(NativeBuildSummary),
+    NativeRan(NativeRunSummary),
+    Tested(TestSummary),
     Project(ProjectSummary),
     Stats(Stats),
     Ok,
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TestMode {
+    Parse,
+    Interpreter,
+}
+
+/// Optimization and diagnostics profile for native compilation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NativeProfile {
+    #[default]
+    Dev,
+    Check,
+    Release,
+}
+
+/// Measurements and cache observability for one native build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBuildSummary {
+    pub module_symbol: String,
+    pub output_path: String,
+    pub compiler_identity: String,
+    pub generated_c_cache_hit: bool,
+    pub app_object_cache_hit: bool,
+    pub runtime_object_cache_hit: bool,
+    pub launcher_object_cache_hit: bool,
+    pub executable_cache_hit: bool,
+    pub generated_c_bytes: u64,
+    pub app_object_bytes: u64,
+    pub runtime_object_bytes: u64,
+    pub launcher_object_bytes: u64,
+    pub executable_bytes: u64,
+    pub emit_millis: u64,
+    pub compile_millis: u64,
+    pub link_millis: u64,
+    pub total_millis: u64,
+}
+
+/// Result of a native process launch, including the build that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRunSummary {
+    /// Conventional process code; `None` means the process was terminated by a signal.
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub build: NativeBuildSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TestOutcome {
+    Pass,
+    Fail,
+    Unsupported,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestCaseSummary {
+    /// Stable corpus-relative identity, including the strictness variant when applicable.
+    pub id: String,
+    pub path: String,
+    pub variant: String,
+    pub outcome: TestOutcome,
+    pub elapsed_nanos: u64,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestSummary {
+    pub discovered: usize,
+    pub selected: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub unsupported: usize,
+    pub skipped: usize,
+    pub elapsed_millis: u64,
+    pub cases: Vec<TestCaseSummary>,
+}
+
+/// Result of one interpreter launch. Compile/runtime failures are structured diagnostics rather
+/// than transport errors so callers can retain source ranges and any stdout produced first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub path: String,
+    pub file: FileId,
+    pub succeeded: bool,
+    pub stdout: String,
+    pub value: Option<String>,
+    pub instructions: u64,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// What the pipeline currently knows about one module.
@@ -51,6 +181,14 @@ pub struct ModuleSummary {
     /// Changes only when externally relevant semantics change (design.md §3).
     pub interface_hash: u64,
     pub exports: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub message: String,
+    pub start: Option<u32>,
+    pub end: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +205,8 @@ pub struct ProjectSummary {
 pub struct Stats {
     pub revision: u64,
     pub parse_computed: u64,
+    #[serde(default)]
+    pub ir_computed: u64,
     pub interface_computed: u64,
     pub project_computed: u64,
     /// Times a query was validated without recomputing (dependencies unchanged).
