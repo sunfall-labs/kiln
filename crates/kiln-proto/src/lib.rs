@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any non-additive change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -52,6 +52,8 @@ pub enum Request {
     /// Compile the cached HIR and execute one module through the interpreter.
     Run {
         path: String,
+        /// Project root used to resolve this module's explicit relative imports.
+        project_root: String,
     },
     /// Emit, compile, and link one module through the native backend.
     NativeBuild {
@@ -88,7 +90,10 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    Pong { protocol: u32, pid: u32 },
+    Pong {
+        protocol: u32,
+        pid: u32,
+    },
     Checked(ModuleSummary),
     Ran(RunSummary),
     NativeBuilt(NativeBuildSummary),
@@ -101,7 +106,9 @@ pub enum Response {
         paths: Vec<String>,
     },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +177,20 @@ pub struct TestCaseSummary {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// How many cases shared one reason for not passing.
+///
+/// A conformance run over a corpus the compiler cannot execute yet has a pass count worth little
+/// and a reason distribution worth a lot: it is the implementation backlog, ordered by how many
+/// tests each entry unblocks. Carried on the wire so the aggregation happens once, next to the
+/// runner that produced the reasons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestReasonSummary {
+    pub count: usize,
+    pub outcome: TestOutcome,
+    /// `phase: message`, using the compiler's own words.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestSummary {
     pub discovered: usize,
@@ -180,6 +201,8 @@ pub struct TestSummary {
     pub skipped: usize,
     pub elapsed_millis: u64,
     pub cases: Vec<TestCaseSummary>,
+    /// Non-passing cases grouped by reason, largest group first.
+    pub reasons: Vec<TestReasonSummary>,
 }
 
 /// Result of one interpreter launch. Compile/runtime failures are structured diagnostics rather

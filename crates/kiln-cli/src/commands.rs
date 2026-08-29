@@ -36,11 +36,34 @@ impl Output {
 
 /// Compile and execute one file. Program stdout stays byte-for-byte on stdout; compiler and
 /// runtime diagnostics go to stderr and make the command unsuccessful.
-pub fn run(backend: &mut dyn Backend, path: &Path) -> Result<Output> {
+pub fn run(backend: &mut dyn Backend, path: &Path, project_root: &Path) -> Result<Output> {
     let display = path.display().to_string();
+    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    run_source(backend, &display, canonical, text)
+    // A source outside the discovered project (or an extension intentionally not walked) still
+    // gets uploaded so the long-standing single-file command remains useful. In-project files
+    // were already uploaded by the sync handshake when the daemon requested them.
+    if !synced_paths.contains(&canonical) {
+        backend.set_source(canonical.clone(), text)?;
+    }
+    let summary = backend.run(canonical, project_root_string(project_root)?)?;
+    let notes = summary
+        .diagnostics
+        .iter()
+        .map(|diagnostic| match (diagnostic.start, diagnostic.end) {
+            (Some(start), Some(end)) => {
+                format!("{display}:{start}..{end}: {}", diagnostic.message)
+            }
+            _ => format!("{display}: {}", diagnostic.message),
+        })
+        .chain(project_notes)
+        .collect();
+    Ok(Output {
+        text: summary.stdout,
+        notes,
+        exit_code: if summary.succeeded { 0 } else { 1 },
+    })
 }
 
 /// Build one source file into a native executable. Source upload is kept in the command layer so
@@ -53,9 +76,12 @@ pub fn build(
     profile: NativeProfile,
 ) -> Result<Output> {
     let display = path.display().to_string();
+    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    backend.set_source(canonical.clone(), text)?;
+    if !synced_paths.contains(&canonical) {
+        backend.set_source(canonical.clone(), text)?;
+    }
     let output = native_output_path(path, project_root, requested_output)?;
     if Path::new(&output) == Path::new(&canonical)
         || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&canonical))
@@ -70,7 +96,11 @@ pub fn build(
         Some(output),
         profile,
     )?;
-    Ok(Output::new(render::native_build(&display, &summary)))
+    Ok(Output {
+        text: render::native_build(&display, &summary),
+        notes: project_notes,
+        exit_code: 0,
+    })
 }
 
 /// Build and execute one source file through the native backend.
@@ -80,11 +110,14 @@ pub fn native_run(
     project_root: &Path,
     profile: NativeProfile,
 ) -> Result<Output> {
+    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    backend.set_source(canonical.clone(), text)?;
+    if !synced_paths.contains(&canonical) {
+        backend.set_source(canonical.clone(), text)?;
+    }
     let summary = backend.native_run(canonical, project_root_string(project_root)?, profile)?;
-    let mut notes = Vec::new();
+    let mut notes = project_notes;
     if !summary.stderr.is_empty() {
         notes.push(summary.stderr.clone());
     }
@@ -122,31 +155,6 @@ fn native_output_path(source: &Path, root: &Path, requested: Option<&Path>) -> R
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", output.display())))
-}
-
-fn run_source(
-    backend: &mut dyn Backend,
-    display: &str,
-    canonical: String,
-    text: String,
-) -> Result<Output> {
-    backend.set_source(canonical.clone(), text)?;
-    let summary = backend.run(canonical)?;
-    let notes = summary
-        .diagnostics
-        .iter()
-        .map(|diagnostic| match (diagnostic.start, diagnostic.end) {
-            (Some(start), Some(end)) => {
-                format!("{display}:{start}..{end}: {}", diagnostic.message)
-            }
-            _ => format!("{display}: {}", diagnostic.message),
-        })
-        .collect();
-    Ok(Output {
-        text: summary.stdout,
-        notes,
-        exit_code: if summary.succeeded { 0 } else { 1 },
-    })
 }
 
 /// Check one file: push its current contents, ask for its summary, report the cost.
@@ -202,6 +210,27 @@ pub fn check_source(
 /// optimisation of the wire rather than a correctness fix -- but it is the difference between
 /// a warm command costing microseconds and costing tens of milliseconds.
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
+    let before = backend.stats()?;
+    let started = Instant::now();
+    let (notes, _) = sync_project_sources(backend, root)?;
+    let summary = backend.project()?;
+    let elapsed = started.elapsed();
+    let after = backend.stats()?;
+
+    let work = Work::between(&before, &after);
+    Ok(Output {
+        text: render::project(&summary, &work, after.revision, elapsed),
+        notes,
+        exit_code: 0,
+    })
+}
+
+/// Synchronize all discoverable project sources, returning non-fatal walk notes. The source hash
+/// and uploaded text are deliberately derived from one read of each file.
+fn sync_project_sources(
+    backend: &mut dyn Backend,
+    root: &Path,
+) -> Result<(Vec<String>, HashSet<String>)> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -217,11 +246,6 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
         ));
     }
 
-    let before = backend.stats()?;
-    let started = Instant::now();
-
-    // Read once: the hash we announce and the text we may send must come from the same bytes,
-    // or a file edited between the two would be announced under its old hash and never sent.
     let mut texts = Vec::with_capacity(walk.files.len());
     for file in &walk.files {
         texts.push((canonical_path(file)?, read_source(file)?));
@@ -238,22 +262,16 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
         )?
         .into_iter()
         .collect();
+    let synced_paths = texts
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<HashSet<_>>();
     for (path, text) in texts {
         if needed.contains(&path) {
             backend.set_source(path, text)?;
         }
     }
-
-    let summary = backend.project()?;
-    let elapsed = started.elapsed();
-    let after = backend.stats()?;
-
-    let work = Work::between(&before, &after);
-    Ok(Output {
-        text: render::project(&summary, &work, after.revision, elapsed),
-        notes,
-        exit_code: 0,
-    })
+    Ok((notes, synced_paths))
 }
 
 pub fn stats(backend: &mut dyn Backend) -> Result<Output> {
@@ -291,8 +309,31 @@ pub fn test(
     Ok(Output {
         text: render_test(&corpus, &summary),
         notes: Vec::new(),
-        exit_code: if summary.failed == 0 { 0 } else { 1 },
+        exit_code: test_exit_code(&summary),
     })
+}
+
+/// Exit status for `kiln test`.
+///
+/// A failure is a failure, and that half is obvious. The half that is not: a run which selected
+/// tests and executed none of them is **not** a success, even though nothing failed. Before this,
+/// `kiln test conformance/effect` exited 0 while skipping all twelve programs for want of a
+/// bundle step -- a green tick certifying that nothing was checked, which is exactly what
+/// `kiln_report_has_measurements` in scripts/lib.sh already refuses to let a benchmark do.
+///
+/// Wiring that into CI would have been worse than having no gate, because it would have looked
+/// like one. A corpus that cannot run yet should say so in the exit status until it can.
+///
+/// Selecting nothing at all is left as success: that is an empty corpus or a filter matching
+/// nothing, which the summary reports plainly and which is not a claim about the compiler.
+fn test_exit_code(summary: &TestSummary) -> i32 {
+    if summary.failed > 0 {
+        return 1;
+    }
+    if summary.selected > 0 && summary.passed == 0 {
+        return 1;
+    }
+    0
 }
 
 fn render_test(corpus: &str, summary: &TestSummary) -> String {
@@ -313,6 +354,20 @@ fn render_test(corpus: &str, summary: &TestSummary) -> String {
         let _ = writeln!(output, "  {:<15}{}", outcome_name(case.outcome), case.id);
         if let Some(diagnostic) = case.diagnostics.first() {
             let _ = writeln!(output, "    {}", diagnostic.message);
+        }
+    }
+    // The distribution last, because on a corpus the compiler cannot execute yet it is the part
+    // worth acting on: which refusals block how many tests, in the order to work them.
+    if !summary.reasons.is_empty() {
+        output.push_str("  reasons\n");
+        for reason in &summary.reasons {
+            let _ = writeln!(
+                output,
+                "  {:>5}  {:<15}{}",
+                reason.count,
+                outcome_name(reason.outcome),
+                reason.reason
+            );
         }
     }
     output
@@ -444,6 +499,51 @@ pub fn read_source(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+
+    fn summary(passed: usize, failed: usize, skipped: usize, selected: usize) -> TestSummary {
+        TestSummary {
+            discovered: selected,
+            selected,
+            passed,
+            failed,
+            unsupported: 0,
+            skipped,
+            elapsed_millis: 0,
+            cases: Vec::new(),
+            reasons: Vec::new(),
+        }
+    }
+
+    /// The case this exists for: `kiln test conformance/effect` skipped all twelve programs for
+    /// want of a bundle step and exited 0, which would have been a CI gate certifying that
+    /// nothing was checked.
+    #[test]
+    fn a_run_that_verified_nothing_is_not_a_success() {
+        assert_eq!(test_exit_code(&summary(0, 0, 12, 12)), 1, "all skipped");
+        assert_eq!(test_exit_code(&summary(0, 20, 0, 20)), 1, "all failed");
+        assert_eq!(
+            test_exit_code(&summary(0, 8, 12, 20)),
+            1,
+            "failed and skipped"
+        );
+    }
+
+    #[test]
+    fn a_run_that_verified_something_succeeds() {
+        assert_eq!(test_exit_code(&summary(2, 0, 0, 2)), 0, "everything passed");
+        assert_eq!(
+            test_exit_code(&summary(2, 0, 10, 12)),
+            0,
+            "some passed, rest skipped: a real check happened"
+        );
+    }
+
+    /// Selecting nothing is not a claim about the compiler, so it is not a failure either.
+    #[test]
+    fn selecting_no_tests_is_not_a_failure() {
+        assert_eq!(test_exit_code(&summary(0, 0, 0, 0)), 0);
+    }
+
     use super::*;
     use kiln_proto::{
         Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeRunSummary, ProjectSummary,
@@ -524,7 +624,7 @@ mod tests {
                         diagnostics: self.diagnostics.clone(),
                     })
                 }
-                Request::Run { path } => Response::Ran(RunSummary {
+                Request::Run { path, .. } => Response::Ran(RunSummary {
                     path,
                     file: FileId(1),
                     succeeded: self.diagnostics.is_empty(),
@@ -611,17 +711,45 @@ mod tests {
     #[test]
     fn run_preserves_program_stdout_and_reports_failures_with_a_nonzero_status() {
         let mut fake = Fake::new();
-        let out = run_source(
-            &mut fake,
-            "main.ts",
+        fake.set_source(
             "/tmp/main.ts".to_string(),
             "console.log('hello from kiln')".to_string(),
         )
-        .expect("run succeeds");
+        .expect("set source");
+        let summary = fake
+            .run("/tmp/main.ts".to_string(), "/tmp".to_string())
+            .expect("run succeeds");
 
         assert_eq!(fake.names(), ["SetSource", "Run"]);
-        assert_eq!(out.text, "hello from kiln\n");
-        assert_eq!(out.exit_code, 0);
+        assert_eq!(summary.stdout, "hello from kiln\n");
+        assert!(summary.succeeded);
+    }
+
+    #[test]
+    fn run_syncs_project_sources_before_running_the_entry() {
+        let root = std::env::temp_dir().join(format!("kiln-cli-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create run fixture");
+        let dependency = root.join("dependency.js");
+        let entry = root.join("entry.js");
+        std::fs::write(&dependency, "export const answer = 42;\n").expect("write dependency");
+        std::fs::write(
+            &entry,
+            "import { answer } from './dependency.js'; console.log(answer);\n",
+        )
+        .expect("write entry");
+
+        let mut backend = Fake::new();
+        let output = run(&mut backend, &entry, &root).expect("run graph");
+        assert_eq!(output.text, "hello from kiln\n");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(backend.names(), ["Sync", "SetSource", "SetSource", "Run"]);
+        let Request::Run { project_root, .. } = backend.seen.last().expect("run request") else {
+            panic!("last request must be Run");
+        };
+        assert_eq!(project_root, &root.to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

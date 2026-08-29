@@ -1,0 +1,82 @@
+name: Conformance
+
+# design.md §13 gates on recorded numbers. This workflow records the JavaScript conformance
+# corpus's, and holds it to the one rule that matters while the compiler is still being built:
+# the count of passing tests goes up, and never quietly comes back down.
+#
+# Two jobs, independent for the same reason ci.yml's are - a fact worth restating, because the
+# temptation to fold this into the build job is exactly what would cost it. The inventory needs
+# no toolchain and answers in seconds; putting it behind a workspace build would spend a build's
+# wall clock to read two files.
+#
+#   inventory  conformance/status.sh, into the job summary: what the corpus contains and what has
+#              actually been recorded about it. Reports, and does not gate.
+#   gate       scripts/ci-conformance.sh: run the corpus, compare it against the committed
+#              baseline, and fail if a test that used to pass no longer does. The blocking half.
+#
+# `conformance/status.sh --gate` is deliberately not what the gate job runs, although it exists
+# and stays red for exactly as long as nothing in the corpus can run. Two reasons. Its red is the
+# same red on every run until an interpreter lands, and a check that is red unconditionally is
+# one people learn to scroll past - which would cost more than it buys on the day it means
+# something. And the fact it would be shouting is already recorded, in
+# conformance/results/baseline.json, where a reviewer meets it as a diff rather than as an
+# annotation. The gate job reports that state as "skipped" - never as "passed" - and starts
+# blocking the moment a runner exists. Run `--gate` locally, or on a branch that is trying to
+# make the corpus run, where its red is news.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing useful left to say.
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  inventory:
+    name: Corpus inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain, and no cache to restore: status.sh reads two files with bash and python3,
+      # both of which the runner image already has. Invoked through bash rather than by its
+      # executable bit, so a checkout that lost the mode still runs.
+      - run: bash conformance/status.sh
+
+  gate:
+    name: Regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain named by rust-toolchain.toml. The corpus runner will be a cargo
+      # binary when it exists; until then this job resolves that there is no runner and finishes
+      # without compiling anything, which is a minute of runner time in exchange for the step not
+      # having to appear on the day the runner lands.
+      - run: rustup toolchain install --no-self-update
+      # Third-party, but it prunes stale artifacts out of the cached target directory, which a
+      # hand-rolled actions/cache does not - without that the cache grows without bound and
+      # eventually costs more to restore than the build costs to redo.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+      - run: bash scripts/ci-conformance.sh
+      # Uploaded even when the comparison failed: a run that just tripped the gate is exactly the
+      # one whose per-test detail is worth reading. `ignore` rather than `warn` because there is
+      # legitimately no document while there is no runner, and a warning annotation on every run
+      # is how a warning stops being read.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results-${{ github.run_id }}
+          path: target/conformance/results.json
+          if-no-files-found: ignore
+          retention-days: 30
