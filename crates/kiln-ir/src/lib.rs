@@ -35,6 +35,7 @@ pub enum UnaryOp {
     Plus,
     Negate,
     Not,
+    TypeOf,
 }
 
 /// Binary operations understood by the bytecode runtime.
@@ -81,6 +82,16 @@ pub enum Instruction {
     /// Call the value `argc` slots below the top of the stack, consuming it and its arguments
     /// and leaving the result.
     Call {
+        argc: u16,
+    },
+    /// Push a built-in global.
+    ///
+    /// Built-ins are named by index rather than resolved by string at runtime because the
+    /// compiler already knows which one it means: a global lookup that could fail at runtime
+    /// would be a worse contract for no benefit while the set is fixed.
+    LoadBuiltin(Builtin),
+    /// `new callee(...)` with `argc` arguments above the callee on the stack.
+    New {
         argc: u16,
     },
     /// Build an object from `count` key/value pairs on the stack, keys first in each pair and
@@ -145,6 +156,33 @@ pub struct FunctionProto {
     pub code: Vec<Instruction>,
     /// Where each captured cell comes from, resolved against the frame creating the closure.
     pub upvalues: Vec<Upvalue>,
+}
+
+/// A global the compiler resolves by name and the runtime provides.
+///
+/// This is the native half of design.md §5, which wants built-ins written in JavaScript. Nothing
+/// can bootstrap a JS built-in yet -- that needs objects, prototypes and a loader, and two of
+/// those have only just arrived -- so the ones the corpus needs first are native. The set is
+/// deliberately tiny and each addition should be argued rather than assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Error,
+}
+
+impl Builtin {
+    /// The global name that resolves to this built-in.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+        }
+    }
 }
 
 /// Where a closure's captured cell is found when the closure is created.
@@ -624,10 +662,15 @@ impl Compiler {
                 Resolution::Unresolved if name == "undefined" => {
                     self.push_constant(Constant::Undefined)
                 }
-                Resolution::Unresolved => self.error(
-                    Some(expression.span),
-                    format!("unresolved identifier `{name}`"),
-                ),
+                // A built-in is only reachable when nothing else bound the name, so a program
+                // that declares its own `Error` shadows it exactly as it would any other global.
+                Resolution::Unresolved => match Builtin::from_name(name) {
+                    Some(builtin) => self.code.push(Instruction::LoadBuiltin(builtin)),
+                    None => self.error(
+                        Some(expression.span),
+                        format!("unresolved identifier `{name}`"),
+                    ),
+                },
             },
             ExpressionKind::Unary { operator, argument } => {
                 self.expression(argument);
@@ -635,6 +678,7 @@ impl Compiler {
                     UnaryOperator::Plus => UnaryOp::Plus,
                     UnaryOperator::Negate => UnaryOp::Negate,
                     UnaryOperator::Not => UnaryOp::Not,
+                    UnaryOperator::TypeOf => UnaryOp::TypeOf,
                 }));
             }
             ExpressionKind::Binary {
@@ -684,6 +728,19 @@ impl Compiler {
             }
             ExpressionKind::Call { callee, arguments } => {
                 self.call(callee, arguments, expression.span)
+            }
+            ExpressionKind::New { callee, arguments } => {
+                if arguments.len() > u16::MAX as usize {
+                    self.error(Some(expression.span), "too many constructor arguments");
+                    return;
+                }
+                self.expression(callee);
+                for argument in arguments {
+                    self.expression(argument);
+                }
+                self.code.push(Instruction::New {
+                    argc: arguments.len() as u16,
+                });
             }
             ExpressionKind::MemberAssignment {
                 operator,
@@ -1279,6 +1336,12 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(argument, names, collecting);
             }
         }
+        ExpressionKind::New { callee, arguments } => {
+            collect_identifiers(callee, names, collecting);
+            for argument in arguments {
+                collect_identifiers(argument, names, collecting);
+            }
+        }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
@@ -1315,6 +1378,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || expression_references(alternate, name)
         }
         ExpressionKind::Call { callee, arguments } => {
+            expression_references(callee, name)
+                || arguments
+                    .iter()
+                    .any(|argument| expression_references(argument, name))
+        }
+        ExpressionKind::New { callee, arguments } => {
             expression_references(callee, name)
                 || arguments
                     .iter()

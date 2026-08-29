@@ -679,7 +679,9 @@ fn stack_effect(
         | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
         | Instruction::GetProperty(_)
-        | Instruction::SetProperty(_) => Err(EmitError::Unsupported {
+        | Instruction::SetProperty(_)
+        | Instruction::LoadBuiltin(_)
+        | Instruction::New { .. } => Err(EmitError::Unsupported {
             feature: "functions and objects in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
@@ -890,7 +892,9 @@ fn emit_instruction(
         | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
         | Instruction::GetProperty(_)
-        | Instruction::SetProperty(_) => {
+        | Instruction::SetProperty(_)
+        | Instruction::LoadBuiltin(_)
+        | Instruction::New { .. } => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -975,6 +979,9 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::Plus => 1,
         UnaryOp::Negate => 2,
         UnaryOp::Not => 3,
+        // Stable: these are persisted cache keys, so a new operator takes the next free code
+        // rather than renumbering the existing ones.
+        UnaryOp::TypeOf => 4,
     }
 }
 
@@ -1052,6 +1059,14 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // Tags are a persisted cache key: existing ones never change, new instructions
             // take the next free values. Reusing a tag would make two different programs hash
             // alike and serve one's object file for the other.
+            Instruction::LoadBuiltin(builtin) => {
+                byte(&mut hash, 25);
+                word(&mut hash, *builtin as u64);
+            }
+            Instruction::New { argc } => {
+                byte(&mut hash, 26);
+                word(&mut hash, u64::from(*argc));
+            }
             Instruction::NewObject { count } => {
                 byte(&mut hash, 22);
                 word(&mut hash, u64::from(*count));

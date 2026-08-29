@@ -13,6 +13,29 @@ use std::rc::Rc;
 use kiln_host_abi::{HostOps, HostValue};
 use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
 
+/// The built-ins the runtime provides natively.
+///
+/// Kept minimal on purpose. design.md §5 wants built-ins written in JavaScript, and everything
+/// here is a placeholder for one -- but nothing can bootstrap a JS built-in until there are
+/// prototypes and a loader, so the handful the conformance corpus needs first live here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Native {
+    Error,
+    /// A V8 extension the corpus checks for. Present, and a no-op: kiln has no frames to capture,
+    /// so the honest implementation is one that exists and does nothing.
+    ErrorCaptureStackTrace,
+}
+
+impl Native {
+    fn property(self, name: &str) -> Option<Value> {
+        match (self, name) {
+            (Self::Error, "captureStackTrace") => Some(Value::Native(Self::ErrorCaptureStackTrace)),
+            (Self::Error, "name") => Some(Value::String("Error".to_owned())),
+            _ => None,
+        }
+    }
+}
+
 /// An ordinary object: string-keyed properties in insertion order.
 ///
 /// A `Vec` rather than a map because objects here are small and property order is observable --
@@ -96,6 +119,12 @@ pub enum Value {
     /// It is a variant of `Value` rather than a separate slot type so that a frame's locals stay
     /// one homogeneous vector.
     Cell(Cell),
+    /// A built-in provided by the runtime rather than compiled from source.
+    ///
+    /// `Copy` and compared by value: there is exactly one `Error` in a realm, so two references
+    /// to it are the same function, which is what `===` should say. That stops being true when
+    /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
+    Native(Native),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
     /// references name the same object, and a mutation through one must be visible through the
     /// other.
@@ -110,6 +139,25 @@ pub enum Value {
 }
 
 impl Value {
+    /// What `typeof` reports.
+    ///
+    /// Distinct from [`Value::type_name`], which is for diagnostics: `typeof null` is the string
+    /// "object", a specification bug old enough to be load-bearing, while a diagnostic saying a
+    /// value is an object when it is null would just be confusing.
+    pub fn type_of(&self) -> &'static str {
+        match self {
+            Self::Undefined => "undefined",
+            Self::Null => "object",
+            Self::Boolean(_) => "boolean",
+            Self::Number(_) => "number",
+            Self::String(_) => "string",
+            Self::Function(_) => "function",
+            Self::Object(_) => "object",
+            Self::Native(_) => "function",
+            Self::Cell(_) => unreachable!("a cell is never used as a value"),
+        }
+    }
+
     /// The name JavaScript would use for this value's type, for diagnostics only.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -120,6 +168,7 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
+            Self::Native(_) => "function",
             Self::Cell(_) => "cell",
         }
     }
@@ -140,7 +189,7 @@ impl Value {
             Self::Function(_) => f64::NAN,
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
-            Self::Object(_) => f64::NAN,
+            Self::Object(_) | Self::Native(_) => f64::NAN,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -154,7 +203,7 @@ impl Value {
             // Every object is truthy, and a function is an object.
             Self::Function(_) => true,
             // Every object is truthy, including an empty one.
-            Self::Object(_) => true,
+            Self::Object(_) | Self::Native(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -179,6 +228,7 @@ impl Value {
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
+            Self::Native(native) => format!("[Function {native:?}]"),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -210,6 +260,7 @@ impl From<Value> for HostValue {
             // something truthful rather than failing.
             Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
             Value::Object(_) => Self::String("[object Object]".to_owned()),
+            Value::Native(native) => Self::String(format!("[Function {native:?}]")),
             Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
         }
     }
@@ -309,6 +360,11 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// `new` on something that is not a constructor.
+    NotConstructable {
+        instruction: usize,
+        value: &'static str,
+    },
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -367,6 +423,10 @@ impl fmt::Display for ExecutionError {
             Self::InvalidPropertyKey { instruction, value } => write!(
                 formatter,
                 "instruction {instruction} used a {value} as a property name"
+            ),
+            Self::NotConstructable { instruction, value } => write!(
+                formatter,
+                "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
             Self::NotAnObject { instruction, value } => write!(
                 formatter,
@@ -616,6 +676,30 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let closure = self.make_closure(*index)?;
                     self.stack.push(Value::Function(closure));
                 }
+                Instruction::LoadBuiltin(builtin) => {
+                    self.stack.push(Value::Native(match builtin {
+                        kiln_ir::Builtin::Error => Native::Error,
+                    }));
+                }
+                Instruction::New { argc } => {
+                    let argc = *argc as usize;
+                    if self.stack.len() < argc + 1 {
+                        return Err(ExecutionError::StackUnderflow {
+                            instruction: current,
+                        });
+                    }
+                    let arguments = self.stack.split_off(self.stack.len() - argc);
+                    let callee = self.pop(current)?;
+                    let Value::Native(Native::Error) = callee else {
+                        // Only built-in constructors exist so far. A user-defined one needs a
+                        // prototype and a `this` binding, which is the class slice.
+                        return Err(ExecutionError::NotConstructable {
+                            instruction: current,
+                            value: callee.type_name(),
+                        });
+                    };
+                    self.stack.push(construct_error(&arguments));
+                }
                 Instruction::NewObject { count } => {
                     let count = *count as usize;
                     if self.stack.len() < count * 2 {
@@ -815,6 +899,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 .get(name)
                 .cloned()
                 .unwrap_or(Value::Undefined),
+            Value::Native(native) => native.property(name).unwrap_or(Value::Undefined),
             _ => Value::Undefined,
         }
     }
@@ -922,6 +1007,8 @@ fn unary(operator: UnaryOp, value: Value) -> Value {
         UnaryOp::Plus => Value::Number(value.as_number()),
         UnaryOp::Negate => Value::Number(-value.as_number()),
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
+        // `typeof` never coerces and never throws; it reports the type tag directly.
+        UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
     }
 }
 
@@ -956,6 +1043,40 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
     }
 }
 
+/// Build an `Error` instance.
+///
+/// `stack` is a header line and nothing more. A release build strips unwind tables and
+/// dead-strips symbols, so real frames are not obtainable, and `Error.stackTraceLimit = 0` in V8
+/// produces exactly this shape -- a truthful degenerate case rather than an invented trace.
+///
+/// `cause` follows InstallErrorCause: the property exists when the options object *has* a
+/// `cause` key, including when its value is `undefined`. Testing presence rather than value is
+/// the whole point of that step in the specification.
+fn construct_error(arguments: &[Value]) -> Value {
+    let message = match arguments.first() {
+        None | Some(Value::Undefined) => String::new(),
+        Some(value) => value.to_display_string(),
+    };
+
+    let mut data = ObjectData::default();
+    data.set("message", Value::String(message.clone()));
+    data.set("name", Value::String("Error".to_owned()));
+    data.set(
+        "stack",
+        Value::String(if message.is_empty() {
+            "Error".to_owned()
+        } else {
+            format!("Error: {message}")
+        }),
+    );
+    if let Some(Value::Object(options)) = arguments.get(1)
+        && let Some(cause) = options.borrow().get("cause")
+    {
+        data.set("cause", cause.clone());
+    }
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
 fn strict_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
@@ -967,6 +1088,8 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         // and it also avoids borrowing a `RefCell` that a caller may already hold mutably.
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
         (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+        // One `Error` per realm, so two references to it are the same function.
+        (Value::Native(a), Value::Native(b)) => a == b,
         _ => false,
     }
 }
@@ -1078,6 +1201,94 @@ mod tests {
 
     /// Re-assigning a key keeps its position: JavaScript enumerates string keys in insertion
     /// order, so a `set` that moved the key would change an observable property of the object.
+    /// `cause` follows InstallErrorCause: the property exists when the options object *has* the
+    /// key, even when its value is undefined. Testing presence rather than value is the whole
+    /// point of that step, and copying the value would lose the distinction.
+    #[test]
+    fn error_cause_is_installed_by_presence_not_by_value() {
+        let with_cause = construct_error(&[
+            Value::String("m".to_owned()),
+            object(&[("cause", Value::Undefined)]),
+        ]);
+        let Value::Object(data) = &with_cause else {
+            panic!("construct_error returns an object");
+        };
+        assert_eq!(data.borrow().get("cause"), Some(&Value::Undefined));
+
+        let without = construct_error(&[Value::String("m".to_owned())]);
+        let Value::Object(data) = &without else {
+            panic!("construct_error returns an object");
+        };
+        assert_eq!(data.borrow().get("cause"), None, "no options, no cause");
+    }
+
+    /// A cause is carried by identity: the error holds the same object the caller passed.
+    #[test]
+    fn error_cause_keeps_the_identity_of_the_value_given() {
+        let inner = object(&[("marker", Value::Number(1.0))]);
+        let outer = construct_error(&[
+            Value::String("outer".to_owned()),
+            object(&[("cause", inner.clone())]),
+        ]);
+        let Value::Object(data) = &outer else {
+            panic!("construct_error returns an object");
+        };
+        let cause = data.borrow().get("cause").cloned().expect("cause present");
+        assert!(strict_equal(&cause, &inner), "cause is the same object");
+    }
+
+    /// An error with no message gets a bare header, not one with a trailing colon.
+    #[test]
+    fn an_empty_message_produces_a_bare_stack_header() {
+        for arguments in [Vec::new(), vec![Value::Undefined]] {
+            let Value::Object(data) = construct_error(&arguments) else {
+                panic!("construct_error returns an object");
+            };
+            assert_eq!(
+                data.borrow().get("stack"),
+                Some(&Value::String("Error".to_owned()))
+            );
+            assert_eq!(
+                data.borrow().get("message"),
+                Some(&Value::String(String::new()))
+            );
+        }
+    }
+
+    /// `typeof null` is "object" -- a specification bug old enough to be load-bearing, and
+    /// distinct from the diagnostic name, which says "null" because that is more useful there.
+    #[test]
+    fn typeof_reports_the_language_tags_including_the_null_one() {
+        assert_eq!(Value::Null.type_of(), "object");
+        assert_eq!(Value::Null.type_name(), "null");
+        assert_eq!(Value::Undefined.type_of(), "undefined");
+        assert_eq!(Value::Number(1.0).type_of(), "number");
+        assert_eq!(Value::Native(Native::Error).type_of(), "function");
+        assert_eq!(object(&[]).type_of(), "object");
+    }
+
+    #[test]
+    fn new_on_a_non_constructor_is_rejected() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![number(1.0)],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::New { argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::NotConstructable {
+                value: "number",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn reassigning_a_property_keeps_its_position() {
         let mut data = ObjectData::default();

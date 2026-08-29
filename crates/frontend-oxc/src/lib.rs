@@ -479,8 +479,21 @@ impl Lowerer {
             Expression::ClassExpression(_) => {
                 return self.unsupported_expression("class expression", expression_span);
             }
-            Expression::NewExpression(_) => {
-                return self.unsupported_expression("new expression", expression_span);
+            Expression::NewExpression(expression) => {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    let Some(argument) = argument.as_expression() else {
+                        return self.unsupported_expression(
+                            "spread constructor argument",
+                            expression_span,
+                        );
+                    };
+                    arguments.push(self.expression(argument));
+                }
+                HirExpressionKind::New {
+                    callee: Box::new(self.expression(&expression.callee)),
+                    arguments,
+                }
             }
             Expression::TemplateLiteral(_) | Expression::TaggedTemplateExpression(_) => {
                 return self.unsupported_expression("template literal", expression_span);
@@ -724,6 +737,7 @@ fn lower_unary_operator(operator: UnaryOperator) -> Option<HirUnaryOperator> {
         UnaryOperator::UnaryPlus => Some(HirUnaryOperator::Plus),
         UnaryOperator::UnaryNegation => Some(HirUnaryOperator::Negate),
         UnaryOperator::LogicalNot => Some(HirUnaryOperator::Not),
+        UnaryOperator::Typeof => Some(HirUnaryOperator::TypeOf),
         _ => None,
     }
 }
@@ -953,14 +967,15 @@ mod tests {
 
     #[test]
     fn unsupported_expression_diagnostics_name_the_oxc_variant() {
-        // Object expressions used to be here and are now lowered; what this test protects is
-        // that whatever remains unsupported says which construct it was, rather than falling
-        // into a catch-all that reports the bare word "expression". A third of the guard corpus
-        // was once hidden behind exactly that.
+        // This list shrinks as constructs get lowered -- object and `new` expressions were both
+        // here and both left. That churn is the point rather than a nuisance: what the test
+        // protects is that whatever *remains* unsupported names the construct, instead of
+        // falling into a catch-all reporting the bare word "expression". A third of the guard
+        // corpus was once hidden behind exactly that, which is why it is worth a test at all.
+        // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
             ("const value = [];", "array expression"),
             ("const value = () => 1;", "arrow function expression"),
-            ("const value = new Thing();", "new expression"),
             ("const value = `x`;", "template literal"),
             ("const value = { [key]: 1 };", "computed object key"),
             ("const value = { ...other };", "object spread"),
