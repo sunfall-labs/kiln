@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use kiln_hir::{
     ArrayElement, AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName,
     ExportOrigin, Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator,
-    Module, ObjectKey, Span, Statement, StatementKind, UnaryOperator, VariableKind,
+    Module, ObjectKey, Pattern, Span, Statement, StatementKind, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -95,6 +95,12 @@ pub enum Instruction {
     NewArray {
         count: u32,
     },
+    /// Replace the iterable on top of the stack with an array of everything it yields.
+    ///
+    /// Array destructuring goes through the iterator protocol, so `const [a, b] = someSet` works.
+    /// Materialising first costs a copy and buys one binding path for every iterable, rather than
+    /// an indexed path for arrays and a protocol path for everything else.
+    IterableToArray,
     /// Append every element of the iterable on top of the stack to the array beneath it.
     ///
     /// Spread is a separate instruction rather than a wider `NewArray` because the count it
@@ -644,12 +650,27 @@ impl Compiler {
         match &statement.kind {
             StatementKind::Variable { kind, declarations } => {
                 for declaration in declarations {
-                    self.variable(
-                        *kind,
-                        declaration.name.as_str(),
-                        declaration.initializer.as_ref(),
-                        declaration.span,
-                    );
+                    // A plain name keeps the direct path, which knows about `var` redeclaration
+                    // and temporal-dead-zone checks. A pattern evaluates its initialiser once
+                    // and binds against the result.
+                    match declaration.pattern.as_identifier() {
+                        Some(name) => self.variable(
+                            *kind,
+                            name,
+                            declaration.initializer.as_ref(),
+                            declaration.span,
+                        ),
+                        None => {
+                            match &declaration.initializer {
+                                Some(initializer) => self.expression(initializer),
+                                // `const { a } = undefined` throws in JavaScript; there is no
+                                // throw from the compiler, so it binds undefined and each
+                                // property read yields undefined.
+                                None => self.push_constant(Constant::Undefined),
+                            }
+                            self.bind_pattern(*kind, &declaration.pattern, declaration.span);
+                        }
+                    }
                 }
             }
             StatementKind::Expression(expression) => {
@@ -725,6 +746,75 @@ impl Compiler {
         span: Span,
     ) {
         self.variable_with(kind, name, initializer, span, false);
+    }
+
+    /// Bind `pattern` to the value on top of the stack, consuming it.
+    fn bind_pattern(&mut self, kind: VariableKind, pattern: &Pattern, span: Span) {
+        match pattern {
+            Pattern::Identifier(name) => {
+                if name.is_empty() {
+                    // The frontend already reported why; binding an impossible name here would
+                    // add a second, more confusing diagnostic.
+                    self.code.push(Instruction::Pop);
+                    return;
+                }
+                self.declare_bound(kind, name, span);
+            }
+            Pattern::WithDefault { inner, default } => {
+                // A default applies only to `undefined`, not to every falsy value and not to
+                // `null` -- which is why this is a nullish-style test against undefined alone
+                // rather than a truthiness test.
+                self.code.push(Instruction::Dup);
+                self.push_constant(Constant::Undefined);
+                self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+                let skip = self.emit_jump(Instruction::JumpIfFalse(0));
+                self.code.push(Instruction::Pop);
+                self.expression(default);
+                self.patch_jump(skip);
+                self.bind_pattern(kind, inner, span);
+            }
+            Pattern::Object { properties, rest } => {
+                for property in properties {
+                    self.code.push(Instruction::Dup);
+                    let key = self.constant_index(Constant::String(property.key.clone()));
+                    self.code.push(Instruction::GetProperty(key));
+                    self.bind_pattern(kind, &property.value, span);
+                }
+                match rest {
+                    // An object rest needs the keys not already taken, which needs a runtime
+                    // operation this IR does not have yet. Refused rather than bound to an empty
+                    // object, which would look like it worked.
+                    Some(_) => {
+                        self.error(Some(span), "object rest in a pattern is not supported yet");
+                        self.code.push(Instruction::Pop);
+                    }
+                    None => self.code.push(Instruction::Pop),
+                }
+            }
+            Pattern::Array { elements, rest } => {
+                self.code.push(Instruction::IterableToArray);
+                for (index, element) in elements.iter().enumerate() {
+                    let Some(element) = element else {
+                        continue; // a hole binds nothing
+                    };
+                    self.code.push(Instruction::Dup);
+                    self.push_constant(Constant::Number((index as f64).to_bits()));
+                    self.code.push(Instruction::GetComputed);
+                    self.bind_pattern(kind, element, span);
+                }
+                if let Some(rest) = rest {
+                    self.code.push(Instruction::Dup);
+                    self.push_constant(Constant::Number((elements.len() as f64).to_bits()));
+                    let slice = self.constant_index(Constant::String("slice".to_owned()));
+                    self.code.push(Instruction::CallMethod {
+                        name: slice,
+                        argc: 1,
+                    });
+                    self.bind_pattern(kind, rest, span);
+                }
+                self.code.push(Instruction::Pop);
+            }
+        }
     }
 
     /// Declare a binding.
@@ -2304,7 +2394,7 @@ fn collect_nested_function_names(
         StatementKind::Variable { declarations, .. } => {
             for declaration in declarations {
                 if inside_function {
-                    names.insert(declaration.name.clone());
+                    collect_pattern_names(&declaration.pattern, names);
                 }
                 if let Some(initializer) = &declaration.initializer {
                     collect_identifiers(initializer, names, inside_function);
@@ -2408,6 +2498,32 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
         }
         if let Some(value) = &field.value {
             collect_identifiers(value, names, true);
+        }
+    }
+}
+
+/// Every name a pattern binds.
+fn collect_pattern_names(pattern: &Pattern, names: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Identifier(name) => {
+            names.insert(name.clone());
+        }
+        Pattern::WithDefault { inner, .. } => collect_pattern_names(inner, names),
+        Pattern::Object { properties, rest } => {
+            for property in properties {
+                collect_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = rest {
+                names.insert(rest.clone());
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for element in elements.iter().flatten() {
+                collect_pattern_names(element, names);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_names(rest, names);
+            }
         }
     }
 }
@@ -2779,7 +2895,7 @@ mod tests {
             statement(StatementKind::Variable {
                 kind: VariableKind::Let,
                 declarations: vec![kiln_hir::VariableDeclarator {
-                    name: "o".into(),
+                    pattern: kiln_hir::Pattern::Identifier("o".into()),
                     initializer: Some(Expression {
                         kind: ExpressionKind::Object {
                             properties: Vec::new(),
@@ -2826,7 +2942,7 @@ mod tests {
             statement(StatementKind::Variable {
                 kind: VariableKind::Let,
                 declarations: vec![kiln_hir::VariableDeclarator {
-                    name: "o".into(),
+                    pattern: kiln_hir::Pattern::Identifier("o".into()),
                     initializer: Some(Expression {
                         kind: ExpressionKind::Object {
                             properties: Vec::new(),
@@ -2859,7 +2975,7 @@ mod tests {
                 statement(StatementKind::Variable {
                     kind: VariableKind::Let,
                     declarations: vec![kiln_hir::VariableDeclarator {
-                        name: "captured".into(),
+                        pattern: kiln_hir::Pattern::Identifier("captured".into()),
                         initializer: Some(number(0.0)),
                         span: Span::default(),
                     }],
@@ -2908,7 +3024,7 @@ mod tests {
             vec![statement(StatementKind::Variable {
                 kind: VariableKind::Let,
                 declarations: vec![kiln_hir::VariableDeclarator {
-                    name: "local".into(),
+                    pattern: kiln_hir::Pattern::Identifier("local".into()),
                     initializer: Some(number(1.0)),
                     span: Span::default(),
                 }],
@@ -3040,7 +3156,7 @@ mod tests {
             statement(StatementKind::Variable {
                 kind: VariableKind::Let,
                 declarations: vec![kiln_hir::VariableDeclarator {
-                    name: "shared".into(),
+                    pattern: kiln_hir::Pattern::Identifier("shared".into()),
                     initializer: Some(number(1.0)),
                     span: Span::default(),
                 }],
@@ -3136,7 +3252,7 @@ mod tests {
                 kind: StatementKind::Variable {
                     kind: VariableKind::Let,
                     declarations: vec![kiln_hir::VariableDeclarator {
-                        name: "answer".into(),
+                        pattern: kiln_hir::Pattern::Identifier("answer".into()),
                         initializer: Some(Expression {
                             kind: ExpressionKind::Binary {
                                 operator: BinaryOperator::Add,
@@ -3235,7 +3351,7 @@ mod tests {
                 kind: StatementKind::Variable {
                     kind: VariableKind::Let,
                     declarations: vec![kiln_hir::VariableDeclarator {
-                        name: "x".into(),
+                        pattern: kiln_hir::Pattern::Identifier("x".into()),
                         initializer: None,
                         span: Span::new(10, 11),
                     }],
@@ -3246,7 +3362,7 @@ mod tests {
                 kind: StatementKind::Variable {
                     kind: VariableKind::Var,
                     declarations: vec![kiln_hir::VariableDeclarator {
-                        name: "x".into(),
+                        pattern: kiln_hir::Pattern::Identifier("x".into()),
                         initializer: None,
                         span: Span::new(12, 13),
                     }],
@@ -3290,7 +3406,7 @@ mod tests {
             kind: StatementKind::Variable {
                 kind: VariableKind::Const,
                 declarations: vec![kiln_hir::VariableDeclarator {
-                    name: "answer".into(),
+                    pattern: kiln_hir::Pattern::Identifier("answer".into()),
                     initializer: Some(Expression {
                         kind: ExpressionKind::Binary {
                             operator: BinaryOperator::Multiply,
