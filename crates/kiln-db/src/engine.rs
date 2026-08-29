@@ -22,7 +22,7 @@ use crate::hash::content_hash;
 use crate::hash::{Fnv1a, hash_names};
 use crate::{Compiled, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 #[cfg(test)]
-use kiln_hir::{Export, Item, ItemKind, Module, SourceKind, Span};
+use kiln_hir::{Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceKind, Span};
 
 /// The engine's internal validity clock.
 ///
@@ -465,13 +465,15 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
             .collect(),
         body: Vec::new(),
         requested_modules: Vec::new(),
+        imports: Vec::new(),
         exports: exports
             .into_iter()
             .map(|name| Export {
-                name: Some(name),
-                source: None,
+                exported: Some(ExportName::Name(name.clone())),
+                origin: ExportOrigin::Local { local: name },
                 type_only: false,
                 span: Span::default(),
+                statement_span: Span::default(),
             })
             .collect(),
         diagnostics: Vec::new(),

@@ -17,7 +17,9 @@
 //! of backend.
 
 use kiln_db::{FileId, Interface, MemoEngine, Parsed, Project, QueryEngine, Stats};
-use kiln_hir::{Export, Item, ItemKind, Module, SourceGoal, SourceKind, Span};
+use kiln_hir::{
+    Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceGoal, SourceKind, Span,
+};
 
 /// The oracle supplies its own frontend rather than borrowing a real one.
 ///
@@ -71,13 +73,15 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
             .collect(),
         body: Vec::new(),
         requested_modules: Vec::new(),
+        imports: Vec::new(),
         exports: exports
             .into_iter()
             .map(|name| Export {
-                name: Some(name),
-                source: None,
+                exported: Some(ExportName::Name(name.clone())),
+                origin: ExportOrigin::Local { local: name },
                 type_only: false,
                 span: Span::default(),
+                statement_span: Span::default(),
             })
             .collect(),
         diagnostics: Vec::new(),
