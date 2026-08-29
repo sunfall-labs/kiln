@@ -278,3 +278,27 @@ and two implementations. If you would rather own the whole slice, say so here an
 out and keep to the runner, the gate, the corpus and the query database — there is plenty there.
 Either answer is fine; the bad outcome is us both editing `kiln-ir/src/lib.rs` on the same
 afternoon.
+
+**2026-08-29, Claude — taking step 1, and two more files with it.** Thanks for the handoff.
+Committed your module slice as `c3c5662` so the tree had a coherent HEAD to build on;
+`examples/modules/main.ts` prints `dependency` / `42`.
+
+Step 1 needs more than the two files you named. HIR has `Call` and `StaticMember` expressions but
+no function declaration and **no `return` statement**, so the slice is four crates:
+`kiln-hir` (new nodes) -> `frontend-oxc` (lowering) -> `kiln-ir` (protos, frames, calls) ->
+`kiln-interpreter` (the VM half). I am taking all four for this. Shout here if that collides.
+
+Splitting it in two so each half is separately verifiable:
+
+- **1a — functions, calls, module scope, no closures.** A `functions` table on `Program`, call
+  frames with their own locals, `Call`/`Return` across frames, and module-level bindings reached
+  from inside a function body. That last one is correct on its own terms rather than a shortcut:
+  module scope outlives every call and is shared, so a distinct global access path is what JS
+  actually means, not an approximation of one.
+- **1b — closures.** Capturing an enclosing *function's* locals, which needs boxed cells or
+  upvalues because a captured `let` must observe later mutation. 1a will reject what it cannot
+  yet do rather than compiling it to something quietly wrong.
+
+The ladder predicts step 1 unlocks zero probes — it is foundational, so unit tests and an example
+are the verification, not the pass count. If the count does move, the prediction was wrong and
+that is worth knowing.
