@@ -6,7 +6,7 @@
 
 use kiln_proto::{
     ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, ProjectSummary, Request,
-    Response, RunSummary, Stats, TestMode, TestSummary,
+    Response, RunSummary, SourceHash, Stats, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -20,6 +20,14 @@ pub trait Backend {
         match self.request(Request::SetSource { path, text })? {
             Response::Ok => Ok(()),
             other => Err(mismatch("SetSource", &other)),
+        }
+    }
+
+    /// Name every file, and learn which ones actually have to be sent.
+    fn sync(&mut self, files: Vec<SourceHash>) -> Result<Vec<String>> {
+        match self.request(Request::Sync { files })? {
+            Response::Needed { paths } => Ok(paths),
+            other => Err(mismatch("Sync", &other)),
         }
     }
 
@@ -127,6 +135,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::Tested(_) => "Tested",
         Response::Project(_) => "Project",
         Response::Stats(_) => "Stats",
+        Response::Needed { .. } => "Needed",
         Response::Ok => "Ok",
         Response::Error { .. } => "Error",
     }

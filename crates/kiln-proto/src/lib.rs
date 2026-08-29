@@ -8,7 +8,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any non-additive change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
+
+/// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
+/// of its text.
+///
+/// The hash is the point of [`Request::Sync`]. A stateless client can afford to name every file
+/// in the project on every command; it cannot afford to send every file's contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHash {
+    pub path: String,
+    pub hash: u64,
+}
 
 /// A source file, interned by the daemon. Stable for the lifetime of a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -24,6 +35,15 @@ pub enum Request {
     SetSource {
         path: String,
         text: String,
+    },
+    /// The client's whole view of the project, named but not sent.
+    ///
+    /// Answered with [`Response::Needed`]: the subset whose contents the daemon does not
+    /// already hold, which is all the client then has to push. Without this a stateless client
+    /// re-sends every source on every command -- on a 320-file project that was ~370KB of JSON
+    /// to answer a question whose response was "nothing changed".
+    Sync {
+        files: Vec<SourceHash>,
     },
     /// Run the query pipeline for a file and return its summary.
     Check {
@@ -76,6 +96,10 @@ pub enum Response {
     Tested(TestSummary),
     Project(ProjectSummary),
     Stats(Stats),
+    /// The paths from a [`Request::Sync`] whose contents the daemon still needs.
+    Needed {
+        paths: Vec<String>,
+    },
     Ok,
     Error { message: String },
 }

@@ -4,7 +4,7 @@
 //! incremental behaviour observable to a person instead of only to a test, and it is cheap:
 //! two extra round trips against a check that is meant to be a millisecond.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -14,7 +14,7 @@ use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
-use kiln_proto::{NativeProfile, TestMode, TestOutcome, TestSummary};
+use kiln_proto::{NativeProfile, SourceHash, TestMode, TestOutcome, TestSummary};
 
 /// What a command produced: `text` is the answer, `notes` are diagnostics for stderr.
 #[derive(Debug)]
@@ -193,9 +193,14 @@ pub fn check_source(
 
 /// Summarise every source file under `root`.
 ///
-/// The client owns file discovery (see [`crate::sources`]), so this pushes every file before
-/// asking for the rollup. Byte-identical `SetSource` requests are no-ops; edited implementations
-/// still cut off at an unchanged interface. The work report makes both kinds of reuse visible.
+/// The client owns file discovery (see [`crate::sources`]), and a fresh process starts knowing
+/// nothing about what the daemon already holds. So it names every file with its content hash
+/// and pushes only the ones the daemon asks for. Sending them all was correct but wasteful: a
+/// warm no-op on a 320-file project moved ~370KB of JSON to be told nothing had changed.
+///
+/// Byte-identical `SetSource` requests are no-ops in the engine as well, so this is an
+/// optimisation of the wire rather than a correctness fix -- but it is the difference between
+/// a warm command costing microseconds and costing tens of milliseconds.
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
@@ -214,10 +219,31 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 
     let before = backend.stats()?;
     let started = Instant::now();
+
+    // Read once: the hash we announce and the text we may send must come from the same bytes,
+    // or a file edited between the two would be announced under its old hash and never sent.
+    let mut texts = Vec::with_capacity(walk.files.len());
     for file in &walk.files {
-        let text = read_source(file)?;
-        backend.set_source(canonical_path(file)?, text)?;
+        texts.push((canonical_path(file)?, read_source(file)?));
     }
+    let needed: HashSet<String> = backend
+        .sync(
+            texts
+                .iter()
+                .map(|(path, text)| SourceHash {
+                    path: path.clone(),
+                    hash: kiln_db::content_hash(text),
+                })
+                .collect(),
+        )?
+        .into_iter()
+        .collect();
+    for (path, text) in texts {
+        if needed.contains(&path) {
+            backend.set_source(path, text)?;
+        }
+    }
+
     let summary = backend.project()?;
     let elapsed = started.elapsed();
     let after = backend.stats()?;
@@ -454,6 +480,7 @@ mod tests {
                 .map(|request| match request {
                     Request::Ping { .. } => "Ping",
                     Request::SetSource { .. } => "SetSource",
+                    Request::Sync { .. } => "Sync",
                     Request::Check { .. } => "Check",
                     Request::Run { .. } => "Run",
                     Request::NativeBuild { .. } => "NativeBuild",
@@ -477,6 +504,12 @@ mod tests {
                     self.stats.revision += 1;
                     Response::Ok
                 }
+                // A cold daemon: it holds nothing, so everything named is needed. That keeps
+                // these tests asserting the push path rather than the skip path; the skip path
+                // is covered end to end in the daemon's own tests.
+                Request::Sync { files } => Response::Needed {
+                    paths: files.into_iter().map(|file| file.path).collect(),
+                },
                 Request::Check { path } => {
                     self.stats.parse_computed += self.per_check.parse_computed;
                     self.stats.interface_computed += self.per_check.interface_computed;
