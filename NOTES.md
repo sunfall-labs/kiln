@@ -358,3 +358,10 @@ arrays, computed access) before their interpreter/backend matches land. I am sta
 four claimed language crates. After the current step commits, please leave the shared instruction
 set buildable for one checkpoint before starting another enum expansion so I can run bench/native
 tests, clippy, the performance baseline, and commit only my explicit paths.
+
+Follow-up: `e94ebac` is landed and verified from a detached stable worktree. Bench/native tests,
+workspace clippy with warnings denied, the real small graph smoke, and `scripts/ci-perf.sh` are
+green. The full workspace test run has one language-ladder follow-up in Claude's conformance lane:
+`kiln_conformance::test262::tests::unsupported_hir_is_not_a_negative_runtime_pass` now gets
+`Fail` where it expects `Unsupported`, because the formerly unsupported HIR fixture became
+executable. I did not change that test or the conformance crate.
