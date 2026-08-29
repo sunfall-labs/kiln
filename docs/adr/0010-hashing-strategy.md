@@ -1,4 +1,4 @@
-# 0007. Hash choice follows whatever compares the result
+# 0010. Hash choice follows whatever compares the result
 
 ## Status
 

@@ -19,6 +19,7 @@ mod render;
 mod sources;
 mod watch;
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 
@@ -46,7 +47,7 @@ fn main() {
 }
 
 fn run() -> Result<i32> {
-    match args::parse(command_line()?)? {
+    match args::parse(utf8_args(std::env::args_os().skip(1))?)? {
         Parsed::Help => {
             emit(args::HELP)?;
             Ok(0)
@@ -59,10 +60,19 @@ fn run() -> Result<i32> {
     }
 }
 
-/// `std::env::args` panics on a non-UTF-8 argument, which a file path can legitimately be.
-fn command_line() -> Result<Vec<String>> {
-    std::env::args_os()
-        .skip(1)
+/// `std::env::args` panics on a non-UTF-8 argument, and an argument is entitled to be one:
+/// on Unix it is a byte string, and so is a path. Rejecting it here rather than carrying the
+/// bytes further is the honest answer for a path as well as for a flag - `Request::Check`
+/// carries a `String`, and `commands::canonical_path` already refuses a path it cannot
+/// decode - so accepting the argument would only move the same failure downstream.
+///
+/// Taking the arguments as a parameter rather than reading the environment is what makes the
+/// non-UTF-8 case testable at all.
+fn utf8_args<I>(args: I) -> Result<Vec<String>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    args.into_iter()
         .map(|arg| {
             arg.into_string().map_err(|bad| {
                 Error::usage(format!(
@@ -91,20 +101,66 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     let one_shot = invocation.one_shot;
 
     match invocation.command {
+        Command::Run {
+            path,
+            native: false,
+            ..
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::run(backend.as_mut(), &path)?)
+        }
+        Command::Run {
+            path,
+            native: true,
+            profile,
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::native_run(
+                backend.as_mut(),
+                &path,
+                &root,
+                profile,
+            )?)
+        }
+        Command::Build {
+            path,
+            output,
+            profile,
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::build(
+                backend.as_mut(),
+                &path,
+                &root,
+                output.as_deref(),
+                profile,
+            )?)
+        }
         Command::Check { path } => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::check(backend.as_mut(), &path)?)?;
-            Ok(0)
+            report(commands::check(backend.as_mut(), &path)?)
+        }
+        Command::Test {
+            path,
+            changed,
+            parse_only,
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::test(
+                backend.as_mut(),
+                &path,
+                &root,
+                changed,
+                parse_only,
+            )?)
         }
         Command::Project => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::project(backend.as_mut(), &root)?)?;
-            Ok(0)
+            report(commands::project(backend.as_mut(), &root)?)
         }
         Command::Stats => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::stats(backend.as_mut())?)?;
-            Ok(0)
+            report(commands::stats(backend.as_mut())?)
         }
         Command::Watch { path, interval } => {
             let mut backend = open(one_shot, &socket)?;
@@ -113,14 +169,8 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             watch::run(backend.as_mut(), &path, interval, &mut out, &mut notes)?;
             Ok(0)
         }
-        Command::Daemon(DaemonAction::Start) => {
-            report(lifecycle::start(&socket)?)?;
-            Ok(0)
-        }
-        Command::Daemon(DaemonAction::Stop) => {
-            report(lifecycle::stop(&socket)?)?;
-            Ok(0)
-        }
+        Command::Daemon(DaemonAction::Start) => report(lifecycle::start(&socket)?),
+        Command::Daemon(DaemonAction::Stop) => report(lifecycle::stop(&socket)?),
         Command::Daemon(DaemonAction::Status) => {
             let (output, code) = lifecycle::status(&socket)?;
             report(output)?;
@@ -146,12 +196,12 @@ fn open(one_shot: bool, socket: &Path) -> Result<Box<dyn Backend>> {
     Ok(Box::new(client))
 }
 
-fn report(output: Output) -> Result<()> {
+fn report(output: Output) -> Result<i32> {
     emit(&output.text)?;
     for note in &output.notes {
         eprintln!("kiln: {note}");
     }
-    Ok(())
+    Ok(output.exit_code)
 }
 
 fn emit(text: &str) -> Result<()> {
@@ -164,12 +214,34 @@ fn emit(text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn arguments_survive_the_trip_through_osstring() {
+        let args = utf8_args([OsString::from("check"), OsString::from("a.js")]);
+        assert_eq!(args.expect("valid UTF-8 parses"), ["check", "a.js"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_is_a_usage_error_not_a_panic() {
+        use std::os::unix::ffi::OsStringExt;
+
+        // A lone 0x80 is a continuation byte with nothing to continue: a legal filename on
+        // both macOS and Linux, and not a legal `str`.
+        let path = OsString::from_vec(vec![b'a', 0x80, b'.', b'j', b's']);
+        let err = utf8_args([OsString::from("check"), path]).expect_err("must not panic");
+        assert!(format!("{err}").contains("not valid UTF-8"), "got: {err}");
+    }
+
     use super::*;
 
     #[test]
     fn help_documents_every_command_and_option() {
         for expected in [
+            "run",
+            "build",
             "check",
+            "test",
             "project",
             "stats",
             "watch",
@@ -189,8 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn help_does_not_promise_things_v0_cannot_do() {
-        // There is no interpreter and no native backend yet, so no command may imply one.
+    fn help_lists_the_current_command_surface() {
         let commands: Vec<&str> = args::HELP
             .lines()
             .skip_while(|line| !line.starts_with("commands:"))
@@ -198,7 +269,12 @@ mod tests {
             .take_while(|line| line.starts_with("    "))
             .filter_map(|line| line.split_whitespace().next())
             .collect();
-        assert_eq!(commands, ["check", "project", "stats", "watch", "daemon"]);
+        assert_eq!(
+            commands,
+            [
+                "run", "build", "check", "test", "project", "stats", "watch", "daemon"
+            ]
+        );
     }
 
     #[test]
