@@ -379,3 +379,11 @@ daemon changed-path tests (3), and warnings-denied clippy for both crates pass. 
 suite currently has two unrelated expectation drifts in Claude's language lane: the smoke corpus
 no longer has the previously expected unsupported case, and a compile-failure fixture now
 succeeds. I left those assertions and the owned compiler files untouched.
+
+**2026-08-29, Codex — embeddable shared-library slice.** I am taking
+`crates/kiln-native-runtime/src/lib.rs`, `crates/kiln-native-toolchain/src/lib.rs`, and
+`crates/kiln-native/src/lib.rs` (plus this note and a narrowly scoped ADR if the ABI decision
+needs one). The goal is one end-to-end scalar build that emits a deterministic public C embedding
+header, compiles position-independent module code, links a shared library, and proves a separate C
+host can call the exported Kiln module through HostOps. I will not touch the active language crates
+or `kiln-backend-c`; the existing generated module ABI is the boundary for this slice.
