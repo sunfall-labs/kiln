@@ -5,8 +5,8 @@
 //! special case, and so the tests can drive them without either.
 
 use kiln_proto::{
-    ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, ProjectSummary, Request,
-    Response, RunSummary, SourceHash, Stats, TestMode, TestSummary,
+    ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, NativeSharedLibrarySummary,
+    ProjectSummary, Request, Response, RunSummary, SourceHash, Stats, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -79,6 +79,24 @@ pub trait Backend {
         }
     }
 
+    fn native_shared_build(
+        &mut self,
+        path: String,
+        project_root: String,
+        output: Option<String>,
+        profile: NativeProfile,
+    ) -> Result<NativeSharedLibrarySummary> {
+        match self.request(Request::NativeSharedBuild {
+            path,
+            project_root,
+            output,
+            profile,
+        })? {
+            Response::NativeSharedBuilt(summary) => Ok(summary),
+            other => Err(mismatch("NativeSharedBuild", &other)),
+        }
+    }
+
     fn test(
         &mut self,
         root: String,
@@ -131,6 +149,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::Checked(_) => "Checked",
         Response::Ran(_) => "Ran",
         Response::NativeBuilt(_) => "NativeBuilt",
+        Response::NativeSharedBuilt(_) => "NativeSharedBuilt",
         Response::NativeRan(_) => "NativeRan",
         Response::Tested(_) => "Tested",
         Response::Project(_) => "Project",

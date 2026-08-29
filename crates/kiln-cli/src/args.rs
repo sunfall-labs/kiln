@@ -61,6 +61,7 @@ pub enum Command {
         path: PathBuf,
         output: Option<PathBuf>,
         profile: NativeProfile,
+        shared: bool,
     },
     Test {
         path: PathBuf,
@@ -98,6 +99,7 @@ where
     let mut native = false;
     let mut output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
+    let mut shared = false;
     let mut only_positional = false;
 
     let mut args = args.into_iter();
@@ -137,6 +139,10 @@ where
                 reject_inline_value(&flag, &inline)?;
                 native = true;
             }
+            "--shared" => {
+                reject_inline_value(&flag, &inline)?;
+                shared = true;
+            }
             "--output" => {
                 output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
@@ -157,6 +163,9 @@ where
 
     if native && name != "run" {
         return Err(Error::usage("--native only applies to `kiln run`"));
+    }
+    if shared && name != "build" {
+        return Err(Error::usage("--shared only applies to `kiln build`"));
     }
     if output.is_some() && name != "build" {
         return Err(Error::usage("--output only applies to `kiln build`"));
@@ -180,6 +189,7 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             output,
             profile: profile.unwrap_or_default(),
+            shared,
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -317,7 +327,7 @@ usage:
 
 commands:
     run <file>         compile and execute one module (or use --native)
-    build <file>       compile and link one native executable
+    build <file>       compile and link a native executable or shared library
     check <file>       check one file and report what was recomputed
     test <directory>   run a Test262 tree or Kiln's local conformance corpus
     project            summarise the whole project
@@ -339,7 +349,8 @@ options:
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
     --native           with `run`, execute through the native backend
-    --output <path>    with `build`, write the native executable here
+    --shared            with `build`, write a shared library for embedding
+    --output <path>    with `build`, write the native executable or shared library here
     --profile <name>   native-dev, native-check, or native-release
     -h, --help         show this help
     -V, --version      show version and protocol information
@@ -404,8 +415,17 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 output: Some(PathBuf::from("bin/app")),
                 profile: NativeProfile::Release,
+                shared: false,
             }
         );
+        assert!(matches!(
+            run(&["build", "src/main.ts", "--shared"]).command,
+            Command::Build {
+                shared: true,
+                profile: NativeProfile::Dev,
+                ..
+            }
+        ));
         assert_eq!(
             run(&[
                 "run",
@@ -421,6 +441,12 @@ mod tests {
                 profile: NativeProfile::Check,
             }
         );
+    }
+
+    #[test]
+    fn shared_only_applies_to_build() {
+        assert!(usage_error(&["run", "a.js", "--shared"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--shared"]).contains("only applies"));
     }
 
     #[test]

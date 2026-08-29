@@ -10,7 +10,9 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use kiln_proto::{ModuleSummary, NativeBuildSummary, ProjectSummary, Stats};
+use kiln_proto::{
+    ModuleSummary, NativeBuildSummary, NativeSharedLibrarySummary, ProjectSummary, Stats,
+};
 
 /// Width of the indented label column, sized to the longest label ("implementation").
 const LABEL: usize = 16;
@@ -186,6 +188,52 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
             "{} bytes ({})",
             summary.executable_bytes,
             hit(summary.executable_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "timing",
+        &format!(
+            "emit {}ms, compile {}ms, link {}ms",
+            summary.emit_millis, summary.compile_millis, summary.link_millis
+        ),
+    );
+    out
+}
+
+/// `kiln build --shared` output. Shared-library reports intentionally contain only the
+/// generated source, PIC object, and library layers involved in an embedding build.
+pub fn native_shared_build(source: &str, summary: &NativeSharedLibrarySummary) -> String {
+    let hit = |value: bool| if value { "hit" } else { "built" };
+    let mut out = format!("native shared build {source}  {}ms\n", summary.total_millis);
+    row(&mut out, "module", &summary.module_symbol);
+    row(&mut out, "output", &summary.output_path);
+    row(&mut out, "compiler", &summary.compiler_identity);
+    row(
+        &mut out,
+        "generated C",
+        &format!(
+            "{} bytes ({})",
+            summary.generated_c_bytes,
+            hit(summary.generated_c_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "PIC object",
+        &format!(
+            "{} bytes ({})",
+            summary.object_bytes,
+            hit(summary.object_cache_hit)
+        ),
+    );
+    row(
+        &mut out,
+        "shared library",
+        &format!(
+            "{} bytes ({})",
+            summary.library_bytes,
+            hit(summary.library_cache_hit)
         ),
     );
     row(
@@ -393,5 +441,33 @@ mod tests {
         assert!(out.contains("revision            7\n"), "{out}");
         assert!(out.contains("interface computed  2\n"), "{out}");
         assert!(out.contains("early cutoff        2\n"), "{out}");
+    }
+
+    #[test]
+    fn shared_build_renders_only_embedding_artifacts() {
+        let out = native_shared_build(
+            "src/main.ts",
+            &NativeSharedLibrarySummary {
+                module_symbol: "kiln_module_main".to_owned(),
+                output_path: ".kiln/lib/main.so".to_owned(),
+                compiler_identity: "cc".to_owned(),
+                generated_c_cache_hit: true,
+                object_cache_hit: false,
+                library_cache_hit: true,
+                generated_c_bytes: 10,
+                object_bytes: 20,
+                library_bytes: 30,
+                emit_millis: 1,
+                compile_millis: 2,
+                link_millis: 3,
+                total_millis: 6,
+            },
+        );
+        assert!(out.contains("native shared build src/main.ts"), "{out}");
+        assert!(out.contains("PIC object"), "{out}");
+        assert!(out.contains("shared library"), "{out}");
+        assert!(!out.contains("runtime object"), "{out}");
+        assert!(!out.contains("launcher object"), "{out}");
+        assert!(!out.contains("executable"), "{out}");
     }
 }
