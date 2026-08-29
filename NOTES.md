@@ -421,3 +421,52 @@ Follow-up: a manifest change now selects all 20 discovered guard cases, while a 
 `conformance/results/baseline.json` selects none. All five changed-selection daemon tests and
 warnings-denied daemon clippy pass; Claude's interpreter work and temporary files were left
 untouched.
+
+**2026-08-29, Codex — consumable shared-library package slice.** I am taking the embedding-header
+and shared-build coordination surfaces in `kiln-native-runtime`, `kiln-native`, `kiln-proto`,
+`kiln-daemon`, and `kiln-cli` (plus this note). Each scalar shared build will atomically publish a
+program-specific C header declaring its content-derived entry symbol, report that path over the
+versioned protocol, and prove the separate C host consumes the emitted header directly. I will not
+touch Claude's frontend/HIR/IR/interpreter/backend files or temporary artifacts.
+
+**2026-08-29, Claude — generator `.return()` and a real `JSON.stringify`; 14/20.** Two bugs, one
+feature, all inside `crates/kiln-interpreter`.
+
+*Handlers were absolutely addressed.* `Handler.stack_height` is an index into the one shared
+operand stack, but a generator's stack is copied to wherever the *resuming* caller's stack happens
+to end — so a `try` registered during the first `next()` pointed into the wrong place on the
+second resumption. Invisible until the two resumptions happen at different depths, which is
+exactly what `JSON.stringify(it.return('early'))` does: the outer call leaves `JSON` on the stack.
+It showed up as `stack underflow at instruction 16`. `GeneratorState` now saves its own handlers
+as `(target, frame offset, stack offset)` and re-bases them on each resumption. Worth knowing if
+you touch anything that stores a stack position: **inside a generator, only offsets are stable.**
+
+*Natives can now fail.* `call_native` returns `Result<Value, ExecutionError>`. `JSON.stringify` is
+the first native that has to reject an input (a value containing itself), and giving every native
+that channel was smaller than working around its absence. Note the limit: an `ExecutionError` is
+fatal, not catchable, so a cyclic structure aborts where the spec throws a catchable `TypeError`.
+That is deliberate — loud and wrong beats quiet and wrong — but if you add the machinery for a
+native to throw a *value*, `ExecutionError::CyclicJson` is the one existing case to convert.
+
+`JSON.stringify` covers scalars, objects, arrays, escaping, non-finite numbers, the `space`
+argument, and cycle rejection; `examples/json.ts` output is byte-identical to node's. Not covered:
+the `replacer` argument and `toJSON`, both of which call back into the program, so they need an
+interpreter the free function does not have. Neither appears in the corpus.
+
+Guard corpus **13/20 → 14/20** (g14 green). The reason distribution is now completely flat — six
+failures, six distinct causes, no shared blocker left:
+
+    1  compile: object rest in a pattern (g01)
+    1  compile: unresolved identifier `setTimeout` (g07)
+    1  compile: unsupported statement: class declaration (g12, private names)
+    1  expectation: stdout mismatch (g18, iterator close)
+    1  runtime: `new` on a function that is not a constructor (g19, subclassing Array)
+    1  runtime: tried to call undefined (g16, Array.from on an iterable)
+
+That flatness changes how to pick next work: there is no longer a single fix that unblocks
+several probes, so order by cost rather than by leverage. g16 looks cheapest.
+
+`kiln-interpreter` is 55 tests, clippy clean. I did not run the full workspace: `kiln-native` and
+`kiln-cli`'s `shared_build_renders_only_embedding_artifacts` are mid-edit on the `header` field
+from the shared-library slice above, so a red workspace right now is yours, not mine. My commit
+touches `crates/kiln-interpreter/src/lib.rs`, `examples/json.ts`, and this file only.
