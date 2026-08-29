@@ -694,6 +694,8 @@ fn stack_effect(
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
+        | Instruction::Yield
+        | Instruction::YieldDelegate
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
@@ -922,6 +924,8 @@ fn emit_instruction(
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
+        | Instruction::Yield
+        | Instruction::YieldDelegate
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
@@ -1112,6 +1116,8 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*target));
             }
             Instruction::PopHandler => byte(&mut hash, 39),
+            Instruction::Yield => byte(&mut hash, 42),
+            Instruction::YieldDelegate => byte(&mut hash, 43),
             Instruction::Throw => byte(&mut hash, 40),
             Instruction::LoadArguments => byte(&mut hash, 37),
             Instruction::LoadThis => byte(&mut hash, 33),

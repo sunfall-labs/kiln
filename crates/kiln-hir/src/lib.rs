@@ -72,6 +72,8 @@ pub struct Function {
     /// An arrow function. It has no `arguments` of its own and takes `this` lexically, so the
     /// distinction has to survive lowering even while neither is implemented yet.
     pub arrow: bool,
+    /// A generator. Calling it produces an object rather than running the body.
+    pub generator: bool,
     pub parameters: Vec<Parameter>,
     pub body: Vec<Statement>,
     pub span: Span,
@@ -324,6 +326,14 @@ pub enum ExpressionKind {
         increment: bool,
         prefix: bool,
         target: String,
+    },
+    /// `yield value` and `yield* iterable`.
+    ///
+    /// An expression, not a statement: it evaluates to whatever the caller sends back with the
+    /// next `next(v)`, which is the whole reason generators can receive values.
+    Yield {
+        delegate: bool,
+        value: Option<Box<Expression>>,
     },
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.

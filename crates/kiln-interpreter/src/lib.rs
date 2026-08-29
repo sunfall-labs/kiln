@@ -56,6 +56,9 @@ pub enum Native {
     ArrayJoin,
     /// `next` on an array iterator.
     ArrayIteratorNext,
+    /// `String.prototype[Symbol.iterator]`, which walks code points rather than UTF-16 units.
+    StringValues,
+    StringIteratorNext,
     ArrayPush,
     ArrayPop,
     ArrayIndexOf,
@@ -185,6 +188,32 @@ impl ObjectData {
     }
 }
 
+/// A generator's saved execution state.
+///
+/// A generator is the first thing in this VM whose frame does not run to completion, so its
+/// registers live here between resumptions rather than on the frame stack. Resuming installs
+/// them, running suspends back into them, and the operand stack is saved alongside because a
+/// `yield` can occur part-way through an expression.
+#[derive(Debug)]
+pub struct GeneratorState {
+    closure: Rc<Closure>,
+    locals: Vec<Value>,
+    /// The generator's own operand stack, relative to where it was suspended.
+    stack: Vec<Value>,
+    instruction: usize,
+    this_value: Value,
+    arguments: Vec<Value>,
+    /// False until the first `next`, which starts the body rather than resuming a `yield`.
+    started: bool,
+    done: bool,
+}
+
+impl PartialEq for GeneratorState {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
 /// A callable value: which function body to run, and the bindings it closed over.
 #[derive(Debug)]
 pub struct Closure {
@@ -251,6 +280,8 @@ pub enum Value {
     /// to it are the same function, which is what `===` should say. That stops being true when
     /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
     Native(Native),
+    /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
+    Generator(Rc<RefCell<GeneratorState>>),
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
@@ -300,7 +331,7 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) => "function",
-            Self::Array(_) => "object",
+            Self::Array(_) | Self::Generator(_) => "object",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -318,6 +349,7 @@ impl Value {
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) => "function",
             Self::Array(_) => "array",
+            Self::Generator(_) => "generator",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
         }
@@ -339,7 +371,7 @@ impl Value {
             Self::Function(_) => f64::NAN,
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
-            Self::Object(_) | Self::Native(_) | Self::Callback(_) => f64::NAN,
+            Self::Object(_) | Self::Native(_) | Self::Callback(_) | Self::Generator(_) => f64::NAN,
             // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
             Self::Symbol(_) => f64::NAN,
             // `Number([])` is 0 and `Number([2])` is 2: ToPrimitive joins, then parses.
@@ -361,6 +393,7 @@ impl Value {
             | Self::Native(_)
             | Self::Callback(_)
             | Self::Array(_)
+            | Self::Generator(_)
             | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -388,6 +421,7 @@ impl Value {
             Self::Object(_) => "[object Object]".to_owned(),
             Self::Native(native) => format!("[Function {native:?}]"),
             Self::Callback(method) => format!("[Function {method:?}]"),
+            Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Symbol(symbol) => format!(
                 "Symbol(Symbol.{})",
                 symbol.property_key().trim_start_matches("@@")
@@ -427,6 +461,7 @@ impl From<Value> for HostValue {
             Value::Object(_) => Self::String("[object Object]".to_owned()),
             Value::Native(native) => Self::String(format!("[Function {native:?}]")),
             Value::Callback(method) => Self::String(format!("[Function {method:?}]")),
+            Value::Generator(_) => Self::String("[object Generator]".to_owned()),
             Value::Symbol(symbol) => Self::String(symbol.property_key().to_owned()),
             Value::Array(items) => Self::String(join(&items.borrow(), ",")),
             Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
@@ -652,6 +687,8 @@ pub fn execute<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals: vec![Value::Undefined; program.local_count as usize],
         function: None,
+        suspended: false,
+        pending_yields: Vec::new(),
         handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
@@ -697,6 +734,8 @@ pub fn execute_module<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals,
         function: None,
+        suspended: false,
+        pending_yields: Vec::new(),
         handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
@@ -763,6 +802,10 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     function: Option<Rc<Closure>>,
+    /// Set by `Yield`, so the run loop knows it stopped at a suspension rather than a return.
+    suspended: bool,
+    /// Values a `yield*` produced ahead of time, handed out one resumption at a time.
+    pending_yields: Vec<Value>,
     /// Active exception handlers, innermost last.
     handlers: Vec<Handler>,
     /// The arguments the running frame received.
@@ -1040,6 +1083,36 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 Instruction::PopHandler => {
                     self.handlers.pop();
+                }
+                Instruction::Yield => {
+                    // Returning straight out of the loop leaves the generator's registers in
+                    // place; the caller snapshots them. A `Return` would have popped the frame.
+                    let value = self.pop(current)?;
+                    self.suspended = true;
+                    return Ok(ExecutionResult {
+                        value,
+                        steps: self.steps,
+                    });
+                }
+                Instruction::YieldDelegate => {
+                    // `yield*` is not one suspension but a sequence of them, and the loop cannot
+                    // suspend part-way through a Rust function. Draining first is a real
+                    // deviation: a delegate to an infinite iterable would not terminate, where
+                    // the language would yield forever. Recorded rather than hidden.
+                    let source = self.pop(current)?;
+                    let values = self.drain_iterable(&source, current)?;
+                    self.pending_yields.extend(values.into_iter().rev());
+                    match self.pending_yields.pop() {
+                        Some(value) => {
+                            self.suspended = true;
+                            return Ok(ExecutionResult {
+                                value,
+                                steps: self.steps,
+                            });
+                        }
+                        // An empty delegate yields nothing and evaluates to undefined.
+                        None => self.push_constant_value(Value::Undefined),
+                    }
                 }
                 Instruction::Throw => {
                     let thrown = self.pop(current)?;
@@ -1331,6 +1404,119 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(())
     }
 
+    fn push_constant_value(&mut self, value: Value) {
+        self.stack.push(value);
+    }
+
+    /// Build the object a generator function call produces.
+    fn build_generator(
+        &mut self,
+        closure: &Rc<Closure>,
+        argc: u16,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let proto = &self.program.functions[closure.function as usize];
+        let argc = argc as usize;
+        if self.stack.len() < argc + 1 {
+            return Err(ExecutionError::StackUnderflow { instruction });
+        }
+        let mut arguments = self.stack.split_off(self.stack.len() - argc);
+        self.stack.pop();
+
+        let mut locals = vec![Value::Undefined; proto.local_count as usize];
+        let received = arguments.clone();
+        arguments.truncate(proto.parameter_count as usize);
+        for (slot, argument) in arguments.into_iter().enumerate() {
+            locals[slot] = argument;
+        }
+
+        Ok(Value::Generator(Rc::new(RefCell::new(GeneratorState {
+            closure: Rc::clone(closure),
+            locals,
+            stack: Vec::new(),
+            instruction: 0,
+            this_value: Value::Undefined,
+            arguments: received,
+            started: false,
+            done: false,
+        }))))
+    }
+
+    /// Start or resume a generator, returning its next value and whether it finished.
+    fn resume_generator(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        sent: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        if generator.borrow().done {
+            return Ok((Value::Undefined, true));
+        }
+        // A `yield*` was drained ahead of time; hand its values out one resumption at a time so
+        // the caller still sees one value per `next`.
+        if let Some(value) = self.pending_yields.pop() {
+            return Ok((value, false));
+        }
+
+        let depth = self.frames.len();
+        let stack_base = self.stack.len();
+        let (closure, locals, saved_stack, instruction_pointer, this_value, arguments, started) = {
+            let state = generator.borrow();
+            (
+                Rc::clone(&state.closure),
+                state.locals.clone(),
+                state.stack.clone(),
+                state.instruction,
+                state.this_value.clone(),
+                state.arguments.clone(),
+                state.started,
+            )
+        };
+
+        self.frames.push(Frame {
+            function: self.function.take(),
+            this_value: std::mem::replace(&mut self.this_value, this_value),
+            arguments: std::mem::replace(&mut self.arguments, arguments),
+            constructing: None,
+            locals: std::mem::replace(&mut self.locals, locals),
+            instruction: self.instruction,
+            stack_base,
+        });
+        self.function = Some(closure);
+        self.instruction = instruction_pointer;
+        self.stack.extend(saved_stack);
+        if started {
+            // The value the caller sent becomes the result of the `yield` that suspended.
+            self.stack.push(sent);
+        }
+
+        self.suspended = false;
+        let outcome = self.run_frames(depth)?;
+
+        if self.suspended {
+            let mut state = generator.borrow_mut();
+            state.locals = std::mem::take(&mut self.locals);
+            state.instruction = self.instruction;
+            state.stack = self.stack.split_off(stack_base);
+            state.started = true;
+            drop(state);
+
+            let frame = self.frames.pop().expect("this resumption pushed a frame");
+            self.locals = frame.locals;
+            self.function = frame.function;
+            self.this_value = frame.this_value;
+            self.arguments = frame.arguments;
+            self.instruction = frame.instruction;
+            self.suspended = false;
+            return Ok((outcome.value, false));
+        }
+
+        // A normal return finished the generator; `run_frames` already restored the caller.
+        generator.borrow_mut().done = true;
+        let _ = instruction;
+        Ok((outcome.value, true))
+    }
+
     /// Collect every value an iterable yields.
     ///
     /// Drives the same protocol `for-of` uses rather than a second one, so anything iterable in
@@ -1391,6 +1577,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 instruction,
             )?;
             match method {
+                // Dispatched before `array_callback` is reached; a generator method is not an
+                // array walk.
+                CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
+                    unreachable!("generator methods are handled by `invoke`")
+                }
                 CallbackMethod::Map => collected.push(result),
                 CallbackMethod::ForEach => {}
                 CallbackMethod::Filter => {
@@ -1418,6 +1609,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
 
         Ok(match method {
+            CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
+                unreachable!("generator methods are handled by `invoke`")
+            }
             CallbackMethod::Map | CallbackMethod::Filter => {
                 Value::Array(Rc::new(RefCell::new(collected)))
             }
@@ -1442,6 +1636,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Value, ExecutionError> {
         match callee {
             Value::Native(native) => Ok(call_native(*native, &this_value, &arguments)),
+            // A callback method reaches here when a built-in drives another built-in -- a spread
+            // over a generator, for instance. `invoke` is the one place that knows how to run
+            // each kind, so this defers to it rather than repeating the dispatch.
+            Value::Callback(_) => Ok(self
+                .invoke(callee.clone(), this_value, arguments, instruction)?
+                .unwrap_or(Value::Undefined)),
             Value::Function(closure) => {
                 let depth = self.frames.len();
                 // The shared call path expects a callee beneath the arguments and pops it.
@@ -1684,7 +1884,25 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
             // Unbound, so that reading the same method twice yields the same value. The
             // receiver is supplied by `CallMethod`, not captured here.
+            // Strings expose `length` and the iterator. `length` is UTF-16 code units, which is
+            // what JavaScript counts, and is not the same as either bytes or characters.
+            Value::String(text) if name == "length" => {
+                Value::Number(text.encode_utf16().count() as f64)
+            }
+            Value::String(_) if name == "values" || name == WellKnown::Iterator.property_key() => {
+                Value::Native(Native::StringValues)
+            }
             Value::Array(_) => array_property(name),
+            // A generator object is its own iterator, which is what lets one be used directly in
+            // `for-of` and in a spread.
+            Value::Generator(_) => match name {
+                "next" => Value::Callback(CallbackMethod::GeneratorNext),
+                "return" => Value::Callback(CallbackMethod::GeneratorReturn),
+                key if key == WellKnown::Iterator.property_key() => {
+                    Value::Native(Native::IteratorSelf)
+                }
+                _ => Value::Undefined,
+            },
             _ => Value::Undefined,
         }
     }
@@ -1715,6 +1933,29 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Option<Value>, ExecutionError> {
         match method {
             Value::Native(native) => Ok(Some(call_native(native, &receiver, &arguments))),
+            // Generator methods drive the machine, so they cannot go through `array_callback`.
+            Value::Callback(
+                method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
+            ) => {
+                let Value::Generator(generator) = &receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let generator = Rc::clone(generator);
+                let (value, done) = if matches!(method, CallbackMethod::GeneratorReturn) {
+                    // `return(v)` finishes the generator without resuming it. A full
+                    // implementation would run the body's `finally` blocks first; this does not,
+                    // which is a real gap and is why g14 still fails.
+                    generator.borrow_mut().done = true;
+                    (arguments.first().cloned().unwrap_or(Value::Undefined), true)
+                } else {
+                    let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
+                    self.resume_generator(&generator, sent, instruction)?
+                };
+                Ok(Some(iteration_result(value, done)))
+            }
             Value::Callback(method) => Ok(Some(self.array_callback(
                 method,
                 &receiver,
@@ -1871,6 +2112,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
+        if proto.generator {
+            // Calling a generator function does not run it: it captures the arguments and hands
+            // back an object whose `next` runs the body up to each `yield`.
+            let generator = self.build_generator(&closure, argc, instruction)?;
+            self.stack.push(generator);
+            return Ok(());
+        }
         if self.frames.len() >= self.limits.max_call_depth {
             return Err(ExecutionError::CallDepthExceeded {
                 limit: self.limits.max_call_depth,
@@ -2152,6 +2400,31 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             _ => Value::Undefined,
         },
         Native::IteratorSelf => receiver.clone(),
+        Native::StringValues => {
+            let Value::String(text) = receiver else {
+                return Value::Undefined;
+            };
+            // A string iterator walks code points, not UTF-16 units: an astral character is one
+            // step, which is the difference between iterating a string and indexing it.
+            let characters = text
+                .chars()
+                .map(|character| Value::String(character.to_string()))
+                .collect::<Vec<_>>();
+            let mut iterator = ObjectData::default();
+            iterator.set(
+                "@@iterated",
+                Value::Array(Rc::new(RefCell::new(characters))),
+            );
+            iterator.set("@@index", Value::Number(0.0));
+            iterator.set("next", Value::Native(Native::StringIteratorNext));
+            iterator.set(
+                WellKnown::Iterator.property_key(),
+                Value::Native(Native::IteratorSelf),
+            );
+            Value::Object(Rc::new(RefCell::new(iterator)))
+        }
+        // The state shape is the array iterator's, so the same stepper serves both.
+        Native::StringIteratorNext => call_native(Native::ArrayIteratorNext, receiver, arguments),
         Native::SetAdd | Native::MapSet => {
             let Some((entries, is_map)) = collection_state(receiver) else {
                 return Value::Undefined;
@@ -2512,6 +2785,10 @@ fn array_callback_method(name: &str) -> Option<CallbackMethod> {
 /// re-enter the interpreter, which only the VM can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallbackMethod {
+    /// `next` on a generator: resumes the body, which the VM must drive.
+    GeneratorNext,
+    /// `return` on a generator: finishes it without resuming.
+    GeneratorReturn,
     Map,
     ForEach,
     Filter,
@@ -2579,6 +2856,7 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         // One `Error` per realm, so two references to it are the same function.
         (Value::Native(a), Value::Native(b)) => a == b,
         (Value::Callback(a), Value::Callback(b)) => a == b,
+        (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
         (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
         _ => false,
@@ -2668,6 +2946,7 @@ mod tests {
             functions: vec![kiln_ir::FunctionProto {
                 name: Some("second".to_owned()),
                 arrow: false,
+                generator: false,
                 parameter_count: 2,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
@@ -3181,6 +3460,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("outer".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -3195,6 +3475,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("inner".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -3231,6 +3512,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("outer".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -3245,6 +3527,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("read".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
@@ -3265,6 +3548,7 @@ mod tests {
             functions: vec![kiln_ir::FunctionProto {
                 name: None,
                 arrow: false,
+                generator: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![Instruction::Return],
@@ -3354,6 +3638,7 @@ mod tests {
             functions: vec![kiln_ir::FunctionProto {
                 name: Some("forever".to_owned()),
                 arrow: false,
+                generator: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![
@@ -3395,6 +3680,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("write".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -3408,6 +3694,7 @@ mod tests {
                 kiln_ir::FunctionProto {
                     name: Some("read".to_owned()),
                     arrow: false,
+                    generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],

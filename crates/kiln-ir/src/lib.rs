@@ -125,6 +125,14 @@ pub enum Instruction {
     PopHandler,
     /// Throw the value on top of the stack.
     Throw,
+    /// Suspend the running generator, handing the value on top of the stack to its caller.
+    ///
+    /// Leaves whatever the caller sends with the next `next(v)` in its place, which is why
+    /// `yield` is an expression rather than a statement.
+    Yield,
+    /// `yield*`: hand every value the iterable on top of the stack produces to the caller, one
+    /// resumption at a time, and leave that iterable's own return value.
+    YieldDelegate,
     /// Push this frame's `arguments` as an array.
     ///
     /// Built on demand rather than on every call: most functions never mention it, and
@@ -215,6 +223,8 @@ pub struct FunctionProto {
     pub name: Option<String>,
     /// An arrow function: it has no `this` of its own and captures the defining scope's.
     pub arrow: bool,
+    /// A generator: calling it builds an object rather than running the body.
+    pub generator: bool,
     pub parameter_count: u32,
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
@@ -1237,6 +1247,17 @@ impl Compiler {
                 self.call(callee, arguments, expression.span)
             }
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::Yield { delegate, value } => {
+                match value {
+                    Some(value) => self.expression(value),
+                    None => self.push_constant(Constant::Undefined),
+                }
+                self.code.push(if *delegate {
+                    Instruction::YieldDelegate
+                } else {
+                    Instruction::Yield
+                });
+            }
             ExpressionKind::Class(class) => self.class_expression(class, expression.span),
             ExpressionKind::Update {
                 increment,
@@ -1510,6 +1531,7 @@ impl Compiler {
             None => Function {
                 name: Some(name.clone()),
                 arrow: false,
+                generator: false,
                 parameters: Vec::new(),
                 body: Vec::new(),
                 span: class.span,
@@ -1810,6 +1832,7 @@ impl Compiler {
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
+            generator: function.generator,
             parameter_count,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),
@@ -2465,6 +2488,11 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(operand, names, collecting);
             }
         }
+        ExpressionKind::Yield { value, .. } => {
+            if let Some(value) = value {
+                collect_identifiers(value, names, collecting);
+            }
+        }
         ExpressionKind::ComputedMember { object, property } => {
             collect_identifiers(object, names, collecting);
             collect_identifiers(property, names, collecting);
@@ -2553,6 +2581,9 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
         }
+        ExpressionKind::Yield { value, .. } => value
+            .as_ref()
+            .is_some_and(|value| expression_references(value, name)),
         ExpressionKind::Class(_)
         | ExpressionKind::This
         | ExpressionKind::Function(_)
@@ -2614,6 +2645,7 @@ mod tests {
         statement(StatementKind::Function(Box::new(kiln_hir::Function {
             name: Some(name.to_owned()),
             arrow: false,
+            generator: false,
             parameters: parameters
                 .iter()
                 .map(|name| kiln_hir::Parameter {
@@ -2643,6 +2675,7 @@ mod tests {
             kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
                 name: None,
                 arrow: true,
+                generator: false,
                 parameters: parameters
                     .iter()
                     .map(|name| kiln_hir::Parameter {
