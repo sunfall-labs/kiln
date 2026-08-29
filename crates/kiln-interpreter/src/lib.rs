@@ -54,6 +54,10 @@ pub enum Native {
     JsonStringify,
     /// `Array.prototype.join`.
     ArrayJoin,
+    ArrayPush,
+    ArrayPop,
+    ArrayIndexOf,
+    ArrayIncludes,
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
     /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
     ArrayValues,
@@ -1735,6 +1739,35 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             }
             _ => Value::Array(Rc::new(RefCell::new(Vec::new()))),
         },
+        Native::ArrayPush => match receiver {
+            Value::Array(items) => {
+                let mut items = items.borrow_mut();
+                items.extend(arguments.iter().cloned());
+                Value::Number(items.len() as f64)
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayPop => match receiver {
+            // Popping an empty array is `undefined`, not an error.
+            Value::Array(items) => items.borrow_mut().pop().unwrap_or(Value::Undefined),
+            _ => Value::Undefined,
+        },
+        Native::ArrayIndexOf | Native::ArrayIncludes => {
+            let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let found = match receiver {
+                // `indexOf` uses strict equality, so NaN is never found and `-0` matches `0`.
+                Value::Array(items) => items
+                    .borrow()
+                    .iter()
+                    .position(|item| strict_equal(item, &needle)),
+                _ => None,
+            };
+            if matches!(native, Native::ArrayIncludes) {
+                Value::Boolean(found.is_some())
+            } else {
+                Value::Number(found.map_or(-1.0, |index| index as f64))
+            }
+        }
         Native::ArrayJoin => {
             let separator = match arguments.first() {
                 None | Some(Value::Undefined) => ",".to_owned(),
@@ -1858,6 +1891,10 @@ fn has_property(target: &Value, key: &Value) -> bool {
 fn array_property(name: &str) -> Value {
     match name {
         "join" => Value::Native(Native::ArrayJoin),
+        "push" => Value::Native(Native::ArrayPush),
+        "pop" => Value::Native(Native::ArrayPop),
+        "indexOf" => Value::Native(Native::ArrayIndexOf),
+        "includes" => Value::Native(Native::ArrayIncludes),
         "values" => Value::Native(Native::ArrayValues),
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,
