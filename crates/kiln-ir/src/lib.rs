@@ -1855,6 +1855,7 @@ impl Compiler {
             // A class with no constructor gets an empty one, so `new` needs no special case for
             // classes that declared none.
             None => Function {
+                rest: None,
                 name: Some(name.clone()),
                 arrow: false,
                 generator: false,
@@ -2072,25 +2073,34 @@ impl Compiler {
         // Which of this function's own bindings its nested functions refer to. Computed before
         // the body is compiled because a declaration has to know, at the point it allocates its
         // slot, whether that slot holds a value or a cell.
-        let captured = names_captured_by_nested_functions(&function.body);
+        let captured = names_captured_by_this_function(function);
 
+        // Every parameter owns a positional slot, whether or not it binds a name there. A plain
+        // identifier binds the slot itself, which keeps the common call free of any prologue; a
+        // pattern leaves the slot anonymous and is destructured out of it below, into ordinary
+        // locals that behave like any other binding.
         let mut parameters = HashMap::with_capacity(function.parameters.len());
         let mut celled_parameters = Vec::new();
+        let mut destructured = Vec::new();
         for (slot, parameter) in function.parameters.iter().enumerate() {
-            if parameters.contains_key(&parameter.name) {
+            let slot = slot as u32;
+            let Pattern::Identifier(name) = &parameter.pattern else {
+                destructured.push((slot, &parameter.pattern, parameter.span));
+                continue;
+            };
+            if parameters.contains_key(name) {
                 self.error(
                     Some(parameter.span),
-                    format!("duplicate parameter `{}`", parameter.name),
+                    format!("duplicate parameter `{name}`"),
                 );
                 return None;
             }
-            let slot = slot as u32;
-            let celled = captured.contains(&parameter.name);
+            let celled = captured.contains(name);
             if celled {
                 celled_parameters.push(slot);
             }
             parameters.insert(
-                parameter.name.clone(),
+                name.clone(),
                 Local {
                     slot,
                     kind: VariableKind::Let,
@@ -2122,6 +2132,27 @@ impl Compiler {
             self.code.push(Instruction::LoadLocal(slot));
             self.code.push(Instruction::NewCell(slot));
             self.code.push(Instruction::StoreCell(slot));
+        }
+
+        // Destructure the parameters that bind a pattern, in declaration order, before anything
+        // in the body can read them. `bind_pattern` is the same code a `const { a } = x` uses, so
+        // defaults, renaming, nesting and rest behave identically wherever they are written.
+        for (slot, pattern, span) in destructured {
+            self.code.push(Instruction::LoadLocal(slot));
+            self.bind_pattern(VariableKind::Let, pattern, span);
+        }
+
+        // `...rest` is the arguments beyond the declared parameters. Taken from the arguments
+        // object rather than from slots, because its length is decided by the caller.
+        if let Some(rest) = &function.rest {
+            self.code.push(Instruction::LoadArguments);
+            self.push_constant(Constant::Number(f64::from(parameter_count).to_bits()));
+            let slice = self.constant_index(Constant::String("slice".to_owned()));
+            self.code.push(Instruction::CallMethod {
+                name: slice,
+                argc: 1,
+            });
+            self.bind_pattern(VariableKind::Let, rest, function.span);
         }
 
         if forwards_to_super {
@@ -2613,6 +2644,46 @@ fn names_captured_by_nested_functions(body: &[Statement]) -> HashSet<String> {
     captured
 }
 
+/// As [`names_captured_by_nested_functions`], but for a whole function rather than a body.
+///
+/// A parameter default is compiled in the function's own scope and may contain a nested function
+/// of its own -- `function f(a, cb = () => a)` captures `a`, and nothing in the body says so. The
+/// body-only scan leaves `a` unboxed, and the arrow then cannot reach it at all.
+fn names_captured_by_this_function(function: &Function) -> HashSet<String> {
+    let mut captured = names_captured_by_nested_functions(&function.body);
+    for parameter in &function.parameters {
+        collect_pattern_default_captures(&parameter.pattern, &mut captured);
+    }
+    if let Some(rest) = &function.rest {
+        collect_pattern_default_captures(rest, &mut captured);
+    }
+    captured
+}
+
+/// Names that nested functions inside a pattern's defaults refer to.
+fn collect_pattern_default_captures(pattern: &Pattern, names: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Identifier(_) => {}
+        Pattern::WithDefault { inner, default } => {
+            collect_identifiers(default, names, false);
+            collect_pattern_default_captures(inner, names);
+        }
+        Pattern::Object { properties, .. } => {
+            for property in properties {
+                collect_pattern_default_captures(&property.value, names);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for element in elements.iter().flatten() {
+                collect_pattern_default_captures(element, names);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_default_captures(rest, names);
+            }
+        }
+    }
+}
+
 fn collect_nested_function_names(
     statement: &Statement,
     names: &mut HashSet<String>,
@@ -3015,10 +3086,11 @@ mod tests {
             parameters: parameters
                 .iter()
                 .map(|name| kiln_hir::Parameter {
-                    name: (*name).to_owned(),
+                    pattern: kiln_hir::Pattern::Identifier((*name).to_owned()),
                     span: Span::default(),
                 })
                 .collect(),
+            rest: None,
             body,
             span: Span::default(),
         })))
@@ -3032,10 +3104,7 @@ mod tests {
             .collect()
     }
 
-    /// A capture must box the *binding*: both closures over one variable have to see the same
-    /// cell, or the second one reads a stale copy.
-    /// A compound member assignment must evaluate its receiver once. Compiling the object
-    /// expression twice would be the easy mistake and would double any side effect in it.
+    /// An arrow function taking the given parameters.
     fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
         Expression {
             kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
@@ -3045,10 +3114,11 @@ mod tests {
                 parameters: parameters
                     .iter()
                     .map(|name| kiln_hir::Parameter {
-                        name: (*name).to_owned(),
+                        pattern: kiln_hir::Pattern::Identifier((*name).to_owned()),
                         span: Span::default(),
                     })
                     .collect(),
+                rest: None,
                 body,
                 span: Span::default(),
             })),

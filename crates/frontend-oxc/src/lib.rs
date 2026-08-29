@@ -22,8 +22,8 @@ use oxc_ast::ast::{
 };
 use oxc_ast::ast::{
     ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
-    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, Function,
-    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
+    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters,
+    Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
     VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_parser::Parser;
@@ -904,6 +904,41 @@ impl Lowerer {
         })
     }
 
+    /// Lower a parameter list, including defaults and a rest parameter.
+    ///
+    /// oxc keeps a parameter's default on the `FormalParameter` rather than inside its binding
+    /// pattern, so reading only `item.pattern` sees a plain identifier for `f(x = 1)` and drops
+    /// the default without a word. That is exactly the silent-alteration this frontend refuses
+    /// everywhere else, and it is why the default is folded in here rather than in `pattern`.
+    fn parameters(
+        &mut self,
+        parameters: &FormalParameters<'_>,
+    ) -> (Vec<HirParameter>, Option<kiln_hir::Pattern>) {
+        let lowered = parameters
+            .items
+            .iter()
+            .map(|item| {
+                let item_span = span(item.span);
+                let pattern = self.pattern(&item.pattern, item_span);
+                HirParameter {
+                    pattern: match &item.initializer {
+                        Some(default) => kiln_hir::Pattern::WithDefault {
+                            inner: Box::new(pattern),
+                            default: Box::new(self.expression(default)),
+                        },
+                        None => pattern,
+                    },
+                    span: item_span,
+                }
+            })
+            .collect();
+        let rest = parameters
+            .rest
+            .as_ref()
+            .map(|rest| self.pattern(&rest.rest.argument, span(rest.span)));
+        (lowered, rest)
+    }
+
     /// Lower an arrow function.
     ///
     /// An expression body becomes a single `return`, which is what it means. The arrow flag is
@@ -918,22 +953,7 @@ impl Lowerer {
             self.unsupported("async arrow function", expression_span);
             return None;
         }
-        if arrow.params.rest.is_some() {
-            self.unsupported("rest parameter", expression_span);
-            return None;
-        }
-
-        let mut parameters = Vec::with_capacity(arrow.params.items.len());
-        for item in &arrow.params.items {
-            let BindingPattern::BindingIdentifier(identifier) = &item.pattern else {
-                self.unsupported("destructuring parameter", span(item.span));
-                return None;
-            };
-            parameters.push(HirParameter {
-                name: identifier.name.to_string(),
-                span: span(identifier.span),
-            });
-        }
+        let (parameters, rest) = self.parameters(&arrow.params);
 
         let body = match &arrow.body {
             ArrowFunctionBody::FunctionBody(block) => block
@@ -960,6 +980,7 @@ impl Lowerer {
             arrow: true,
             generator: false,
             parameters,
+            rest,
             body,
             span: expression_span,
         })
@@ -975,24 +996,7 @@ impl Lowerer {
             self.unsupported("async function", statement_span);
             return None;
         }
-        if declaration.params.rest.is_some() {
-            self.unsupported("rest parameter", statement_span);
-            return None;
-        }
-
-        let mut parameters = Vec::with_capacity(declaration.params.items.len());
-        for item in &declaration.params.items {
-            let BindingPattern::BindingIdentifier(identifier) = &item.pattern else {
-                // Destructuring, defaults and rest each have their own semantics. Naming the
-                // parameter anyway would produce a function that binds the wrong thing.
-                self.unsupported("destructuring parameter", span(item.span));
-                return None;
-            };
-            parameters.push(HirParameter {
-                name: identifier.name.to_string(),
-                span: span(identifier.span),
-            });
-        }
+        let (parameters, rest) = self.parameters(&declaration.params);
 
         let body = declaration.body.as_ref()?;
         let statements = body
@@ -1006,6 +1010,7 @@ impl Lowerer {
             arrow: false,
             generator: declaration.generator,
             parameters,
+            rest,
             body: statements,
             span: statement_span,
         })
@@ -1471,5 +1476,63 @@ mod tests {
             HirStatementKind::While { .. }
         ));
         assert!(matches!(module.body[2].kind, HirStatementKind::If { .. }));
+    }
+
+    /// The parameters of the single function a module declares.
+    fn parameters_of(source: &str) -> (Vec<kiln_hir::Parameter>, Option<kiln_hir::Pattern>) {
+        let module = parse("parameters.ts", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let Some(kiln_hir::StatementKind::Function(function)) =
+            module.body.first().map(|statement| &statement.kind)
+        else {
+            panic!("expected one function declaration");
+        };
+        (function.parameters.clone(), function.rest.clone())
+    }
+
+    #[test]
+    fn a_parameter_default_survives_lowering() {
+        // oxc keeps the default on the `FormalParameter`, not inside the binding pattern, so a
+        // lowering that reads only the pattern sees a bare identifier and drops the default in
+        // silence -- which is how `function a(x = 5) { return x }` came to return undefined.
+        let (parameters, _) = parameters_of("function a(x = 5) { return x; }");
+        let kiln_hir::Pattern::WithDefault { inner, default } = &parameters[0].pattern else {
+            panic!("expected a default, got {:?}", parameters[0].pattern);
+        };
+        assert_eq!(**inner, kiln_hir::Pattern::Identifier("x".to_owned()));
+        assert!(matches!(
+            default.kind,
+            kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::Number(_))
+        ));
+    }
+
+    #[test]
+    fn a_parameter_binds_whatever_pattern_was_written() {
+        let (parameters, _) = parameters_of("function a(plain, { key }, [item]) {}");
+        assert!(matches!(
+            parameters[0].pattern,
+            kiln_hir::Pattern::Identifier(_)
+        ));
+        assert!(matches!(
+            parameters[1].pattern,
+            kiln_hir::Pattern::Object { .. }
+        ));
+        assert!(matches!(
+            parameters[2].pattern,
+            kiln_hir::Pattern::Array { .. }
+        ));
+    }
+
+    #[test]
+    fn a_rest_parameter_is_separate_from_the_positional_ones() {
+        // It takes no positional slot and its arity is the caller's, so it cannot be one of them.
+        let (parameters, rest) = parameters_of("function a(first, ...others) {}");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(
+            rest,
+            Some(kiln_hir::Pattern::Identifier("others".to_owned()))
+        );
+        let (_, none) = parameters_of("function a(first) {}");
+        assert_eq!(none, None);
     }
 }

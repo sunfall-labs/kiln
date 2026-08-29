@@ -695,7 +695,7 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 # machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
 # stderr.
 [regress]
-tests = 5
+tests = 6
 authored = "2026-08-29"
 expected_output_method = "Ran `node <probe>.js` and recorded the bytes it printed."
 
@@ -802,4 +802,30 @@ expected_stdout = """
 {"x":1,"y":2,"z":3} x,z
 1 {"b":2,"c":3} 5 {"d":6} undefined {"a":1,"b":2}
 one two false 0
+"""
+
+[[test]]
+id = "regress/r06-parameter-forms"
+group = "regress"
+source = "regress/r06-parameter-forms.js"
+status = "runnable"
+features = ["parameters", "default-parameters", "rest-parameters", "destructuring", "closures", "arguments-object"]
+catches = """
+Every parameter form, and one silent wrong answer in particular: oxc keeps a parameter's default \
+on the `FormalParameter` rather than inside its binding pattern, so a frontend that reads only \
+`item.pattern` sees a plain identifier for `f(x = 1)` and drops the default without a \
+diagnostic. The refusal guard around destructuring never fired, because the pattern really is \
+just an identifier. Also pins what a default applies to (`undefined` only), that it is evaluated \
+per call, that rest is an empty array rather than undefined, that `arguments` reports what was \
+passed rather than what was defaulted, and that a closure written *in another parameter's \
+default* still shares the binding -- the one capture the body-only analysis cannot see.\
+"""
+expected_stdout = """
+5 2 5 null
+3 11 1 1
+1: 1:2,3 0 1 true:0
+1,2,9 1,7 15 1 {"extra":2}
+1 2 9 42
+inner outer
+3 0 2
 """
