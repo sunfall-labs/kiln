@@ -191,6 +191,11 @@ pub struct Closure {
     pub function: u32,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
+    /// The enclosing function's `arguments`, captured for an arrow.
+    ///
+    /// An arrow has no `arguments` of its own; it sees the enclosing function's, from where it
+    /// was written. Captured alongside `this` because the rule is the same one.
+    pub captured_arguments: Option<Vec<Value>>,
     /// `this` captured where the closure was written, for an arrow function.
     ///
     /// An arrow has no `this` of its own: it uses the one from its defining scope, permanently.
@@ -250,6 +255,8 @@ pub enum Value {
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
     Array(Rc<RefCell<Vec<Value>>>),
+    /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
+    Callback(CallbackMethod),
     /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
     Symbol(WellKnown),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
@@ -292,7 +299,7 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
-            Self::Native(_) => "function",
+            Self::Native(_) | Self::Callback(_) => "function",
             Self::Array(_) => "object",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -309,7 +316,7 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
-            Self::Native(_) => "function",
+            Self::Native(_) | Self::Callback(_) => "function",
             Self::Array(_) => "array",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
@@ -332,7 +339,7 @@ impl Value {
             Self::Function(_) => f64::NAN,
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
-            Self::Object(_) | Self::Native(_) => f64::NAN,
+            Self::Object(_) | Self::Native(_) | Self::Callback(_) => f64::NAN,
             // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
             Self::Symbol(_) => f64::NAN,
             // `Number([])` is 0 and `Number([2])` is 2: ToPrimitive joins, then parses.
@@ -350,7 +357,11 @@ impl Value {
             // Every object is truthy, and a function is an object.
             Self::Function(_) => true,
             // Every object is truthy, including an empty one.
-            Self::Object(_) | Self::Native(_) | Self::Array(_) | Self::Symbol(_) => true,
+            Self::Object(_)
+            | Self::Native(_)
+            | Self::Callback(_)
+            | Self::Array(_)
+            | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -376,6 +387,7 @@ impl Value {
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
             Self::Native(native) => format!("[Function {native:?}]"),
+            Self::Callback(method) => format!("[Function {method:?}]"),
             Self::Symbol(symbol) => format!(
                 "Symbol(Symbol.{})",
                 symbol.property_key().trim_start_matches("@@")
@@ -414,6 +426,7 @@ impl From<Value> for HostValue {
             Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
             Value::Object(_) => Self::String("[object Object]".to_owned()),
             Value::Native(native) => Self::String(format!("[Function {native:?}]")),
+            Value::Callback(method) => Self::String(format!("[Function {method:?}]")),
             Value::Symbol(symbol) => Self::String(symbol.property_key().to_owned()),
             Value::Array(items) => Self::String(join(&items.borrow(), ",")),
             Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
@@ -750,6 +763,17 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
 
 impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
+        // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
+        // `Return` -- the end of the program.
+        self.run_frames(usize::MAX)
+    }
+
+    /// Run until the frame stack drops back to `stop_at`, or until the program ends.
+    ///
+    /// The boundary is what lets a built-in call back into user code: `map` pushes a frame for
+    /// its callback and then drives the machine until that frame returns, rather than needing a
+    /// second interpreter or a continuation.
+    fn run_frames(&mut self, stop_at: usize) -> Result<ExecutionResult, ExecutionError> {
         loop {
             if self.steps >= self.limits.max_steps {
                 return Err(ExecutionError::StepLimitExceeded {
@@ -962,6 +986,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 Instruction::SuperCall { argc } => {
                     self.super_call(*argc, current)?;
+                }
+                Instruction::LoadArguments => {
+                    let arguments = self.arguments.clone();
+                    self.stack
+                        .push(Value::Array(Rc::new(RefCell::new(arguments))));
                 }
                 Instruction::LoadThis => {
                     let this_value = self.this_value.clone();
@@ -1180,8 +1209,120 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         value = instance;
                     }
                     self.stack.push(value);
+                    if self.frames.len() == stop_at {
+                        return Ok(ExecutionResult {
+                            value: self.stack.pop().unwrap_or(Value::Undefined),
+                            steps: self.steps,
+                        });
+                    }
                 }
             }
+        }
+    }
+
+    /// Run an array method that takes a callback.
+    ///
+    /// The length is re-read each step, so an array mutated by the callback behaves the way
+    /// JavaScript says: elements appended during the walk are not visited, and a shortened array
+    /// stops early rather than reading past its end.
+    fn array_callback(
+        &mut self,
+        method: CallbackMethod,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Array(items) = receiver else {
+            return Ok(Value::Undefined);
+        };
+        let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+
+        let mut collected = Vec::new();
+        let mut index = 0usize;
+        loop {
+            let Some(item) = items.borrow().get(index).cloned() else {
+                break;
+            };
+            let result = self.call_value(
+                &callback,
+                this_value.clone(),
+                vec![item.clone(), Value::Number(index as f64), receiver.clone()],
+                instruction,
+            )?;
+            match method {
+                CallbackMethod::Map => collected.push(result),
+                CallbackMethod::ForEach => {}
+                CallbackMethod::Filter => {
+                    if result.is_truthy() {
+                        collected.push(item);
+                    }
+                }
+                CallbackMethod::Find => {
+                    if result.is_truthy() {
+                        return Ok(item);
+                    }
+                }
+                CallbackMethod::Some => {
+                    if result.is_truthy() {
+                        return Ok(Value::Boolean(true));
+                    }
+                }
+                CallbackMethod::Every => {
+                    if !result.is_truthy() {
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        Ok(match method {
+            CallbackMethod::Map | CallbackMethod::Filter => {
+                Value::Array(Rc::new(RefCell::new(collected)))
+            }
+            CallbackMethod::ForEach | CallbackMethod::Find => Value::Undefined,
+            CallbackMethod::Some => Value::Boolean(false),
+            CallbackMethod::Every => Value::Boolean(true),
+        })
+    }
+
+    /// Call `callee` and run it to completion, returning its value.
+    ///
+    /// For a native this is a direct call; for a compiled function it pushes a frame and drives
+    /// the machine until that frame returns. Built-ins that take a callback -- `map`, `filter`,
+    /// `forEach` -- need exactly this, and having one place that does it keeps them from each
+    /// inventing a way to re-enter the interpreter.
+    fn call_value(
+        &mut self,
+        callee: &Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match callee {
+            Value::Native(native) => Ok(call_native(*native, &this_value, &arguments)),
+            Value::Function(closure) => {
+                let depth = self.frames.len();
+                // The shared call path expects a callee beneath the arguments and pops it.
+                self.stack.push(Value::Undefined);
+                let argc = arguments.len();
+                for argument in arguments {
+                    self.stack.push(argument);
+                }
+                self.call_with_this(
+                    Rc::clone(closure),
+                    argc as u16,
+                    instruction,
+                    this_value,
+                    None,
+                )?;
+                Ok(self.run_frames(depth)?.value)
+            }
+            other => Err(ExecutionError::NotCallable {
+                instruction,
+                value: other.type_name(),
+            }),
         }
     }
 
@@ -1348,6 +1489,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             } else {
                 None
             },
+            captured_arguments: if proto.arrow {
+                Some(self.arguments.clone())
+            } else {
+                None
+            },
             prototype: RefCell::new(None),
             properties: RefCell::new(ObjectData::default()),
         }))
@@ -1429,6 +1575,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Option<Value>, ExecutionError> {
         match method {
             Value::Native(native) => Ok(Some(call_native(native, &receiver, &arguments))),
+            Value::Callback(method) => Ok(Some(self.array_callback(
+                method,
+                &receiver,
+                &arguments,
+                instruction,
+            )?)),
             Value::Function(closure) => {
                 // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
                 // the shared call path receives them; it pops the placeholder as the callee.
@@ -1601,10 +1753,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             locals[slot] = argument;
         }
 
-        // An arrow ignores the receiver entirely and uses what it captured.
+        // An arrow ignores the receiver entirely and uses what it captured, and the same holds
+        // for `arguments`.
         let entering = match &closure.captured_this {
             Some(captured) => captured.clone(),
             None => this_value,
+        };
+        let received = match &closure.captured_arguments {
+            Some(captured) => captured.clone(),
+            None => received,
         };
         self.frames.push(Frame {
             function: self.function.take(),
@@ -2186,7 +2343,37 @@ fn same_value_zero(left: &Value, right: &Value) -> bool {
     }
 }
 
+/// Array methods that call back into user code, and so cannot be plain natives.
+fn array_callback_method(name: &str) -> Option<CallbackMethod> {
+    match name {
+        "map" => Some(CallbackMethod::Map),
+        "forEach" => Some(CallbackMethod::ForEach),
+        "filter" => Some(CallbackMethod::Filter),
+        "find" => Some(CallbackMethod::Find),
+        "some" => Some(CallbackMethod::Some),
+        "every" => Some(CallbackMethod::Every),
+        _ => None,
+    }
+}
+
+/// A built-in that takes a function argument.
+///
+/// Separate from `Native` because these cannot be evaluated by `call_native`: they need to
+/// re-enter the interpreter, which only the VM can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallbackMethod {
+    Map,
+    ForEach,
+    Filter,
+    Find,
+    Some,
+    Every,
+}
+
 fn array_property(name: &str) -> Value {
+    if let Some(method) = array_callback_method(name) {
+        return Value::Callback(method);
+    }
     match name {
         "join" => Value::Native(Native::ArrayJoin),
         "push" => Value::Native(Native::ArrayPush),
@@ -2241,6 +2428,7 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
         // One `Error` per realm, so two references to it are the same function.
         (Value::Native(a), Value::Native(b)) => a == b,
+        (Value::Callback(a), Value::Callback(b)) => a == b,
         (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
         _ => false,
@@ -2534,6 +2722,7 @@ mod tests {
             function: 0,
             upvalues: Vec::new(),
             captured_this: None,
+            captured_arguments: None,
             prototype: RefCell::new(Some(parent_prototype.clone())),
             properties: RefCell::new(ObjectData::default()),
         });
@@ -2545,6 +2734,7 @@ mod tests {
             function: 1,
             upvalues: Vec::new(),
             captured_this: None,
+            captured_arguments: None,
             prototype: RefCell::new(Some(child_prototype.clone())),
             properties: RefCell::new(ObjectData::default()),
         });
@@ -2568,6 +2758,7 @@ mod tests {
             function: 2,
             upvalues: Vec::new(),
             captured_this: None,
+            captured_arguments: None,
             prototype: RefCell::new(Some(Value::Object(Rc::new(RefCell::new(
                 ObjectData::default(),
             ))))),
