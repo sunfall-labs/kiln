@@ -427,6 +427,17 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     })
 }
 
+/// Unpatched exits from one loop.
+///
+/// Collected rather than patched as they are emitted, because neither target is known until the
+/// loop's shape is finished: `break` needs the address after the loop and `continue` needs the
+/// update clause.
+#[derive(Default)]
+struct LoopContext {
+    breaks: Vec<usize>,
+    continues: Vec<usize>,
+}
+
 #[derive(Clone, Copy)]
 struct Local {
     slot: u32,
@@ -475,6 +486,9 @@ struct Compiler {
     upvalues: Vec<Upvalue>,
     upvalue_names: HashMap<String, u32>,
     captured: HashSet<String>,
+    /// Loops currently being compiled, innermost last, holding the jumps their `break` and
+    /// `continue` statements still need patched.
+    loops: Vec<LoopContext>,
     /// The hidden `super` bindings of the derived classes currently being compiled, innermost
     /// last. A stack rather than a field because class bodies nest.
     super_bindings: Vec<String>,
@@ -502,6 +516,7 @@ impl Compiler {
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
             captured: HashSet::new(),
+            loops: Vec::new(),
             super_bindings: Vec::new(),
             super_binding_count: 0,
             scopes: vec![HashMap::new()],
@@ -601,6 +616,22 @@ impl Compiler {
                 alternate,
             } => self.if_statement(test, consequent, alternate.as_deref()),
             StatementKind::While { test, body } => self.while_statement(test, body),
+            StatementKind::For {
+                init,
+                test,
+                update,
+                body,
+            } => self.for_statement(
+                init.as_deref(),
+                test.as_ref(),
+                update.as_ref(),
+                body,
+                statement.span,
+            ),
+            StatementKind::Break { label } => self.jump_out(label.as_deref(), true, statement.span),
+            StatementKind::Continue { label } => {
+                self.jump_out(label.as_deref(), false, statement.span)
+            }
             StatementKind::Empty => {}
             StatementKind::Function(function) => {
                 self.function_declaration(function, statement.span)
@@ -718,6 +749,97 @@ impl Compiler {
         }
     }
 
+    /// `for (init; test; update) body`.
+    ///
+    /// The initialiser gets its own scope so a `let` there belongs to the loop rather than to
+    /// the enclosing block, and `continue` jumps to the update rather than to the test -- which
+    /// is the difference a `while` desugaring would silently lose.
+    fn for_statement(
+        &mut self,
+        init: Option<&Statement>,
+        test: Option<&Expression>,
+        update: Option<&Expression>,
+        body: &Statement,
+        span: Span,
+    ) {
+        let _ = span;
+        self.scopes.push(HashMap::new());
+        if let Some(init) = init {
+            self.statement(init);
+        }
+
+        let start = self.code.len();
+        let exit_jump = test.map(|test| {
+            self.expression(test);
+            self.emit_jump(Instruction::JumpIfFalse(0))
+        });
+
+        self.loops.push(LoopContext::default());
+        self.statement(body);
+        let context = self.loops.pop().expect("this loop pushed its own context");
+
+        // `continue` lands here rather than at the test, so the update still runs.
+        let update_target = self.code.len() as u32;
+        for jump in context.continues {
+            self.patch_jump_to(jump, update_target);
+        }
+        if let Some(update) = update {
+            self.expression(update);
+            self.code.push(Instruction::Pop);
+        }
+        self.code.push(Instruction::Jump(start as u32));
+
+        if let Some(exit_jump) = exit_jump {
+            self.patch_jump(exit_jump);
+        }
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+        self.scopes.pop().expect("loop scope was just pushed");
+    }
+
+    /// `break` or `continue`, recorded for the enclosing loop to patch once its shape is known.
+    fn jump_out(&mut self, label: Option<&str>, is_break: bool, span: Span) {
+        if label.is_some() {
+            // A labelled jump can leave several loops at once, which needs the label recorded on
+            // each loop context. Refused rather than treated as unlabelled, which would exit the
+            // wrong loop and look like it worked.
+            self.error(
+                Some(span),
+                "labelled break and continue are not supported yet",
+            );
+            return;
+        }
+        let jump = self.emit_jump(Instruction::Jump(0));
+        let Some(context) = self.loops.last_mut() else {
+            self.error(
+                Some(span),
+                if is_break {
+                    "`break` outside of a loop"
+                } else {
+                    "`continue` outside of a loop"
+                },
+            );
+            return;
+        };
+        if is_break {
+            context.breaks.push(jump);
+        } else {
+            context.continues.push(jump);
+        }
+    }
+
+    fn patch_jump_to(&mut self, jump: usize, target: u32) {
+        match &mut self.code[jump] {
+            Instruction::Jump(slot)
+            | Instruction::JumpIfFalse(slot)
+            | Instruction::JumpIfTruthy(slot)
+            | Instruction::JumpIfNotNullish(slot) => *slot = target,
+            other => unreachable!("patched a {other:?}, which is not a jump"),
+        }
+    }
+
     fn while_statement(&mut self, test: &Expression, body: &Statement) {
         let loop_start = self.code.len();
         self.expression(test);
@@ -811,6 +933,11 @@ impl Compiler {
                 self.call(callee, arguments, expression.span)
             }
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::Update {
+                increment,
+                prefix,
+                target,
+            } => self.update(*increment, *prefix, target, expression.span),
             ExpressionKind::SuperCall { arguments } => {
                 if arguments.len() > u16::MAX as usize {
                     self.error(Some(expression.span), "too many arguments to `super`");
@@ -1318,6 +1445,52 @@ impl Compiler {
     /// The object expression is evaluated once. `o().x += 1` must not call `o` twice, so the
     /// reference is duplicated on the stack rather than the expression being compiled twice --
     /// which would be the easy mistake and would double any side effect in the receiver.
+    /// `x++` and friends.
+    ///
+    /// The two forms differ only in when the value is duplicated: a prefix update yields the new
+    /// value, a postfix one the old. That is the whole reason this is not lowered to `x = x + 1`.
+    fn update(&mut self, increment: bool, prefix: bool, target: &str, span: Span) {
+        let (load, store) = match self.resolve_or_capture(target) {
+            Resolution::Local(local) if local.celled => (
+                Instruction::LoadCell(local.slot),
+                Instruction::StoreCell(local.slot),
+            ),
+            Resolution::Local(local) => (
+                Instruction::LoadLocal(local.slot),
+                Instruction::StoreLocal(local.slot),
+            ),
+            Resolution::Upvalue(index) => (
+                Instruction::LoadUpvalue(index),
+                Instruction::StoreUpvalue(index),
+            ),
+            Resolution::Global(slot) => (
+                Instruction::LoadGlobal(slot),
+                Instruction::StoreGlobal(slot),
+            ),
+            Resolution::Unresolved => {
+                self.error(Some(span), format!("unresolved identifier `{target}`"));
+                self.push_constant(Constant::Undefined);
+                return;
+            }
+        };
+
+        self.code.push(load);
+        if !prefix {
+            // Keep the old value beneath the arithmetic; the store below consumes the new one.
+            self.code.push(Instruction::Dup);
+        }
+        self.push_constant(Constant::Number(1.0f64.to_bits()));
+        self.code.push(Instruction::Binary(if increment {
+            BinaryOp::Add
+        } else {
+            BinaryOp::Subtract
+        }));
+        if prefix {
+            self.code.push(Instruction::Dup);
+        }
+        self.code.push(store);
+    }
+
     /// `object[key] = value`, and the compound forms.
     ///
     /// Both the object and the key are evaluated once, in that order, which is the order the
@@ -1680,7 +1853,27 @@ fn collect_nested_function_names(
             collect_identifiers(test, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
         }
-        StatementKind::Empty | StatementKind::Unsupported { .. } => {}
+        StatementKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                collect_nested_function_names(init, names, inside_function);
+            }
+            if let Some(test) = test {
+                collect_identifiers(test, names, inside_function);
+            }
+            if let Some(update) = update {
+                collect_identifiers(update, names, inside_function);
+            }
+            collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::Break { .. }
+        | StatementKind::Continue { .. }
+        | StatementKind::Empty
+        | StatementKind::Unsupported { .. } => {}
     }
 }
 
@@ -1701,6 +1894,11 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         ExpressionKind::Identifier(name) => {
             if collecting {
                 names.insert(name.clone());
+            }
+        }
+        ExpressionKind::Update { target, .. } => {
+            if collecting {
+                names.insert(target.clone());
             }
         }
         ExpressionKind::Literal(_)
@@ -1845,6 +2043,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
+        ExpressionKind::Update { target, .. } => target == name,
         ExpressionKind::Literal(_) => false,
     }
 }

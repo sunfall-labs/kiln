@@ -160,6 +160,25 @@ pub enum StatementKind {
         test: Expression,
         body: Box<Statement>,
     },
+    /// `for (init; test; update) body`.
+    ///
+    /// Kept as its own node rather than desugared into `while`: `continue` must run the update,
+    /// which a `while` desugaring loses, and a `let` binding in the initialiser is scoped to the
+    /// loop rather than to the enclosing block.
+    For {
+        init: Option<Box<Statement>>,
+        test: Option<Expression>,
+        update: Option<Expression>,
+        body: Box<Statement>,
+    },
+    /// `break`, optionally labelled.
+    Break {
+        label: Option<String>,
+    },
+    /// `continue`, optionally labelled.
+    Continue {
+        label: Option<String>,
+    },
     Empty,
     /// A hoisted function declaration.
     ///
@@ -246,6 +265,15 @@ pub enum ExpressionKind {
     /// `super.property`, which resolves on the parent's prototype rather than on `this`.
     SuperMember {
         property: String,
+    },
+    /// `x++`, `++x`, `x--`, `--x`.
+    ///
+    /// Not desugared into an assignment: the postfix form evaluates to the *old* value, which a
+    /// plain `x = x + 1` cannot express, and the distinction is invisible once lowered.
+    Update {
+        increment: bool,
+        prefix: bool,
+        target: String,
     },
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.

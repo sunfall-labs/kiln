@@ -23,12 +23,14 @@ use oxc_ast::ast::{
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
     VariableDeclaration, VariableDeclarationKind,
 };
+use oxc_ast::ast::{ForStatementInit, SimpleAssignmentTarget};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
     ImportImportName,
 };
+use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 
 /// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
@@ -240,14 +242,28 @@ impl Lowerer {
             Statement::DoWhileStatement(_) => {
                 self.unsupported_statement("do-while statement", statement_span)
             }
-            Statement::ForStatement(_)
-            | Statement::ForInStatement(_)
-            | Statement::ForOfStatement(_) => {
-                self.unsupported_statement("for statement", statement_span)
+            Statement::ForStatement(statement) => HirStatementKind::For {
+                init: statement
+                    .init
+                    .as_ref()
+                    .and_then(|init| self.for_init(init, statement_span))
+                    .map(Box::new),
+                test: statement.test.as_ref().map(|test| self.expression(test)),
+                update: statement
+                    .update
+                    .as_ref()
+                    .map(|update| self.expression(update)),
+                body: Box::new(self.statement_or_unsupported(&statement.body)),
+            },
+            Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
+                self.unsupported_statement("for-in or for-of statement", statement_span)
             }
-            Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
-                self.unsupported_statement("break or continue statement", statement_span)
-            }
+            Statement::BreakStatement(statement) => HirStatementKind::Break {
+                label: statement.label.as_ref().map(|label| label.name.to_string()),
+            },
+            Statement::ContinueStatement(statement) => HirStatementKind::Continue {
+                label: statement.label.as_ref().map(|label| label.name.to_string()),
+            },
             Statement::ReturnStatement(statement) => HirStatementKind::Return(
                 statement
                     .argument
@@ -556,8 +572,20 @@ impl Lowerer {
             Expression::YieldExpression(_) => {
                 return self.unsupported_expression("yield expression", expression_span);
             }
-            Expression::UpdateExpression(_) => {
-                return self.unsupported_expression("update expression", expression_span);
+            Expression::UpdateExpression(update) => {
+                let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                    &update.argument
+                else {
+                    // A member target needs the object evaluated once and its old value kept
+                    // below it on the stack; refused rather than evaluated twice.
+                    return self
+                        .unsupported_expression("update of a member expression", expression_span);
+                };
+                HirExpressionKind::Update {
+                    increment: matches!(update.operator, UpdateOperator::Increment),
+                    prefix: update.prefix,
+                    target: identifier.name.to_string(),
+                }
             }
             Expression::ThisExpression(_) => HirExpressionKind::This,
             Expression::SequenceExpression(_) => {
@@ -624,6 +652,27 @@ impl Lowerer {
             };
         };
         HirStatementKind::Function(Box::new(function))
+    }
+
+    /// A `for` initialiser is either a declaration or an expression.
+    fn for_init(
+        &mut self,
+        init: &ForStatementInit<'_>,
+        statement_span: HirSpan,
+    ) -> Option<HirStatement> {
+        match init {
+            ForStatementInit::VariableDeclaration(declaration) => Some(HirStatement {
+                kind: self.variable(declaration),
+                span: span(declaration.span),
+            }),
+            other => {
+                let expression = other.as_expression()?;
+                Some(HirStatement {
+                    kind: HirStatementKind::Expression(self.expression(expression)),
+                    span: statement_span,
+                })
+            }
+        }
     }
 
     /// Lower a class, or refuse it whole.
