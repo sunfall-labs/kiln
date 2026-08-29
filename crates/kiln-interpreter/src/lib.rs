@@ -60,6 +60,23 @@ pub enum Native {
     ArrayPop,
     ArrayIndexOf,
     ArrayIncludes,
+    SetConstructor,
+    MapConstructor,
+    SetAdd,
+    SetHas,
+    SetDelete,
+    MapSet,
+    MapGet,
+    MapHas,
+    MapDelete,
+    CollectionValues,
+    CollectionIteratorNext,
+    /// A deleted slot in a Set or Map.
+    ///
+    /// Deletion leaves a hole rather than compacting, because compacting a dense array under a
+    /// live iterator shifts the elements past the cursor and skips one. That is the exact bug
+    /// g13 exists to catch. Never reachable from JavaScript: no expression produces it.
+    Tombstone,
     /// Returns its own receiver, so an iterator is iterable.
     IteratorSelf,
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
@@ -965,6 +982,8 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         kiln_ir::Builtin::Error => Native::Error,
                         kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
                         kiln_ir::Builtin::String => Native::StringConstructor,
+                        kiln_ir::Builtin::Set => Native::SetConstructor,
+                        kiln_ir::Builtin::Map => Native::MapConstructor,
                         // The realm's global object, holding exactly the built-ins that exist.
                         // A fresh object each time is wrong -- `globalThis === globalThis` should
                         // hold -- but nothing observes that yet, and pinning it needs the realm
@@ -999,6 +1018,16 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Value::Native(Native::Error) => {
                             let error = self.construct_error(&arguments);
                             self.stack.push(error);
+                        }
+                        Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
+                            let is_map = matches!(kind, Native::MapConstructor);
+                            let mut data = ObjectData::default();
+                            data.set("@@entries", Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                            if is_map {
+                                data.set("@@map", Value::Boolean(true));
+                            }
+                            data.set("size", Value::Number(0.0));
+                            self.stack.push(Value::Object(Rc::new(RefCell::new(data))));
                         }
                         Value::Function(closure) => {
                             // `new` creates the instance, runs the body with it as `this`, and
@@ -1332,6 +1361,21 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// value rather than a plausible one.
     fn property(&self, target: &Value, name: &str) -> Value {
         match target {
+            // A Set or Map instance is an object whose reserved state marks it. Its methods come
+            // from one table shared with `in`, so the two cannot disagree -- and this arm has to
+            // precede the ordinary object case, which would otherwise answer `undefined` first.
+            Value::Object(object)
+                if object.borrow().get_own("@@entries").is_some() && name != "size" =>
+            {
+                let is_map = matches!(
+                    object.borrow().get_own("@@map"),
+                    Some(&Value::Boolean(true))
+                );
+                match collection_property(is_map, name) {
+                    Value::Undefined => object.borrow().get(name).unwrap_or(Value::Undefined),
+                    method => method,
+                }
+            }
             Value::Object(object) => object.borrow().get(name).unwrap_or(Value::Undefined),
             Value::Native(native) => native.property(name).unwrap_or(Value::Undefined),
             // `f.prototype` is the object `new f()` gives instances. Reading it creates it, so
@@ -1811,6 +1855,127 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             _ => Value::Undefined,
         },
         Native::IteratorSelf => receiver.clone(),
+        Native::SetAdd | Native::MapSet => {
+            let Some((entries, is_map)) = collection_state(receiver) else {
+                return Value::Undefined;
+            };
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            let existing = find_entry(&entries.borrow(), &key, is_map);
+            match existing {
+                Some(index) if is_map => {
+                    // Re-setting a key keeps its insertion position, which iteration order shows.
+                    if let Some(Value::Array(pair)) = entries.borrow().get(index) {
+                        pair.borrow_mut()[1] = value;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let entry = if is_map {
+                        Value::Array(Rc::new(RefCell::new(vec![key, value])))
+                    } else {
+                        key
+                    };
+                    entries.borrow_mut().push(entry);
+                    bump_size(receiver, 1.0);
+                }
+            }
+            receiver.clone()
+        }
+        Native::SetHas | Native::MapHas => {
+            let Some((entries, is_map)) = collection_state(receiver) else {
+                return Value::Boolean(false);
+            };
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let found = find_entry(&entries.borrow(), &key, is_map).is_some();
+            Value::Boolean(found)
+        }
+        Native::MapGet => {
+            let Some((entries, is_map)) = collection_state(receiver) else {
+                return Value::Undefined;
+            };
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let entries = entries.borrow();
+            match find_entry(&entries, &key, is_map) {
+                Some(index) => match entries.get(index) {
+                    Some(Value::Array(pair)) => {
+                        pair.borrow().get(1).cloned().unwrap_or(Value::Undefined)
+                    }
+                    _ => Value::Undefined,
+                },
+                None => Value::Undefined,
+            }
+        }
+        Native::SetDelete | Native::MapDelete => {
+            let Some((entries, is_map)) = collection_state(receiver) else {
+                return Value::Boolean(false);
+            };
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let index = find_entry(&entries.borrow(), &key, is_map);
+            match index {
+                Some(index) => {
+                    // A hole, not a removal: compacting here would shift every later element
+                    // past a live iterator's cursor and skip one.
+                    entries.borrow_mut()[index] = Value::Native(Native::Tombstone);
+                    bump_size(receiver, -1.0);
+                    Value::Boolean(true)
+                }
+                None => Value::Boolean(false),
+            }
+        }
+        Native::CollectionValues => {
+            let Some((entries, _)) = collection_state(receiver) else {
+                return Value::Undefined;
+            };
+            let mut iterator = ObjectData::default();
+            iterator.set("@@iterated", Value::Array(entries));
+            iterator.set("@@index", Value::Number(0.0));
+            iterator.set("next", Value::Native(Native::CollectionIteratorNext));
+            iterator.set(
+                WellKnown::Iterator.property_key(),
+                Value::Native(Native::IteratorSelf),
+            );
+            Value::Object(Rc::new(RefCell::new(iterator)))
+        }
+        Native::CollectionIteratorNext => {
+            let Value::Object(state) = receiver else {
+                return iteration_result(Value::Undefined, true);
+            };
+            let (iterated, mut index) = {
+                let state = state.borrow();
+                (
+                    state.get("@@iterated").unwrap_or(Value::Undefined),
+                    state
+                        .get("@@index")
+                        .unwrap_or(Value::Number(0.0))
+                        .as_number() as usize,
+                )
+            };
+            let Value::Array(entries) = &iterated else {
+                return iteration_result(Value::Undefined, true);
+            };
+            // Skip holes left by deletion, and re-read the length each step so entries added
+            // during iteration are seen -- both are observable and both are what a Set does.
+            loop {
+                let entry = entries.borrow().get(index).cloned();
+                match entry {
+                    None => {
+                        state
+                            .borrow_mut()
+                            .set("@@index", Value::Number(index as f64));
+                        return iteration_result(Value::Undefined, true);
+                    }
+                    Some(Value::Native(Native::Tombstone)) => index += 1,
+                    Some(value) => {
+                        state
+                            .borrow_mut()
+                            .set("@@index", Value::Number(index as f64 + 1.0));
+                        return iteration_result(value, false);
+                    }
+                }
+            }
+        }
+        Native::Tombstone => Value::Undefined,
         Native::ArrayIteratorNext => {
             let Value::Object(state) = receiver else {
                 return iteration_result(Value::Undefined, true);
@@ -1843,6 +2008,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                 None => iteration_result(Value::Undefined, true),
             }
         }
+        Native::SetConstructor | Native::MapConstructor => Value::Undefined,
         Native::Error
         | Native::SymbolConstructor
         | Native::ArrayConstructor
@@ -1950,6 +2116,76 @@ fn has_property(target: &Value, key: &Value) -> bool {
 }
 
 /// The properties an array exposes, shared by reads and by `in` so the two cannot disagree.
+/// The index of `key` among live entries, or `None`.
+fn find_entry(entries: &[Value], key: &Value, is_map: bool) -> Option<usize> {
+    entries.iter().position(|entry| match entry {
+        Value::Native(Native::Tombstone) => false,
+        Value::Array(pair) if is_map => pair
+            .borrow()
+            .first()
+            .is_some_and(|existing| same_value_zero(existing, key)),
+        other => !is_map && same_value_zero(other, key),
+    })
+}
+
+/// Adjust a collection's stored `size`.
+///
+/// Stored rather than derived so a read is a plain property lookup; the two cannot drift because
+/// only `add` and `delete` change either.
+fn bump_size(receiver: &Value, delta: f64) {
+    if let Value::Object(object) = receiver {
+        let current = object
+            .borrow()
+            .get_own("size")
+            .map_or(0.0, Value::as_number);
+        object
+            .borrow_mut()
+            .set("size", Value::Number(current + delta));
+    }
+}
+
+/// The methods a Set or Map instance exposes, shared by property reads and `in`.
+fn collection_property(is_map: bool, name: &str) -> Value {
+    match (is_map, name) {
+        (false, "add") => Value::Native(Native::SetAdd),
+        (false, "has") => Value::Native(Native::SetHas),
+        (false, "delete") => Value::Native(Native::SetDelete),
+        (true, "set") => Value::Native(Native::MapSet),
+        (true, "get") => Value::Native(Native::MapGet),
+        (true, "has") => Value::Native(Native::MapHas),
+        (true, "delete") => Value::Native(Native::MapDelete),
+        (_, "values" | "keys" | "entries") => Value::Native(Native::CollectionValues),
+        (_, key) if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::CollectionValues)
+        }
+        _ => Value::Undefined,
+    }
+}
+
+/// The backing entries of a Set or Map, and whether it is a Map.
+fn collection_state(receiver: &Value) -> Option<(Rc<RefCell<Vec<Value>>>, bool)> {
+    let Value::Object(object) = receiver else {
+        return None;
+    };
+    let object = object.borrow();
+    let Some(Value::Array(entries)) = object.get_own("@@entries").cloned() else {
+        return None;
+    };
+    let is_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+    Some((entries, is_map))
+}
+
+/// SameValueZero, which is what Set and Map use for key identity.
+///
+/// It differs from `===` in exactly one place: NaN is its own key, so a Set can contain one and
+/// find it again. `-0` and `0` remain the same key under both.
+fn same_value_zero(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan() => true,
+        _ => strict_equal(left, right),
+    }
+}
+
 fn array_property(name: &str) -> Value {
     match name {
         "join" => Value::Native(Native::ArrayJoin),
@@ -2372,6 +2608,63 @@ mod tests {
             ("message", Value::String(String::new())),
         ]);
         assert_eq!(error_to_string(&bare), "Error");
+    }
+
+    /// Deleting during iteration must not skip the next element. Compacting the backing store
+    /// shifts everything past the cursor by one, which is the bug this design exists to avoid.
+    #[test]
+    fn deleting_leaves_a_hole_rather_than_compacting() {
+        let entries = vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)];
+        assert_eq!(find_entry(&entries, &Value::Number(2.0), false), Some(1));
+
+        let with_hole = vec![
+            Value::Number(1.0),
+            Value::Native(Native::Tombstone),
+            Value::Number(3.0),
+        ];
+        assert_eq!(
+            find_entry(&with_hole, &Value::Number(3.0), false),
+            Some(2),
+            "a hole must not shift the indices after it"
+        );
+        assert_eq!(
+            find_entry(&with_hole, &Value::Number(2.0), false),
+            None,
+            "a deleted entry is not found"
+        );
+    }
+
+    /// Set and Map use SameValueZero, which differs from `===` in exactly one place: NaN is its
+    /// own key, so a Set can contain one and find it again.
+    #[test]
+    fn collections_key_on_same_value_zero() {
+        let nan = Value::Number(f64::NAN);
+        assert!(!strict_equal(&nan, &nan), "=== says NaN is not itself");
+        assert!(same_value_zero(&nan, &nan), "SameValueZero says it is");
+
+        assert!(same_value_zero(&Value::Number(0.0), &Value::Number(-0.0)));
+        assert!(!same_value_zero(
+            &Value::Number(1.0),
+            &Value::String("1".to_owned())
+        ));
+    }
+
+    /// A Map keyed by identity finds the same object and not an equal one.
+    #[test]
+    fn map_keys_are_matched_by_identity() {
+        let key = object(&[("id", Value::Number(1.0))]);
+        let twin = object(&[("id", Value::Number(1.0))]);
+        let entries = vec![Value::Array(Rc::new(RefCell::new(vec![
+            key.clone(),
+            Value::String("found".to_owned()),
+        ])))];
+
+        assert_eq!(find_entry(&entries, &key, true), Some(0));
+        assert_eq!(
+            find_entry(&entries, &twin, true),
+            None,
+            "an equal-looking object is a different key"
+        );
     }
 
     #[test]
