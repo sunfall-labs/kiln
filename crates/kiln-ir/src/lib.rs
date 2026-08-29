@@ -114,6 +114,11 @@ pub enum Instruction {
     SetComputed,
     /// Push the current `this`.
     LoadThis,
+    /// Push this frame's `arguments` as an array.
+    ///
+    /// Built on demand rather than on every call: most functions never mention it, and
+    /// allocating one per call would tax every call to serve the few that do.
+    LoadArguments,
     /// Set an object's prototype. Stack is object, then prototype; the object is left.
     SetPrototype,
     /// Run a parent constructor against the current `this`, forwarding the arguments this frame
@@ -1003,6 +1008,12 @@ impl Compiler {
                 Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
                 Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
                 Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
+                // `arguments` is not a declared binding, so it only resolves when nothing else
+                // bound the name -- a parameter or local called `arguments` shadows it, as it
+                // does in JavaScript.
+                Resolution::Unresolved if name == "arguments" && self.compiling_function() => {
+                    self.code.push(Instruction::LoadArguments)
+                }
                 Resolution::Unresolved if name == "undefined" => {
                     self.push_constant(Constant::Undefined)
                 }

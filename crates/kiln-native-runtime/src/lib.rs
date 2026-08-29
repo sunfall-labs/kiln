@@ -5,11 +5,22 @@
 //! operation, plus a tiny executable launcher for one generated module.  Keeping those sources
 //! separate lets the runtime object be cached independently from application code.
 
+use std::sync::OnceLock;
+
 /// Version of the generated native runtime source and its C ABI.
 pub const NATIVE_RUNTIME_VERSION: u32 = 1;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
+
+/// Return the C header shared by embedded modules and the native CLI runtime.
+///
+/// The header is self-contained, include-guarded, and contains only the stable value/callback
+/// contract. It is suitable for writing to a header file or embedding directly in a generated C
+/// translation unit.
+pub fn embedding_header() -> &'static str {
+    EMBEDDING_HEADER
+}
 
 /// Why a native runtime source request was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +47,16 @@ pub type RuntimeError = RuntimeSourceError;
 /// Return the deterministic, program-independent C11 runtime translation unit.
 pub fn runtime_source() -> &'static str {
     RUNTIME_SOURCE
+        .get_or_init(|| {
+            let mut source = String::with_capacity(
+                RUNTIME_PREFIX.len() + embedding_header().len() + RUNTIME_BODY.len(),
+            );
+            source.push_str(RUNTIME_PREFIX);
+            source.push_str(embedding_header());
+            source.push_str(RUNTIME_BODY);
+            source
+        })
+        .as_str()
 }
 
 /// Emit a deterministic C11 launcher that calls `symbol` as the process entry point.
@@ -45,9 +66,16 @@ pub fn runtime_source() -> &'static str {
 pub fn launcher_source(symbol: &str) -> Result<String, RuntimeSourceError> {
     validate_symbol(symbol)?;
     let mut source = String::with_capacity(
-        LAUNCHER_PREFIX.len() + 2 * symbol.len() + LAUNCHER_DECL_SUFFIX.len() + LAUNCHER_BODY.len(),
+        LAUNCHER_PREFIX.len()
+            + embedding_header().len()
+            + LAUNCHER_DECL_PREFIX.len()
+            + 2 * symbol.len()
+            + LAUNCHER_DECL_SUFFIX.len()
+            + LAUNCHER_BODY.len(),
     );
     source.push_str(LAUNCHER_PREFIX);
+    source.push_str(embedding_header());
+    source.push_str(LAUNCHER_DECL_PREFIX);
     source.push_str(symbol);
     source.push_str(LAUNCHER_DECL_SUFFIX);
     source.push_str(symbol);
@@ -77,18 +105,25 @@ fn validate_symbol(symbol: &str) -> Result<(), RuntimeSourceError> {
     Ok(())
 }
 
-// Keep these declarations byte-for-byte compatible with kiln-backend-c's generated C99 units.
-// The runtime is C11, but only uses facilities available in C99 for portability.
-const RUNTIME_SOURCE: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
-#include <math.h>
+/// Keep this declaration byte-for-byte compatible with kiln-backend-c's generated C99 units.
+/// The runtime is C11, but only uses facilities available in C99 for portability.
+const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
+#ifndef KILN_NATIVE_EMBEDDING_H
+#define KILN_NATIVE_EMBEDDING_H
+
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
 
-/* Native runtime version 1; C ABI version 1; HostOps ABI version 1. */
+#define KILN_NATIVE_RUNTIME_VERSION 1
+#define KILN_C_ABI_VERSION 1
+#define KILN_HOST_ABI_VERSION 1
+
 #define KILN_C99_OK 0
+#define KILN_C99_INVALID_ARGUMENT (-1)
+#define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+
+#define KILN_HOST_OP_WRITE_STDOUT 1
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -98,7 +133,8 @@ enum kiln_value_tag {
     KILN_VALUE_STRING = 4
 };
 
-/* This layout must remain identical to the generated module boundary. */
+/* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
+ * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
     uint32_t tag;
     uint32_t reserved;
@@ -107,6 +143,8 @@ typedef struct kiln_value {
     size_t len;
 } kiln_value;
 
+/* A nonzero callback return is propagated as KILN_C99_HOST_ERROR.  The callback owns any
+ * interpretation of operation numbers and may replace *result. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
 typedef struct kiln_host {
@@ -114,6 +152,19 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+#endif /* KILN_NATIVE_EMBEDDING_H */
+"#;
+
+static RUNTIME_SOURCE: OnceLock<String> = OnceLock::new();
+
+const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+"#;
+
+const RUNTIME_BODY: &str = r#"
 static int kiln_cli_write_bytes(const char *bytes, size_t length) {
     if (length != 0 && bytes == NULL) {
         return KILN_C99_HOST_ERROR;
@@ -184,7 +235,8 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                        const kiln_value *arguments, kiln_value *result) {
     uint16_t index;
     (void)context;
-    if (operation != 1 || result == NULL || (argc != 0 && arguments == NULL)) {
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || result == NULL
+        || (argc != 0 && arguments == NULL)) {
         return KILN_C99_HOST_ERROR;
     }
     for (index = 0; index < argc; ++index) {
@@ -205,32 +257,10 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
 
 const LAUNCHER_PREFIX: &str = r#"/* Kiln native CLI launcher. */
 #include <locale.h>
-#include <stddef.h>
-#include <stdint.h>
 
-enum kiln_value_tag {
-    KILN_VALUE_UNDEFINED = 0,
-    KILN_VALUE_NULL = 1,
-    KILN_VALUE_BOOLEAN = 2,
-    KILN_VALUE_NUMBER = 3,
-    KILN_VALUE_STRING = 4
-};
+"#;
 
-typedef struct kiln_value {
-    uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
-} kiln_value;
-
-typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
-                                 const kiln_value *arguments, kiln_value *result);
-typedef struct kiln_host {
-    kiln_host_call_fn call;
-    void *context;
-} kiln_host;
-
+const LAUNCHER_DECL_PREFIX: &str = r#"
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int 
@@ -275,6 +305,86 @@ mod tests {
     }
 
     #[test]
+    fn embedding_header_is_deterministic_and_contains_the_stable_contract() {
+        assert_eq!(embedding_header(), embedding_header());
+        assert!(embedding_header().contains("#ifndef KILN_NATIVE_EMBEDDING_H"));
+        assert!(embedding_header().contains("#define KILN_NATIVE_RUNTIME_VERSION 1"));
+        assert!(embedding_header().contains("#define KILN_C_ABI_VERSION 1"));
+        assert!(embedding_header().contains("#define KILN_HOST_ABI_VERSION 1"));
+        assert!(embedding_header().contains("#define KILN_HOST_OP_WRITE_STDOUT 1"));
+        assert!(embedding_header().contains("uint32_t tag;"));
+        assert!(embedding_header().contains("uint32_t reserved;"));
+        assert!(embedding_header().contains("uint64_t bits;"));
+        assert!(embedding_header().contains("const char *ptr;"));
+        assert!(embedding_header().contains("size_t len;"));
+        assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
+        assert!(embedding_header().contains("typedef struct kiln_host"));
+        assert!(embedding_header().contains("#endif /* KILN_NATIVE_EMBEDDING_H */"));
+    }
+
+    #[test]
+    fn embedding_header_compiles_as_c_and_cxx() {
+        let Some(cc) = find_cc() else {
+            return;
+        };
+        let Some(cxx) = find_cxx() else {
+            return;
+        };
+        let root = test_directory();
+        std::fs::create_dir(&root).expect("create test directory");
+        let header = root.join("kiln_embedding.h");
+        let c_source = root.join("probe.c");
+        let cxx_source = root.join("probe.cc");
+        std::fs::write(&header, embedding_header()).expect("write header");
+        let probe = r#"
+#include "kiln_embedding.h"
+static int call(void *context, uint16_t operation, uint16_t argc,
+                const kiln_value *arguments, kiln_value *result) {
+    (void)context;
+    (void)operation;
+    (void)argc;
+    (void)arguments;
+    (void)result;
+    return KILN_C99_OK;
+}
+int main(void) {
+    kiln_host host;
+    kiln_value value;
+    host.call = call;
+    host.context = 0;
+    value.tag = KILN_VALUE_UNDEFINED;
+    value.reserved = 0;
+    value.bits = 0;
+    value.ptr = 0;
+    value.len = 0;
+    return host.call(host.context, KILN_HOST_OP_WRITE_STDOUT, 0, 0, &value);
+}
+"#;
+        std::fs::write(&c_source, probe).expect("write C probe");
+        std::fs::write(&cxx_source, probe).expect("write C++ probe");
+
+        for (compiler, standard, source, object) in [
+            (cc, "-std=c11", &c_source, root.join("probe-c.o")),
+            (cxx, "-std=c++11", &cxx_source, root.join("probe-cxx.o")),
+        ] {
+            let compile = Command::new(compiler)
+                .args([standard, "-pedantic", "-Wall", "-Wextra", "-Werror"])
+                .arg("-c")
+                .arg(source)
+                .arg("-o")
+                .arg(&object)
+                .output()
+                .expect("invoke C compiler");
+            assert!(
+                compile.status.success(),
+                "embedding header failed to compile with {compiler}:\n{}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn launcher_validates_symbols_and_is_deterministic() {
         let one = launcher_source("kiln_module_deadbeef").expect("valid symbol");
         assert_eq!(one, launcher_source("kiln_module_deadbeef").unwrap());
@@ -310,6 +420,7 @@ mod tests {
         std::fs::create_dir(&root).expect("create test directory");
         let runtime = root.join("runtime.c");
         let launcher = root.join("launcher.c");
+        let header = root.join("kiln_host.h");
         let stub = root.join("stub.c");
         let executable = root.join("kiln-test");
         std::fs::write(&runtime, runtime_source()).expect("write runtime");
@@ -318,6 +429,7 @@ mod tests {
             launcher_source("kiln_module_test").expect("valid symbol"),
         )
         .expect("write launcher");
+        std::fs::write(&header, embedding_header()).expect("write header");
         std::fs::write(&stub, STUB_SOURCE).expect("write stub");
         let compile = Command::new(cc)
             .args(["-std=c11", "-pedantic", "-Wall", "-Wextra", "-Werror"])
@@ -343,13 +455,21 @@ mod tests {
     }
 
     fn find_cc() -> Option<&'static str> {
-        let result = Command::new("cc")
+        find_compiler("cc")
+    }
+
+    fn find_cxx() -> Option<&'static str> {
+        find_compiler("c++")
+    }
+
+    fn find_compiler(name: &'static str) -> Option<&'static str> {
+        let result = Command::new(name)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .ok()?;
-        result.success().then_some("cc")
+        result.success().then_some(name)
     }
 
     fn test_directory() -> PathBuf {
@@ -366,30 +486,8 @@ mod tests {
     }
 
     const STUB_SOURCE: &str = r#"
-#include <stddef.h>
-#include <stdint.h>
 #include <string.h>
-
-enum kiln_value_tag {
-    KILN_VALUE_UNDEFINED = 0,
-    KILN_VALUE_NULL = 1,
-    KILN_VALUE_BOOLEAN = 2,
-    KILN_VALUE_NUMBER = 3,
-    KILN_VALUE_STRING = 4
-};
-typedef struct kiln_value {
-    uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
-} kiln_value;
-typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
-                                 const kiln_value *arguments, kiln_value *result);
-typedef struct kiln_host {
-    kiln_host_call_fn call;
-    void *context;
-} kiln_host;
+#include "kiln_host.h"
 
 int kiln_module_test(kiln_host *host, kiln_value *result) {
     static const char text[] = "hello";
