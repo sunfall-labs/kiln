@@ -303,6 +303,7 @@ pub struct CompileDiagnostic {
 /// Compile owned HIR into stack bytecode.
 pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
+    // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
         if let Some(occurrence) = requested.occurrences.first() {
@@ -489,6 +490,8 @@ struct Compiler {
     /// Loops currently being compiled, innermost last, holding the jumps their `break` and
     /// `continue` statements still need patched.
     loops: Vec<LoopContext>,
+    /// Counter for compiler-introduced bindings, so two in one scope never collide.
+    hidden_bindings: usize,
     /// The hidden `super` bindings of the derived classes currently being compiled, innermost
     /// last. A stack rather than a field because class bodies nest.
     super_bindings: Vec<String>,
@@ -515,8 +518,12 @@ impl Compiler {
             enclosing: Vec::new(),
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
-            captured: HashSet::new(),
+            // The module body has nested functions of its own, so its block bindings can be
+            // captured. Computed here rather than in each entry point, because there are two --
+            // `compile` and `compile_module` -- and one of them would have been forgotten.
+            captured: names_captured_by_nested_functions(&module.body),
             loops: Vec::new(),
+            hidden_bindings: 0,
             super_bindings: Vec::new(),
             super_binding_count: 0,
             scopes: vec![HashMap::new()],
@@ -628,6 +635,12 @@ impl Compiler {
                 body,
                 statement.span,
             ),
+            StatementKind::ForOf {
+                kind,
+                name,
+                iterable,
+                body,
+            } => self.for_of(*kind, name, iterable, body, statement.span),
             StatementKind::Break { label } => self.jump_out(label.as_deref(), true, statement.span),
             StatementKind::Continue { label } => {
                 self.jump_out(label.as_deref(), false, statement.span)
@@ -655,6 +668,23 @@ impl Compiler {
         name: &str,
         initializer: Option<&Expression>,
         span: Span,
+    ) {
+        self.variable_with(kind, name, initializer, span, false);
+    }
+
+    /// Declare a binding.
+    ///
+    /// `bound_from_stack` is for bindings the compiler introduces itself, where the value is
+    /// already on the stack and the caller stores it: a `for-of` loop variable is `const` and
+    /// initialised, but not by an expression this function can see. Without the distinction the
+    /// const check would reject a binding that is in fact initialised.
+    fn variable_with(
+        &mut self,
+        kind: VariableKind,
+        name: &str,
+        initializer: Option<&Expression>,
+        span: Span,
+        bound_from_stack: bool,
     ) {
         if name.is_empty() {
             self.error(Some(span), "destructuring bindings are not supported yet");
@@ -693,7 +723,7 @@ impl Compiler {
             );
             return;
         }
-        if kind == VariableKind::Const && initializer.is_none() {
+        if kind == VariableKind::Const && initializer.is_none() && !bound_from_stack {
             self.error(
                 Some(span),
                 format!("const local `{name}` requires an initializer"),
@@ -701,11 +731,13 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
-        // Boxed only when a nested function refers to this name *and* the name belongs to a
-        // function. A module binding is already shared: `LoadGlobal`/`StoreGlobal` reach the one
-        // slot from every frame, so boxing it would leave the cell itself in the slot and a
-        // global read would hand back the cell rather than its contents.
-        let celled = self.captured.contains(name) && self.compiling_function();
+        // Boxed only when a nested function refers to this name and the name is not a module
+        // *scope* binding. Module scope is already shared -- `LoadGlobal`/`StoreGlobal` reach the
+        // one slot from every frame -- so boxing it would leave the cell itself in the slot and a
+        // global read would hand back the cell rather than its contents. A block inside the
+        // module body is not module scope, and a closure over it does need a cell.
+        let in_module_scope = !self.compiling_function() && scope_index == 0;
+        let celled = self.captured.contains(name) && !in_module_scope;
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -717,6 +749,11 @@ impl Compiler {
         );
         if celled {
             self.code.push(Instruction::NewCell(slot));
+        }
+        if bound_from_stack {
+            // The value is already on the stack; the caller emits the store, because it may need
+            // to know which instruction was used.
+            return;
         }
         if let Some(initializer) = initializer {
             self.expression(initializer);
@@ -746,6 +783,106 @@ impl Compiler {
             self.patch_jump(end_jump);
         } else {
             self.patch_jump(false_jump);
+        }
+    }
+
+    /// `for (const name of iterable) body`.
+    ///
+    /// Lowered to the protocol rather than to indexed access: the subject may be any iterable,
+    /// and indexing an array directly would be wrong for everything else and would miss the
+    /// re-read of `length` that mutation during iteration depends on.
+    ///
+    /// The iterator and each step's result live in hidden locals whose names carry a character an
+    /// identifier cannot contain, so they can never collide with the program's own bindings.
+    fn for_of(
+        &mut self,
+        kind: VariableKind,
+        name: &str,
+        iterable: &Expression,
+        body: &Statement,
+        span: Span,
+    ) {
+        let iterator_binding = format!("%iter{}", self.hidden_bindings);
+        let result_binding = format!("%step{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+
+        self.scopes.push(HashMap::new());
+
+        // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than only
+        // an array.
+        self.expression(iterable);
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: symbol,
+            argc: 0,
+        });
+        self.declare_hidden(&iterator_binding, span);
+
+        let start = self.code.len();
+        self.load_hidden(&iterator_binding);
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: next,
+            argc: 0,
+        });
+        self.declare_hidden(&result_binding, span);
+
+        self.load_hidden(&result_binding);
+        let done = self.constant_index(Constant::String("done".to_owned()));
+        self.code.push(Instruction::GetProperty(done));
+        let exit_jump = self.emit_jump(Instruction::JumpIfTruthy(0));
+
+        // A fresh binding each iteration, so a closure made in the body captures that step's
+        // value rather than the last one.
+        self.scopes.push(HashMap::new());
+        self.load_hidden(&result_binding);
+        let value = self.constant_index(Constant::String("value".to_owned()));
+        self.code.push(Instruction::GetProperty(value));
+        self.declare_bound(kind, name, span);
+
+        self.loops.push(LoopContext::default());
+        self.statement(body);
+        let context = self.loops.pop().expect("this loop pushed its own context");
+        self.scopes.pop().expect("iteration scope was just pushed");
+
+        let continue_target = self.code.len() as u32;
+        for jump in context.continues {
+            self.patch_jump_to(jump, continue_target);
+        }
+        self.code.push(Instruction::Jump(start as u32));
+
+        self.patch_jump(exit_jump);
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+        self.scopes.pop().expect("loop scope was just pushed");
+    }
+
+    /// Bind a hidden local to the value on top of the stack.
+    fn declare_hidden(&mut self, name: &str, span: Span) {
+        self.declare_bound(VariableKind::Let, name, span);
+    }
+
+    /// Declare `name` and store the value on top of the stack into it.
+    fn declare_bound(&mut self, kind: VariableKind, name: &str, span: Span) {
+        self.variable_with(kind, name, None, span, true);
+        match self.resolve(name) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::StoreCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::StoreLocal(local.slot)),
+            _ => self.error(Some(span), format!("could not bind `{name}`")),
+        }
+    }
+
+    fn load_hidden(&mut self, name: &str) {
+        match self.resolve(name) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            _ => self.error(None, format!("`{name}` went out of scope")),
         }
     }
 
@@ -1671,21 +1808,21 @@ impl Compiler {
     /// its immediately enclosing frame holds -- a two-level capture is two hops, not one long
     /// one. Levels are indices into `enclosing` followed by the current function.
     fn capture(&mut self, name: &str) -> Option<u32> {
-        // Level 0 is the module body, whose bindings are globals rather than captures.
-        let owner = (1..self.enclosing.len()).rev().find(|level| {
-            self.enclosing[*level]
+        // Scope 0 of level 0 is module scope, whose bindings are globals rather than captures --
+        // but a *block* inside the module body is an ordinary scope, and a closure created there
+        // captures from it like any other. Skipping level 0 entirely missed exactly that: a
+        // `for-of` at module level whose body creates a closure over the loop variable.
+        let (owner, local) = (0..self.enclosing.len()).rev().find_map(|level| {
+            let skip = usize::from(level == 0);
+            self.enclosing[level]
                 .scopes
                 .iter()
-                .any(|scope| scope.contains_key(name))
+                .enumerate()
+                .rev()
+                .filter(|(index, _)| *index >= skip)
+                .find_map(|(_, scope)| scope.get(name))
+                .map(|local| (level, *local))
         })?;
-
-        let local = self.enclosing[owner]
-            .scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name))
-            .copied()
-            .expect("the owning level was just located by this name");
         if !local.celled {
             // The capture analysis said no nested function referred to this name, yet here we
             // are. Compiling it anyway would read an uninitialised slot as though it were a
@@ -1868,6 +2005,10 @@ fn collect_nested_function_names(
             if let Some(update) = update {
                 collect_identifiers(update, names, inside_function);
             }
+            collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::ForOf { iterable, body, .. } => {
+            collect_identifiers(iterable, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::Break { .. }

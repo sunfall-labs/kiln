@@ -171,6 +171,16 @@ pub enum StatementKind {
         update: Option<Expression>,
         body: Box<Statement>,
     },
+    /// `for (const name of iterable) body`.
+    ///
+    /// The binding is fresh on each iteration for `let` and `const`, which is what makes a
+    /// closure created in the body capture that iteration's value rather than the last one.
+    ForOf {
+        kind: VariableKind,
+        name: String,
+        iterable: Expression,
+        body: Box<Statement>,
+    },
     /// `break`, optionally labelled.
     Break {
         label: Option<String>,
