@@ -1,0 +1,666 @@
+# kiln JavaScript conformance corpus - machine-readable index.
+#
+# Shape follows docs/design.md §9, which asks each test to declare what it exercises:
+#
+#     test: closures/capture-let.js
+#     features: [lexical-environments, closures]
+#     ir: [make_environment, load_capture, store_capture]
+#
+# `features` is carried over directly and is the field a changed-test selector keys on, so the
+# tags are meant to be accurate rather than decorative: each one names a JavaScript semantic the
+# test would actually stop passing without.
+#
+# §9's `ir` field is deliberately absent. Kiln has no IR operations yet, so every value would be
+# invented, and an invented tag in a selector input is worse than a missing one - it would make
+# the selector confidently wrong instead of conservatively broad. Add `ir` per test when the IR
+# exists and the test has been observed to touch those operations.
+#
+# `status` is "not-yet-runnable" for every test in this file. Nothing here has run under kiln,
+# because kiln cannot execute JavaScript yet. See README.md and status.sh.
+#
+# Provenance for the whole corpus is in [corpus] below.
+
+[corpus]
+name = "porffor-effect-findings"
+source_repo = "~/Developer/Personal/oss/porffor-effect-findings"
+source_commit = "bfdd2b0"
+source_commit_subject = "porffor/Effect: findings, and the three regression gates"
+ported = "2026-08-29"
+guard_tests = 20
+effect_tests = 12
+total_tests = 32
+
+# How the expected output in this file was obtained. Both halves were *observed*, not
+# transcribed: every value below is what `node v25.9.0` actually printed on this machine.
+[corpus.expected_output_method]
+guard = """
+Ran `node <probe>.js` for each of the 20 probes, capturing stdout and stderr merged, and \
+recorded the bytes verbatim. The original corpus never stored expected output at all - its \
+guard/run.sh diffs porffor's output against a live `node` run each time - so there was no \
+recorded value to copy and it had to be produced. All 20 exit 0 and write nothing to stderr.\
+"""
+effect = """
+Each program carries an `// expect:` comment, but those are lossy: they join lines with " | " \
+and 12-service-layer's own output contains a literal " | ", so the comment alone cannot be \
+parsed back into lines. So the bundles were built with build.sh and each was run under `node \
+v25.9.0`, and the observed stdout recorded. Where the observation disagrees with the comment, \
+the observation wins and the disagreement is recorded in `expect_comment_disagrees`.\
+"""
+node_version = "v25.9.0"
+notes = """
+Every test's output was checked for run-to-run stability. The timing-sensitive ones \
+(guard/g07-timers-order, effect/06-sleep, effect/07-interruption, effect/12-service-layer) were \
+run repeatedly and produced identical output every time under node. That stability is a \
+property of node's scheduler, not a guarantee: under design.md §11 these should be driven by \
+the mock event driver's virtual time rather than by real sleeping, and the tests tagged \
+`event-loop` or `timers` are exactly the ones that will need it.\
+"""
+
+# ---------------------------------------------------------------------------------------------
+# guard/ - 20 standalone probes, one behaviour each.
+#
+# `catches` records which compiler defect the probe was written to catch. In the source corpus
+# that rationale lives in guard/gen.mjs (the generator), NOT in the probe files - only three of
+# the twenty .js files carry any comment at all. The probes are copied here byte for byte, so
+# rather than editing them to add comments, the rationale is lifted into this field and gen.mjs
+# is carried alongside them unmodified.
+# ---------------------------------------------------------------------------------------------
+
+[[test]]
+id = "guard/g01-spread-symbols"
+group = "guard"
+source = "guard/g01-spread-symbols.js"
+status = "not-yet-runnable"
+features = ["object-spread", "object-rest", "symbol-keys", "well-known-symbols", "object-statics"]
+catches = """
+Object spread and rest dropping symbol-keyed own properties. Effect builds every prototype by \
+spreading one proto into another, and `[Symbol.iterator]` is what makes an Effect yieldable, so \
+losing symbol keys in spread makes `Effect.gen` impossible. Note that `Object.keys` must still \
+exclude symbols - the probe asserts both halves at once.\
+"""
+expected_stdout = """
+2 3 a
+"""
+
+[[test]]
+id = "guard/g02-arrow-arguments"
+group = "guard"
+source = "guard/g02-arrow-arguments.js"
+status = "not-yet-runnable"
+features = ["arrow-functions", "arguments-object", "closures", "array-methods"]
+catches = """
+Arrow functions not inheriting `arguments` from the enclosing function. `arguments` in an \
+ordinary function, a method or a nested function expression is the easy case and was never \
+broken; only the arrow-inherits case was. This is what Effect's `dual()` is built on, and \
+`dual()` is how nearly every data-last/data-first Effect API is defined.\
+"""
+expected_stdout = """
+2 3,3
+"""
+
+[[test]]
+id = "guard/g03-class-field-closure"
+group = "guard"
+source = "guard/g03-class-field-closure.js"
+status = "not-yet-runnable"
+features = ["classes", "class-fields", "closures", "lexical-environments", "arrow-functions"]
+catches = """
+Class instance-field initialisers not capturing the enclosing scope. Constructor-body \
+assignment, methods, static fields and top-level instance fields all captured correctly; only \
+an instance-field initialiser inside a function did not. `Data.TaggedError` is literally \
+`tag => class Base extends Error { _tag = tag }`, so this breaks every tagged error at class \
+definition time.\
+"""
+expected_stdout = """
+T T
+"""
+
+[[test]]
+id = "guard/g04-generic-forof"
+group = "guard"
+source = "guard/g04-generic-forof.js"
+status = "not-yet-runnable"
+features = ["iterator-protocol", "well-known-symbols", "for-of", "array-spread", "arrow-functions"]
+catches = """
+No generic iterator protocol: `for..of` and spread dispatching on a fixed set of built-in type \
+tags instead of looking up `@@iterator` and driving `.next()`. The spread half matters \
+independently - the broken version failed silently, reading a length out of the object pointer \
+and emitting garbage rather than throwing.\
+"""
+expected_stdout = """
+3 0,1,2
+"""
+
+[[test]]
+id = "guard/g05-yieldstar-protocol"
+group = "guard"
+source = "guard/g05-yieldstar-protocol.js"
+status = "not-yet-runnable"
+features = ["generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "classes", "two-way-generators"]
+catches = """
+`yield*` delegation over a user-defined iterable, with values passed back in through \
+`.next(v)`. This is a faithful miniature of Effect's SingleShotGen: the class is its own \
+iterator, returns itself from `@@iterator`, and yields once then completes with whatever was \
+sent in. `yield*` lowered to a `for..of` inherits every `for..of` limitation, which is why this \
+is a separate probe from g04.\
+"""
+expected_stdout = """
+one,two ONETWO
+"""
+
+[[test]]
+id = "guard/g06-array-proto-iterator"
+group = "guard"
+source = "guard/g06-array-proto-iterator.js"
+status = "not-yet-runnable"
+features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "computed-member-access"]
+catches = """
+`Array.prototype[Symbol.iterator]` existing as a real property rather than iteration being \
+dispatched by type tag. This probe references nothing else on purpose. An earlier version of it \
+also touched `[].values`, which silently forced the prototype to materialise and hid the fact \
+that the fix only worked when some *other* construct in the same program had already triggered \
+it. A one-line probe that names only the symbol is the whole point of the file.\
+"""
+expected_stdout = """
+function
+"""
+
+[[test]]
+id = "guard/g06b-array-iterator-identity"
+group = "guard"
+source = "guard/g06b-array-iterator-identity.js"
+status = "not-yet-runnable"
+features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "in-operator", "array-methods", "function-identity"]
+catches = """
+The companion to g06: the property must be *observable* (`Symbol.iterator in []`) and must be \
+the same function object as `Array.prototype.values`, not a second one that merely behaves the \
+same. Effect's `Effect.forEach` tests `Symbol.iterator in v` and refuses arrays if the answer \
+is false, so presence-not-just-behaviour is load-bearing.\
+"""
+expected_stdout = """
+true true
+"""
+
+[[test]]
+id = "guard/g07-timers-order"
+group = "guard"
+source = "guard/g07-timers-order.js"
+status = "not-yet-runnable"
+features = ["timers", "microtasks", "event-loop", "callback-ordering", "timer-arguments"]
+catches = """
+Timers existing at all, and firing in the right order relative to each other and to \
+microtasks: `setTimeout` with extra arguments forwarded to the callback, `clearTimeout` before \
+firing, `setInterval` cleared from inside its own callback, and `queueMicrotask` draining \
+before any timer. A later change unified two separate timer implementations and this probe is \
+what caught the two bugs that unification introduced.\
+"""
+expected_stdout = """
+a
+b
+micro
+args p
+iv 1
+iv 2
+late
+"""
+
+[[test]]
+id = "guard/g08-finally-paths"
+group = "guard"
+source = "guard/g08-finally-paths.js"
+status = "not-yet-runnable"
+features = ["try-finally", "abrupt-completion", "completion-values", "exceptions", "loops", "break-continue"]
+catches = """
+`finally` being skipped on abrupt completion. It ran correctly for normal completion and for a \
+caught-and-handled exception, and was dropped when the `try` exited via `return`, via a \
+propagating throw, or via `break`/`continue` out of a loop. Silent wrong behaviour rather than \
+a crash, which makes it the nastiest kind: every JS-level resource cleanup and every generator \
+`.return()` cleanup used for interruption just did not happen. The four exit paths are all in \
+one file deliberately.\
+"""
+expected_stdout = """
+finA
+A
+finB
+caught B
+fin 0
+fin 1
+fin 2
+done
+"""
+
+[[test]]
+id = "guard/g09-error-subclass"
+group = "guard"
+source = "guard/g09-error-subclass.js"
+status = "not-yet-runnable"
+features = ["classes", "inheritance", "derived-constructors", "error-objects", "error-subclassing", "instanceof", "global-object", "to-string"]
+catches = """
+`class X extends Error` producing a working Error. The broken version modelled errors as a \
+distinct primitive type tag rather than an object with a real prototype chain, so `instanceof \
+Error` was a type-tag range check a user subclass could never satisfy, `.message` was undefined \
+on a subclass, and `String(e)` gave `[object Object]`. The second half - `extends \
+globalThis.Error` - is a separate path from `extends Error` and had to be checked separately.\
+"""
+expected_stdout = """
+true true boom E T E: boom
+true g
+"""
+
+[[test]]
+id = "guard/g10-builtin-statics"
+group = "guard"
+source = "guard/g10-builtin-statics.js"
+status = "not-yet-runnable"
+features = ["builtin-statics", "global-object", "object-statics", "array-statics", "json"]
+catches = """
+A constructor's static methods being reachable through a *variable* holding the constructor, \
+not only through its global name. Effect does `const Array = globalThis.Array` and then \
+`Array.isArray(...)`; a compiler that resolves `Array.isArray` as a static name at the call \
+site gets this wrong. The later fix also replaced a regex source-scan with a real data source, \
+which turned up several statics the scan had silently missed.\
+"""
+expected_stdout = """
+function function function function
+true x
+"""
+
+[[test]]
+id = "guard/g11-proto-on-function"
+group = "guard"
+source = "guard/g11-proto-on-function.js"
+status = "not-yet-runnable"
+features = ["set-prototype-of", "prototype-chain", "function-objects", "classes", "inheritance", "static-inheritance", "well-known-symbols"]
+catches = """
+A prototype set on a *function* being honoured for lookups, including symbol-keyed ones, and \
+being inherited by a subclass through the static side. This is exactly what \
+`Context.Service` does: `Object.setPrototypeOf(KeyClass, ServiceProto)`, with the yieldable \
+`@@iterator` living on that prototype - so `yield* MyService` in an `Effect.gen` resolves \
+through it.\
+"""
+expected_stdout = """
+function f T function T
+"""
+
+[[test]]
+id = "guard/g12-private-not-inherited"
+group = "guard"
+source = "guard/g12-private-not-inherited.js"
+status = "not-yet-runnable"
+features = ["classes", "private-methods", "private-fields", "static-methods", "inheritance", "exceptions", "brand-checks"]
+catches = """
+Private-name brand checks. A static private method called through a subclass must throw a \
+TypeError, because the subclass constructor is a different object and was never branded - while \
+an *instance* private method must still be reachable from an inherited public method. The two \
+halves pull in opposite directions, which is why they are in one probe.\
+"""
+expected_stdout = """
+42
+threw TypeError
+inherited instance private: 1
+"""
+
+[[test]]
+id = "guard/g13-set-mutation"
+group = "guard"
+source = "guard/g13-set-mutation.js"
+status = "not-yet-runnable"
+features = ["set", "iterator-protocol", "for-of", "mutation-during-iteration"]
+catches = """
+Deleting from a Set while iterating it. The broken version compacted the dense backing array \
+under a live cursor and compared the cursor against a shrinking count, so the walk skipped \
+entries. Effect's `race` and `timeout` interrupt their children by doing exactly this - \
+deleting each child from a Set as it iterates - so this single bug blocked all of interruption.\
+"""
+expected_stdout = """
+3 a,b,c 0
+"""
+
+[[test]]
+id = "guard/g14-generator-return-finally"
+group = "guard"
+source = "guard/g14-generator-return-finally.js"
+status = "not-yet-runnable"
+features = ["generators", "generator-return", "try-finally", "abrupt-completion", "json"]
+catches = """
+`generator.return(v)` unwinding the suspended body so its `finally` runs, and then completing \
+with `{ value: v, done: true }`. This is the mechanism a fiber runtime uses to interrupt a \
+suspended computation; without it, interruption silently skips all cleanup.\
+"""
+expected_stdout = """
+1
+cleanup
+{"value":"early","done":true}
+"""
+
+[[test]]
+id = "guard/g15-error-stack-cause"
+group = "guard"
+source = "guard/g15-error-stack-cause.js"
+status = "not-yet-runnable"
+features = ["error-objects", "error-cause", "error-stack", "builtin-statics"]
+catches = """
+The three Error surfaces Effect actually reads: `.stack` present and a string, the `cause` \
+option preserved by identity, and `Error.captureStackTrace` existing. Note what is *not* \
+asserted - the content of `.stack`. In the source project real frames were unobtainable \
+because the release build strips unwind tables, so `.stack` is the header-only shape V8 gives \
+under `Error.stackTraceLimit = 0`. Kiln can do better here; the probe is a floor, not a ceiling.\
+"""
+expected_stdout = """
+string true function
+"""
+
+[[test]]
+id = "guard/g16-array-from-iterable"
+group = "guard"
+source = "guard/g16-array-from-iterable.js"
+status = "not-yet-runnable"
+features = ["array-from", "iterator-protocol", "generators", "array-spread", "well-known-symbols"]
+catches = """
+`Array.from` going through `@@iterator` rather than reading a length, checked against array \
+spread on the same object so the two paths cannot drift apart. The subject is an object literal \
+with a generator method as its `@@iterator`, which is the shape Effect's Chunk hands to \
+`Array.from`.\
+"""
+expected_stdout = """
+1,2 1,2
+"""
+
+[[test]]
+id = "guard/g17-set-map-iterator"
+group = "guard"
+source = "guard/g17-set-map-iterator.js"
+status = "not-yet-runnable"
+features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "set", "map", "string-iteration", "generators"]
+catches = """
+`@@iterator` present as a real property on Set, Map, String and generator objects - the same \
+presence-not-just-behaviour requirement as g06b, applied to the other four iterable built-ins. \
+Fixing this also surfaced two generator prototype branches that had been dead code because of a \
+doubled name prefix.\
+"""
+expected_stdout = """
+function function function
+function
+"""
+
+[[test]]
+id = "guard/g18-iterator-close"
+group = "guard"
+source = "guard/g18-iterator-close.js"
+status = "not-yet-runnable"
+features = ["iterator-protocol", "iterator-close", "for-of", "abrupt-completion", "well-known-symbols"]
+catches = """
+IteratorClose: `break` out of a `for..of` calling the iterator's `return()`. Worth reading \
+alongside the README's methodology section - the fix for this probe introduced a bug where an \
+iterator that was never opened got closed anyway, and that bug passed this probe and showed no \
+test262 regression. Only a real Effect program caught it. In the source project only `break` \
+closed; `return`, `throw` and labelled jumps did not, and that limit was accepted deliberately.\
+"""
+expected_stdout = """
+closed
+"""
+
+[[test]]
+id = "guard/g19-subclass-array-map"
+group = "guard"
+source = "guard/g19-subclass-array-map.js"
+status = "not-yet-runnable"
+features = ["classes", "inheritance", "derived-constructors", "builtin-subclassing", "instanceof", "array-methods", "map"]
+catches = """
+Real derived-constructor semantics over built-ins: `this` binding to the result of `super()` \
+rather than to a freshly allocated ordinary object, so `class A extends Array` is an actual \
+Array and `class M extends Map` is an actual Map. Getting this right is what let the source \
+project delete a special-cased Error patch entirely - Error subclassing stopped needing its own \
+mechanism once derived constructors were correct.\
+"""
+expected_stdout = """
+true 1
+true 1
+"""
+
+# ---------------------------------------------------------------------------------------------
+# effect/ - 12 real Effect-TS programs, in increasing order of difficulty.
+#
+# These are not probes. Each is a small but genuine program that exercises a whole library at
+# once, and they exist because probes and broad conformance suites both miss things that real
+# programs hit. See README.md, "Why the real programs are a separate gate".
+#
+# `source` is the TypeScript entry point. `bundle` is the single-file ESM output build.sh
+# produces from it; the bundles are not committed (see .gitignore) except the one noted in
+# [[fixture]] at the end of this file.
+#
+# `features` names JavaScript semantics, because that is what a selector over compiler changes
+# needs. `effect_api` separately names the library surface, which is what a human reading this
+# file wants to know.
+# ---------------------------------------------------------------------------------------------
+
+[[test]]
+id = "effect/01-core"
+group = "effect"
+source = "effect/src/01-core.ts"
+bundle = "effect/bundle/01-core.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain", "object-spread", "symbol-keys"]
+effect_api = ["Effect.succeed", "Effect.map", "Effect.flatMap", "pipe", "Effect.runSync", "Effect.runPromise"]
+expected_stdout = """
+runSync 1
+pipe 20
+promise 5
+"""
+
+[[test]]
+id = "effect/02-gen"
+group = "effect"
+source = "effect/src/02-gen.ts"
+bundle = "effect/bundle/02-gen.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "object-spread", "symbol-keys", "closures"]
+effect_api = ["Effect.gen", "Effect.succeed", "Effect.runSync"]
+notes = """
+The smallest program that needs both of the two defects that originally blocked Effect \
+entirely: object spread keeping symbol keys, so the value has an `@@iterator` at all, and a \
+generic iterator protocol, so `yield*` can drive it.\
+"""
+expected_stdout = """
+gen 2
+"""
+
+[[test]]
+id = "effect/03-ref"
+group = "effect"
+source = "effect/src/03-ref.ts"
+bundle = "effect/bundle/03-ref.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain"]
+effect_api = ["Ref.make", "Ref.update", "Ref.get", "Effect.flatMap", "Effect.runPromise"]
+expected_stdout = """
+ref 1
+"""
+
+[[test]]
+id = "effect/04-all-foreach"
+group = "effect"
+source = "effect/src/04-all-foreach.ts"
+bundle = "effect/bundle/04-all-foreach.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "builtin-statics", "global-object", "well-known-symbols", "iterator-protocol", "in-operator", "array-methods", "promises", "microtasks"]
+effect_api = ["Effect.all", "Effect.forEach", "Effect.succeed", "Effect.runPromise"]
+notes = """
+Reaches `Array.isArray` off a variable holding `globalThis.Array` (see guard/g10) and tests \
+`Symbol.iterator in v` before accepting an array (see guard/g06b). Both of those are why this \
+program failed while 01-core passed.\
+"""
+expected_stdout = """
+all 1,2
+seq 2,4,6
+"""
+
+[[test]]
+id = "effect/05-concurrency"
+group = "effect"
+source = "effect/src/05-concurrency.ts"
+bundle = "effect/bundle/05-concurrency.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "promises", "microtasks", "event-loop", "iterator-protocol", "closures", "callback-ordering"]
+effect_api = ["Effect.forEach", "Effect.runPromise"]
+notes = """
+Bounded (`concurrency: 2`) and unbounded concurrency. The output is order-sensitive: results \
+must come back in *input* order regardless of completion order, which is a real constraint on \
+the scheduler and not just on the primitives.\
+"""
+expected_stdout = """
+conc 2,4
+unbounded 2,4,6
+"""
+
+[[test]]
+id = "effect/06-sleep"
+group = "effect"
+source = "effect/src/06-sleep.ts"
+bundle = "effect/bundle/06-sleep.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "timers", "event-loop", "promises", "microtasks"]
+effect_api = ["Effect.sleep", "Effect.andThen", "Effect.succeed", "Effect.runPromise"]
+notes = """
+The first program that needs a real event loop rather than only a microtask queue. Under \
+design.md §11 this should eventually be driven by virtual time.\
+"""
+expected_stdout = """
+slept
+"""
+
+[[test]]
+id = "effect/07-interruption"
+group = "effect"
+source = "effect/src/07-interruption.ts"
+bundle = "effect/bundle/07-interruption.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "timers", "event-loop", "set", "mutation-during-iteration", "iterator-protocol", "generator-return", "try-finally", "abrupt-completion", "promises", "microtasks", "error-objects"]
+effect_api = ["Effect.race", "Effect.timeout", "Effect.sleep", "Effect.flatMap", "Effect.runPromise"]
+notes = """
+The hardest of the mid-tier programs and the reason guard/g13 and guard/g14 exist: race and \
+timeout interrupt their children by deleting them from a Set while iterating it, and the \
+interruption itself is a generator `.return()` that must run the body's `finally`.\
+"""
+expect_comment_disagrees = """
+The source's `// expect:` comment reads "timeout threw TimeoutError | race fast", implying that \
+order. Observed order under node is the reverse - `race fast` first, then `timeout threw \
+TimeoutError` - which is also what the code says should happen: the race resolves on a 2 ms \
+sleep and the timeout does not fire until 5 ms. Confirmed identical over ten consecutive runs. \
+The observed order is recorded above; the comment is left unedited in the source file.\
+"""
+expected_stdout = """
+race fast
+timeout threw TimeoutError
+"""
+
+[[test]]
+id = "effect/08-scope"
+group = "effect"
+source = "effect/src/08-scope.ts"
+bundle = "effect/bundle/08-scope.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "generators", "yield-delegation", "closures", "lexical-environments", "try-finally", "promises", "microtasks"]
+effect_api = ["Effect.scoped", "Effect.acquireRelease", "Effect.gen", "Effect.sync", "Effect.runPromise"]
+notes = """
+Nested `Effect.gen` closing over a mutable local, with the release action asserting through \
+that closure that it actually ran.\
+"""
+expected_stdout = """
+scope released=true
+"""
+
+[[test]]
+id = "effect/09-fiber"
+group = "effect"
+source = "effect/src/09-fiber.ts"
+bundle = "effect/bundle/09-fiber.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "global-object", "in-operator", "timers", "event-loop", "promises", "microtasks", "closures"]
+effect_api = ["Effect.forkChild", "Fiber.join", "Effect.flatMap", "Effect.runPromise"]
+notes = """
+This is the module-semantics test. Effect picks its scheduler with `"setImmediate" in \
+globalThis ? ... : setTimeout`, wrapped around its own top-level binding. If top-level `var` in \
+a module leaks onto the global object, the wrong branch is taken and fork scheduling breaks - \
+which is why the bundles must be run with module semantics even though esbuild has already \
+removed every import and export.\
+"""
+expected_stdout = """
+fork 7
+"""
+
+[[test]]
+id = "effect/10-tagged-error"
+group = "effect"
+source = "effect/src/10-tagged-error.ts"
+bundle = "effect/bundle/10-tagged-error.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "classes", "class-fields", "closures", "inheritance", "derived-constructors", "error-objects", "error-subclassing", "instanceof", "promises"]
+effect_api = ["Data.TaggedError", "Effect.fail", "Effect.catchTag", "Effect.succeed", "Effect.runSync"]
+notes = """
+`Data.TaggedError` is `tag => class Base extends Error { _tag = tag }`, so this program is \
+guard/g03 and guard/g09 composed: a class-field initialiser closing over a function parameter, \
+inside a class extending Error, whose instances must satisfy `instanceof Error` and carry a \
+string `message`.\
+"""
+expected_stdout = """
+A true MyError x string
+B caught:x
+"""
+
+[[test]]
+id = "effect/11-stream"
+group = "effect"
+source = "effect/src/11-stream.ts"
+bundle = "effect/bundle/11-stream.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "iterator-protocol", "array-from", "well-known-symbols", "generators", "promises", "microtasks", "closures"]
+effect_api = ["Stream.fromIterable", "Stream.map", "Stream.runCollect", "Effect.map", "Effect.runPromise"]
+notes = """
+Pulls in far more of the library than any other program - its bundle is 377 KB against ~200 KB \
+for the rest - and ends in `Array.from` over a Chunk, which is guard/g16's shape.\
+"""
+expected_stdout = """
+stream 2,4,6
+"""
+
+[[test]]
+id = "effect/12-service-layer"
+group = "effect"
+source = "effect/src/12-service-layer.ts"
+bundle = "effect/bundle/12-service-layer.js"
+status = "not-yet-runnable"
+features = ["modules", "module-semantics", "set-prototype-of", "prototype-chain", "function-objects", "static-inheritance", "classes", "inheritance", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "timers", "event-loop", "promises", "microtasks"]
+effect_api = ["Context.Service", "Layer.succeed", "Effect.provide", "Effect.gen", "Effect.forEach", "Effect.sleep", "Effect.runPromise"]
+notes = """
+The end-to-end program: dependency injection, generators, concurrency and timers in one. \
+`Context.Service` does `Object.setPrototypeOf(KeyClass, ServiceProto)` and the yieldable \
+`@@iterator` lives on that prototype, so `yield* Greeter` only resolves if a prototype set on a \
+function is honoured (guard/g11). This is the program the source project treated as its \
+definition of done, and it is the one committed as a bundle fixture below.
+
+Its expected output contains a literal " | ", which is why the `// expect:` comment convention \
+cannot be parsed mechanically and the output here was observed instead.\
+"""
+expected_stdout = """
+RESULT hi world | 2,4,6
+"""
+
+# ---------------------------------------------------------------------------------------------
+# Not a test. A committed input fixture, listed here so it is inventoried rather than being an
+# unexplained 209 KB file. status.sh must not count this toward any test total.
+# ---------------------------------------------------------------------------------------------
+
+[[fixture]]
+id = "effect/12-service-layer.bundle"
+path = "effect/fixtures/12-service-layer.bundle.js"
+bytes = 209056
+sha256 = "0d552dd5e5cb17a3829d1959f1083ddbded2850c7d39490036826f442a4e159b"
+generated_from = "effect/src/12-service-layer.ts"
+generator = "esbuild 0.27.7 --bundle --format=esm --platform=neutral"
+purpose = """
+A large, real, machine-generated JavaScript input for frontend and parser benchmarking. Not \
+hand-written, not minified, not synthetic: ~209 KB of the shapes a bundler actually emits. \
+Regenerable byte for byte from package-lock.json plus build.sh - verified by building twice and \
+diffing - but committed so that benchmarks need neither a network nor a Node toolchain.\
+"""

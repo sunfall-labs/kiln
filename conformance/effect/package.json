@@ -1,0 +1,14 @@
+{
+  "name": "kiln-conformance-effect",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Bundle inputs for the Effect-TS conformance programs. Not published, not part of the Rust workspace; it exists only so that `npm ci && ./build.sh` reproduces the bundles the manifest's expected output was recorded against.",
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh"
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.112",
+    "esbuild": "0.27.7"
+  }
+}
