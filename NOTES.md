@@ -387,3 +387,11 @@ needs one). The goal is one end-to-end scalar build that emits a deterministic p
 header, compiles position-independent module code, links a shared library, and proves a separate C
 host can call the exported Kiln module through HostOps. I will not touch the active language crates
 or `kiln-backend-c`; the existing generated module ABI is the boundary for this slice.
+
+Follow-up: `3706fcb` is verified from a detached stable worktree. The real C host loads the emitted
+macOS dylib, calls its reported symbol, and receives `embedded\0tail` through HostOps using the
+borrowed `ptr + len` contract; no CLI runtime is linked. The test also proves executable objects do
+not reuse PIC objects, repeat shared builds hit all three cache layers, and an output-basename
+change relinks for a new install name/SONAME. All native/runtime/toolchain tests (19), targeted and
+workspace clippy with warnings denied, and ABI C/C++ probes pass. Full workspace tests have only
+the already-recorded conformance expectation drift for a formerly unsupported HIR fixture.
