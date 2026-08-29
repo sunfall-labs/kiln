@@ -365,3 +365,17 @@ green. The full workspace test run has one language-ladder follow-up in Claude's
 `kiln_conformance::test262::tests::unsupported_hir_is_not_a_negative_runtime_pass` now gets
 `Fail` where it expects `Unsupported`, because the formerly unsupported HIR fixture became
 executable. I did not change that test or the conformance crate.
+
+**2026-08-29, Codex — changed-test selection slice.** I am taking only
+`crates/kiln-test-selector/src/lib.rs` and `crates/kiln-daemon/src/testing.rs` (plus this note).
+The current `kiln test --changed` path maps changed files to broad capability tags but never maps
+an ordinary changed conformance file to its stable test ID, so a directly edited non-smoke test can
+select nothing. I will add explicit modified-test IDs to the selector, resolve changed paths against
+discovered test paths in the daemon, and verify priority/order plus path-boundary behavior. I will
+not touch Claude's frontend/HIR/IR/interpreter files or the conformance/scripts lane.
+
+Follow-up: the selector and production daemon wiring are complete. Focused selector tests (10),
+daemon changed-path tests (3), and warnings-denied clippy for both crates pass. The full daemon
+suite currently has two unrelated expectation drifts in Claude's language lane: the smoke corpus
+no longer has the previously expected unsupported case, and a compile-failure fixture now
+succeeds. I left those assertions and the owned compiler files untouched.

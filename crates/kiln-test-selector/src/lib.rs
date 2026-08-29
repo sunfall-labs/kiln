@@ -178,6 +178,8 @@ pub struct ChangeSet {
     pub ir_operations: Tags,
     pub builtin_modules: Tags,
     pub host_ops: Tags,
+    /// Tests whose source files were edited directly.
+    pub changed_tests: BTreeSet<TestId>,
     /// Select every known test, while retaining ordinary priority ordering.
     pub full_run: bool,
 }
@@ -209,6 +211,7 @@ impl ChangeSet {
             && self.ir_operations.is_empty()
             && self.builtin_modules.is_empty()
             && self.host_ops.is_empty()
+            && self.changed_tests.is_empty()
     }
 
     pub fn compiler_crate(mut self, tag: impl Into<String>) -> Self {
@@ -236,6 +239,11 @@ impl ChangeSet {
         self
     }
 
+    pub fn changed_test(mut self, id: impl Into<TestId>) -> Self {
+        self.changed_tests.insert(id.into());
+        self
+    }
+
     pub fn add_compiler_crate(&mut self, tag: impl Into<String>) {
         self.compiler_crates.insert(tag.into());
     }
@@ -255,6 +263,10 @@ impl ChangeSet {
     pub fn add_host_op(&mut self, tag: impl Into<String>) {
         self.host_ops.insert(tag.into());
     }
+
+    pub fn add_changed_test(&mut self, id: impl Into<TestId>) {
+        self.changed_tests.insert(id.into());
+    }
 }
 
 /// Why a test was selected.
@@ -267,6 +279,7 @@ pub enum SelectionReason {
     ModifiedIrOperation(String),
     ModifiedBuiltinModule(String),
     ModifiedHostOp(String),
+    ModifiedTest(TestId),
     FullRun,
 }
 
@@ -279,7 +292,8 @@ impl SelectionReason {
             | Self::ModifiedFeature(_)
             | Self::ModifiedIrOperation(_)
             | Self::ModifiedBuiltinModule(_)
-            | Self::ModifiedHostOp(_) => 2,
+            | Self::ModifiedHostOp(_)
+            | Self::ModifiedTest(_) => 2,
             Self::FullRun => 3,
         }
     }
@@ -658,6 +672,9 @@ fn add_intersection_reasons(
     for tag in metadata.host_ops.intersection(&changes.host_ops) {
         reasons.insert(SelectionReason::ModifiedHostOp(tag.clone()));
     }
+    if changes.changed_tests.contains(&metadata.id) {
+        reasons.insert(SelectionReason::ModifiedTest(metadata.id.clone()));
+    }
 }
 
 fn reason_priority(reasons: &BTreeSet<SelectionReason>) -> u8 {
@@ -685,13 +702,19 @@ mod tests {
             TestMetadata::new("b-both")
                 .smoke()
                 .builtin_module("console"),
+            TestMetadata::new("c-modified"),
             TestMetadata::new("unrelated"),
         ];
-        let changes = ChangeSet::new().builtin_module("console");
+        let changes = ChangeSet::new()
+            .builtin_module("console")
+            .changed_test("c-modified");
         let failures = FailureState::from_failing(["m-failing", "b-both"]);
         let selection = select(metadata, &changes, &failures);
 
-        assert_eq!(ids(&selection), ["b-both", "m-failing", "a-smoke"]);
+        assert_eq!(
+            ids(&selection),
+            ["b-both", "m-failing", "a-smoke", "c-modified"]
+        );
         assert!(selection.tests[0].has_reason(&SelectionReason::PreviouslyFailed));
         assert!(selection.tests[0].has_reason(&SelectionReason::UniversalSmoke));
         assert!(
@@ -700,6 +723,23 @@ mod tests {
         );
         assert!(selection.tests[1].has_reason(&SelectionReason::PreviouslyFailed));
         assert!(selection.tests[2].has_reason(&SelectionReason::UniversalSmoke));
+        assert!(selection.tests[3].has_reason(&SelectionReason::ModifiedTest("c-modified".into())));
+    }
+
+    #[test]
+    fn directly_modified_ordinary_test_is_selected_without_selecting_unaffected_tests() {
+        let metadata = vec![
+            TestMetadata::new("changed.js"),
+            TestMetadata::new("unaffected.js"),
+        ];
+        let selection = select(
+            metadata,
+            &ChangeSet::new().changed_test("changed.js"),
+            &FailureState::new(),
+        );
+
+        assert_eq!(ids(&selection), ["changed.js"]);
+        assert!(selection.tests[0].has_reason(&SelectionReason::ModifiedTest("changed.js".into())));
     }
 
     #[test]
