@@ -94,13 +94,24 @@ pub struct Parameter {
 ///
 /// Keys are already strings: an identifier key, a string key and a numeric key all name the same
 /// property, and normalising here means later passes never have to know which syntax produced it.
-/// Computed keys, shorthand methods and spread are separate features and are refused rather than
-/// flattened into this.
+/// A spread is not one of these -- see [`ObjectMember`] -- and getters and setters are refused
+/// rather than flattened into this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectProperty {
     pub key: ObjectKey,
     pub value: Expression,
     pub span: Span,
+}
+
+/// One entry in an object literal.
+///
+/// A spread is not a property with a special key: it copies whatever its source has *at the
+/// point it appears*, so a property written after it wins and one written before it loses. That
+/// ordering is only representable by keeping members in one source-ordered list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectMember {
+    Property(ObjectProperty),
+    Spread(Expression),
 }
 
 /// How an object literal names a property.
@@ -424,7 +435,7 @@ pub enum ExpressionKind {
     /// An object literal. Property order is source order, which is the order JavaScript
     /// enumerates string keys in and therefore not an implementation detail.
     Object {
-        properties: Vec<ObjectProperty>,
+        members: Vec<ObjectMember>,
     },
     StaticMember {
         object: Box<Expression>,

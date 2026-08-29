@@ -35,7 +35,67 @@ impl WellKnown {
             Self::Iterator => "@@iterator",
         }
     }
+
+    /// What `String(symbol)` shows, which spells the well-known ones out.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Iterator => "Symbol.iterator",
+        }
+    }
 }
+
+/// A symbol: a property key with an identity of its own.
+#[derive(Clone, Debug)]
+pub enum Symbol {
+    /// One of the specification's own symbols. The same one everywhere in the program, so it
+    /// needs no allocation and equality is the variant's.
+    WellKnown(WellKnown),
+    /// `Symbol(description)`. Two calls make two different symbols even given the same
+    /// description, so identity is the allocation's and the reserved key carries a serial number.
+    /// The description is for display only and is never part of the key.
+    Unique(Rc<UniqueSymbol>),
+}
+
+#[derive(Debug)]
+pub struct UniqueSymbol {
+    serial: u64,
+    description: Option<String>,
+}
+
+impl Symbol {
+    /// The reserved string key this symbol names a property under.
+    ///
+    /// A well-known symbol gets a fixed key so that two mentions of `Symbol.iterator` reach the
+    /// same property; a unique one gets its serial, so that two symbols with the same description
+    /// do not collide and a program cannot spell either by writing a string.
+    pub fn property_key(&self) -> String {
+        match self {
+            Self::WellKnown(symbol) => symbol.property_key().to_owned(),
+            Self::Unique(symbol) => format!("@@symbol:{}", symbol.serial),
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self {
+            Self::WellKnown(symbol) => symbol.description(),
+            Self::Unique(symbol) => symbol.description.as_deref().unwrap_or(""),
+        }
+    }
+}
+
+impl PartialEq for Symbol {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::WellKnown(left), Self::WellKnown(right)) => left == right,
+            (Self::Unique(left), Self::Unique(right)) => Rc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+/// Any string key beginning with this is the VM's own: a symbol-keyed property or an internal
+/// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
+const RESERVED_KEY_PREFIX: &str = "@@";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
@@ -126,7 +186,9 @@ impl Native {
             }
             (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
-            (Self::SymbolConstructor, "iterator") => Some(Value::Symbol(WellKnown::Iterator)),
+            (Self::SymbolConstructor, "iterator") => {
+                Some(Value::Symbol(Symbol::WellKnown(WellKnown::Iterator)))
+            }
             _ => None,
         }
     }
@@ -199,6 +261,11 @@ impl ObjectData {
             Some((_, existing)) => *existing = value,
             None => self.properties.push((key.to_owned(), value)),
         }
+    }
+
+    /// Remove an own property, keeping the order of the rest.
+    pub fn remove(&mut self, key: &str) {
+        self.properties.retain(|(name, _)| name != key);
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
@@ -322,7 +389,7 @@ pub enum Value {
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
     Callback(CallbackMethod),
     /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
-    Symbol(WellKnown),
+    Symbol(Symbol),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
     /// references name the same object, and a mutation through one must be visible through the
     /// other.
@@ -344,7 +411,7 @@ impl Value {
     /// `obj[Symbol.iterator]` and `obj["Symbol(Symbol.iterator)"]` the same property.
     pub fn property_key(&self) -> String {
         match self {
-            Self::Symbol(symbol) => symbol.property_key().to_owned(),
+            Self::Symbol(symbol) => symbol.property_key(),
             other => other.to_display_string(),
         }
     }
@@ -455,10 +522,7 @@ impl Value {
             Self::Native(native) => format!("[Function {native:?}]"),
             Self::Callback(method) => format!("[Function {method:?}]"),
             Self::Generator(_) => "[object Generator]".to_owned(),
-            Self::Symbol(symbol) => format!(
-                "Symbol(Symbol.{})",
-                symbol.property_key().trim_start_matches("@@")
-            ),
+            Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
             Self::Array(items) => join(&items.borrow(), ","),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -739,6 +803,7 @@ pub fn execute<H: HostOps + ?Sized>(
         frames: Vec::new(),
         instruction: 0,
         steps: 0,
+        symbol_serial: 0,
         limits,
     };
     vm.run()
@@ -785,6 +850,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         frames: Vec::new(),
         instruction: 0,
         steps: 0,
+        symbol_serial: 0,
         limits,
     };
     let execution = vm.run()?;
@@ -862,6 +928,9 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     frames: Vec<Frame>,
     instruction: usize,
     steps: u64,
+    /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
+    /// symbol needs: it never leaves the run that made it.
+    symbol_serial: u64,
     limits: ExecutionLimits,
 }
 
@@ -1291,6 +1360,32 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(object))));
                 }
+                Instruction::SpreadObject => {
+                    let source = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let Value::Object(object) = &target else {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
+                    };
+                    // Spreading `null` or `undefined` contributes nothing rather than throwing,
+                    // which is the one place object spread is more forgiving than array spread.
+                    for (key, value) in own_properties(&source) {
+                        object.borrow_mut().set(&key, value);
+                    }
+                    self.stack.push(target);
+                }
+                Instruction::DeleteProperty(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    if let Value::Object(object) = &target {
+                        object.borrow_mut().remove(&name);
+                    }
+                    // `delete` reports whether the property is gone afterwards, and on anything
+                    // without own properties it trivially is.
+                    self.stack.push(Value::Boolean(true));
+                }
                 Instruction::GetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
@@ -1653,6 +1748,18 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Value, ExecutionError> {
         match native {
             Native::ArrayFrom => self.array_from(arguments, instruction),
+            // Every call has to produce a symbol distinct from every other, so this needs the
+            // counter rather than only its arguments.
+            Native::SymbolConstructor => {
+                self.symbol_serial += 1;
+                Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
+                    serial: self.symbol_serial,
+                    description: match arguments.first() {
+                        None | Some(Value::Undefined) => None,
+                        Some(value) => Some(value.to_display_string()),
+                    },
+                }))))
+            }
             _ => call_native(native, receiver, arguments),
         }
     }
@@ -2541,7 +2648,7 @@ fn json_stringify(
             for (key, property) in object.entries() {
                 // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
                 // own enumerable string property, so it is not part of the object's JSON.
-                if key.starts_with("@@") {
+                if key.starts_with(RESERVED_KEY_PREFIX) {
                     continue;
                 }
                 if let Some(part) = json_stringify(property, indent, &nested, guard.seen)? {
@@ -2629,6 +2736,7 @@ fn call_native(
                 Some(Value::Object(object)) => object
                     .borrow()
                     .keys()
+                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
                 // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too.
@@ -3311,6 +3419,34 @@ fn join(items: &[Value], separator: &str) -> String {
         .join(separator)
 }
 
+/// Every own property of a value, in enumeration order, symbol-keyed ones included.
+///
+/// This is what a spread copies, and it is deliberately not the same set `Object.keys` returns:
+/// spread carries symbol keys across and `Object.keys` does not. An array or a string contributes
+/// its indices, which is what makes `{ ...[1, 2] }` an object with keys "0" and "1"; a primitive
+/// with nothing of its own contributes nothing, and so does `null` or `undefined`.
+fn own_properties(value: &Value) -> Vec<(String, Value)> {
+    match value {
+        Value::Object(object) => object
+            .borrow()
+            .entries()
+            .map(|(key, value)| (key.to_owned(), value.clone()))
+            .collect(),
+        Value::Array(items) => items
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (index.to_string(), item.clone()))
+            .collect(),
+        Value::String(text) => text
+            .chars()
+            .enumerate()
+            .map(|(index, character)| (index.to_string(), Value::String(character.to_string())))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn strict_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
@@ -3485,7 +3621,7 @@ mod tests {
     /// A symbol keys a property under its reserved slot, not under its printable description.
     #[test]
     fn a_symbol_key_is_not_its_display_string() {
-        let symbol = Value::Symbol(WellKnown::Iterator);
+        let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
         assert_eq!(symbol.property_key(), "@@iterator");
         assert_eq!(symbol.to_display_string(), "Symbol(Symbol.iterator)");
         assert_eq!(symbol.type_of(), "symbol");
@@ -4406,7 +4542,10 @@ mod tests {
         // The caller turns `None` into `undefined`, a dropped property, or a null element --
         // three different outcomes that all start here.
         assert_eq!(json(&Value::Undefined), None);
-        assert_eq!(json(&Value::Symbol(WellKnown::Iterator)), None);
+        assert_eq!(
+            json(&Value::Symbol(Symbol::WellKnown(WellKnown::Iterator))),
+            None
+        );
         assert_eq!(json(&Value::Native(Native::ArrayIsArray)), None);
     }
 
@@ -4489,5 +4628,84 @@ mod tests {
         // A fractional or zero count means no indent at all, same as omitting the argument.
         assert_eq!(json_indent(Some(&Value::Number(0.0))), "");
         assert_eq!(json_indent(None), "");
+    }
+
+    #[test]
+    fn two_symbols_with_one_description_key_different_properties() {
+        let first = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 1,
+            description: Some("same".to_owned()),
+        }));
+        let second = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 2,
+            description: Some("same".to_owned()),
+        }));
+        assert_ne!(first.property_key(), second.property_key());
+        assert_ne!(first, second);
+        assert_eq!(first, first.clone());
+        // The description is for display only, and never reaches the key.
+        assert_eq!(
+            Value::Symbol(first).to_display_string(),
+            "Symbol(same)".to_owned()
+        );
+    }
+
+    #[test]
+    fn a_symbols_key_is_reserved_so_a_string_cannot_spell_it() {
+        let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 7,
+            description: None,
+        }));
+        assert!(symbol.property_key().starts_with(RESERVED_KEY_PREFIX));
+        assert!(
+            Symbol::WellKnown(WellKnown::Iterator)
+                .property_key()
+                .starts_with(RESERVED_KEY_PREFIX)
+        );
+    }
+
+    #[test]
+    fn spread_reads_every_own_property_including_symbol_keyed_ones() {
+        let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 1,
+            description: None,
+        }));
+        let source = object(&[
+            ("plain", Value::Number(1.0)),
+            (&symbol.property_key(), Value::Number(2.0)),
+        ]);
+        let copied = own_properties(&source);
+        assert_eq!(copied.len(), 2, "a spread carries symbol keys across");
+        assert_eq!(copied[0].0, "plain");
+    }
+
+    #[test]
+    fn spreading_something_without_own_properties_contributes_nothing() {
+        // `{ ...null }` is `{}`, not a throw -- the one place object spread is more forgiving
+        // than array spread.
+        assert!(own_properties(&Value::Null).is_empty());
+        assert!(own_properties(&Value::Undefined).is_empty());
+        assert!(own_properties(&Value::Number(1.0)).is_empty());
+    }
+
+    #[test]
+    fn an_array_and_a_string_spread_as_their_indices() {
+        let items = own_properties(&array(&[Value::Number(7.0), Value::Number(8.0)]));
+        assert_eq!(items[0].0, "0");
+        assert_eq!(items[1].0, "1");
+        let characters = own_properties(&Value::String("hi".to_owned()));
+        assert_eq!(characters.len(), 2);
+        assert_eq!(characters[1].0, "1");
+    }
+
+    #[test]
+    fn removing_a_property_keeps_the_order_of_the_rest() {
+        // Insertion order is observable, so a removal must not be implemented as a swap.
+        let mut data = ObjectData::default();
+        for key in ["a", "b", "c"] {
+            data.set(key, Value::Undefined);
+        }
+        data.remove("b");
+        assert_eq!(data.keys().collect::<Vec<_>>(), vec!["a", "c"]);
     }
 }

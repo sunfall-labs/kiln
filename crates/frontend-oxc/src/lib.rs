@@ -1013,18 +1013,24 @@ impl Lowerer {
 
     /// Lower an object literal, or refuse the whole literal.
     ///
-    /// Refusing wholesale rather than dropping the properties it cannot lower: an object missing
-    /// a spread's contributions looks like a valid object and would be wrong everywhere it was
+    /// Refusing wholesale rather than dropping the members it cannot lower: an object missing
+    /// some of its properties looks like a valid object and would be wrong everywhere it was
     /// used, whereas a missing object is a diagnostic at the point of the mistake.
     fn object_literal(
         &mut self,
         expression: &ObjectExpression<'_>,
         expression_span: HirSpan,
     ) -> HirExpression {
-        let mut properties = Vec::with_capacity(expression.properties.len());
+        let mut members = Vec::with_capacity(expression.properties.len());
         for property in &expression.properties {
-            let ObjectPropertyKind::ObjectProperty(property) = property else {
-                return self.unsupported_expression("object spread", expression_span);
+            let property = match property {
+                ObjectPropertyKind::ObjectProperty(property) => property,
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    members.push(kiln_hir::ObjectMember::Spread(
+                        self.expression(&spread.argument),
+                    ));
+                    continue;
+                }
             };
             // A shorthand method is a property whose value is a function expression. It differs
             // from one written longhand only in having no `prototype` and not being constructable,
@@ -1043,14 +1049,14 @@ impl Lowerer {
                 };
                 kiln_hir::ObjectKey::Static(key.to_string())
             };
-            properties.push(kiln_hir::ObjectProperty {
+            members.push(kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                 key,
                 value: self.expression(&property.value),
                 span: span(property.span),
-            });
+            }));
         }
         HirExpression {
-            kind: HirExpressionKind::Object { properties },
+            kind: HirExpressionKind::Object { members },
             span: expression_span,
         }
     }
@@ -1367,10 +1373,7 @@ mod tests {
         // falling into a catch-all reporting the bare word "expression". A third of the guard
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
-        let cases = [
-            ("const value = `x`;", "template literal"),
-            ("const value = { ...other };", "object spread"),
-        ];
+        let cases = [("const value = `x`;", "template literal")];
         for (source, expected) in cases {
             let module = parse("module.js", source);
             let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {

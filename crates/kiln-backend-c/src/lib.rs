@@ -685,6 +685,8 @@ fn stack_effect(
         | Instruction::Dup2
         | Instruction::NewArray { .. }
         | Instruction::SpreadInto
+        | Instruction::SpreadObject
+        | Instruction::DeleteProperty(_)
         | Instruction::IterableToArray
         | Instruction::GetComputed
         | Instruction::SetComputed
@@ -915,6 +917,8 @@ fn emit_instruction(
         | Instruction::Dup2
         | Instruction::NewArray { .. }
         | Instruction::SpreadInto
+        | Instruction::SpreadObject
+        | Instruction::DeleteProperty(_)
         | Instruction::IterableToArray
         | Instruction::GetComputed
         | Instruction::SetComputed
@@ -1123,6 +1127,11 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::Dup2 => byte(&mut hash, 27),
             Instruction::IterableToArray => byte(&mut hash, 44),
             Instruction::SpreadInto => byte(&mut hash, 41),
+            Instruction::SpreadObject => byte(&mut hash, 45),
+            Instruction::DeleteProperty(value) => {
+                byte(&mut hash, 46);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::NewArray { count } => {
                 byte(&mut hash, 28);
                 word(&mut hash, u64::from(*count));
