@@ -41,6 +41,7 @@ pub enum UnaryOp {
 /// Binary operations understood by the bytecode runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
+    In,
     Add,
     Subtract,
     Multiply,
@@ -67,6 +68,11 @@ pub enum Instruction {
     StoreLocal(u32),
     Pop,
     Dup,
+    /// Duplicate the top two values, preserving their order.
+    ///
+    /// Needed by compound computed assignment, where the object and key must be read once and
+    /// used twice. Doing it with two `Dup`s would reverse them.
+    Dup2,
     Unary(UnaryOp),
     Binary(BinaryOp),
     Jump(u32),
@@ -84,6 +90,27 @@ pub enum Instruction {
     Call {
         argc: u16,
     },
+    /// Build an array from `count` values on the stack, in source order.
+    NewArray {
+        count: u32,
+    },
+    /// Read `object[key]`. Stack is object, then key.
+    GetComputed,
+    /// Call `object.name(...)` with the object as receiver. Stack is object, then arguments.
+    ///
+    /// A method call cannot be a `GetProperty` followed by a `Call`: that discards the receiver,
+    /// and a property read must yield the *unbound* function so that `a.f === a.f` holds. Keeping
+    /// the receiver on the stack until the call is what lets both be true at once.
+    CallMethod {
+        name: u32,
+        argc: u16,
+    },
+    /// `object[key](...)`, the computed form of `CallMethod`.
+    CallComputed {
+        argc: u16,
+    },
+    /// Write `object[key] = value`. Stack is object, key, value.
+    SetComputed,
     /// Push a built-in global.
     ///
     /// Built-ins are named by index rather than resolved by string at runtime because the
@@ -167,6 +194,10 @@ pub struct FunctionProto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
     Error,
+    Symbol,
+    Array,
+    Object,
+    Json,
 }
 
 impl Builtin {
@@ -174,6 +205,10 @@ impl Builtin {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "Error" => Some(Self::Error),
+            "Symbol" => Some(Self::Symbol),
+            "Array" => Some(Self::Array),
+            "Object" => Some(Self::Object),
+            "JSON" => Some(Self::Json),
             _ => None,
         }
     }
@@ -181,6 +216,10 @@ impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Self::Error => "Error",
+            Self::Symbol => "Symbol",
+            Self::Array => "Array",
+            Self::Object => "Object",
+            Self::Json => "JSON",
         }
     }
 }
@@ -696,6 +735,7 @@ impl Compiler {
                     BinaryOperator::Remainder => BinaryOp::Remainder,
                     BinaryOperator::Exponentiate => BinaryOp::Exponentiate,
                     BinaryOperator::StrictEqual => BinaryOp::StrictEqual,
+                    BinaryOperator::In => BinaryOp::In,
                     BinaryOperator::StrictNotEqual => BinaryOp::StrictNotEqual,
                     BinaryOperator::LessThan => BinaryOp::LessThan,
                     BinaryOperator::LessThanOrEqual => BinaryOp::LessThanOrEqual,
@@ -729,6 +769,29 @@ impl Compiler {
             ExpressionKind::Call { callee, arguments } => {
                 self.call(callee, arguments, expression.span)
             }
+            ExpressionKind::Array { elements } => {
+                if elements.len() > u32::MAX as usize {
+                    self.error(Some(expression.span), "array literal has too many elements");
+                    return;
+                }
+                for element in elements {
+                    self.expression(element);
+                }
+                self.code.push(Instruction::NewArray {
+                    count: elements.len() as u32,
+                });
+            }
+            ExpressionKind::ComputedMember { object, property } => {
+                self.expression(object);
+                self.expression(property);
+                self.code.push(Instruction::GetComputed);
+            }
+            ExpressionKind::ComputedAssignment {
+                operator,
+                object,
+                property,
+                value,
+            } => self.computed_assignment(*operator, object, property, value),
             ExpressionKind::New { callee, arguments } => {
                 if arguments.len() > u16::MAX as usize {
                     self.error(Some(expression.span), "too many constructor arguments");
@@ -1020,6 +1083,41 @@ impl Compiler {
     /// The object expression is evaluated once. `o().x += 1` must not call `o` twice, so the
     /// reference is duplicated on the stack rather than the expression being compiled twice --
     /// which would be the easy mistake and would double any side effect in the receiver.
+    /// `object[key] = value`, and the compound forms.
+    ///
+    /// Both the object and the key are evaluated once, in that order, which is the order the
+    /// language specifies and the one a reader assumes. A compound form has to re-read through
+    /// the same pair rather than re-evaluating either, so both are duplicated on the stack.
+    fn computed_assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        object: &Expression,
+        property: &Expression,
+        value: &Expression,
+    ) {
+        self.expression(object);
+        self.expression(property);
+
+        if operator != AssignmentOperator::Assign {
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
+            self.expression(value);
+            self.code.push(Instruction::Binary(match operator {
+                AssignmentOperator::Add => BinaryOp::Add,
+                AssignmentOperator::Subtract => BinaryOp::Subtract,
+                AssignmentOperator::Multiply => BinaryOp::Multiply,
+                AssignmentOperator::Divide => BinaryOp::Divide,
+                AssignmentOperator::Remainder => BinaryOp::Remainder,
+                AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
+                AssignmentOperator::Assign => unreachable!("handled above"),
+            }));
+        } else {
+            self.expression(value);
+        }
+
+        self.code.push(Instruction::SetComputed);
+    }
+
     fn member_assignment(
         &mut self,
         operator: AssignmentOperator,
@@ -1080,6 +1178,29 @@ impl Compiler {
                 argc,
             });
             return;
+        }
+
+        // A method call keeps its receiver rather than reading the function out first.
+        match &callee.kind {
+            ExpressionKind::StaticMember { object, property } => {
+                let name = self.constant_index(Constant::String(property.clone()));
+                self.expression(object);
+                for argument in arguments {
+                    self.expression(argument);
+                }
+                self.code.push(Instruction::CallMethod { name, argc });
+                return;
+            }
+            ExpressionKind::ComputedMember { object, property } => {
+                self.expression(object);
+                self.expression(property);
+                for argument in arguments {
+                    self.expression(argument);
+                }
+                self.code.push(Instruction::CallComputed { argc });
+                return;
+            }
+            _ => {}
         }
 
         // Everything else is a real call. The callee is evaluated first so it sits below its
@@ -1336,6 +1457,25 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(argument, names, collecting);
             }
         }
+        ExpressionKind::Array { elements } => {
+            for element in elements {
+                collect_identifiers(element, names, collecting);
+            }
+        }
+        ExpressionKind::ComputedMember { object, property } => {
+            collect_identifiers(object, names, collecting);
+            collect_identifiers(property, names, collecting);
+        }
+        ExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } => {
+            collect_identifiers(object, names, collecting);
+            collect_identifiers(property, names, collecting);
+            collect_identifiers(value, names, collecting);
+        }
         ExpressionKind::New { callee, arguments } => {
             collect_identifiers(callee, names, collecting);
             for argument in arguments {
@@ -1382,6 +1522,22 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || arguments
                     .iter()
                     .any(|argument| expression_references(argument, name))
+        }
+        ExpressionKind::Array { elements } => elements
+            .iter()
+            .any(|element| expression_references(element, name)),
+        ExpressionKind::ComputedMember { object, property } => {
+            expression_references(object, name) || expression_references(property, name)
+        }
+        ExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } => {
+            expression_references(object, name)
+                || expression_references(property, name)
+                || expression_references(value, name)
         }
         ExpressionKind::New { callee, arguments } => {
             expression_references(callee, name)

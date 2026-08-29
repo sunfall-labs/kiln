@@ -416,6 +416,14 @@ impl Lowerer {
                             value: Box::new(self.expression(&expression.right)),
                         }
                     }
+                    AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                        HirExpressionKind::ComputedAssignment {
+                            operator,
+                            object: Box::new(self.expression(&member.object)),
+                            property: Box::new(self.expression(&member.expression)),
+                            value: Box::new(self.expression(&expression.right)),
+                        }
+                    }
                     AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                         HirExpressionKind::MemberAssignment {
                             operator,
@@ -455,8 +463,11 @@ impl Lowerer {
                     property: member.property.name.to_string(),
                 }
             }
-            Expression::ComputedMemberExpression(_) => {
-                return self.unsupported_expression("computed property access", expression_span);
+            Expression::ComputedMemberExpression(member) if !member.optional => {
+                HirExpressionKind::ComputedMember {
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(self.expression(&member.expression)),
+                }
             }
             Expression::PrivateFieldExpression(_) => {
                 return self.unsupported_expression("private property access", expression_span);
@@ -467,8 +478,18 @@ impl Lowerer {
             Expression::ObjectExpression(object) => {
                 return self.object_literal(object, expression_span);
             }
-            Expression::ArrayExpression(_) => {
-                return self.unsupported_expression("array expression", expression_span);
+            Expression::ArrayExpression(expression) => {
+                let mut elements = Vec::with_capacity(expression.elements.len());
+                for element in &expression.elements {
+                    let Some(element) = element.as_expression() else {
+                        // A hole is not an undefined element -- it is absent, which `in` and
+                        // iteration can tell apart -- so it cannot be lowered as one.
+                        return self
+                            .unsupported_expression("array hole or spread", expression_span);
+                    };
+                    elements.push(self.expression(element));
+                }
+                HirExpressionKind::Array { elements }
             }
             Expression::ArrowFunctionExpression(_) => {
                 return self.unsupported_expression("arrow function expression", expression_span);
@@ -751,6 +772,7 @@ fn lower_binary_operator(operator: BinaryOperator) -> Option<HirBinaryOperator> 
         BinaryOperator::Remainder => Some(HirBinaryOperator::Remainder),
         BinaryOperator::Exponential => Some(HirBinaryOperator::Exponentiate),
         BinaryOperator::StrictEquality => Some(HirBinaryOperator::StrictEqual),
+        BinaryOperator::In => Some(HirBinaryOperator::In),
         BinaryOperator::StrictInequality => Some(HirBinaryOperator::StrictNotEqual),
         BinaryOperator::LessThan => Some(HirBinaryOperator::LessThan),
         BinaryOperator::LessEqualThan => Some(HirBinaryOperator::LessThanOrEqual),
@@ -974,7 +996,6 @@ mod tests {
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
-            ("const value = [];", "array expression"),
             ("const value = () => 1;", "arrow function expression"),
             ("const value = `x`;", "template literal"),
             ("const value = { [key]: 1 };", "computed object key"),

@@ -18,9 +18,42 @@ use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, 
 /// Kept minimal on purpose. design.md §5 wants built-ins written in JavaScript, and everything
 /// here is a placeholder for one -- but nothing can bootstrap a JS built-in until there are
 /// prototypes and a loader, so the handful the conformance corpus needs first live here.
+/// The well-known symbols, which are the only symbols that exist so far.
+///
+/// Symbol-keyed properties are stored under a reserved string key (`@@iterator`), the same
+/// convention engines use internally. It is not airtight -- a program could write that string as
+/// a literal key -- but a separate key space costs a second lookup path everywhere for a
+/// collision nobody writes by accident, and the corpus is what would catch it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WellKnown {
+    Iterator,
+}
+
+impl WellKnown {
+    pub fn property_key(self) -> &'static str {
+        match self {
+            Self::Iterator => "@@iterator",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
     Error,
+    SymbolConstructor,
+    ArrayConstructor,
+    ObjectConstructor,
+    Json,
+    ArrayIsArray,
+    ArrayFrom,
+    ObjectKeys,
+    JsonParse,
+    JsonStringify,
+    /// `Array.prototype.join`.
+    ArrayJoin,
+    /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
+    /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
+    ArrayValues,
     /// A V8 extension the corpus checks for. Present, and a no-op: kiln has no frames to capture,
     /// so the honest implementation is one that exists and does nothing.
     ErrorCaptureStackTrace,
@@ -31,6 +64,12 @@ impl Native {
         match (self, name) {
             (Self::Error, "captureStackTrace") => Some(Value::Native(Self::ErrorCaptureStackTrace)),
             (Self::Error, "name") => Some(Value::String("Error".to_owned())),
+            (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
+            (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
+            (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
+            (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
+            (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
+            (Self::SymbolConstructor, "iterator") => Some(Value::Symbol(WellKnown::Iterator)),
             _ => None,
         }
     }
@@ -125,6 +164,12 @@ pub enum Value {
     /// to it are the same function, which is what `===` should say. That stops being true when
     /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
     Native(Native),
+    /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
+    /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
+    /// `Vec` is the representation that makes indexing the common case it is.
+    Array(Rc<RefCell<Vec<Value>>>),
+    /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
+    Symbol(WellKnown),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
     /// references name the same object, and a mutation through one must be visible through the
     /// other.
@@ -139,6 +184,18 @@ pub enum Value {
 }
 
 impl Value {
+    /// The string a value becomes when used as a property key.
+    ///
+    /// Distinct from `to_display_string`: a symbol keys a property under its reserved slot, not
+    /// under its human-readable description, and conflating the two would make
+    /// `obj[Symbol.iterator]` and `obj["Symbol(Symbol.iterator)"]` the same property.
+    pub fn property_key(&self) -> String {
+        match self {
+            Self::Symbol(symbol) => symbol.property_key().to_owned(),
+            other => other.to_display_string(),
+        }
+    }
+
     /// What `typeof` reports.
     ///
     /// Distinct from [`Value::type_name`], which is for diagnostics: `typeof null` is the string
@@ -154,6 +211,8 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) => "function",
+            Self::Array(_) => "object",
+            Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -169,6 +228,8 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) => "function",
+            Self::Array(_) => "array",
+            Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
         }
     }
@@ -190,6 +251,10 @@ impl Value {
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
             Self::Object(_) | Self::Native(_) => f64::NAN,
+            // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
+            Self::Symbol(_) => f64::NAN,
+            // `Number([])` is 0 and `Number([2])` is 2: ToPrimitive joins, then parses.
+            Self::Array(items) => parse_number(&join(&items.borrow(), ",")),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -203,7 +268,7 @@ impl Value {
             // Every object is truthy, and a function is an object.
             Self::Function(_) => true,
             // Every object is truthy, including an empty one.
-            Self::Object(_) | Self::Native(_) => true,
+            Self::Object(_) | Self::Native(_) | Self::Array(_) | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -229,6 +294,12 @@ impl Value {
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
             Self::Native(native) => format!("[Function {native:?}]"),
+            Self::Symbol(symbol) => format!(
+                "Symbol(Symbol.{})",
+                symbol.property_key().trim_start_matches("@@")
+            ),
+            // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
+            Self::Array(items) => join(&items.borrow(), ","),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -261,6 +332,8 @@ impl From<Value> for HostValue {
             Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
             Value::Object(_) => Self::String("[object Object]".to_owned()),
             Value::Native(native) => Self::String(format!("[Function {native:?}]")),
+            Value::Symbol(symbol) => Self::String(symbol.property_key().to_owned()),
+            Value::Array(items) => Self::String(join(&items.borrow(), ",")),
             Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
         }
     }
@@ -676,9 +749,74 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let closure = self.make_closure(*index)?;
                     self.stack.push(Value::Function(closure));
                 }
+                Instruction::CallMethod { name, argc } => {
+                    let name = self.string_constant(*name, current)?;
+                    let arguments = self.take_call_arguments(*argc, current)?;
+                    let receiver = self.pop(current)?;
+                    let method = self.property(&receiver, &name);
+                    let result = self.invoke(method, receiver, arguments, current)?;
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
+                }
+                Instruction::CallComputed { argc } => {
+                    let arguments = self.take_call_arguments(*argc, current)?;
+                    let key = self.pop(current)?;
+                    let receiver = self.pop(current)?;
+                    let method = self.computed(&receiver, &key);
+                    let result = self.invoke(method, receiver, arguments, current)?;
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
+                }
+                Instruction::Dup2 => {
+                    let len = self.stack.len();
+                    let (first, second) = (
+                        self.stack
+                            .get(len.wrapping_sub(2))
+                            .ok_or(ExecutionError::StackUnderflow {
+                                instruction: current,
+                            })?
+                            .clone(),
+                        self.stack
+                            .get(len.wrapping_sub(1))
+                            .ok_or(ExecutionError::StackUnderflow {
+                                instruction: current,
+                            })?
+                            .clone(),
+                    );
+                    self.stack.push(first);
+                    self.stack.push(second);
+                }
+                Instruction::NewArray { count } => {
+                    let count = *count as usize;
+                    if self.stack.len() < count {
+                        return Err(ExecutionError::StackUnderflow {
+                            instruction: current,
+                        });
+                    }
+                    let items = self.stack.split_off(self.stack.len() - count);
+                    self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
+                }
+                Instruction::GetComputed => {
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    self.stack.push(self.computed(&target, &key));
+                }
+                Instruction::SetComputed => {
+                    let value = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    self.set_computed(&target, &key, value.clone(), current)?;
+                    self.stack.push(value);
+                }
                 Instruction::LoadBuiltin(builtin) => {
                     self.stack.push(Value::Native(match builtin {
                         kiln_ir::Builtin::Error => Native::Error,
+                        kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
+                        kiln_ir::Builtin::Array => Native::ArrayConstructor,
+                        kiln_ir::Builtin::Object => Native::ObjectConstructor,
+                        kiln_ir::Builtin::Json => Native::Json,
                     }));
                 }
                 Instruction::New { argc } => {
@@ -782,14 +920,24 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         .ok_or(ExecutionError::StackUnderflow {
                             instruction: current,
                         })?;
-                    let Value::Function(closure) = callee else {
-                        return Err(ExecutionError::NotCallable {
-                            instruction: current,
-                            value: callee.type_name(),
-                        });
-                    };
-                    let closure = Rc::clone(closure);
-                    self.call(closure, argc, current)?;
+                    match callee {
+                        Value::Function(closure) => {
+                            let closure = Rc::clone(closure);
+                            self.call(closure, argc, current)?;
+                        }
+                        Value::Native(native) => {
+                            let native = *native;
+                            let arguments = self.take_arguments(argc, current)?;
+                            let result = call_native(native, &Value::Undefined, &arguments);
+                            self.stack.push(result);
+                        }
+                        other => {
+                            return Err(ExecutionError::NotCallable {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
                 }
                 Instruction::LoadGlobal(slot) => {
                     let value = self.global(*slot as usize)?;
@@ -900,7 +1048,123 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 .cloned()
                 .unwrap_or(Value::Undefined),
             Value::Native(native) => native.property(name).unwrap_or(Value::Undefined),
+            // `length` is not an ordinary property of an array: it is derived, and writing it
+            // truncates. Reading it is all the corpus needs so far.
+            Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
+            // Unbound, so that reading the same method twice yields the same value. The
+            // receiver is supplied by `CallMethod`, not captured here.
+            Value::Array(_) => array_property(name),
             _ => Value::Undefined,
+        }
+    }
+
+    /// Pop `argc` arguments, leaving whatever is beneath them.
+    fn take_call_arguments(
+        &mut self,
+        argc: u16,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let argc = argc as usize;
+        if self.stack.len() < argc {
+            return Err(ExecutionError::StackUnderflow { instruction });
+        }
+        Ok(self.stack.split_off(self.stack.len() - argc))
+    }
+
+    /// Invoke `method` with an explicit receiver.
+    ///
+    /// Returns `None` when a frame was pushed instead: a compiled function's result arrives via
+    /// `Return`, so pushing anything here would leave a stray value on the caller's stack.
+    fn invoke(
+        &mut self,
+        method: Value,
+        receiver: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        match method {
+            Value::Native(native) => Ok(Some(call_native(native, &receiver, &arguments))),
+            Value::Function(closure) => {
+                // A compiled method ignores the receiver until `this` exists; pushing the
+                // arguments back is how the shared call path receives them.
+                self.stack.push(Value::Function(Rc::clone(&closure)));
+                let argc = arguments.len();
+                for argument in arguments {
+                    self.stack.push(argument);
+                }
+                self.call(closure, argc as u16, instruction)?;
+                Ok(None)
+            }
+            other => Err(ExecutionError::NotCallable {
+                instruction,
+                value: other.type_name(),
+            }),
+        }
+    }
+
+    /// Pop `argc` arguments and the callee beneath them.
+    fn take_arguments(
+        &mut self,
+        argc: u16,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let argc = argc as usize;
+        if self.stack.len() < argc + 1 {
+            return Err(ExecutionError::StackUnderflow { instruction });
+        }
+        let arguments = self.stack.split_off(self.stack.len() - argc);
+        self.stack.pop();
+        Ok(arguments)
+    }
+
+    /// `object[key]`. Array indices are numeric; everything else is a string key.
+    fn computed(&self, target: &Value, key: &Value) -> Value {
+        if let Value::Array(items) = target
+            && let Some(index) = array_index(key)
+        {
+            return items
+                .borrow()
+                .get(index)
+                .cloned()
+                .unwrap_or(Value::Undefined);
+        }
+        self.property(target, &key.property_key())
+    }
+
+    fn set_computed(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match target {
+            Value::Array(items) => match array_index(key) {
+                Some(index) => {
+                    let mut items = items.borrow_mut();
+                    // Writing past the end extends with holes, which are `undefined` here.
+                    // Real holes are a distinct concept the frontend refuses, so this stays a
+                    // dense vector rather than growing a sparse representation it cannot yet
+                    // observe the difference from.
+                    if index >= items.len() {
+                        items.resize(index + 1, Value::Undefined);
+                    }
+                    items[index] = value;
+                    Ok(())
+                }
+                None => Err(ExecutionError::NotAnObject {
+                    instruction,
+                    value: "array with a non-index key",
+                }),
+            },
+            Value::Object(object) => {
+                object.borrow_mut().set(&key.property_key(), value);
+                Ok(())
+            }
+            other => Err(ExecutionError::NotAnObject {
+                instruction,
+                value: other.type_name(),
+            }),
         }
     }
 
@@ -1031,6 +1295,9 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
         BinaryOp::Remainder => Value::Number(left.as_number() % right.as_number()),
         BinaryOp::Exponentiate => Value::Number(left.as_number().powf(right.as_number())),
         BinaryOp::StrictEqual => Value::Boolean(strict_equal(&left, &right)),
+        // `key in object` tests presence, which is not the same question as reading the key and
+        // comparing to undefined: a property explicitly set to undefined is present.
+        BinaryOp::In => Value::Boolean(has_property(&right, &left)),
         BinaryOp::StrictNotEqual => Value::Boolean(!strict_equal(&left, &right)),
         BinaryOp::LessThan => Value::Boolean(compare(&left, &right, OrderingPredicate::Less)),
         BinaryOp::LessThanOrEqual => {
@@ -1077,6 +1344,121 @@ fn construct_error(arguments: &[Value]) -> Value {
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
+/// Invoke a native built-in.
+///
+/// Natives take their receiver explicitly rather than through a `this` binding, because there is
+/// no `this` yet. When there is, these become ordinary functions and this dispatch disappears --
+/// which is the point of keeping the set small.
+fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
+    match native {
+        Native::ArrayIsArray => Value::Boolean(matches!(arguments.first(), Some(Value::Array(_)))),
+        Native::ObjectKeys => {
+            let keys = match arguments.first() {
+                Some(Value::Object(object)) => object
+                    .borrow()
+                    .keys()
+                    .map(|key| Value::String(key.to_owned()))
+                    .collect(),
+                // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too.
+                Some(Value::Array(items)) => (0..items.borrow().len())
+                    .map(|index| Value::String(index.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Value::Array(Rc::new(RefCell::new(keys)))
+        }
+        Native::ArrayFrom => match arguments.first() {
+            Some(Value::Array(items)) => {
+                Value::Array(Rc::new(RefCell::new(items.borrow().clone())))
+            }
+            _ => Value::Array(Rc::new(RefCell::new(Vec::new()))),
+        },
+        Native::ArrayJoin => {
+            let separator = match arguments.first() {
+                None | Some(Value::Undefined) => ",".to_owned(),
+                Some(value) => value.to_display_string(),
+            };
+            match receiver {
+                Value::Array(items) => Value::String(join(&items.borrow(), &separator)),
+                _ => Value::String(String::new()),
+            }
+        }
+        // Present so `typeof` reports "function", which is what the corpus checks. Calling one
+        // returns undefined rather than pretending to parse or serialise, because a wrong answer
+        // here would be much worse than a missing one.
+        Native::JsonParse | Native::JsonStringify | Native::ErrorCaptureStackTrace => {
+            Value::Undefined
+        }
+        // `Array.prototype.values` should return an iterator object. Nothing consumes one yet
+        // -- for-of is a later step -- and the corpus only checks the function's identity and
+        // type, so returning undefined is the honest placeholder rather than a fake iterator
+        // that would break the moment anything called `.next()` on it.
+        Native::ArrayValues => Value::Undefined,
+        Native::Error
+        | Native::SymbolConstructor
+        | Native::ArrayConstructor
+        | Native::ObjectConstructor
+        | Native::Json => Value::Undefined,
+    }
+}
+
+/// `key in target`.
+fn has_property(target: &Value, key: &Value) -> bool {
+    let name = key.property_key();
+    match target {
+        Value::Object(object) => object.borrow().get(&name).is_some(),
+        Value::Array(items) => {
+            if let Some(index) = array_index(key) {
+                return index < items.borrow().len();
+            }
+            // Methods and `length` live on the prototype in a real engine; here the property
+            // lookup answers for both, so `in` has to agree with it.
+            name == "length" || !matches!(array_property(&name), Value::Undefined)
+        }
+        Value::Native(native) => native.property(&name).is_some(),
+        _ => false,
+    }
+}
+
+/// The properties an array exposes, shared by reads and by `in` so the two cannot disagree.
+fn array_property(name: &str) -> Value {
+    match name {
+        "join" => Value::Native(Native::ArrayJoin),
+        "values" => Value::Native(Native::ArrayValues),
+        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
+        _ => Value::Undefined,
+    }
+}
+
+/// A key usable as a dense array index: a non-negative integer that fits in `usize`.
+///
+/// `a["0"]` and `a[0]` name the same element, so a string that round-trips through a number is
+/// an index too. `a[-1]` and `a[1.5]` are ordinary string properties in JavaScript, and treating
+/// them as indices would silently move data.
+fn array_index(key: &Value) -> Option<usize> {
+    let number = match key {
+        Value::Number(value) => *value,
+        Value::String(text) => text.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    if number < 0.0 || number.fract() != 0.0 || !number.is_finite() {
+        return None;
+    }
+    Some(number as usize)
+}
+
+/// `Array.prototype.join` semantics: null and undefined become empty, everything else stringifies.
+fn join(items: &[Value], separator: &str) -> String {
+    items
+        .iter()
+        .map(|item| match item {
+            Value::Undefined | Value::Null => String::new(),
+            other => other.to_display_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 fn strict_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
@@ -1090,6 +1472,8 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
         // One `Error` per realm, so two references to it are the same function.
         (Value::Native(a), Value::Native(b)) => a == b,
+        (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
+        (Value::Symbol(a), Value::Symbol(b)) => a == b,
         _ => false,
     }
 }
@@ -1204,6 +1588,86 @@ mod tests {
     /// `cause` follows InstallErrorCause: the property exists when the options object *has* the
     /// key, even when its value is undefined. Testing presence rather than value is the whole
     /// point of that step, and copying the value would lose the distinction.
+    /// `a["0"]` and `a[0]` name the same element. `a[-1]` and `a[1.5]` are ordinary string
+    /// properties, and treating them as indices would silently move data.
+    #[test]
+    fn only_integer_like_keys_are_array_indices() {
+        assert_eq!(array_index(&Value::Number(0.0)), Some(0));
+        assert_eq!(array_index(&Value::String("2".to_owned())), Some(2));
+        assert_eq!(array_index(&Value::Number(-1.0)), None);
+        assert_eq!(array_index(&Value::Number(1.5)), None);
+        assert_eq!(array_index(&Value::Number(f64::INFINITY)), None);
+        assert_eq!(array_index(&Value::String("x".to_owned())), None);
+    }
+
+    /// `in` asks about presence, which is not the same question as reading and comparing to
+    /// undefined: a property explicitly set to undefined is present.
+    #[test]
+    fn in_tests_presence_rather_than_value() {
+        let object = object(&[("set_to_undefined", Value::Undefined)]);
+        assert!(has_property(
+            &object,
+            &Value::String("set_to_undefined".to_owned())
+        ));
+        assert!(!has_property(&object, &Value::String("absent".to_owned())));
+    }
+
+    /// The corpus asserts `Symbol.iterator in [1,2]`, so `in` and the property read have to
+    /// agree about what an array exposes. They share one table for that reason.
+    #[test]
+    fn arrays_expose_the_same_properties_to_reads_and_to_in() {
+        let items = Value::Array(Rc::new(RefCell::new(vec![Value::Number(1.0)])));
+        for key in ["join", "values", "@@iterator", "length"] {
+            assert!(
+                has_property(&items, &Value::String(key.to_owned())),
+                "`{key} in array` must be true"
+            );
+        }
+        assert!(has_property(&items, &Value::Number(0.0)), "index 0 present");
+        assert!(!has_property(&items, &Value::Number(1.0)), "index 1 absent");
+    }
+
+    /// A symbol keys a property under its reserved slot, not under its printable description.
+    #[test]
+    fn a_symbol_key_is_not_its_display_string() {
+        let symbol = Value::Symbol(WellKnown::Iterator);
+        assert_eq!(symbol.property_key(), "@@iterator");
+        assert_eq!(symbol.to_display_string(), "Symbol(Symbol.iterator)");
+        assert_eq!(symbol.type_of(), "symbol");
+    }
+
+    /// `[].values` read twice must be the same function, which is what
+    /// `[][Symbol.iterator] === [].values` asserts. Binding a receiver at read time would make
+    /// each read a fresh value and quietly break it.
+    #[test]
+    fn reading_an_array_method_twice_yields_the_same_function() {
+        assert!(strict_equal(
+            &array_property("values"),
+            &array_property("@@iterator")
+        ));
+        assert!(strict_equal(
+            &array_property("join"),
+            &array_property("join")
+        ));
+        assert!(!strict_equal(
+            &array_property("join"),
+            &array_property("values")
+        ));
+    }
+
+    /// `join` treats null and undefined as empty rather than stringifying them, which is the one
+    /// place its output differs from mapping `String` over the elements.
+    #[test]
+    fn join_renders_nullish_elements_as_empty() {
+        let items = [
+            Value::Number(1.0),
+            Value::Undefined,
+            Value::Null,
+            Value::String("x".to_owned()),
+        ];
+        assert_eq!(join(&items, ","), "1,,,x");
+    }
+
     #[test]
     fn error_cause_is_installed_by_presence_not_by_value() {
         let with_cause = construct_error(&[
