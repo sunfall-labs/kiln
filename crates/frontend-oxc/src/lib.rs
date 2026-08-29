@@ -306,11 +306,61 @@ impl Lowerer {
             Statement::SwitchStatement(_) => {
                 self.unsupported_statement("switch statement", statement_span)
             }
-            Statement::ThrowStatement(_) => {
-                self.unsupported_statement("throw statement", statement_span)
+            Statement::ThrowStatement(statement) => {
+                HirStatementKind::Throw(self.expression(&statement.argument))
             }
-            Statement::TryStatement(_) => {
-                self.unsupported_statement("try statement", statement_span)
+            Statement::TryStatement(statement) => {
+                let handler = match &statement.handler {
+                    Some(clause) => {
+                        let binding = match &clause.param {
+                            None => None,
+                            Some(param) => match &param.pattern {
+                                BindingPattern::BindingIdentifier(identifier) => {
+                                    Some(identifier.name.to_string())
+                                }
+                                _ => {
+                                    return Some(HirStatement {
+                                        kind: self.unsupported_statement(
+                                            "destructuring catch binding",
+                                            statement_span,
+                                        ),
+                                        span: statement_span,
+                                    });
+                                }
+                            },
+                        };
+                        Some(kiln_hir::CatchClause {
+                            binding,
+                            body: clause
+                                .body
+                                .body
+                                .iter()
+                                .filter_map(|statement| self.statement(statement))
+                                .collect(),
+                        })
+                    }
+                    None => None,
+                };
+                HirStatementKind::Try {
+                    block: statement
+                        .block
+                        .body
+                        .iter()
+                        .filter_map(|statement| self.statement(statement))
+                        .collect(),
+                    handler,
+                    finalizer: statement
+                        .finalizer
+                        .as_ref()
+                        .map(|block| {
+                            block
+                                .body
+                                .iter()
+                                .filter_map(|statement| self.statement(statement))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }
             }
             _ => self.unsupported_statement("statement", statement_span),
         };

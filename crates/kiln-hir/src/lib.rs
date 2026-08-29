@@ -136,6 +136,13 @@ pub struct Class {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchClause {
+    /// `None` for the optional-binding form, `catch { }`.
+    pub binding: Option<String>,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassField {
     pub key: ObjectKey,
     /// `None` for `x;`, which initialises to undefined.
@@ -195,6 +202,16 @@ pub enum StatementKind {
         name: String,
         iterable: Expression,
         body: Box<Statement>,
+    },
+    /// `throw expression`.
+    Throw(Expression),
+    /// `try { block } catch (param) { handler } finally { cleanup }`.
+    Try {
+        block: Vec<Statement>,
+        /// `None` for `try/finally`; the binding is `None` for `catch { }` with no parameter.
+        handler: Option<CatchClause>,
+        /// Empty when there is no `finally`.
+        finalizer: Vec<Statement>,
     },
     /// `break`, optionally labelled.
     Break {

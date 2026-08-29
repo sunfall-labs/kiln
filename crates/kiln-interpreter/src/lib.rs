@@ -533,6 +533,11 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// An exception that reached the top of the program.
+    Uncaught {
+        instruction: usize,
+        message: String,
+    },
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -596,6 +601,7 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
+            Self::Uncaught { message, .. } => write!(formatter, "uncaught {message}"),
             Self::NotAnObject { instruction, value } => write!(
                 formatter,
                 "instruction {instruction} set a property on a {value}, which is not an object"
@@ -646,6 +652,7 @@ pub fn execute<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals: vec![Value::Undefined; program.local_count as usize],
         function: None,
+        handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
         this_value: Value::Undefined,
@@ -690,6 +697,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals,
         function: None,
+        handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
         this_value: Value::Undefined,
@@ -712,6 +720,17 @@ pub fn execute_module<H: HostOps + ?Sized>(
         });
     }
     Ok(ModuleExecutionResult { execution, exports })
+}
+
+/// A `catch` or `finally` waiting for an exception.
+///
+/// The frame depth and stack height are recorded so unwinding can restore the machine to exactly
+/// the state the handler expects, however many frames the throw crossed.
+#[derive(Debug)]
+struct Handler {
+    target: usize,
+    frame_depth: usize,
+    stack_height: usize,
 }
 
 /// A suspended caller, restored when the callee returns.
@@ -744,6 +763,8 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     function: Option<Rc<Closure>>,
+    /// Active exception handlers, innermost last.
+    handlers: Vec<Handler>,
     /// The arguments the running frame received.
     arguments: Vec<Value>,
     /// `Error.prototype` for this execution, created on first use.
@@ -987,6 +1008,20 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::SuperCall { argc } => {
                     self.super_call(*argc, current)?;
                 }
+                Instruction::PushHandler(target) => {
+                    self.handlers.push(Handler {
+                        target: *target as usize,
+                        frame_depth: self.frames.len(),
+                        stack_height: self.stack.len(),
+                    });
+                }
+                Instruction::PopHandler => {
+                    self.handlers.pop();
+                }
+                Instruction::Throw => {
+                    let thrown = self.pop(current)?;
+                    self.unwind(thrown, current)?;
+                }
                 Instruction::LoadArguments => {
                     let arguments = self.arguments.clone();
                     self.stack
@@ -1218,6 +1253,32 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
             }
         }
+    }
+
+    /// Transfer control to the innermost handler, or fail if there is none.
+    ///
+    /// Unwinding restores frames one at a time rather than jumping directly, so each caller's
+    /// locals, `this` and arguments are put back exactly as `Return` would have -- an exception
+    /// crossing a call must leave the machine in the same shape a normal return does.
+    fn unwind(&mut self, thrown: Value, instruction: usize) -> Result<(), ExecutionError> {
+        let Some(handler) = self.handlers.pop() else {
+            return Err(ExecutionError::Uncaught {
+                instruction,
+                message: describe_thrown(&thrown),
+            });
+        };
+        while self.frames.len() > handler.frame_depth {
+            let frame = self.frames.pop().expect("checked by the loop condition");
+            self.locals = frame.locals;
+            self.function = frame.function;
+            self.this_value = frame.this_value;
+            self.arguments = frame.arguments;
+            self.instruction = frame.instruction;
+        }
+        self.stack.truncate(handler.stack_height);
+        self.stack.push(thrown);
+        self.instruction = handler.target;
+        Ok(())
     }
 
     /// Run an array method that takes a callback.
@@ -2182,6 +2243,16 @@ fn iteration_result(value: Value, done: bool) -> Value {
     Value::Object(Rc::new(RefCell::new(result)))
 }
 
+/// How an uncaught value is described. An error renders through its `toString`; anything else
+/// through its ordinary string form, because JavaScript lets you throw any value.
+fn describe_thrown(value: &Value) -> String {
+    if has_error_to_string(value) {
+        error_to_string(value)
+    } else {
+        value.to_display_string()
+    }
+}
+
 /// Whether a value inherits `Error.prototype.toString`.
 fn has_error_to_string(value: &Value) -> bool {
     match value {
@@ -2856,6 +2927,65 @@ mod tests {
             None,
             "an equal-looking object is a different key"
         );
+    }
+
+    /// An exception with no handler is an execution error naming what was thrown, rather than a
+    /// silent stop or a panic.
+    #[test]
+    fn an_uncaught_throw_names_what_was_thrown() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![Constant::String("boom".to_owned())],
+            code: vec![Instruction::Const(0), Instruction::Throw],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let Err(ExecutionError::Uncaught { message, .. }) = run(&program) else {
+            panic!("an unhandled throw must not succeed");
+        };
+        assert_eq!(message, "boom");
+    }
+
+    /// A handler restores the stack to the height it had when the handler was registered, so
+    /// values left by the abandoned code cannot leak into the catch block.
+    #[test]
+    fn unwinding_restores_the_stack_the_handler_expected() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
+            code: vec![
+                Instruction::Const(0), // a value the handler must still see
+                Instruction::PushHandler(6),
+                Instruction::Const(1), // debris left by the abandoned try block
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::Throw,
+                // handler: the thrown value is on top, and the sentinel is beneath it
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        assert_eq!(
+            run(&program),
+            Ok(Value::Number(1.0)),
+            "the sentinel from before the handler survives, the debris does not"
+        );
+    }
+
+    /// An error renders through its inherited `toString`; any other value through its ordinary
+    /// string form, because JavaScript allows throwing anything.
+    #[test]
+    fn a_thrown_value_is_described_by_what_it_is() {
+        let error = object(&[
+            ("name", Value::String("E".to_owned())),
+            ("message", Value::String("boom".to_owned())),
+            ("toString", Value::Native(Native::ErrorToString)),
+        ]);
+        assert_eq!(describe_thrown(&error), "E: boom");
+        assert_eq!(describe_thrown(&Value::Number(42.0)), "42");
+        assert_eq!(describe_thrown(&Value::Undefined), "undefined");
     }
 
     #[test]
