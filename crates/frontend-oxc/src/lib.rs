@@ -18,9 +18,9 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AssignmentTarget, BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, VariableDeclaration,
-    VariableDeclarationKind,
+    ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Declaration,
+    ExportDefaultDeclarationKind, Expression, Function, ObjectExpression, ObjectPropertyKind,
+    PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -491,11 +491,17 @@ impl Lowerer {
                 }
                 HirExpressionKind::Array { elements }
             }
-            Expression::ArrowFunctionExpression(_) => {
-                return self.unsupported_expression("arrow function expression", expression_span);
+            Expression::ArrowFunctionExpression(arrow) => {
+                let Some(function) = self.arrow_function(arrow, expression_span) else {
+                    return self.unsupported_expression("arrow function", expression_span);
+                };
+                HirExpressionKind::Function(Box::new(function))
             }
-            Expression::FunctionExpression(_) => {
-                return self.unsupported_expression("function expression", expression_span);
+            Expression::FunctionExpression(function) => {
+                let Some(function) = self.function(function, expression_span) else {
+                    return self.unsupported_expression("function expression", expression_span);
+                };
+                HirExpressionKind::Function(Box::new(function))
             }
             Expression::ClassExpression(_) => {
                 return self.unsupported_expression("class expression", expression_span);
@@ -597,6 +603,66 @@ impl Lowerer {
         HirStatementKind::Function(Box::new(function))
     }
 
+    /// Lower an arrow function.
+    ///
+    /// An expression body becomes a single `return`, which is what it means. The arrow flag is
+    /// carried even though neither `this` nor `arguments` is implemented: the difference is real,
+    /// and a later step that has to reconstruct it from the shape of the body would get it wrong.
+    fn arrow_function(
+        &mut self,
+        arrow: &ArrowFunctionExpression<'_>,
+        expression_span: HirSpan,
+    ) -> Option<HirFunction> {
+        if arrow.r#async {
+            self.unsupported("async arrow function", expression_span);
+            return None;
+        }
+        if arrow.params.rest.is_some() {
+            self.unsupported("rest parameter", expression_span);
+            return None;
+        }
+
+        let mut parameters = Vec::with_capacity(arrow.params.items.len());
+        for item in &arrow.params.items {
+            let BindingPattern::BindingIdentifier(identifier) = &item.pattern else {
+                self.unsupported("destructuring parameter", span(item.span));
+                return None;
+            };
+            parameters.push(HirParameter {
+                name: identifier.name.to_string(),
+                span: span(identifier.span),
+            });
+        }
+
+        let body = match &arrow.body {
+            ArrowFunctionBody::FunctionBody(block) => block
+                .statements
+                .iter()
+                .filter_map(|statement| self.statement(statement))
+                .collect(),
+            // A concise body (`x => x + 1`) is an expression whose value is returned, not an
+            // expression statement whose value is discarded.
+            concise => {
+                let Some(expression) = concise.as_expression() else {
+                    self.unsupported("arrow function body", expression_span);
+                    return None;
+                };
+                vec![HirStatement {
+                    kind: HirStatementKind::Return(Some(self.expression(expression))),
+                    span: expression_span,
+                }]
+            }
+        };
+
+        Some(HirFunction {
+            name: None,
+            arrow: true,
+            parameters,
+            body,
+            span: expression_span,
+        })
+    }
+
     /// The shared part of every function form. `None` means a diagnostic was already recorded.
     fn function(
         &mut self,
@@ -639,6 +705,7 @@ impl Lowerer {
 
         Some(HirFunction {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
+            arrow: false,
             parameters,
             body: statements,
             span: statement_span,
@@ -660,20 +727,25 @@ impl Lowerer {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
                 return self.unsupported_expression("object spread", expression_span);
             };
-            if property.computed {
-                return self.unsupported_expression("computed object key", expression_span);
-            }
-            if property.method {
-                return self.unsupported_expression("object method", expression_span);
-            }
+            // A shorthand method is a property whose value is a function expression. It differs
+            // from one written longhand only in having no `prototype` and not being constructable,
+            // neither of which is observable yet.
             if !matches!(property.kind, PropertyKind::Init) {
                 return self.unsupported_expression("object getter or setter", expression_span);
             }
-            let Some(key) = property.key.static_name() else {
-                return self.unsupported_expression("object key", expression_span);
+            let key = if property.computed {
+                let Some(key) = property.key.as_expression() else {
+                    return self.unsupported_expression("computed object key", expression_span);
+                };
+                kiln_hir::ObjectKey::Computed(self.expression(key))
+            } else {
+                let Some(key) = property.key.static_name() else {
+                    return self.unsupported_expression("object key", expression_span);
+                };
+                kiln_hir::ObjectKey::Static(key.to_string())
             };
             properties.push(kiln_hir::ObjectProperty {
-                key: key.to_string(),
+                key,
                 value: self.expression(&property.value),
                 span: span(property.span),
             });
@@ -996,9 +1068,7 @@ mod tests {
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
-            ("const value = () => 1;", "arrow function expression"),
             ("const value = `x`;", "template literal"),
-            ("const value = { [key]: 1 };", "computed object key"),
             ("const value = { ...other };", "object spread"),
         ];
         for (source, expected) in cases {

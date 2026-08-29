@@ -69,6 +69,9 @@ pub struct Module {
 pub struct Function {
     /// `None` for a function expression that was never given one.
     pub name: Option<String>,
+    /// An arrow function. It has no `arguments` of its own and takes `this` lexically, so the
+    /// distinction has to survive lowering even while neither is implemented yet.
+    pub arrow: bool,
     pub parameters: Vec<Parameter>,
     pub body: Vec<Statement>,
     pub span: Span,
@@ -93,9 +96,20 @@ pub struct Parameter {
 /// flattened into this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectProperty {
-    pub key: String,
+    pub key: ObjectKey,
     pub value: Expression,
     pub span: Span,
+}
+
+/// How an object literal names a property.
+///
+/// A computed key is not just a string that happens to be written differently: it is an
+/// arbitrary expression, evaluated in source order between the properties around it, and it can
+/// produce a symbol. Collapsing it into a string at lowering would lose both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectKey {
+    Static(String),
+    Computed(Expression),
 }
 
 /// An owned executable statement.
@@ -198,6 +212,8 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    /// A function expression or arrow function used as a value.
+    Function(Box<Function>),
     /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept
     /// from `undefined` elements and are refused by the frontend rather than flattened here.
     Array {
