@@ -676,8 +676,11 @@ fn stack_effect(
         | Instruction::LoadCell(_)
         | Instruction::StoreCell(_)
         | Instruction::LoadUpvalue(_)
-        | Instruction::StoreUpvalue(_) => Err(EmitError::Unsupported {
-            feature: "function calls in the native backend".to_string(),
+        | Instruction::StoreUpvalue(_)
+        | Instruction::NewObject { .. }
+        | Instruction::GetProperty(_)
+        | Instruction::SetProperty(_) => Err(EmitError::Unsupported {
+            feature: "functions and objects in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
         Instruction::StoreLocal(_) | Instruction::Pop => {
@@ -884,8 +887,11 @@ fn emit_instruction(
         | Instruction::LoadCell(_)
         | Instruction::StoreCell(_)
         | Instruction::LoadUpvalue(_)
-        | Instruction::StoreUpvalue(_) => {
-            unreachable!("verification rejects call instructions before emission")
+        | Instruction::StoreUpvalue(_)
+        | Instruction::NewObject { .. }
+        | Instruction::GetProperty(_)
+        | Instruction::SetProperty(_) => {
+            unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
@@ -1046,6 +1052,18 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // Tags are a persisted cache key: existing ones never change, new instructions
             // take the next free values. Reusing a tag would make two different programs hash
             // alike and serve one's object file for the other.
+            Instruction::NewObject { count } => {
+                byte(&mut hash, 22);
+                word(&mut hash, u64::from(*count));
+            }
+            Instruction::GetProperty(value) => {
+                byte(&mut hash, 23);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::SetProperty(value) => {
+                byte(&mut hash, 24);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::NewCell(value) => {
                 byte(&mut hash, 17);
                 word(&mut hash, u64::from(*value));

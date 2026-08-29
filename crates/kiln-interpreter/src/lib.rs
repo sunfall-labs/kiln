@@ -13,6 +13,49 @@ use std::rc::Rc;
 use kiln_host_abi::{HostOps, HostValue};
 use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
 
+/// An ordinary object: string-keyed properties in insertion order.
+///
+/// A `Vec` rather than a map because objects here are small and property order is observable --
+/// JavaScript enumerates string keys in insertion order, so the structure that preserves it for
+/// free is the right one until a profile says otherwise. Lookup is linear, which is fine at this
+/// size and is the kind of decision the timing harness exists to revisit.
+/// Object identity is reference identity, which is what `===` asks of two objects. Structural
+/// equality would call two distinct objects with equal contents the same object, and they are
+/// not: assigning through one would then appear to change the other.
+impl PartialEq for ObjectData {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ObjectData {
+    properties: Vec<(String, Value)>,
+}
+
+impl ObjectData {
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.properties
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    /// Insert or overwrite, preserving the position of an existing key.
+    ///
+    /// Re-assigning a property does not move it to the end in JavaScript, so it must not here.
+    pub fn set(&mut self, key: &str, value: Value) {
+        match self.properties.iter_mut().find(|(name, _)| name == key) {
+            Some((_, existing)) => *existing = value,
+            None => self.properties.push((key.to_owned(), value)),
+        }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.properties.iter().map(|(name, _)| name.as_str())
+    }
+}
+
 /// A callable value: which function body to run, and the bindings it closed over.
 #[derive(Debug)]
 pub struct Closure {
@@ -53,6 +96,10 @@ pub enum Value {
     /// It is a variant of `Value` rather than a separate slot type so that a frame's locals stay
     /// one homogeneous vector.
     Cell(Cell),
+    /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
+    /// references name the same object, and a mutation through one must be visible through the
+    /// other.
+    Object(Rc<RefCell<ObjectData>>),
     /// A callable: a proto plus the cells it captured when it was created.
     ///
     /// Shared by `Rc` because two references to the same closure must be the same object --
@@ -72,6 +119,7 @@ impl Value {
             Self::Number(_) => "number",
             Self::String(_) => "string",
             Self::Function(_) => "function",
+            Self::Object(_) => "object",
             Self::Cell(_) => "cell",
         }
     }
@@ -90,6 +138,9 @@ impl Value {
             // `Number(fn)` is NaN in JavaScript: a function has no numeric value, and ToNumber
             // on it goes through ToPrimitive, which cannot produce one.
             Self::Function(_) => f64::NAN,
+            // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
+            // which does not parse as a number.
+            Self::Object(_) => f64::NAN,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -102,6 +153,8 @@ impl Value {
             Self::String(value) => !value.is_empty(),
             // Every object is truthy, and a function is an object.
             Self::Function(_) => true,
+            // Every object is truthy, including an empty one.
+            Self::Object(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -123,6 +176,9 @@ impl Value {
             // Not `Function.prototype.toString`, which returns source text the VM never sees.
             // The proto index is stable and useful when reading a trace; a made-up body is not.
             Self::Function(closure) => format!("[Function {}]", closure.function),
+            // What `String({})` produces. `console.log` in a real console prints the contents
+            // instead, which needs a formatter the host side does not have yet.
+            Self::Object(_) => "[object Object]".to_owned(),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
@@ -153,6 +209,7 @@ impl From<Value> for HostValue {
             // the one HostOps has. Passing the display form keeps `console.log(fn)` printing
             // something truthful rather than failing.
             Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
+            Value::Object(_) => Self::String("[object Object]".to_owned()),
             Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
         }
     }
@@ -247,6 +304,16 @@ pub enum ExecutionError {
     UnknownFunction {
         function: u32,
     },
+    /// A property name that is not a string constant, which the compiler never emits.
+    InvalidPropertyKey {
+        instruction: usize,
+        value: &'static str,
+    },
+    /// A property assignment on something that is not an object.
+    NotAnObject {
+        instruction: usize,
+        value: &'static str,
+    },
     /// A capture descriptor pointing past the creating closure's upvalues.
     MissingUpvalue {
         index: u32,
@@ -297,6 +364,14 @@ impl fmt::Display for ExecutionError {
                     "invalid jump from instruction {instruction} to {target}"
                 )
             }
+            Self::InvalidPropertyKey { instruction, value } => write!(
+                formatter,
+                "instruction {instruction} used a {value} as a property name"
+            ),
+            Self::NotAnObject { instruction, value } => write!(
+                formatter,
+                "instruction {instruction} set a property on a {value}, which is not an object"
+            ),
             Self::MissingUpvalue { index } => {
                 write!(formatter, "no captured cell at upvalue index {index}")
             }
@@ -541,6 +616,50 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let closure = self.make_closure(*index)?;
                     self.stack.push(Value::Function(closure));
                 }
+                Instruction::NewObject { count } => {
+                    let count = *count as usize;
+                    if self.stack.len() < count * 2 {
+                        return Err(ExecutionError::StackUnderflow {
+                            instruction: current,
+                        });
+                    }
+                    let flat = self.stack.split_off(self.stack.len() - count * 2);
+                    let mut object = ObjectData::default();
+                    for pair in flat.chunks_exact(2) {
+                        // A duplicate key in a literal keeps the last value and the first
+                        // position, which is what `set` already does.
+                        let Value::String(key) = &pair[0] else {
+                            return Err(ExecutionError::InvalidPropertyKey {
+                                instruction: current,
+                                value: pair[0].type_name(),
+                            });
+                        };
+                        object.set(key, pair[1].clone());
+                    }
+                    self.stack
+                        .push(Value::Object(Rc::new(RefCell::new(object))));
+                }
+                Instruction::GetProperty(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    self.stack.push(self.property(&target, &name));
+                }
+                Instruction::SetProperty(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let Value::Object(object) = &target else {
+                        // Assigning a property of a primitive is silently discarded in sloppy
+                        // mode and a TypeError in strict mode. Modules are always strict, and
+                        // there is nowhere to throw yet, so it is an execution error.
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
+                    };
+                    object.borrow_mut().set(&name, value.clone());
+                    self.stack.push(value);
+                }
                 Instruction::NewCell(slot) => {
                     let slot = *slot as usize;
                     let cell = Rc::new(RefCell::new(Value::Undefined));
@@ -683,6 +802,36 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(Rc::new(Closure { function, upvalues }))
     }
 
+    /// A property read. Missing properties are `undefined`, which is not an error in JavaScript.
+    ///
+    /// Reads off a primitive currently yield `undefined` rather than consulting a prototype:
+    /// `"abc".length` needs `String.prototype`, which does not exist yet. Returning undefined is
+    /// wrong for those, and it is wrong in the direction that shows up as a visibly missing
+    /// value rather than a plausible one.
+    fn property(&self, target: &Value, name: &str) -> Value {
+        match target {
+            Value::Object(object) => object
+                .borrow()
+                .get(name)
+                .cloned()
+                .unwrap_or(Value::Undefined),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn string_constant(&self, index: u32, instruction: usize) -> Result<String, ExecutionError> {
+        match self.program.constants.get(index as usize) {
+            Some(Constant::String(name)) => Ok(name.clone()),
+            Some(_) => Err(ExecutionError::InvalidPropertyKey {
+                instruction,
+                value: "non-string constant",
+            }),
+            None => Err(ExecutionError::ConstantOutOfBounds {
+                index: index as usize,
+            }),
+        }
+    }
+
     /// The cell at this closure's upvalue index.
     fn upvalue(&self, index: u32) -> Result<Cell, ExecutionError> {
         self.function
@@ -813,6 +962,11 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::Boolean(a), Value::Boolean(b)) => a == b,
         (Value::Number(a), Value::Number(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
+        // Objects and functions compare by identity: `===` asks whether two references name the
+        // same object, not whether their contents match. `Rc::ptr_eq` is that question exactly,
+        // and it also avoids borrowing a `RefCell` that a caller may already hold mutably.
+        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+        (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
         _ => false,
     }
 }
@@ -914,6 +1068,73 @@ mod tests {
 
     /// Two closures made by separate calls must not share a cell, and two made by one call must.
     /// This is the property that separates capturing a binding from capturing a frame.
+    fn object(pairs: &[(&str, Value)]) -> Value {
+        let mut data = ObjectData::default();
+        for (key, value) in pairs {
+            data.set(key, value.clone());
+        }
+        Value::Object(Rc::new(RefCell::new(data)))
+    }
+
+    /// Re-assigning a key keeps its position: JavaScript enumerates string keys in insertion
+    /// order, so a `set` that moved the key would change an observable property of the object.
+    #[test]
+    fn reassigning_a_property_keeps_its_position() {
+        let mut data = ObjectData::default();
+        data.set("first", Value::Number(1.0));
+        data.set("second", Value::Number(2.0));
+        data.set("first", Value::Number(99.0));
+        assert_eq!(data.keys().collect::<Vec<_>>(), ["first", "second"]);
+        assert_eq!(data.get("first"), Some(&Value::Number(99.0)));
+    }
+
+    /// `===` on objects asks whether two references name the same object. Structural equality
+    /// would say two distinct objects with equal contents are the same, and then a write through
+    /// one would appear to change the other.
+    #[test]
+    fn object_equality_is_identity_not_structure() {
+        let left = object(&[("a", Value::Number(1.0))]);
+        let right = object(&[("a", Value::Number(1.0))]);
+        assert!(strict_equal(&left, &left), "an object equals itself");
+        assert!(
+            !strict_equal(&left, &right),
+            "equal contents are not the same object"
+        );
+        assert!(strict_equal(&left, &left.clone()), "a clone shares the Rc");
+    }
+
+    /// A missing property is `undefined`, not an error: reading one is legal JavaScript.
+    #[test]
+    fn a_missing_property_reads_as_undefined() {
+        let data = ObjectData::default();
+        assert_eq!(data.get("absent"), None);
+    }
+
+    /// Assigning a property of a primitive is a TypeError in strict mode, and modules are always
+    /// strict. Silently discarding it would lose a write the program believes it made.
+    #[test]
+    fn setting_a_property_on_a_primitive_is_rejected() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![Constant::String("x".to_owned()), number(1.0)],
+            code: vec![
+                Instruction::Const(1),
+                Instruction::Const(1),
+                Instruction::SetProperty(0),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::NotAnObject {
+                value: "number",
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn closures_from_separate_calls_capture_separate_cells() {
         // outer(): let c = <cell>; return closure(inner) -- inner increments and returns c.
