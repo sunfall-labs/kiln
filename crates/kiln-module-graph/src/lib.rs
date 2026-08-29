@@ -482,6 +482,7 @@ impl ModuleGraph {
             }
             let remaining_limits = ExecutionLimits {
                 max_steps: limits.max_steps - total_steps,
+                max_call_depth: limits.max_call_depth,
             };
             let result = execute_module(&node.program, &imports, host, remaining_limits).map_err(
                 |error| {
@@ -876,6 +877,7 @@ mod tests {
                     constants: Vec::new(),
                     code: vec![Instruction::Return],
                     local_count: 0,
+                    functions: Vec::new(),
                 },
                 dependencies,
                 imports: Vec::new(),
@@ -907,6 +909,7 @@ mod tests {
                     constants: Vec::new(),
                     code: vec![Instruction::Return],
                     local_count: 0,
+                    functions: Vec::new(),
                 },
                 dependencies: is_entry
                     .then(|| "./dep.js".to_owned())
@@ -919,7 +922,13 @@ mod tests {
         .expect("build graph");
         let mut host = TestHost::default();
         assert!(matches!(
-            graph.execute(&mut host, ExecutionLimits { max_steps: 1 }),
+            graph.execute(
+                &mut host,
+                ExecutionLimits {
+                    max_steps: 1,
+                    ..ExecutionLimits::default()
+                }
+            ),
             Err(ModuleGraphError::Execution {
                 error: ExecutionError::StepLimitExceeded { steps: 1, limit: 1 },
                 ..

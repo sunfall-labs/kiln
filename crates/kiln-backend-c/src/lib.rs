@@ -101,6 +101,62 @@ pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
     })
 }
 
+/// Emit a linkage-aware module with a symbol derived from its normalized logical path.
+///
+/// Graph launchers need to keep their own object cache entry when a module's body changes.  The
+/// ordinary [`emit_module`] symbol intentionally includes the complete bytecode, which is useful
+/// for standalone content-addressed units but would make the launcher change for every body edit.
+/// A graph caller therefore supplies a project-relative path in canonical slash form.  The path
+/// is validated here so the resulting symbol is independent of an absolute checkout location and
+/// always has a valid C identifier.
+pub fn emit_module_with_logical_path(
+    module: &ModuleProgram,
+    logical_path: &str,
+) -> Result<CModule, EmitError> {
+    validate_logical_path(logical_path)?;
+    let max_stack = validate_module(module)?;
+    let (program_hash, _) = hash_module_pair(module);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let source = render_module(module, max_stack, program_hash, &symbol);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
+}
+
+fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
+    let invalid = |message: &str| {
+        Err(EmitError::InvalidProgram {
+            message: format!("invalid logical module path: {message}"),
+        })
+    };
+    if logical_path.is_empty() {
+        return invalid("path is empty");
+    }
+    if logical_path.as_bytes().contains(&0) {
+        return invalid("path contains an embedded NUL");
+    }
+    // Logical paths are deliberately stricter than host filesystem paths.  In particular, a
+    // leading slash, backslash, or drive prefix could smuggle an absolute checkout path into the
+    // supposedly project-relative identity, and empty/dot components are not normalized input.
+    if logical_path.starts_with('/')
+        || logical_path.starts_with('\\')
+        || logical_path.as_bytes().get(1) == Some(&b':')
+        || logical_path.contains('\\')
+    {
+        return invalid("path is not project-relative slash-separated input");
+    }
+    if logical_path
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return invalid("path contains an empty, `.` or `..` component");
+    }
+    Ok(())
+}
+
 const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
 #include <math.h>
 #include <stddef.h>
@@ -608,6 +664,16 @@ fn stack_effect(
         )
     };
     match instruction {
+        // Calls are interpreter-only for now. The native backend emits one C function per
+        // module with a flat local array and no call stack, so these have no lowering yet --
+        // and refusing here is what keeps the two backends from silently disagreeing about
+        // what a program means. `kiln run` works on these; `kiln run --native` says why not.
+        Instruction::MakeFunction(_)
+        | Instruction::Call { .. }
+        | Instruction::LoadGlobal(_)
+        | Instruction::StoreGlobal(_) => Err(EmitError::Unsupported {
+            feature: "function calls in the native backend".to_string(),
+        }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
         Instruction::StoreLocal(_) | Instruction::Pop => {
             if height < 1 {
@@ -803,6 +869,14 @@ fn emit_instruction(
 ) {
     let _ = index;
     match instruction {
+        // Rejected by `verify` before emission begins, so reaching here means the two passes
+        // disagree about the instruction set -- a compiler bug, not a program error.
+        Instruction::MakeFunction(_)
+        | Instruction::Call { .. }
+        | Instruction::LoadGlobal(_)
+        | Instruction::StoreGlobal(_) => {
+            unreachable!("verification rejects call instructions before emission")
+        }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
             Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
@@ -959,6 +1033,25 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     word(&mut hash, program.code.len() as u64);
     for instruction in &program.code {
         match instruction {
+            // Tags are a persisted cache key: existing ones never change, new instructions
+            // take the next free values. Reusing a tag would make two different programs hash
+            // alike and serve one's object file for the other.
+            Instruction::MakeFunction(value) => {
+                byte(&mut hash, 13);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::Call { argc } => {
+                byte(&mut hash, 14);
+                word(&mut hash, u64::from(*argc));
+            }
+            Instruction::LoadGlobal(value) => {
+                byte(&mut hash, 15);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreGlobal(value) => {
+                byte(&mut hash, 16);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::Const(value) => {
                 byte(&mut hash, 0);
                 word(&mut hash, u64::from(*value));
@@ -1016,6 +1109,30 @@ fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
     )
 }
 
+fn hash_logical_path_pair(logical_path: &str) -> (u64, u64) {
+    (
+        hash_logical_path_with_seed(logical_path, 0xcbf29ce484222325),
+        hash_logical_path_with_seed(logical_path, 0x84222325cbf29ce4),
+    )
+}
+
+fn hash_logical_path_with_seed(logical_path: &str, seed: u64) -> u64 {
+    let mut hash = seed;
+    for byte in b"kiln-logical-module-path\0" {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in (logical_path.len() as u64).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in logical_path.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
     let mut hash = hash_program_with_seed(&module.program, seed);
     fn byte(hash: &mut u64, value: u8) {
@@ -1071,6 +1188,7 @@ mod tests {
             constants,
             code,
             local_count,
+            functions: Vec::new(),
         }
     }
 
@@ -1146,6 +1264,66 @@ mod tests {
         );
         assert!(emitted.source.contains("const kiln_value *imports"));
         assert!(emitted.source.contains("size_t import_count"));
+    }
+
+    #[test]
+    fn logical_path_symbol_survives_body_edits_and_is_checkout_independent() {
+        let first = module(
+            program(
+                vec![Constant::Number(1.0f64.to_bits())],
+                vec![Instruction::Const(0), Instruction::Return],
+                0,
+            ),
+            Vec::new(),
+            Vec::new(),
+        );
+        let second = module(
+            program(
+                vec![Constant::Number(2.0f64.to_bits())],
+                vec![Instruction::Const(0), Instruction::Return],
+                0,
+            ),
+            Vec::new(),
+            Vec::new(),
+        );
+        let one = emit_module_with_logical_path(&first, "src/dep.js").expect("module emits");
+        let two = emit_module_with_logical_path(&second, "src/dep.js").expect("module emits");
+        let other = emit_module_with_logical_path(&first, "src/other.js").expect("module emits");
+
+        assert_eq!(one.symbol, two.symbol);
+        assert_ne!(one.source, two.source);
+        assert_ne!(one.symbol, other.symbol);
+        assert!(!one.symbol.contains("/"));
+        assert!(
+            one.symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+    }
+
+    #[test]
+    fn logical_path_symbol_rejects_non_normalized_or_absolute_input() {
+        let module = module(
+            program(Vec::new(), vec![Instruction::Return], 0),
+            Vec::new(),
+            Vec::new(),
+        );
+        for path in [
+            "",
+            "/src/dep.js",
+            "../dep.js",
+            "src/../dep.js",
+            "src\\dep.js",
+            "C:/dep.js",
+        ] {
+            assert!(
+                matches!(
+                    emit_module_with_logical_path(&module, path),
+                    Err(EmitError::InvalidProgram { message }) if message.contains("logical module path")
+                ),
+                "path should be rejected: {path:?}"
+            );
+        }
     }
 
     #[test]

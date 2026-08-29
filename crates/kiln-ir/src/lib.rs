@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, ExportName, ExportOrigin, Expression, ExpressionKind,
-    ImportName, Literal, LogicalOperator, Module, Span, Statement, StatementKind, UnaryOperator,
-    VariableKind,
+    Function, ImportName, Literal, LogicalOperator, Module, Span, Statement, StatementKind,
+    UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -76,6 +76,21 @@ pub enum Instruction {
         op: HostOp,
         argc: u16,
     },
+    /// Push a callable for `Program::functions[index]`.
+    MakeFunction(u32),
+    /// Call the value `argc` slots below the top of the stack, consuming it and its arguments
+    /// and leaving the result.
+    Call {
+        argc: u16,
+    },
+    /// Read a module-scope slot from inside a call frame.
+    ///
+    /// Distinct from `LoadLocal` because a frame's locals are its own: module bindings outlive
+    /// every call and are shared by all of them, which is what module scope means in JavaScript
+    /// rather than an approximation of it. Keeping the two apart also means a frame can never
+    /// reach another frame's locals by accident.
+    LoadGlobal(u32),
+    StoreGlobal(u32),
     Return,
 }
 
@@ -86,6 +101,23 @@ pub struct Program {
     pub constants: Vec<Constant>,
     pub code: Vec<Instruction>,
     pub local_count: u32,
+    /// Compiled function bodies, referenced by [`Instruction::MakeFunction`].
+    ///
+    /// Held on the program rather than in the constant table because a constant is a value and
+    /// a function is not: it becomes one only when `MakeFunction` runs, and once closures land
+    /// the same proto will produce different callables on different evaluations.
+    pub functions: Vec<FunctionProto>,
+}
+
+/// One compiled function body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionProto {
+    /// Diagnostics and stack traces only; calls go by index.
+    pub name: Option<String>,
+    pub parameter_count: u32,
+    /// Includes the parameters, which occupy the first slots in declaration order.
+    pub local_count: u32,
+    pub code: Vec<Instruction>,
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the
@@ -257,10 +289,37 @@ struct Local {
     imported: bool,
 }
 
+/// The per-function half of [`Compiler`], saved and restored around a nested function body.
+///
+/// Constants and diagnostics are deliberately not in here: they are program-wide, and splitting
+/// them would mean merging them back with index fixups for no benefit.
+struct FunctionState {
+    code: Vec<Instruction>,
+    scopes: Vec<HashMap<String, Local>>,
+    local_count: u32,
+}
+
+/// Where a name lives, which decides how it is read and whether it can be read at all.
+enum Resolution {
+    /// A binding in the function currently being compiled.
+    Local(Local),
+    /// A module-scope binding, reached from inside a call frame.
+    Global(u32),
+    /// A binding in an enclosing *function*. That is a closure capture, and compiling it as
+    /// either of the above would read an unrelated slot -- silently, and with a plausible value
+    /// in it. Refused until upvalues exist.
+    Captured,
+    Unresolved,
+}
+
 struct Compiler {
     constants: Vec<Constant>,
+    functions: Vec<FunctionProto>,
+    /// Enclosing function states, module body first. Empty while compiling the module body.
+    enclosing: Vec<FunctionState>,
     code: Vec<Instruction>,
-    /// Lexical scopes, module scope first and innermost block last.
+    /// Lexical scopes of the function being compiled, innermost last. At module level the first
+    /// entry is module scope itself.
     scopes: Vec<HashMap<String, Local>>,
     /// Slots are never recycled: bytecode can jump back into a block in a loop, and a stable
     /// slot keeps that execution independent of compiler scope bookkeeping.
@@ -273,6 +332,8 @@ impl Compiler {
         let mut compiler = Self {
             constants: Vec::new(),
             code: Vec::new(),
+            functions: Vec::new(),
+            enclosing: Vec::new(),
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
@@ -304,6 +365,7 @@ impl Compiler {
                 constants: self.constants,
                 code: self.code,
                 local_count: self.local_count,
+                functions: self.functions,
             })
         } else {
             Err(self.diagnostics)
@@ -369,6 +431,10 @@ impl Compiler {
             } => self.if_statement(test, consequent, alternate.as_deref()),
             StatementKind::While { test, body } => self.while_statement(test, body),
             StatementKind::Empty => {}
+            StatementKind::Function(function) => {
+                self.function_declaration(function, statement.span)
+            }
+            StatementKind::Return(value) => self.return_statement(value.as_ref(), statement.span),
             StatementKind::ExportDefault(_) => self.error(
                 Some(statement.span),
                 "default expression exports are not supported yet",
@@ -475,18 +541,21 @@ impl Compiler {
     fn expression(&mut self, expression: &Expression) {
         match &expression.kind {
             ExpressionKind::Literal(literal) => self.push_literal(literal),
-            ExpressionKind::Identifier(name) => {
-                if let Some(local) = self.resolve(name) {
-                    self.code.push(Instruction::LoadLocal(local.slot));
-                } else if name == "undefined" {
-                    self.push_constant(Constant::Undefined);
-                } else {
-                    self.error(
-                        Some(expression.span),
-                        format!("unresolved identifier `{name}`"),
-                    );
+            ExpressionKind::Identifier(name) => match self.resolve(name) {
+                Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+                Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+                Resolution::Captured => self.error(
+                    Some(expression.span),
+                    format!("`{name}` is captured from an enclosing function, which is not supported yet"),
+                ),
+                Resolution::Unresolved if name == "undefined" => {
+                    self.push_constant(Constant::Undefined)
                 }
-            }
+                Resolution::Unresolved => self.error(
+                    Some(expression.span),
+                    format!("unresolved identifier `{name}`"),
+                ),
+            },
             ExpressionKind::Unary { operator, argument } => {
                 self.expression(argument);
                 self.code.push(Instruction::Unary(match operator {
@@ -582,16 +651,46 @@ impl Compiler {
         value: &Expression,
         span: Span,
     ) {
-        let Some((slot, kind, imported)) = self
-            .resolve(target)
-            .map(|local| (local.slot, local.kind, local.imported))
-        else {
-            self.error(
-                Some(span),
-                format!("unresolved assignment target `{target}`"),
-            );
-            self.push_constant(Constant::Undefined);
-            return;
+        // Whether the target is a frame local or a module slot decides the store instruction,
+        // so it has to be carried alongside the slot rather than assumed.
+        let (slot, global, kind, imported) = match self.resolve(target) {
+            Resolution::Local(local) => (local.slot, false, local.kind, local.imported),
+            Resolution::Global(slot) => {
+                let module = &self.enclosing[0].scopes[0];
+                let local = module
+                    .get(target)
+                    .copied()
+                    .expect("Global resolution just found this name in module scope");
+                (slot, true, local.kind, local.imported)
+            }
+            Resolution::Captured => {
+                self.error(
+                    Some(span),
+                    format!(
+                        "`{target}` is captured from an enclosing function, which is not supported yet"
+                    ),
+                );
+                self.push_constant(Constant::Undefined);
+                return;
+            }
+            Resolution::Unresolved => {
+                self.error(
+                    Some(span),
+                    format!("unresolved assignment target `{target}`"),
+                );
+                self.push_constant(Constant::Undefined);
+                return;
+            }
+        };
+        let load = if global {
+            Instruction::LoadGlobal(slot)
+        } else {
+            Instruction::LoadLocal(slot)
+        };
+        let store = if global {
+            Instruction::StoreGlobal(slot)
+        } else {
+            Instruction::StoreLocal(slot)
         };
         if imported {
             self.error(
@@ -607,7 +706,7 @@ impl Compiler {
         if operator == AssignmentOperator::Assign {
             self.expression(value);
         } else {
-            self.code.push(Instruction::LoadLocal(slot));
+            self.code.push(load);
             self.expression(value);
             let binary = match operator {
                 AssignmentOperator::Add => BinaryOp::Add,
@@ -621,39 +720,189 @@ impl Compiler {
             self.code.push(Instruction::Binary(binary));
         }
         self.code.push(Instruction::Dup);
-        self.code.push(Instruction::StoreLocal(slot));
+        self.code.push(store);
+    }
+
+    /// Compile a function body into its own proto and bind the name to a callable.
+    ///
+    /// Declarations are not hoisted yet: the binding exists from this point on, so calling a
+    /// function textually above its declaration is an unresolved identifier rather than a call
+    /// to `undefined`. That is a smaller lie than hoisting half-way would be, and it is a
+    /// diagnostic rather than a wrong answer.
+    fn function_declaration(&mut self, function: &Function, span: Span) {
+        let Some(name) = function.name.clone() else {
+            self.error(Some(span), "a function declaration requires a name");
+            return;
+        };
+
+        // The binding exists before the body is compiled, which is what makes a function able
+        // to call itself: the body resolves its own name through the enclosing scope, and the
+        // slot it reads is filled by the `MakeFunction` below before any call can reach it.
+        self.variable(VariableKind::Let, &name, None, span);
+
+        let Some(index) = self.compile_function(function, span) else {
+            return;
+        };
+
+        match self.resolve(&name) {
+            Resolution::Local(local) => {
+                self.code.push(Instruction::MakeFunction(index));
+                self.code.push(Instruction::StoreLocal(local.slot));
+            }
+            // `declare_variable` just inserted this into the current function's innermost scope,
+            // so any other resolution means the scope bookkeeping is inconsistent.
+            _ => self.error(Some(span), format!("could not bind function `{name}`")),
+        }
+    }
+
+    /// Compile one function body, returning its index in [`Program::functions`].
+    ///
+    /// The body is compiled against a fresh state: its own code buffer, its own slot numbering
+    /// starting at the parameters, and its own scope stack. Module scope stays reachable through
+    /// `enclosing[0]`; anything between is a capture and is refused by `resolve`.
+    fn compile_function(&mut self, function: &Function, span: Span) -> Option<u32> {
+        if function.parameters.len() > u32::MAX as usize {
+            self.error(Some(span), "too many parameters");
+            return None;
+        }
+        if self.functions.len() >= u32::MAX as usize {
+            self.error(Some(span), "too many functions in one module");
+            return None;
+        }
+
+        let mut parameters = HashMap::with_capacity(function.parameters.len());
+        for (slot, parameter) in function.parameters.iter().enumerate() {
+            if parameters.contains_key(&parameter.name) {
+                self.error(
+                    Some(parameter.span),
+                    format!("duplicate parameter `{}`", parameter.name),
+                );
+                return None;
+            }
+            parameters.insert(
+                parameter.name.clone(),
+                Local {
+                    slot: slot as u32,
+                    kind: VariableKind::Let,
+                    imported: false,
+                },
+            );
+        }
+
+        let parameter_count = function.parameters.len() as u32;
+        let outer = FunctionState {
+            code: std::mem::take(&mut self.code),
+            scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
+            local_count: std::mem::replace(&mut self.local_count, parameter_count),
+        };
+        self.enclosing.push(outer);
+
+        for statement in &function.body {
+            self.statement(statement);
+        }
+        // Falling off the end of a function returns undefined. Emitted unconditionally rather
+        // than only when the body cannot fall through: proving that needs flow analysis, and an
+        // unreachable epilogue costs two instructions.
+        self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::Return);
+
+        let restored = self
+            .enclosing
+            .pop()
+            .expect("this function pushed its own enclosing state");
+        let proto = FunctionProto {
+            name: function.name.clone(),
+            parameter_count,
+            local_count: std::mem::replace(&mut self.local_count, restored.local_count),
+            code: std::mem::replace(&mut self.code, restored.code),
+        };
+        self.scopes = restored.scopes;
+
+        let index = self.functions.len() as u32;
+        self.functions.push(proto);
+        Some(index)
+    }
+
+    fn return_statement(&mut self, value: Option<&Expression>, span: Span) {
+        if !self.compiling_function() {
+            self.error(Some(span), "`return` outside of a function");
+            return;
+        }
+        match value {
+            Some(value) => self.expression(value),
+            None => self.push_constant(Constant::Undefined),
+        }
+        self.code.push(Instruction::Return);
     }
 
     fn call(&mut self, callee: &Expression, arguments: &[Expression], span: Span) {
-        let is_console_log = self.resolve("console").is_none()
+        let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
                 &callee.kind,
                 ExpressionKind::StaticMember { object, property }
                     if property == "log"
                         && matches!(&object.kind, ExpressionKind::Identifier(name) if name == "console")
             );
-        if !is_console_log {
-            self.error(Some(span), "only console.log(...) calls are supported");
-            return;
-        }
         if arguments.len() > u16::MAX as usize {
-            self.error(Some(span), "console.log has too many arguments");
+            self.error(Some(span), "too many call arguments");
             return;
         }
+        let argc = arguments.len() as u16;
+
+        if is_console_log {
+            // Still a compile-time shape rather than a value. `console` becomes an ordinary
+            // object once there are objects to hold it; until then this is the only way to
+            // reach stdout, and turning it into a real call would mean inventing a callable
+            // with no object model underneath it.
+            for argument in arguments {
+                self.expression(argument);
+            }
+            self.code.push(Instruction::HostCall {
+                op: HostOp::WriteStdout,
+                argc,
+            });
+            return;
+        }
+
+        // Everything else is a real call. The callee is evaluated first so it sits below its
+        // arguments, which is both the evaluation order the language requires and the layout
+        // the VM needs to find it at a fixed depth.
+        self.expression(callee);
         for argument in arguments {
             self.expression(argument);
         }
-        self.code.push(Instruction::HostCall {
-            op: HostOp::WriteStdout,
-            argc: arguments.len() as u16,
-        });
+        self.code.push(Instruction::Call { argc });
     }
 
-    fn resolve(&self, name: &str) -> Option<Local> {
-        self.scopes
+    /// Names visible to the function being compiled, and how each is reached.
+    fn resolve(&self, name: &str) -> Resolution {
+        if let Some(local) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+            return Resolution::Local(*local);
+        }
+        let Some(module) = self.enclosing.first() else {
+            // Compiling the module body: its scopes were searched above, so there is nowhere
+            // else a name could be.
+            return Resolution::Unresolved;
+        };
+        if let Some(local) = module.scopes[0].get(name) {
+            return Resolution::Global(local.slot);
+        }
+        // Anything visible in a function between the module and here is a capture. Reported as
+        // such rather than as "unresolved", because the name is in scope in the source and
+        // saying otherwise would send the reader looking for a typo.
+        if self
+            .enclosing
             .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
+            .skip(1)
+            .any(|state| state.scopes.iter().any(|scope| scope.contains_key(name)))
+        {
+            return Resolution::Captured;
+        }
+        Resolution::Unresolved
+    }
+
+    fn compiling_function(&self) -> bool {
+        !self.enclosing.is_empty()
     }
 
     fn push_literal(&mut self, literal: &Literal) {
@@ -751,6 +1000,164 @@ mod tests {
             kind: ExpressionKind::Identifier(name.into()),
             span: Span::default(),
         }
+    }
+
+    fn statement(kind: StatementKind) -> Statement {
+        Statement {
+            kind,
+            span: Span::default(),
+        }
+    }
+
+    fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
+        statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            name: Some(name.to_owned()),
+            parameters: parameters
+                .iter()
+                .map(|name| kiln_hir::Parameter {
+                    name: (*name).to_owned(),
+                    span: Span::default(),
+                })
+                .collect(),
+            body,
+            span: Span::default(),
+        })))
+    }
+
+    fn errors(body: Vec<Statement>) -> Vec<String> {
+        compile(&module(body))
+            .expect_err("expected the module to be rejected")
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_function_body_compiles_into_its_own_proto() {
+        let program = compile(&module(vec![function(
+            "second",
+            &["a", "b"],
+            vec![statement(StatementKind::Return(Some(identifier("b"))))],
+        )]))
+        .expect("compiles");
+
+        assert_eq!(program.functions.len(), 1);
+        let proto = &program.functions[0];
+        assert_eq!(proto.parameter_count, 2);
+        assert_eq!(proto.local_count, 2, "parameters occupy the first slots");
+        assert_eq!(proto.code.first(), Some(&Instruction::LoadLocal(1)));
+        // Every body ends in a Return, so a caller can never fall off the end of one.
+        assert_eq!(proto.code.last(), Some(&Instruction::Return));
+    }
+
+    /// The binding has to exist before the body is compiled, or a function cannot call itself.
+    #[test]
+    fn a_function_can_refer_to_itself() {
+        let program = compile(&module(vec![function(
+            "loop_forever",
+            &[],
+            vec![statement(StatementKind::Return(Some(Expression {
+                kind: ExpressionKind::Call {
+                    callee: Box::new(identifier("loop_forever")),
+                    arguments: Vec::new(),
+                },
+                span: Span::default(),
+            })))],
+        )]))
+        .expect("compiles");
+        assert!(
+            program.functions[0]
+                .code
+                .contains(&Instruction::Call { argc: 0 })
+        );
+    }
+
+    /// Module bindings are read through a distinct instruction, because a frame's locals are
+    /// its own and a module slot is shared by every frame.
+    #[test]
+    fn a_function_reads_module_scope_through_a_global_slot() {
+        let program = compile(&module(vec![
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    name: "shared".into(),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+            function(
+                "read",
+                &[],
+                vec![statement(StatementKind::Return(Some(identifier("shared"))))],
+            ),
+        ]))
+        .expect("compiles");
+        assert!(
+            program.functions[0]
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "module reads must not compile to LoadLocal, which would read the frame's own slot"
+        );
+    }
+
+    /// The whole point of refusing captures rather than compiling them: `LoadLocal` on an
+    /// enclosing function's slot would read whatever the *callee's* frame happens to hold
+    /// there, which is a plausible-looking wrong answer instead of a diagnostic.
+    #[test]
+    fn capturing_an_enclosing_functions_local_is_refused() {
+        let messages = errors(vec![function(
+            "outer",
+            &["x"],
+            vec![function(
+                "inner",
+                &[],
+                vec![statement(StatementKind::Return(Some(identifier("x"))))],
+            )],
+        )]);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("captured from an enclosing function")),
+            "got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn return_outside_a_function_is_refused() {
+        let messages = errors(vec![statement(StatementKind::Return(None))]);
+        assert!(
+            messages.iter().any(|m| m.contains("outside of a function")),
+            "got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_parameters_are_refused() {
+        let messages = errors(vec![function("dup", &["a", "a"], Vec::new())]);
+        assert!(
+            messages.iter().any(|m| m.contains("duplicate parameter")),
+            "got: {messages:?}"
+        );
+    }
+
+    /// A bare `return;` and falling off the end both produce undefined, and both must leave a
+    /// value on the stack: a caller unconditionally pops one.
+    #[test]
+    fn every_exit_from_a_function_yields_a_value() {
+        let program = compile(&module(vec![function(
+            "bare",
+            &[],
+            vec![statement(StatementKind::Return(None))],
+        )]))
+        .expect("compiles");
+        let code = &program.functions[0].code;
+        let returns = code
+            .iter()
+            .filter(|instruction| **instruction == Instruction::Return)
+            .count();
+        assert_eq!(returns, 2, "explicit return plus the fall-through epilogue");
+        assert!(matches!(code.first(), Some(Instruction::Const(_))));
     }
 
     #[test]
