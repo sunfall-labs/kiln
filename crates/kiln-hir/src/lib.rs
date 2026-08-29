@@ -324,6 +324,9 @@ pub enum UnaryOperator {
 pub enum BinaryOperator {
     /// `key in object`. Presence, which a read-and-compare cannot express.
     In,
+    /// `value instanceof constructor`: is the constructor's prototype anywhere on the value's
+    /// prototype chain.
+    InstanceOf,
     Add,
     Subtract,
     Multiply,

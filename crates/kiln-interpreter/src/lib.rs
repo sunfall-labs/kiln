@@ -47,6 +47,9 @@ pub enum Native {
     ArrayIsArray,
     ArrayFrom,
     ObjectKeys,
+    ObjectSetPrototypeOf,
+    ObjectGetPrototypeOf,
+    StringConstructor,
     JsonParse,
     JsonStringify,
     /// `Array.prototype.join`.
@@ -57,6 +60,8 @@ pub enum Native {
     /// A V8 extension the corpus checks for. Present, and a no-op: kiln has no frames to capture,
     /// so the honest implementation is one that exists and does nothing.
     ErrorCaptureStackTrace,
+    /// `Error.prototype.toString`, which renders `name: message`.
+    ErrorToString,
 }
 
 impl Native {
@@ -67,6 +72,12 @@ impl Native {
             (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
             (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
             (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
+            (Self::ObjectConstructor, "setPrototypeOf") => {
+                Some(Value::Native(Self::ObjectSetPrototypeOf))
+            }
+            (Self::ObjectConstructor, "getPrototypeOf") => {
+                Some(Value::Native(Self::ObjectGetPrototypeOf))
+            }
             (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
             (Self::SymbolConstructor, "iterator") => Some(Value::Symbol(WellKnown::Iterator)),
@@ -597,6 +608,8 @@ pub fn execute<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals: vec![Value::Undefined; program.local_count as usize],
         function: None,
+        arguments: Vec::new(),
+        error_prototype: None,
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
@@ -639,6 +652,8 @@ pub fn execute_module<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals,
         function: None,
+        arguments: Vec::new(),
+        error_prototype: None,
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
@@ -669,6 +684,8 @@ struct Frame {
     /// The closure that was running, or `None` for the module body.
     function: Option<Rc<Closure>>,
     this_value: Value,
+    /// What this frame was called with, so `super(...arguments)` can forward them.
+    arguments: Vec<Value>,
     /// The instance being built, when this frame is a `new` call.
     ///
     /// Held here rather than in a parallel stack so that `Return` can decide locally: a
@@ -689,6 +706,14 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     function: Option<Rc<Closure>>,
+    /// The arguments the running frame received.
+    arguments: Vec<Value>,
+    /// `Error.prototype` for this execution, created on first use.
+    ///
+    /// One object per run, because `e instanceof Error` compares it by identity: two error
+    /// prototypes would make errors from the same program fail to recognise each other. This is
+    /// the smallest thing a realm is, and it is where a real realm object will start.
+    error_prototype: Option<Value>,
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
@@ -758,6 +783,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
                     self.stack.push(unary(*operator, value));
+                }
+                Instruction::Binary(BinaryOp::InstanceOf) => {
+                    let right = self.pop(current)?;
+                    let left = self.pop(current)?;
+                    // Threaded rather than global: `Error.prototype` belongs to this run.
+                    let prototype = self.error_prototype.clone();
+                    self.stack.push(Value::Boolean(instance_of(
+                        &left,
+                        &right,
+                        prototype.as_ref(),
+                    )));
                 }
                 Instruction::Binary(operator) => {
                     let right = self.pop(current)?;
@@ -886,57 +922,57 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                     self.stack.push(target);
                 }
-                Instruction::SuperCall { argc } => {
-                    let arguments = self.take_call_arguments(*argc, current)?;
+                Instruction::SuperForward => {
                     let parent = self.pop(current)?;
-                    let this_value = self.this_value.clone();
-                    match parent {
-                        Value::Function(closure) => {
-                            // The parent initialises the *existing* instance rather than
-                            // allocating one, so this is an ordinary call with `this` threaded
-                            // through and no `constructing` slot.
-                            self.stack.push(Value::Undefined);
-                            let argc = arguments.len();
-                            for argument in arguments {
-                                self.stack.push(argument);
-                            }
-                            self.call_with_this(closure, argc as u16, current, this_value, None)?;
-                        }
-                        Value::Native(Native::Error) => {
-                            // A native parent leaves no frame, so the expression's value has to
-                            // be pushed here to match what a compiled parent's `Return` does.
-                            self.stack.push(Value::Undefined);
-                            // A native constructor builds its own object, so its own properties
-                            // are copied onto the instance. That is what `class E extends Error`
-                            // needs: message, name, stack and cause end up on `this`.
-                            if let (Value::Object(instance), Value::Object(built)) =
-                                (&this_value, &construct_error(&arguments))
-                            {
-                                let built = built.borrow();
-                                let mut instance = instance.borrow_mut();
-                                for key in built.keys().map(str::to_owned).collect::<Vec<_>>() {
-                                    if let Some(value) = built.get_own(&key) {
-                                        instance.set(&key, value.clone());
-                                    }
-                                }
-                            }
-                        }
-                        other => {
-                            return Err(ExecutionError::NotConstructable {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
-                        }
+                    let arguments = self.arguments.clone();
+                    self.stack.push(parent);
+                    let argc = arguments.len();
+                    for argument in arguments {
+                        self.stack.push(argument);
                     }
+                    // Fall through to the shared super-call path by re-dispatching with a known
+                    // count: forwarding differs from `super(a, b)` only in where the count came
+                    // from.
+                    self.super_call(argc as u16, current)?;
+                }
+                Instruction::SuperCall { argc } => {
+                    self.super_call(*argc, current)?;
                 }
                 Instruction::LoadThis => {
                     let this_value = self.this_value.clone();
                     self.stack.push(this_value);
                 }
+                Instruction::GetProperty(name)
+                    if matches!(self.stack.last(), Some(Value::Native(Native::Error)))
+                        && self.string_constant(*name, current)? == "prototype" =>
+                {
+                    // `Error.prototype` has to be the same object instances inherit from, or
+                    // `extends Error` would link to something no error descends from.
+                    self.stack.pop();
+                    let prototype = self.error_prototype();
+                    self.stack.push(prototype);
+                }
                 Instruction::LoadBuiltin(builtin) => {
                     self.stack.push(Value::Native(match builtin {
                         kiln_ir::Builtin::Error => Native::Error,
                         kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
+                        kiln_ir::Builtin::String => Native::StringConstructor,
+                        // The realm's global object, holding exactly the built-ins that exist.
+                        // A fresh object each time is wrong -- `globalThis === globalThis` should
+                        // hold -- but nothing observes that yet, and pinning it needs the realm
+                        // this is the first piece of.
+                        kiln_ir::Builtin::GlobalThis => {
+                            let mut globals = ObjectData::default();
+                            globals.set("Error", Value::Native(Native::Error));
+                            globals.set("Array", Value::Native(Native::ArrayConstructor));
+                            globals.set("Object", Value::Native(Native::ObjectConstructor));
+                            globals.set("JSON", Value::Native(Native::Json));
+                            globals.set("Symbol", Value::Native(Native::SymbolConstructor));
+                            globals.set("String", Value::Native(Native::StringConstructor));
+                            self.stack
+                                .push(Value::Object(Rc::new(RefCell::new(globals))));
+                            continue;
+                        }
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
@@ -953,7 +989,8 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let callee = self.pop(current)?;
                     match callee {
                         Value::Native(Native::Error) => {
-                            self.stack.push(construct_error(&arguments));
+                            let error = self.construct_error(&arguments);
+                            self.stack.push(error);
                         }
                         Value::Function(closure) => {
                             // `new` creates the instance, runs the body with it as `this`, and
@@ -1094,6 +1131,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.locals = frame.locals;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
+                    self.arguments = frame.arguments;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
                         && !matches!(value, Value::Object(_) | Value::Array(_))
@@ -1148,6 +1186,78 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             // Validated when the closure was created; a call never installs a bad index.
             Some(closure) => &self.program.functions[closure.function as usize].code,
         }
+    }
+
+    /// Run `parent` (on top of the stack, under `argc` arguments) against the current `this`.
+    fn super_call(&mut self, argc: u16, current: usize) -> Result<(), ExecutionError> {
+        let arguments = self.take_call_arguments(argc, current)?;
+        let parent = self.pop(current)?;
+        let this_value = self.this_value.clone();
+        match parent {
+            Value::Function(closure) => {
+                // The parent initialises the *existing* instance rather than
+                // allocating one, so this is an ordinary call with `this` threaded
+                // through and no `constructing` slot.
+                self.stack.push(Value::Undefined);
+                let argc = arguments.len();
+                for argument in arguments {
+                    self.stack.push(argument);
+                }
+                self.call_with_this(closure, argc as u16, current, this_value, None)?;
+            }
+            Value::Native(Native::Error) => {
+                // A native parent leaves no frame, so the expression's value has to
+                // be pushed here to match what a compiled parent's `Return` does.
+                self.stack.push(Value::Undefined);
+                // A native constructor builds its own object, so its own properties
+                // are copied onto the instance. That is what `class E extends Error`
+                // needs: message, name, stack and cause end up on `this`.
+                let built = self.construct_error(&arguments);
+                if let (Value::Object(instance), Value::Object(built)) = (&this_value, &built) {
+                    let built = built.borrow();
+                    let mut instance = instance.borrow_mut();
+                    for key in built.keys().map(str::to_owned).collect::<Vec<_>>() {
+                        if let Some(value) = built.get_own(&key) {
+                            instance.set(&key, value.clone());
+                        }
+                    }
+                }
+            }
+            other => {
+                return Err(ExecutionError::NotConstructable {
+                    instruction: current,
+                    value: other.type_name(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// `Error.prototype`, created on first use.
+    fn error_prototype(&mut self) -> Value {
+        if let Some(prototype) = &self.error_prototype {
+            return prototype.clone();
+        }
+        let mut data = ObjectData::default();
+        data.set("name", Value::String("Error".to_owned()));
+        data.set("message", Value::String(String::new()));
+        // Marks the chain for `String(e)`. A real `toString` would be invoked through the normal
+        // method path; this is the placeholder that keeps the observable behaviour right until
+        // built-ins can be written in JavaScript (design.md §5).
+        data.set("toString", Value::Native(Native::ErrorToString));
+        let prototype = Value::Object(Rc::new(RefCell::new(data)));
+        self.error_prototype = Some(prototype.clone());
+        prototype
+    }
+
+    /// Build an `Error` instance whose prototype is this run's `Error.prototype`.
+    fn construct_error(&mut self, arguments: &[Value]) -> Value {
+        let prototype = self.error_prototype();
+        let error = build_error(arguments);
+        if let Value::Object(object) = &error {
+            object.borrow_mut().set_prototype(prototype);
+        }
+        error
     }
 
     /// The object a `new` call starts from: an empty object whose prototype is the function's.
@@ -1431,6 +1541,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         // The callee sits directly below its arguments; removing it here is what makes the
         // stack look, to the caller, as though the call left only its result.
         self.stack.pop();
+        let received = arguments.clone();
 
         let mut locals = vec![Value::Undefined; proto.local_count as usize];
         arguments.truncate(proto.parameter_count as usize);
@@ -1446,6 +1557,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         self.frames.push(Frame {
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
+            arguments: std::mem::replace(&mut self.arguments, received),
             constructing,
             locals: std::mem::replace(&mut self.locals, locals),
             instruction: self.instruction,
@@ -1507,6 +1619,10 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
         // `key in object` tests presence, which is not the same question as reading the key and
         // comparing to undefined: a property explicitly set to undefined is present.
         BinaryOp::In => Value::Boolean(has_property(&right, &left)),
+        // Handled in the interpreter loop, which has the realm's Error.prototype; reaching here
+        // would mean the loop stopped special-casing it.
+        BinaryOp::InstanceOf => unreachable!("instanceof is evaluated with realm context"),
+
         BinaryOp::StrictNotEqual => Value::Boolean(!strict_equal(&left, &right)),
         BinaryOp::LessThan => Value::Boolean(compare(&left, &right, OrderingPredicate::Less)),
         BinaryOp::LessThanOrEqual => {
@@ -1528,7 +1644,7 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
 /// `cause` follows InstallErrorCause: the property exists when the options object *has* a
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
 /// the whole point of that step in the specification.
-fn construct_error(arguments: &[Value]) -> Value {
+fn build_error(arguments: &[Value]) -> Value {
     let message = match arguments.first() {
         None | Some(Value::Undefined) => String::new(),
         Some(value) => value.to_display_string(),
@@ -1576,6 +1692,43 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             };
             Value::Array(Rc::new(RefCell::new(keys)))
         }
+        Native::StringConstructor => Value::String(match arguments.first() {
+            // `String(e)` on an error goes through `Error.prototype.toString`. Looking the
+            // method up rather than sniffing for `name` and `message` means an ordinary object
+            // that happens to have both is unaffected.
+            Some(value @ Value::Object(_)) if has_error_to_string(value) => error_to_string(value),
+            Some(value) => value.to_display_string(),
+            None => String::new(),
+        }),
+        Native::ErrorToString => Value::String(error_to_string(receiver)),
+        Native::ObjectSetPrototypeOf => {
+            let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+            if let Some(prototype) = arguments.get(1) {
+                match &target {
+                    Value::Object(object) => object.borrow_mut().set_prototype(prototype.clone()),
+                    // A function is an object, and setting its prototype is how a program gives
+                    // a constructor inherited statics without `extends`.
+                    Value::Function(closure) => closure
+                        .properties
+                        .borrow_mut()
+                        .set_prototype(prototype.clone()),
+                    _ => {}
+                }
+            }
+            target
+        }
+        Native::ObjectGetPrototypeOf => match arguments.first() {
+            Some(Value::Object(object)) => {
+                object.borrow().prototype().cloned().unwrap_or(Value::Null)
+            }
+            Some(Value::Function(closure)) => closure
+                .properties
+                .borrow()
+                .prototype()
+                .cloned()
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
         Native::ArrayFrom => match arguments.first() {
             Some(Value::Array(items)) => {
                 Value::Array(Rc::new(RefCell::new(items.borrow().clone())))
@@ -1609,6 +1762,78 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         | Native::ObjectConstructor
         | Native::Json => Value::Undefined,
     }
+}
+
+/// Whether a value inherits `Error.prototype.toString`.
+fn has_error_to_string(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => matches!(
+            object.borrow().get("toString"),
+            Some(Value::Native(Native::ErrorToString))
+        ),
+        _ => false,
+    }
+}
+
+/// `Error.prototype.toString`: `name`, then `: message` when the message is non-empty.
+fn error_to_string(value: &Value) -> String {
+    let Value::Object(object) = value else {
+        return "Error".to_owned();
+    };
+    let object = object.borrow();
+    let name = match object.get("name") {
+        Some(Value::Undefined) | None => "Error".to_owned(),
+        Some(other) => other.to_display_string(),
+    };
+    let message = match object.get("message") {
+        Some(Value::Undefined) | None => String::new(),
+        Some(other) => other.to_display_string(),
+    };
+    if message.is_empty() {
+        name
+    } else {
+        format!("{name}: {message}")
+    }
+}
+
+/// `value instanceof constructor`.
+///
+/// Walks the value's prototype chain looking for the constructor's `prototype` *by identity*.
+/// Comparing anything else -- shape, name -- would call two unrelated classes the same one.
+///
+/// A right-hand side that is not a function is a TypeError in JavaScript. There is nothing to
+/// throw with yet, so it answers false; that is wrong, and it is the direction that produces a
+/// visibly wrong answer rather than a silently corrupt one.
+fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Value>) -> bool {
+    let prototype = match constructor {
+        Value::Function(closure) => match closure.prototype.borrow().clone() {
+            Some(prototype) => prototype,
+            // A constructor never used with `new` and never read has no prototype object yet,
+            // so nothing can descend from it.
+            None => return false,
+        },
+        // A native constructor's prototype is the realm's, not one per closure.
+        Value::Native(Native::Error) => match error_prototype {
+            Some(prototype) => prototype.clone(),
+            None => return false,
+        },
+        _ => return false,
+    };
+
+    let mut current = match value {
+        Value::Object(object) => object.borrow().prototype().cloned(),
+        _ => None,
+    };
+    while let Some(link) = current {
+        if strict_equal(&link, &prototype) {
+            return true;
+        }
+        current = match &link {
+            Value::Object(object) => object.borrow().prototype().cloned(),
+            _ => None,
+        };
+    }
+    false
 }
 
 /// `key in target`.
@@ -1880,7 +2105,7 @@ mod tests {
 
     #[test]
     fn error_cause_is_installed_by_presence_not_by_value() {
-        let with_cause = construct_error(&[
+        let with_cause = build_error(&[
             Value::String("m".to_owned()),
             object(&[("cause", Value::Undefined)]),
         ]);
@@ -1889,7 +2114,7 @@ mod tests {
         };
         assert_eq!(data.borrow().get("cause"), Some(Value::Undefined));
 
-        let without = construct_error(&[Value::String("m".to_owned())]);
+        let without = build_error(&[Value::String("m".to_owned())]);
         let Value::Object(data) = &without else {
             panic!("construct_error returns an object");
         };
@@ -1900,7 +2125,7 @@ mod tests {
     #[test]
     fn error_cause_keeps_the_identity_of_the_value_given() {
         let inner = object(&[("marker", Value::Number(1.0))]);
-        let outer = construct_error(&[
+        let outer = build_error(&[
             Value::String("outer".to_owned()),
             object(&[("cause", inner.clone())]),
         ]);
@@ -1915,7 +2140,7 @@ mod tests {
     #[test]
     fn an_empty_message_produces_a_bare_stack_header() {
         for arguments in [Vec::new(), vec![Value::Undefined]] {
-            let Value::Object(data) = construct_error(&arguments) else {
+            let Value::Object(data) = build_error(&arguments) else {
                 panic!("construct_error returns an object");
             };
             assert_eq!(
@@ -1965,6 +2190,91 @@ mod tests {
 
     /// A write must create an own property rather than mutating the shared prototype, or two
     /// instances of one class would not be independent.
+    /// `instanceof` compares the constructor's prototype by identity, walking the chain. Two
+    /// unrelated classes with identical shapes must not be confused for one another.
+    #[test]
+    fn instanceof_walks_the_chain_by_identity() {
+        let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let parent = Rc::new(Closure {
+            function: 0,
+            upvalues: Vec::new(),
+            captured_this: None,
+            prototype: RefCell::new(Some(parent_prototype.clone())),
+            properties: RefCell::new(ObjectData::default()),
+        });
+
+        let mut child_prototype_data = ObjectData::default();
+        child_prototype_data.set_prototype(parent_prototype);
+        let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
+        let child = Rc::new(Closure {
+            function: 1,
+            upvalues: Vec::new(),
+            captured_this: None,
+            prototype: RefCell::new(Some(child_prototype.clone())),
+            properties: RefCell::new(ObjectData::default()),
+        });
+
+        let mut instance_data = ObjectData::default();
+        instance_data.set_prototype(child_prototype);
+        let instance = Value::Object(Rc::new(RefCell::new(instance_data)));
+
+        assert!(instance_of(
+            &instance,
+            &Value::Function(Rc::clone(&child)),
+            None
+        ));
+        assert!(
+            instance_of(&instance, &Value::Function(Rc::clone(&parent)), None),
+            "the chain is walked, not just the immediate link"
+        );
+
+        // A separate constructor with its own prototype must not match, however alike.
+        let unrelated = Rc::new(Closure {
+            function: 2,
+            upvalues: Vec::new(),
+            captured_this: None,
+            prototype: RefCell::new(Some(Value::Object(Rc::new(RefCell::new(
+                ObjectData::default(),
+            ))))),
+            properties: RefCell::new(ObjectData::default()),
+        });
+        assert!(!instance_of(&instance, &Value::Function(unrelated), None));
+        assert!(!instance_of(
+            &Value::Number(1.0),
+            &Value::Function(child),
+            None
+        ));
+    }
+
+    /// `String(e)` renders an error through its inherited `toString`, so an ordinary object that
+    /// merely has `name` and `message` is left alone.
+    #[test]
+    fn error_to_string_is_keyed_on_the_inherited_method() {
+        let plain = object(&[
+            ("name", Value::String("NotAnError".to_owned())),
+            ("message", Value::String("m".to_owned())),
+        ]);
+        assert!(!has_error_to_string(&plain));
+
+        let erroneous = object(&[
+            ("name", Value::String("E".to_owned())),
+            ("message", Value::String("boom".to_owned())),
+            ("toString", Value::Native(Native::ErrorToString)),
+        ]);
+        assert!(has_error_to_string(&erroneous));
+        assert_eq!(error_to_string(&erroneous), "E: boom");
+    }
+
+    /// An error with no message renders as a bare name, with no trailing colon.
+    #[test]
+    fn error_to_string_omits_an_empty_message() {
+        let bare = object(&[
+            ("name", Value::String("Error".to_owned())),
+            ("message", Value::String(String::new())),
+        ]);
+        assert_eq!(error_to_string(&bare), "Error");
+    }
+
     #[test]
     fn a_write_does_not_reach_through_the_prototype() {
         let shared = Rc::new(RefCell::new(ObjectData::default()));

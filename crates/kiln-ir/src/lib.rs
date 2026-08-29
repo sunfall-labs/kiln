@@ -42,6 +42,7 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     In,
+    InstanceOf,
     Add,
     Subtract,
     Multiply,
@@ -115,6 +116,13 @@ pub enum Instruction {
     LoadThis,
     /// Set an object's prototype. Stack is object, then prototype; the object is left.
     SetPrototype,
+    /// Run a parent constructor against the current `this`, forwarding the arguments this frame
+    /// received.
+    ///
+    /// A derived class with no constructor behaves as `constructor(...args) { super(...args) }`.
+    /// Its arity is not known where it is synthesized, so the forwarding has to happen at run
+    /// time from what the frame was actually given.
+    SuperForward,
     /// Call a function against the current `this` rather than a fresh or absent one.
     ///
     /// Used by both halves of `super`: `super(...)` runs the parent constructor against the
@@ -209,6 +217,8 @@ pub struct FunctionProto {
 pub enum Builtin {
     Error,
     Symbol,
+    String,
+    GlobalThis,
     Array,
     Object,
     Json,
@@ -220,6 +230,8 @@ impl Builtin {
         match name {
             "Error" => Some(Self::Error),
             "Symbol" => Some(Self::Symbol),
+            "String" => Some(Self::String),
+            "globalThis" => Some(Self::GlobalThis),
             "Array" => Some(Self::Array),
             "Object" => Some(Self::Object),
             "JSON" => Some(Self::Json),
@@ -231,6 +243,8 @@ impl Builtin {
         match self {
             Self::Error => "Error",
             Self::Symbol => "Symbol",
+            Self::String => "String",
+            Self::GlobalThis => "globalThis",
             Self::Array => "Array",
             Self::Object => "Object",
             Self::Json => "JSON",
@@ -762,6 +776,7 @@ impl Compiler {
                     BinaryOperator::Exponentiate => BinaryOp::Exponentiate,
                     BinaryOperator::StrictEqual => BinaryOp::StrictEqual,
                     BinaryOperator::In => BinaryOp::In,
+                    BinaryOperator::InstanceOf => BinaryOp::InstanceOf,
                     BinaryOperator::StrictNotEqual => BinaryOp::StrictNotEqual,
                     BinaryOperator::LessThan => BinaryOp::LessThan,
                     BinaryOperator::LessThanOrEqual => BinaryOp::LessThanOrEqual,
@@ -1032,8 +1047,8 @@ impl Compiler {
 
         let constructor = match &class.constructor {
             Some(constructor) => constructor.clone(),
-            // A class with no constructor gets an empty one. Synthesizing it here keeps `new`
-            // from needing a special case for classes that declared none.
+            // A class with no constructor gets an empty one, so `new` needs no special case for
+            // classes that declared none.
             None => Function {
                 name: Some(name.clone()),
                 arrow: false,
@@ -1042,7 +1057,15 @@ impl Compiler {
                 span: class.span,
             },
         };
-        let Some(index) = self.compile_function(&constructor, class.span) else {
+        let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
+        let Some(index) = self.compile_function_with(
+            &constructor,
+            class.span,
+            // A *derived* class with no constructor is not empty: it forwards its arguments to
+            // the parent. Without that, `class F extends Error {}` would construct an error with
+            // no message.
+            synthesized_derived,
+        ) else {
             return;
         };
 
@@ -1174,6 +1197,16 @@ impl Compiler {
     /// starting at the parameters, and its own scope stack. Module scope stays reachable through
     /// `enclosing[0]`; anything between is a capture and is refused by `resolve`.
     fn compile_function(&mut self, function: &Function, span: Span) -> Option<u32> {
+        self.compile_function_with(function, span, false)
+    }
+
+    /// As [`Compiler::compile_function`], optionally prefixing a `super(...arguments)` forward.
+    fn compile_function_with(
+        &mut self,
+        function: &Function,
+        span: Span,
+        forwards_to_super: bool,
+    ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
             return None;
@@ -1233,6 +1266,11 @@ impl Compiler {
             self.code.push(Instruction::StoreCell(slot));
         }
 
+        if forwards_to_super {
+            self.load_super();
+            self.code.push(Instruction::SuperForward);
+            self.code.push(Instruction::Pop);
+        }
         for statement in &function.body {
             self.statement(statement);
         }
@@ -1807,7 +1845,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
-        ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => false,
+        ExpressionKind::Literal(_) => false,
     }
 }
 
