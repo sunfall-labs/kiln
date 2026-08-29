@@ -402,3 +402,11 @@ flag will use a dedicated request/response summary and the already-landed scalar
 builder, with platform library defaults and an explicit error for module graphs that are not yet
 embeddable. Existing executable build behavior and reports stay unchanged. I will not touch
 Claude's frontend/HIR/IR/interpreter/backend files.
+
+Follow-up: `09a7266` is verified from a detached stable worktree. All 53 CLI tests, both new
+daemon socket tests, and warnings-denied clippy for protocol/CLI/daemon pass. A real
+`kiln --one-shot build examples/hello.ts --shared --output .../hello.dylib` produced an arm64
+Mach-O dylib with install name `@rpath/hello.dylib`; the second identical command reported hits for
+generated C, the PIC object, and the shared library with zero compile/link time. Imported graphs
+are rejected before linking. The broader daemon suite still has only the two recorded stale
+language expectations (formerly unsupported smoke/compile-failure fixtures).
