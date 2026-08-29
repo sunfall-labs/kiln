@@ -131,6 +131,18 @@ pub struct Measurement {
     /// False if the recompute counts differed between measured iterations, which means the loop
     /// never reached a steady state and the timings describe a mixture of different work.
     pub steady_state: bool,
+    /// Native-only artifact details. Omitted for query/interpreter measurements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeArtifactInfo>,
+}
+
+/// Artifact facts attached to a native benchmark measurement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeArtifactInfo {
+    pub cache_hit: bool,
+    pub generated_c_bytes: u64,
+    pub object_bytes: u64,
+    pub executable_bytes: u64,
 }
 
 /// How a scenario names and budgets itself, kept apart from what it measured.
@@ -165,11 +177,15 @@ impl Measurement {
             cache_hit_rate: cache_hit_rate(&stats),
             stats: convert(stats),
             steady_state,
+            native: None,
         }
     }
 
     fn recomputes(&self) -> u64 {
-        self.stats.parse_computed + self.stats.interface_computed + self.stats.project_computed
+        self.stats.parse_computed
+            + self.stats.ir_computed
+            + self.stats.interface_computed
+            + self.stats.project_computed
     }
 
     fn verdict(&self) -> &'static str {
@@ -186,7 +202,7 @@ impl Measurement {
 /// Spelled out because the phrase is ambiguous: the denominator is every query the pipeline
 /// visited, and a "hit" is a query the engine validated without recomputing.
 fn cache_hit_rate(s: &DbStats) -> f64 {
-    let recomputed = s.parse_computed + s.interface_computed + s.project_computed;
+    let recomputed = s.parse_computed + s.ir_computed + s.interface_computed + s.project_computed;
     let total = s.validated + recomputed;
     if total == 0 {
         0.0
@@ -201,6 +217,7 @@ fn convert(s: DbStats) -> Stats {
     Stats {
         revision: s.revision,
         parse_computed: s.parse_computed,
+        ir_computed: s.ir_computed,
         interface_computed: s.interface_computed,
         project_computed: s.project_computed,
         validated: s.validated,
@@ -227,6 +244,8 @@ pub fn render_human(report: &Report) -> String {
     for info in &report.workloads {
         render_workload(&mut out, report, info);
     }
+    render_standalone(&mut out, report, "conformance", "conformance");
+    render_standalone(&mut out, report, "native", "native");
     out.push_str(NOTES);
     out
 }
@@ -235,21 +254,67 @@ pub fn render_human(report: &Report) -> String {
 const NOTES: &str = "\
 notes
   \"daemon startup\" is measured in-process: engine construction plus ingesting every source,
-  deriving nothing. kiln-daemon has no process to spawn yet, so binary load and the socket
+  deriving nothing. The harness does not spawn the daemon binary, so binary load and the socket
   handshake are not in that number and it is a floor, not the real figure.
 
   \"cache hit rate\" is validated / (validated + recomputed) over every memo the pipeline
   touched, so a query validated on the way down a dependency walk counts as a hit.
 
-  v0's query graph is parse -> interface -> project with no module-to-module edges, so blast
-  radius is currently uniform and the edited module's dependent count does not yet change any
-  number above. The workload import graph is real so that it will when those edges land.
+  v0's query graph branches from parse into bytecode and interface -> project, with no
+  module-to-module edges. The workload import graph is real so blast-radius measurements can
+  become dependency-sensitive when module linking lands.
 
-  §13's warm budget is an edit reaching the interpreter. This pipeline is a prefix of that, so
-  passing it is necessary and nowhere near sufficient; the headroom will be spent by items 4
-  and 5 of the implementation order.
+  \"warm interpreted execution\" includes the edit, parse/HIR lowering, bytecode rebuild and VM
+  launch. It uses the scalar execution corpus; broader language coverage will spend some of the
+  current headroom.
+
+  \"targeted Test262\" runs an in-memory positive and parse-negative batch through metadata,
+  explicit variants, the parser, bytecode compiler and interpreter. Full-suite throughput
+  remains a separate measurement once the upstream harness is supported.
+
+  \"native\" measures a tiny scalar C build, a fully warm cache lookup, and a native link. Its
+  equivalence row compares interpreter and native stdout; the cache row asserts all seven entries.
 
 ";
+
+fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &str) {
+    let measurements = report
+        .measurements
+        .iter()
+        .filter(|measurement| measurement.workload == workload)
+        .collect::<Vec<_>>();
+    if measurements.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{label}");
+    let _ = writeln!(
+        out,
+        "  {:<42} {:>10} {:>10} {:>10} {:>10} {:>6}",
+        "operation", "median", "min", "p90", "max", "iters"
+    );
+    let _ = writeln!(out, "  {}", "-".repeat(94));
+    for measurement in measurements {
+        let _ = writeln!(
+            out,
+            "  {:<42} {:>10} {:>10} {:>10} {:>10} {:>6}",
+            measurement.operation,
+            ms(measurement.median_ms),
+            ms(measurement.min_ms),
+            ms(measurement.p90_ms),
+            ms(measurement.max_ms),
+            measurement.iterations,
+        );
+        if let Some(native) = &measurement.native {
+            let cache = if native.cache_hit { "hit" } else { "miss" };
+            let _ = writeln!(
+                out,
+                "    artifacts: cache {cache}, C {} B, objects {} B, executable {} B",
+                native.generated_c_bytes, native.object_bytes, native.executable_bytes
+            );
+        }
+    }
+    out.push('\n');
+}
 
 fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
     let _ = writeln!(
@@ -303,16 +368,17 @@ fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
     let _ = writeln!(out, "  recompute counts for one measured iteration");
     let _ = writeln!(
         out,
-        "  {:<24} {:>7} {:>10} {:>8} {:>10} {:>13} {:>9}",
-        "operation", "parse", "interface", "project", "validated", "early cutoff", "hit rate"
+        "  {:<24} {:>7} {:>5} {:>10} {:>8} {:>10} {:>13} {:>9}",
+        "operation", "parse", "IR", "interface", "project", "validated", "early cutoff", "hit rate"
     );
-    let _ = writeln!(out, "  {}", "-".repeat(92));
+    let _ = writeln!(out, "  {}", "-".repeat(100));
     for m in &mine {
         let _ = writeln!(
             out,
-            "  {:<24} {:>7} {:>10} {:>8} {:>10} {:>13} {:>8.1}%",
+            "  {:<24} {:>7} {:>5} {:>10} {:>8} {:>10} {:>13} {:>8.1}%",
             m.operation,
             m.stats.parse_computed,
+            m.stats.ir_computed,
             m.stats.interface_computed,
             m.stats.project_computed,
             m.stats.validated,
@@ -524,6 +590,7 @@ mod tests {
             },
             cache_hit_rate: 0.5,
             steady_state: true,
+            native: None,
         }
     }
 

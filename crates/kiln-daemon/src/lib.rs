@@ -39,6 +39,7 @@ mod dispatch;
 mod framing;
 mod server;
 mod socket;
+mod testing;
 
 #[cfg(test)]
 mod tests;

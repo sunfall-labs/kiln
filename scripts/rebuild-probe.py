@@ -81,11 +81,16 @@ def cmd_run(args):
         # script has no business editing.
         path.touch()
 
-    build = ["cargo", "build", "--workspace", "--locked", "--message-format=json-render-diagnostics"]
+    # json-render-diagnostics keeps rustc's own error output human-readable on stderr while
+    # the artifact records come back as JSON on stdout.
+    build = [
+        "cargo", "build", "--workspace", "--locked",
+        "--message-format=json-render-diagnostics",
+    ]
     if args.timings:
         build.append("--timings")
 
-    # stderr is left attached so rustc diagnostics and cargo's progress show up in the log.
+    # stderr is left attached so that output and cargo's progress reach the CI log live.
     start = time.monotonic()
     proc = subprocess.run(build, cwd=root, stdout=subprocess.PIPE, text=True)
     elapsed_ms = round((time.monotonic() - start) * 1000)

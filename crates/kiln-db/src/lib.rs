@@ -10,6 +10,18 @@ mod hash;
 
 pub use engine::MemoEngine;
 pub use hash::content_hash;
+pub use kiln_hir::Module as HirModule;
+pub use kiln_ir::{CompileDiagnostic, Program};
+
+/// Memoized result of lowering owned HIR to parser-independent bytecode.
+pub type Compiled = Result<Program, Vec<CompileDiagnostic>>;
+
+/// A parser/lowerer injected into the memo engine.
+///
+/// Keeping this as a plain function pointer makes the engine `Send`, cheap to construct, and
+/// independent of Oxc. Production injects `frontend_oxc::parse`; database unit tests inject a
+/// tiny deterministic fixture frontend.
+pub type Frontend = fn(path: &str, source: &str) -> HirModule;
 
 /// A source file interned by the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,14 +31,27 @@ pub struct FileId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Revision(pub u64);
 
-/// The result of parsing a module. A stand-in until the Oxc frontend lands (design.md §14.4);
-/// what matters now is that it is derived, cached, and depended upon.
+/// The owned result of parsing and lowering one module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     /// Everything about the module, including things no dependent can observe.
     pub implementation_hash: u64,
+    /// Convenience projection used by the current interface query. The complete owned module
+    /// HIR is retained below for subsequent lowering and interpreter queries.
     pub exports: Vec<String>,
     pub lines: usize,
+    pub module: HirModule,
+}
+
+impl Parsed {
+    pub fn new(source: &str, module: HirModule) -> Self {
+        Self {
+            implementation_hash: content_hash(source),
+            exports: module.runtime_export_names(),
+            lines: source.lines().count(),
+            module,
+        }
+    }
 }
 
 /// The externally visible surface of a module.
@@ -54,6 +79,7 @@ pub struct Project {
 pub struct Stats {
     pub revision: u64,
     pub parse_computed: u64,
+    pub ir_computed: u64,
     pub interface_computed: u64,
     pub project_computed: u64,
     pub validated: u64,
@@ -81,6 +107,7 @@ pub trait QueryEngine {
     fn source(&self, file: FileId) -> Option<&str>;
 
     fn parse(&mut self, file: FileId) -> Parsed;
+    fn ir(&mut self, file: FileId) -> Compiled;
     fn interface(&mut self, file: FileId) -> Interface;
     fn project(&mut self) -> Project;
 

@@ -6,6 +6,7 @@
 //! and uses ordered collections, so selection does not depend on filesystem or registration
 //! order.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -551,11 +552,7 @@ fn from_hex(value: u8) -> Option<u8> {
 }
 
 /// Select tests from metadata and the current failure state.
-pub fn select<I, M>(
-    metadata: I,
-    changes: &ChangeSet,
-    failures: &FailureState,
-) -> Selection
+pub fn select<I, M>(metadata: I, changes: &ChangeSet, failures: &FailureState) -> Selection
 where
     I: IntoIterator<Item = M>,
     M: Borrow<TestMetadata>,
@@ -616,7 +613,7 @@ pub fn select_tests(
     changes: &ChangeSet,
     failures: &FailureState,
 ) -> Selection {
-    select(metadata.iter().cloned(), changes, failures)
+    select(metadata, changes, failures)
 }
 
 fn merge_metadata(existing: &mut TestMetadata, incoming: &TestMetadata) {
@@ -713,7 +710,6 @@ mod tests {
             TestMetadata::new("ir").ir_operation("load_capture"),
             TestMetadata::new("builtin").builtin_module("fs"),
             TestMetadata::new("host").host_op("write_stdout"),
-            TestMetadata::new("feature-only").feature("closures"),
         ];
         let changes = ChangeSet::new()
             .compiler_crate("kiln-ir")
@@ -722,8 +718,14 @@ mod tests {
             .builtin_module("fs")
             .host_op("write_stdout");
         let selection = select_tests(&metadata, &changes, &FailureState::new());
-        assert_eq!(ids(&selection), ["builtin", "crate", "feature", "host", "ir"]);
+        assert_eq!(
+            ids(&selection),
+            ["builtin", "crate", "feature", "host", "ir"]
+        );
         assert!(selection.tests.iter().all(|test| test.reasons.len() == 1));
+        assert!(
+            selection.tests[2].has_reason(&SelectionReason::ModifiedFeature("closures".into()))
+        );
     }
 
     #[test]

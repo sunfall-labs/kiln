@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
-use crate::dispatch::{Next, dispatch};
+use crate::dispatch::{Next, dispatch, native_build_program, native_program, native_run_program};
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
 #[derive(Debug)]
@@ -143,9 +143,9 @@ pub struct Daemon<E: QueryEngine = MemoEngine> {
 }
 
 impl Daemon<MemoEngine> {
-    /// Bind `socket`, serving a fresh [`MemoEngine`].
+    /// Bind `socket`, serving a fresh [`MemoEngine`] backed by the Oxc frontend.
     pub fn bind(socket: &Path) -> Result<Self, DaemonError> {
-        Self::bind_with(socket, MemoEngine::default())
+        Self::bind_with(socket, MemoEngine::new(frontend_oxc::parse))
     }
 }
 
@@ -368,11 +368,12 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
     write_frame(writer, &json)
 }
 
-/// Run one request against the engine, holding the lock for the dispatch and nothing more.
+/// Run one request, holding the engine lock only while a query actually needs it.
 ///
-/// The engine's methods take `&mut self`, so requests are serialised whatever we do; what this
-/// buys is that the lock is never held across socket I/O, so a client that stops reading its
-/// responses cannot hold the engine hostage while other clients queue behind it.
+/// The engine's methods take `&mut self`, so query preparation is serialized. Native compilation,
+/// linking, and process execution operate on an owned bytecode program after releasing the lock;
+/// an expensive platform toolchain must not block unrelated parse or check requests. Socket I/O is
+/// likewise outside the lock, so a client that stops reading cannot hold the engine hostage.
 ///
 /// The guard is held *outside* `catch_unwind` and only reborrowed into it, which is what keeps
 /// the mutex unpoisoned: nothing is dropped while the panic unwinds, and by the time the guard
@@ -381,15 +382,66 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
 /// The engine can still be left mid-update by the panic, but its values are all derived and
 /// recomputable, so the next query rebuilds them.
 fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
+    match request {
+        Request::NativeBuild {
+            path,
+            project_root,
+            output,
+            profile,
+        } => {
+            let program = match prepare_native(engine, &path) {
+                Ok(program) => program,
+                Err(message) => return (Response::Error { message }, Next::Continue),
+            };
+            run_without_engine_lock(|| {
+                native_build_program(program, path, project_root, output, profile)
+            })
+        }
+        Request::NativeRun {
+            path,
+            project_root,
+            profile,
+        } => {
+            let program = match prepare_native(engine, &path) {
+                Ok(program) => program,
+                Err(message) => return (Response::Error { message }, Next::Continue),
+            };
+            run_without_engine_lock(|| native_run_program(program, path, project_root, profile))
+        }
+        request => handle_engine_request(engine, request),
+    }
+}
+
+fn prepare_native<E: QueryEngine>(
+    engine: &Mutex<E>,
+    path: &str,
+) -> Result<kiln_ir::Program, String> {
+    let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+    match panic::catch_unwind(AssertUnwindSafe(|| native_program(&mut *guard, path))) {
+        Ok(Ok(program)) => Ok(program),
+        Ok(Err(message)) => Err(message),
+        Err(payload) => Err(format!("internal error: {}", panic_message(&*payload))),
+    }
+}
+
+fn run_without_engine_lock(operation: impl FnOnce() -> Response) -> (Response, Next) {
+    match panic::catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(response) => (response, Next::Continue),
+        Err(payload) => (internal_error(&*payload), Next::Continue),
+    }
+}
+
+fn handle_engine_request<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
     let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
     match panic::catch_unwind(AssertUnwindSafe(|| dispatch(&mut *guard, request))) {
         Ok(outcome) => outcome,
-        Err(payload) => (
-            Response::Error {
-                message: format!("internal error: {}", panic_message(&*payload)),
-            },
-            Next::Continue,
-        ),
+        Err(payload) => (internal_error(&*payload), Next::Continue),
+    }
+}
+
+fn internal_error(payload: &(dyn std::any::Any + Send)) -> Response {
+    Response::Error {
+        message: format!("internal error: {}", panic_message(payload)),
     }
 }
 

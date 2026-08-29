@@ -19,9 +19,35 @@ cd "$(kiln_repo_root)"
 # reproducibility bug, and CI is the right place to notice it.
 if cargo nextest --version >/dev/null 2>&1; then
 	echo "test runner: cargo-nextest"
-	kiln_cargo nextest run --workspace --locked
-	kiln_cargo test --workspace --locked --doc
+	cargo nextest run --workspace --locked
+	cargo test --workspace --locked --doc
 else
 	echo "test runner: cargo test (cargo-nextest is not installed)"
-	kiln_cargo test --workspace --locked
+	cargo test --workspace --locked
+fi
+
+# Exercise the public conformance workflow, not only its component crates. The local corpus is
+# intentionally tiny; the full upstream suite remains an external, separately pinned input.
+cargo run -p kiln-cli --locked -- --one-shot test tests/conformance/smoke
+
+# Exercise the public native path against the same bytecode as the interpreter. The second build
+# must be a fully warm artifact-cache hit, and both execution engines must expose identical stdout
+# for the supported scalar slice.
+KILN_CI_NATIVE_OUTPUT="target/kiln-ci-native"
+cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
+	--output "$KILN_CI_NATIVE_OUTPUT" >/dev/null
+KILN_CI_WARM_BUILD="$(cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
+	--output "$KILN_CI_NATIVE_OUTPUT")"
+KILN_CI_HIT_COUNT="$(printf '%s\n' "$KILN_CI_WARM_BUILD" | grep -c '(hit)')"
+if [[ $KILN_CI_HIT_COUNT -ne 5 ]]; then
+	echo "expected five native cache hits on the warm build" >&2
+	printf '%s\n' "$KILN_CI_WARM_BUILD" >&2
+	exit 1
+fi
+KILN_CI_INTERPRETER_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts)"
+KILN_CI_NATIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts --native)"
+if [[ $KILN_CI_NATIVE_STDOUT != "$KILN_CI_INTERPRETER_STDOUT" ]]; then
+	echo "native stdout differs from interpreter stdout" >&2
+	printf 'interpreter: %s\nnative: %s\n' "$KILN_CI_INTERPRETER_STDOUT" "$KILN_CI_NATIVE_STDOUT" >&2
+	exit 1
 fi

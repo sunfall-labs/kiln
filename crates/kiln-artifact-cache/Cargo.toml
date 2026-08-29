@@ -1,0 +1,11 @@
+[package]
+name = "kiln-artifact-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate deliberately has no dependencies.  It sits below the compiler and native
+# backends, so a cache implementation must not pull either of those (or a crypto runtime)
+# into every incremental build.
+[dependencies]

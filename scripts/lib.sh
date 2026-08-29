@@ -25,29 +25,10 @@ kiln_say() {
 	printf '%s\n' "$*" | kiln_block
 }
 
-# Run cargo, through Mr. Boxington when it is installed.
-#
-# mbx (https://mr-boxington.jdx.dev) keeps one content-addressed build cache shared across git
-# worktrees instead of a target/ per checkout, and gives concurrent cargo invocations a single
-# CPU budget rather than letting each assume it owns the machine. Both matter when several
-# agents or CI jobs build the same workspace at once; neither matters for a lone developer,
-# which is why this is a preference and not a requirement.
-#
-# Deliberately a fallback rather than a dependency: mbx is young, and its own guidance is to
-# rerun the plain cargo equivalent when an mbx command misbehaves. Set KILN_NO_MBX=1 to do that
-# for a whole script run.
-kiln_cargo() {
-	if [[ -z ${KILN_NO_MBX:-} ]] && command -v mbx >/dev/null 2>&1; then
-		mbx "$@"
-	else
-		cargo "$@"
-	fi
-}
-
 # Build the timing harness and echo the path to its binary. Release, because a debug build of
 # a benchmark measures the wrong thing.
 kiln_build_bench() {
-	kiln_cargo build --release --locked -p kiln-bench >&2
+	cargo build --release --locked -p kiln-bench >&2
 	printf '%s\n' "$(kiln_repo_root)/target/release/kiln-bench"
 }
 

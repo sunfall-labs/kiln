@@ -9,24 +9,43 @@ license = "MIT"
 repository = "https://github.com/sunfall-labs/kiln"
 
 [workspace.dependencies]
+kiln-artifact-cache = { path = "crates/kiln-artifact-cache" }
+kiln-backend-c = { path = "crates/kiln-backend-c" }
 kiln-db = { path = "crates/kiln-db" }
+kiln-hir = { path = "crates/kiln-hir" }
+kiln-host-abi = { path = "crates/kiln-host-abi" }
+kiln-ir = { path = "crates/kiln-ir" }
+kiln-interpreter = { path = "crates/kiln-interpreter" }
+kiln-native = { path = "crates/kiln-native" }
+kiln-native-runtime = { path = "crates/kiln-native-runtime" }
+kiln-runtime = { path = "crates/kiln-runtime" }
+kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
+kiln-conformance = { path = "crates/kiln-conformance" }
 kiln-proto = { path = "crates/kiln-proto" }
 kiln-daemon = { path = "crates/kiln-daemon" }
+kiln-test-selector = { path = "crates/kiln-test-selector" }
+kiln-test262 = { path = "crates/kiln-test262" }
+frontend-oxc = { path = "crates/frontend-oxc" }
+oxc_allocator = { version = "0.147.0", default-features = false }
+oxc_ast = { version = "0.147.0", default-features = false }
+oxc_parser = { version = "0.147.0", default-features = false }
+oxc_span = { version = "0.147.0", default-features = false }
+oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
-# Declared centrally so no workstream has to edit this file. A crate opts in from its own
-# manifest with `{ workspace = true }`; a dependency listed here that nobody names costs
-# nothing but a lockfile entry.
+# Declared centrally so no crate-level change has to edit this file. NOTE: these were dropped
+# once by a concurrent rewrite of this section; if a build fails with "was not found in
+# workspace.dependencies", check here first.
 #
-# proptest is a dev-dependency wherever it is used: it never reaches a consumer's build graph,
-# which is why it does not conflict with the foundational-crate rule in docs/adr/0004.
+# proptest is used only as a dev-dependency, so it never enters a consumer's build graph and
+# does not bear on the foundational-crate rule in docs/adr/0004.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Filesystem events. The debouncer is not optional: editors write-then-rename and emit several
 # events per save.
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = { version = "0.7", default-features = false }
-# FxHashMap. For process-local tables where SipHash's DoS resistance and cross-release
+# FxHashMap, for process-local tables where SipHash's DoS resistance and cross-release
 # stability are both irrelevant. Never for a hash that is persisted or sent on the wire.
 rustc-hash = { version = "2.1", default-features = false, features = ["std"] }
 

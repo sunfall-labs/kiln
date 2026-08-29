@@ -1,0 +1,17 @@
+[package]
+name = "kiln-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Keep the conformance runner at the top of the compiler stack.  In particular, the Test262
+# metadata reader is the only thing this crate knows about the suite format; all execution is
+# routed through the same frontend, IR, interpreter, and runtime used by the CLI.
+[dependencies]
+frontend-oxc = { path = "../frontend-oxc" }
+kiln-hir = { path = "../kiln-hir" }
+kiln-ir = { path = "../kiln-ir" }
+kiln-interpreter = { path = "../kiln-interpreter" }
+kiln-runtime = { path = "../kiln-runtime" }
+kiln-test262 = { path = "../kiln-test262" }

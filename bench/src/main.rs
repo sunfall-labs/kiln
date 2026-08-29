@@ -104,6 +104,12 @@ fn run(args: &Args) -> Result<Outcome, String> {
             .measurements
             .extend(scenarios::run_all(w, args.budget)?);
     }
+    report
+        .measurements
+        .push(scenarios::targeted_conformance(args.budget)?);
+    if let Some(native) = scenarios::native(args.budget)? {
+        report.measurements.extend(native);
+    }
 
     let json = serde_json::to_string_pretty(&report)
         .map_err(|e| format!("serialising the report: {e}"))?;

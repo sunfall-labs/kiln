@@ -3,20 +3,27 @@ name: Performance
 # design.md §13 asks CI to record a list of measurements and says a regression should require
 # explicit justification. This workflow records the ones that exist in v0.
 #
-# Two jobs, with deliberately opposite cache policies:
+# Three jobs, because the measurements need three different cache policies and there is no
+# single one that is honest for all of them:
 #
-#   build-timings  measures cargo itself, so it must NOT restore a target directory - a "clean
-#                  build" against a warm target directory is not a measurement of anything.
-#   bench          measures the compiler daemon at runtime, so a warm target directory makes
-#                  the job faster and changes nothing it reports.
+#   clean-build   measures a from-scratch build, so it must NOT restore a target directory - a
+#                 clean build against a warm target directory is not a measurement of anything.
+#                 That now includes compiling oxc, so it is deliberately kept off the pull
+#                 request path and runs on pushes to main, where it is a weekly-scale trend
+#                 rather than something anyone is waiting on.
+#   rebuilds      measures the developer's actual loop - no-op and edit-driven rebuilds - which
+#                 only makes sense against a warm target directory, and is cheap because of it.
+#                 This is the one that runs on every pull request.
+#   bench         measures the compiler daemon at runtime, so a warm target directory makes the
+#                 job faster and changes nothing it reports.
 #
-# Neither job gates on a wall-clock number. A GitHub-hosted runner shares a host with other
-# tenants, and the committed baseline was recorded on a developer's machine of a different
-# architecture; a threshold on those numbers would fail for reasons no one can act on. Both
-# jobs instead gate on the machine-independent half of the same data, which is also the half
-# design.md is actually about: build-timings asserts *which* packages cargo recompiled, and
-# bench asserts the recompute counters from kiln_proto::Stats. The wall-clock figures are
-# recorded next to them and shown in the job summary as a trend.
+# No job gates on a wall-clock number. A GitHub-hosted runner shares a host with other tenants,
+# and the committed baseline was recorded on a developer's machine of a different architecture;
+# a threshold on those numbers would fail for reasons no one can act on. The jobs gate instead
+# on the machine-independent half of the same data, which is also the half design.md is actually
+# about: `rebuilds` asserts *which* packages cargo recompiled, and `bench` asserts the recompute
+# counters from kiln_proto::Stats. The wall-clock figures are recorded next to them and shown in
+# the job summary as a trend.
 
 on:
   push:
@@ -35,8 +42,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-timings:
-    name: Build timings
+  clean-build:
+    name: Clean build
+    # Nothing on a pull request can be learned from this that the `rebuilds` job does not say
+    # sooner and cheaper, and it is the longest job in the repository.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,14 +54,14 @@ jobs:
       # components it declares. With no toolchain argument rustup installs the active one, so
       # the pin lives in exactly one place.
       - run: rustup toolchain install --no-self-update
-      # Registry only. cache-targets is off so the clean-build measurement is genuinely clean;
+      # Registry only. Caching the target directory would make the measurement meaningless;
       # keeping the downloaded crate sources merely removes network variance from a number
       # that is meant to be about compilation.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-timings
+          key: clean-build
           cache-targets: "false"
-      - run: bash scripts/ci-rebuild-timing.sh
+      - run: bash scripts/ci-rebuild-timing.sh clean
       # §12 asks for `cargo build --timings` to be inspected regularly, which means it has to
       # be somewhere you can click on. Uploaded even on failure: a build that just got slow
       # enough to trip a check is exactly when the report is worth reading.
@@ -62,6 +72,27 @@ jobs:
           path: |
             target/cargo-timings/
             target/rebuild-timings.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+  rebuilds:
+    name: Incremental rebuilds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      # Third-party, but it prunes stale artifacts out of the cached target directory, which a
+      # hand-rolled actions/cache does not - without that the cache grows without bound and
+      # eventually costs more to restore than the build costs to redo.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rebuilds
+      - run: bash scripts/ci-rebuild-timing.sh incremental
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebuild-timings-${{ github.run_id }}
+          path: target/rebuild-timings.jsonl
           if-no-files-found: warn
           retention-days: 30
 
