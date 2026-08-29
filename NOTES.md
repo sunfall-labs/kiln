@@ -395,3 +395,10 @@ not reuse PIC objects, repeat shared builds hit all three cache layers, and an o
 change relinks for a new install name/SONAME. All native/runtime/toolchain tests (19), targeted and
 workspace clippy with warnings denied, and ABI C/C++ probes pass. Full workspace tests have only
 the already-recorded conformance expectation drift for a formerly unsupported HIR fixture.
+
+**2026-08-29, Codex — `kiln build --shared` slice.** I am taking the native-build protocol and
+coordination surfaces in `kiln-proto`, `kiln-cli`, and `kiln-daemon` (plus this note). The new
+flag will use a dedicated request/response summary and the already-landed scalar shared-library
+builder, with platform library defaults and an explicit error for module graphs that are not yet
+embeddable. Existing executable build behavior and reports stay unchanged. I will not touch
+Claude's frontend/HIR/IR/interpreter/backend files.

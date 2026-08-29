@@ -74,6 +74,7 @@ pub fn build(
     project_root: &Path,
     requested_output: Option<&Path>,
     profile: NativeProfile,
+    shared: bool,
 ) -> Result<Output> {
     let display = path.display().to_string();
     let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
@@ -82,7 +83,7 @@ pub fn build(
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
     }
-    let output = native_output_path(path, project_root, requested_output)?;
+    let output = native_output_path(path, project_root, requested_output, shared)?;
     if Path::new(&output) == Path::new(&canonical)
         || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&canonical))
     {
@@ -90,12 +91,17 @@ pub fn build(
             "native output would overwrite source file {canonical}"
         )));
     }
-    let summary = backend.native_build(
-        canonical,
-        project_root_string(project_root)?,
-        Some(output),
-        profile,
-    )?;
+    let project_root = project_root_string(project_root)?;
+    if shared {
+        let summary =
+            backend.native_shared_build(canonical, project_root, Some(output), profile)?;
+        return Ok(Output {
+            text: render::native_shared_build(&display, &summary),
+            notes: project_notes,
+            exit_code: 0,
+        });
+    }
+    let summary = backend.native_build(canonical, project_root, Some(output), profile)?;
     Ok(Output {
         text: render::native_build(&display, &summary),
         notes: project_notes,
@@ -134,14 +140,30 @@ fn project_root_string(root: &Path) -> Result<String> {
         .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", root.display())))
 }
 
-fn native_output_path(source: &Path, root: &Path, requested: Option<&Path>) -> Result<String> {
+fn native_output_path(
+    source: &Path,
+    root: &Path,
+    requested: Option<&Path>,
+    shared: bool,
+) -> Result<String> {
     let output = requested.map(PathBuf::from).unwrap_or_else(|| {
         let stem = source
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("module");
-        let mut output = root.join(".kiln").join("bin").join(stem);
-        if cfg!(windows) {
+        let mut output = root
+            .join(".kiln")
+            .join(if shared { "lib" } else { "bin" })
+            .join(stem);
+        if shared {
+            output.set_extension(if cfg!(target_os = "macos") {
+                "dylib"
+            } else if cfg!(windows) {
+                "dll"
+            } else {
+                "so"
+            });
+        } else if cfg!(windows) {
             output.set_extension("exe");
         }
         output
@@ -546,8 +568,9 @@ mod tests {
 
     use super::*;
     use kiln_proto::{
-        Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeRunSummary, ProjectSummary,
-        Request, Response, RunSummary, Stats, TestCaseSummary,
+        Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeRunSummary,
+        NativeSharedLibrarySummary, ProjectSummary, Request, Response, RunSummary, Stats,
+        TestCaseSummary,
     };
 
     /// A backend that answers from a script and records what it was asked, so the command
@@ -584,6 +607,7 @@ mod tests {
                     Request::Check { .. } => "Check",
                     Request::Run { .. } => "Run",
                     Request::NativeBuild { .. } => "NativeBuild",
+                    Request::NativeSharedBuild { .. } => "NativeSharedBuild",
                     Request::NativeRun { .. } => "NativeRun",
                     Request::Test { .. } => "Test",
                     Request::Project => "Project",
@@ -652,6 +676,23 @@ mod tests {
                     link_millis: 1,
                     total_millis: 3,
                 }),
+                Request::NativeSharedBuild { output, .. } => {
+                    Response::NativeSharedBuilt(NativeSharedLibrarySummary {
+                        module_symbol: "kiln_module_test".to_owned(),
+                        output_path: output.unwrap_or_default(),
+                        compiler_identity: "test-cc".to_owned(),
+                        generated_c_cache_hit: false,
+                        object_cache_hit: false,
+                        library_cache_hit: false,
+                        generated_c_bytes: 1,
+                        object_bytes: 2,
+                        library_bytes: 3,
+                        emit_millis: 1,
+                        compile_millis: 1,
+                        link_millis: 1,
+                        total_millis: 3,
+                    })
+                }
                 Request::NativeRun { .. } => Response::NativeRan(NativeRunSummary {
                     exit_code: Some(0),
                     stdout: "native hello\n".to_owned(),
@@ -756,7 +797,8 @@ mod tests {
     fn native_output_defaults_to_project_bin_and_resolves_relative_paths() {
         let root = Path::new("/tmp/project");
         assert_eq!(
-            native_output_path(Path::new("src/main.ts"), root, None).expect("default output"),
+            native_output_path(Path::new("src/main.ts"), root, None, false)
+                .expect("default output"),
             root.join(".kiln")
                 .join("bin")
                 .join(if cfg!(windows) { "main.exe" } else { "main" })
@@ -764,10 +806,67 @@ mod tests {
                 .expect("utf-8")
         );
         assert_eq!(
-            native_output_path(Path::new("src/main.ts"), root, Some(Path::new("bin/app")))
-                .expect("requested output"),
+            native_output_path(
+                Path::new("src/main.ts"),
+                root,
+                Some(Path::new("bin/app")),
+                false,
+            )
+            .expect("requested output"),
             root.join("bin").join("app").to_str().expect("utf-8")
         );
+    }
+
+    #[test]
+    fn shared_native_output_defaults_to_project_lib() {
+        let root = Path::new("/tmp/project");
+        let expected_extension = if cfg!(target_os = "macos") {
+            "dylib"
+        } else if cfg!(windows) {
+            "dll"
+        } else {
+            "so"
+        };
+        let expected = root
+            .join(".kiln")
+            .join("lib")
+            .join(format!("main.{expected_extension}"));
+        assert_eq!(
+            native_output_path(Path::new("src/main.ts"), root, None, true).expect("shared output"),
+            expected.to_str().expect("utf-8")
+        );
+    }
+
+    #[test]
+    fn shared_build_uses_dedicated_request_and_summary() {
+        let root = std::env::temp_dir().join(format!("kiln-cli-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create shared fixture");
+        let entry = root.join("main.ts");
+        std::fs::write(&entry, "export const main = 1;\n").expect("write shared fixture");
+
+        let mut backend = Fake::new();
+        let output = build(&mut backend, &entry, &root, None, NativeProfile::Dev, true)
+            .expect("shared build");
+        assert!(
+            output.text.contains("native shared build"),
+            "{}",
+            output.text
+        );
+        assert!(output.text.contains("shared library"), "{}", output.text);
+        assert_eq!(backend.names(), ["Sync", "SetSource", "NativeSharedBuild"]);
+        let Request::NativeSharedBuild { output, .. } = backend.seen.last().expect("request")
+        else {
+            panic!("last request must be NativeSharedBuild");
+        };
+        assert!(
+            output
+                .as_deref()
+                .is_some_and(|path| path.ends_with(".kiln/lib/main.so")
+                    || path.ends_with(".kiln/lib/main.dylib")
+                    || path.ends_with(".kiln/lib/main.dll"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

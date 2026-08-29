@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped on any non-additive change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Bumped on every wire-shape change. The daemon refuses a client that does not match.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -64,6 +64,15 @@ pub enum Request {
         output: Option<String>,
         profile: NativeProfile,
     },
+    /// Emit, compile, and link one scalar module as a shared library for an embedding host.
+    NativeSharedBuild {
+        path: String,
+        project_root: String,
+        /// Requested output path. The client supplies the default so daemon and one-shot
+        /// invocations produce the same artifact location.
+        output: Option<String>,
+        profile: NativeProfile,
+    },
     /// Emit, compile, link, and execute one module through the native backend.
     NativeRun {
         path: String,
@@ -97,6 +106,7 @@ pub enum Response {
     Checked(ModuleSummary),
     Ran(RunSummary),
     NativeBuilt(NativeBuildSummary),
+    NativeSharedBuilt(NativeSharedLibrarySummary),
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
     Project(ProjectSummary),
@@ -142,6 +152,24 @@ pub struct NativeBuildSummary {
     pub runtime_object_bytes: u64,
     pub launcher_object_bytes: u64,
     pub executable_bytes: u64,
+    pub emit_millis: u64,
+    pub compile_millis: u64,
+    pub link_millis: u64,
+    pub total_millis: u64,
+}
+
+/// Measurements and cache observability for one embedded shared-library build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSharedLibrarySummary {
+    pub module_symbol: String,
+    pub output_path: String,
+    pub compiler_identity: String,
+    pub generated_c_cache_hit: bool,
+    pub object_cache_hit: bool,
+    pub library_cache_hit: bool,
+    pub generated_c_bytes: u64,
+    pub object_bytes: u64,
+    pub library_bytes: u64,
     pub emit_millis: u64,
     pub compile_millis: u64,
     pub link_millis: u64,

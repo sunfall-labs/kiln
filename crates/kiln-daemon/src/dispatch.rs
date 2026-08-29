@@ -7,7 +7,8 @@ use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary, Stats,
+    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
+    Stats,
 };
 use std::path::{Path, PathBuf};
 
@@ -82,6 +83,30 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
                     Ok(program) => {
                         native_build_program(program, path, project_root, output, profile)
                     }
+                    Err(message) => Response::Error { message },
+                },
+                Err(message) => Response::Error { message },
+            },
+            Next::Continue,
+        ),
+        Request::NativeSharedBuild {
+            path,
+            project_root,
+            output,
+            profile,
+        } => (
+            match native_graph(engine, &path, &project_root) {
+                Ok(Some(graph)) if graph.module_count() > 1 => Response::Error {
+                    message: "native shared-library graph builds are unsupported; build a scalar module without imports".to_owned(),
+                },
+                Ok(Some(_)) | Ok(None) => match native_program(engine, &path) {
+                    Ok(program) => native_build_shared_program(
+                        program,
+                        path,
+                        project_root,
+                        output,
+                        profile,
+                    ),
                     Err(message) => Response::Error { message },
                 },
                 Err(message) => Response::Error { message },
@@ -387,6 +412,48 @@ pub(crate) fn native_build_program(
     }
 }
 
+pub(crate) fn native_build_shared_program(
+    program: kiln_ir::Program,
+    path: String,
+    project_root: String,
+    output: Option<String>,
+    profile: NativeProfile,
+) -> Response {
+    let project_root = PathBuf::from(project_root);
+    let output = output.map_or_else(
+        || default_native_shared_output(&project_root, &path),
+        PathBuf::from,
+    );
+    if output == Path::new(&path)
+        || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&path))
+    {
+        return Response::Error {
+            message: format!("native output would overwrite source file {path}"),
+        };
+    }
+    let builder =
+        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
+            Ok(builder) => builder,
+            Err(error) => {
+                return Response::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+    match builder.build_shared_library(
+        &program,
+        &kiln_native::NativeBuildOptions {
+            output,
+            profile: native_profile(profile),
+        },
+    ) {
+        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
 pub(crate) fn native_build_graph(
     graph: ModuleGraph,
     path: String,
@@ -541,6 +608,24 @@ fn default_native_output(project_root: &Path, source: &str) -> PathBuf {
     output
 }
 
+fn default_native_shared_output(project_root: &Path, source: &str) -> PathBuf {
+    let stem = Path::new(source)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("module");
+    let extension = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(windows) {
+        "dll"
+    } else {
+        "so"
+    };
+    project_root
+        .join(".kiln/lib")
+        .join(stem)
+        .with_extension(extension)
+}
+
 fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary {
     NativeBuildSummary {
         module_symbol: report.module_symbol,
@@ -562,6 +647,32 @@ fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary 
         runtime_object_bytes: report.sizes.runtime_object,
         launcher_object_bytes: report.sizes.launcher_object,
         executable_bytes: report.sizes.executable,
+        emit_millis: millis(report.timings.emit),
+        compile_millis: millis(report.timings.compile),
+        link_millis: millis(report.timings.link),
+        total_millis: millis(report.timings.total),
+    }
+}
+
+fn native_shared_summary(
+    report: kiln_native::NativeSharedLibraryReport,
+) -> NativeSharedLibrarySummary {
+    NativeSharedLibrarySummary {
+        module_symbol: report.module_symbol,
+        output_path: report.output.to_string_lossy().into_owned(),
+        compiler_identity: format!(
+            "{} {} targeting {} ({})",
+            report.tool.kind,
+            report.tool.version,
+            report.tool.target,
+            report.tool.path.display()
+        ),
+        generated_c_cache_hit: report.cache_hits.generated_c,
+        object_cache_hit: report.cache_hits.object,
+        library_cache_hit: report.cache_hits.library,
+        generated_c_bytes: report.sizes.generated_c,
+        object_bytes: report.sizes.object,
+        library_bytes: report.sizes.library,
         emit_millis: millis(report.timings.emit),
         compile_millis: millis(report.timings.compile),
         link_millis: millis(report.timings.link),
