@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use kiln_hir::{
     ArrayElement, AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName,
     ExportOrigin, Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator,
-    Module, ObjectKey, Pattern, Span, Statement, StatementKind, UnaryOperator, VariableKind,
+    Module, ObjectKey, ObjectMember, Pattern, Span, Statement, StatementKind, UnaryOperator,
+    VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -180,6 +181,15 @@ pub enum Instruction {
     GetProperty(u32),
     /// Write a property. Stack is object, then value.
     SetProperty(u32),
+    /// Copy every own property of the source into the target object, symbol-keyed ones included.
+    ///
+    /// Stack: `[target, source] -> [target]`, the same shape `SpreadInto` uses for arrays. One
+    /// instruction serves both `{ ...source }` and the rest of an object pattern, because both
+    /// are "everything this value has, into a fresh object".
+    SpreadObject,
+    /// Remove an own property, leaving `true` -- which is what the `delete` operator evaluates
+    /// to. Stack: `[target] -> [true]`.
+    DeleteProperty(u32),
     /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
     /// than a copy of its value.
     ///
@@ -801,12 +811,26 @@ impl Compiler {
                     self.bind_pattern(kind, &property.value, span);
                 }
                 match rest {
-                    // An object rest needs the keys not already taken, which needs a runtime
-                    // operation this IR does not have yet. Refused rather than bound to an empty
-                    // object, which would look like it worked.
-                    Some(_) => {
-                        self.error(Some(span), "object rest in a pattern is not supported yet");
-                        self.code.push(Instruction::Pop);
+                    // Copy everything, then remove what the named properties already took. The
+                    // other direction -- copy all but a set of names -- would need the exclusion
+                    // list at runtime; this needs only instructions that already earn their keep.
+                    Some(name) => {
+                        let source = format!("%rest{}", self.hidden_bindings);
+                        self.hidden_bindings += 1;
+                        self.scopes.push(HashMap::new());
+                        self.declare_hidden(&source, span);
+
+                        self.code.push(Instruction::NewObject { count: 0 });
+                        self.load_hidden(&source);
+                        self.code.push(Instruction::SpreadObject);
+                        for property in properties {
+                            let key = self.constant_index(Constant::String(property.key.clone()));
+                            self.code.push(Instruction::Dup);
+                            self.code.push(Instruction::DeleteProperty(key));
+                            self.code.push(Instruction::Pop);
+                        }
+                        self.scopes.pop().expect("rest scope was just pushed");
+                        self.declare_bound(kind, name, span);
                     }
                     None => self.code.push(Instruction::Pop),
                 }
@@ -1601,29 +1625,7 @@ impl Compiler {
                 property,
                 value,
             } => self.member_assignment(*operator, object, property, value),
-            ExpressionKind::Object { properties } => {
-                if properties.len() > u32::MAX as usize {
-                    self.error(
-                        Some(expression.span),
-                        "object literal has too many properties",
-                    );
-                    return;
-                }
-                for property in properties {
-                    match &property.key {
-                        ObjectKey::Static(key) => {
-                            self.push_constant(Constant::String(key.clone()));
-                        }
-                        // Evaluated in source order, between the properties around it, because
-                        // a computed key is an arbitrary expression and may have side effects.
-                        ObjectKey::Computed(key) => self.expression(key),
-                    }
-                    self.expression(&property.value);
-                }
-                self.code.push(Instruction::NewObject {
-                    count: properties.len() as u32,
-                });
-            }
+            ExpressionKind::Object { members } => self.object_literal(members, expression.span),
             ExpressionKind::StaticMember { object, property } => {
                 self.expression(object);
                 let name = self.constant_index(Constant::String(property.clone()));
@@ -1636,6 +1638,64 @@ impl Compiler {
                 );
                 self.push_constant(Constant::Undefined);
             }
+        }
+    }
+
+    /// An object literal.
+    ///
+    /// With no spread this is one `NewObject` over the whole literal, which is the common case
+    /// and the cheap one. A spread splits the literal into segments: each run of properties
+    /// becomes its own object and is merged into the accumulator in source order, so a property
+    /// written after a spread overwrites what the spread contributed and one written before it
+    /// is overwritten. Merging a segment uses the same instruction the spread does, rather than
+    /// a second way to set a property on an object already on the stack.
+    fn object_literal(&mut self, members: &[ObjectMember], span: Span) {
+        if members.len() > u32::MAX as usize {
+            self.error(Some(span), "object literal has too many properties");
+            return;
+        }
+        let mut pending = 0u32;
+        let mut accumulating = false;
+
+        for member in members {
+            match member {
+                ObjectMember::Property(property) => {
+                    match &property.key {
+                        ObjectKey::Static(key) => {
+                            self.push_constant(Constant::String(key.clone()));
+                        }
+                        // Evaluated in source order, between the members around it, because a
+                        // computed key is an arbitrary expression and may have side effects.
+                        ObjectKey::Computed(key) => self.expression(key),
+                    }
+                    self.expression(&property.value);
+                    pending += 1;
+                }
+                ObjectMember::Spread(source) => {
+                    // The first segment becomes the accumulator; later ones merge into it.
+                    self.emit_object_segment(&mut pending, accumulating);
+                    accumulating = true;
+                    self.expression(source);
+                    self.code.push(Instruction::SpreadObject);
+                }
+            }
+        }
+        self.emit_object_segment(&mut pending, accumulating);
+    }
+
+    /// Emit the pending run of key/value pairs as an object, merging it into the accumulator
+    /// beneath when one exists.
+    ///
+    /// Skipped when the run is empty and something is already accumulating, so `{ ...a, ...b }`
+    /// does not build two throwaway objects.
+    fn emit_object_segment(&mut self, pending: &mut u32, merge: bool) {
+        if merge && *pending == 0 {
+            return;
+        }
+        self.code.push(Instruction::NewObject { count: *pending });
+        *pending = 0;
+        if merge {
+            self.code.push(Instruction::SpreadObject);
         }
     }
 
@@ -2807,12 +2867,19 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
         }
-        ExpressionKind::Object { properties } => {
-            for property in properties {
-                if let ObjectKey::Computed(key) = &property.key {
-                    collect_identifiers(key, names, collecting);
+        ExpressionKind::Object { members } => {
+            for member in members {
+                match member {
+                    ObjectMember::Property(property) => {
+                        if let ObjectKey::Computed(key) = &property.key {
+                            collect_identifiers(key, names, collecting);
+                        }
+                        collect_identifiers(&property.value, names, collecting);
+                    }
+                    ObjectMember::Spread(source) => {
+                        collect_identifiers(source, names, collecting);
+                    }
                 }
-                collect_identifiers(&property.value, names, collecting);
             }
         }
         ExpressionKind::StaticMember { object, .. } => {
@@ -2888,9 +2955,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::SuperCall { arguments } => arguments
             .iter()
             .any(|argument| expression_references(argument, name)),
-        ExpressionKind::Object { properties } => properties.iter().any(|property| {
-            expression_references(&property.value, name)
-                || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
+        ExpressionKind::Object { members } => members.iter().any(|member| match member {
+            ObjectMember::Property(property) => {
+                expression_references(&property.value, name)
+                    || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
+            }
+            ObjectMember::Spread(source) => expression_references(source, name),
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Update { target, .. } => target == name,
@@ -3036,13 +3106,13 @@ mod tests {
         let program = compile(&module(vec![statement(StatementKind::Expression(
             Expression {
                 kind: ExpressionKind::Object {
-                    properties: vec![
-                        kiln_hir::ObjectProperty {
+                    members: vec![
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("fixed".into()),
                             value: number(1.0),
                             span: Span::default(),
-                        },
-                        kiln_hir::ObjectProperty {
+                        }),
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Computed(Expression {
                                 kind: ExpressionKind::Binary {
                                     operator: kiln_hir::BinaryOperator::Add,
@@ -3053,7 +3123,7 @@ mod tests {
                             }),
                             value: number(3.0),
                             span: Span::default(),
-                        },
+                        }),
                     ],
                 },
                 span: Span::default(),
@@ -3078,7 +3148,7 @@ mod tests {
                     pattern: kiln_hir::Pattern::Identifier("o".into()),
                     initializer: Some(Expression {
                         kind: ExpressionKind::Object {
-                            properties: Vec::new(),
+                            members: Vec::new(),
                         },
                         span: Span::default(),
                     }),
@@ -3125,7 +3195,7 @@ mod tests {
                     pattern: kiln_hir::Pattern::Identifier("o".into()),
                     initializer: Some(Expression {
                         kind: ExpressionKind::Object {
-                            properties: Vec::new(),
+                            members: Vec::new(),
                         },
                         span: Span::default(),
                     }),
@@ -3663,6 +3733,104 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("imported binding"))
+        );
+    }
+
+    #[test]
+    fn an_object_literal_without_a_spread_stays_one_instruction() {
+        // The segment machinery only earns its cost when a spread is present; the common literal
+        // must not pay for it with a merge per property.
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Object {
+                    members: vec![
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("a".into()),
+                            value: number(1.0),
+                            span: Span::default(),
+                        }),
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("b".into()),
+                            value: number(2.0),
+                            span: Span::default(),
+                        }),
+                    ],
+                },
+                span: Span::default(),
+            },
+        ))]))
+        .expect("compiles");
+        assert_eq!(
+            program
+                .code
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::NewObject { .. }))
+                .count(),
+            1
+        );
+        assert!(!program.code.contains(&Instruction::SpreadObject));
+    }
+
+    #[test]
+    fn a_spread_splits_the_literal_into_merged_segments() {
+        // `{ a: 1, ...source, b: 2 }`: the leading run, the spread, and the trailing run each
+        // merge in source order, which is what makes the later property win.
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Object {
+                    members: vec![
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("a".into()),
+                            value: number(1.0),
+                            span: Span::default(),
+                        }),
+                        kiln_hir::ObjectMember::Spread(number(0.0)),
+                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("b".into()),
+                            value: number(2.0),
+                            span: Span::default(),
+                        }),
+                    ],
+                },
+                span: Span::default(),
+            },
+        ))]))
+        .expect("compiles");
+        let objects = program
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::NewObject { .. }))
+            .count();
+        let merges = program
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::SpreadObject))
+            .count();
+        assert_eq!((objects, merges), (2, 2));
+    }
+
+    #[test]
+    fn consecutive_spreads_do_not_build_throwaway_objects() {
+        // `{ ...a, ...b }` has no properties of its own, so only the accumulator is allocated.
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Object {
+                    members: vec![
+                        kiln_hir::ObjectMember::Spread(number(0.0)),
+                        kiln_hir::ObjectMember::Spread(number(1.0)),
+                    ],
+                },
+                span: Span::default(),
+            },
+        ))]))
+        .expect("compiles");
+        assert_eq!(
+            program
+                .code
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::NewObject { .. }))
+                .count(),
+            1
         );
     }
 }

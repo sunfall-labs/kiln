@@ -695,7 +695,7 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 # machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
 # stderr.
 [regress]
-tests = 4
+tests = 5
 authored = "2026-08-29"
 expected_output_method = "Ran `node <probe>.js` and recorded the bytes it printed."
 
@@ -778,4 +778,28 @@ return: return
 throw: throw boom
 nested try: finally,nested
 nested loops: inner,outer
+"""
+
+[[test]]
+id = "regress/r05-object-spread-order"
+group = "regress"
+source = "regress/r05-object-spread-order.js"
+status = "runnable"
+features = ["object-spread", "object-rest", "symbol-keys", "computed-keys", "evaluation-order", "object-statics"]
+catches = """
+The ordering rule that decides whether an object literal is correct at all: a spread contributes \
+what its source holds at the point it appears, so a property written after it overwrites and one \
+written before it is overwritten. Also the cases a naive implementation gets wrong in the other \
+direction -- spreading `null`, spreading an array or a string for its indices, a computed key \
+evaluated in source order rather than hoisted, and two symbols with the same description being \
+two different properties. g01 covers symbol keys surviving a spread; none of this.\
+"""
+expected_stdout = """
+{"a":1,"b":9}
+{"a":1,"b":3,"c":4}
+{"ok":true}
+{"0":7,"1":8} {"0":"h","1":"i"}
+{"x":1,"y":2,"z":3} x,z
+1 {"b":2,"c":3} 5 {"d":6} undefined {"a":1,"b":2}
+one two false 0
 """
