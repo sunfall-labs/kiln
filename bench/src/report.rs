@@ -140,7 +140,9 @@ pub struct Measurement {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeArtifactInfo {
     pub cache_hit: bool,
+    /// Generated C bytes for application/module units (runtime/launcher C is shared support code).
     pub generated_c_bytes: u64,
+    /// Aggregate application/module, runtime, and launcher object bytes.
     pub object_bytes: u64,
     pub executable_bytes: u64,
 }
@@ -260,20 +262,39 @@ notes
   \"cache hit rate\" is validated / (validated + recomputed) over every memo the pipeline
   touched, so a query validated on the way down a dependency walk counts as a hit.
 
-  v0's query graph branches from parse into bytecode and interface -> project, with no
-  module-to-module edges. The workload import graph is real so blast-radius measurements can
-  become dependency-sensitive when module linking lands.
+  v0's query layer is represented by memoized scalar and linked-module queries.
+  The generated import graph is exercised by linked rows when those rows are present.
 
-  \"warm interpreted execution\" includes the edit, parse/HIR lowering, bytecode rebuild and VM
-  launch. It uses the scalar execution corpus; broader language coverage will spend some of the
-  current headroom.
+  \"warm-impl-edit\" and \"warm-interface-edit\" are scalar database-query measurements: they
+  edit one source, query parse/interface/project, and do not build or execute a module graph.
+  Their import edges describe the generated workload, but do not make those rows graph
+  measurements.
+
+  \"warm-execute\" is scalar interpreter execution: edit, parse/HIR lowering, scalar bytecode
+  rebuild, and VM launch for one module. It is distinct from linked interpreter rows, which build
+  an entry-rooted graph and execute dependencies before the entry.
+
+  Linked interpreter rows rebuild a fresh entry-rooted graph on every iteration. The graph
+  traversal, resolution, link validation, and graph allocation are not memoized; the provider can
+  still reuse memoized per-module module_ir. Consequently DB recompute/hit counters describe the
+  query layer only and do not imply that graph traversal was skipped. These rows use a scalar
+  mirror of the reported workload topology plus one synthetic entry that imports every reported
+  module; the established function-shaped analysis workload and its source-line count remain
+  unchanged for historical comparisons. The displayed \"IR\" counter is the database's combined
+  scalar-ir/module-ir counter; in a linked-only row, a value of one means one module_ir rebuild.
+  Linked rows have no provisional latency goal until a fixed-machine baseline calibrates one.
 
   \"targeted Test262\" runs an in-memory positive and parse-negative batch through metadata,
   explicit variants, the parser, bytecode compiler and interpreter. Full-suite throughput
   remains a separate measurement once the upstream harness is supported.
 
-  \"native\" measures a tiny scalar C build, a fully warm cache lookup, and a native link. Its
-  equivalence row compares interpreter and native stdout; the cache row asserts all seven entries.
+  Native linked-graph rows include a fresh entry-rooted graph build before real per-module
+  C/object/link work and artifact-cache lookup; they are not lookup-only microbenchmarks or graph
+  cache hits. The warm unchanged row requires every module, runtime, launcher, and executable
+  artifact to hit. The body-edit row requires exactly one module C/object miss, a warm launcher,
+  and a relink; it starts from precompiled module IR to isolate the native seam. Generated-C size
+  covers application modules, while object size aggregates application, runtime, and launcher
+  units. Native equivalence compares linked interpreter and native stdout.
 
 ";
 
@@ -287,17 +308,19 @@ fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &
         return;
     }
     let _ = writeln!(out, "{label}");
+    render_linked_note(out, &measurements);
     let _ = writeln!(
         out,
-        "  {:<42} {:>10} {:>10} {:>10} {:>10} {:>6}",
-        "operation", "median", "min", "p90", "max", "iters"
+        "  {:<42} {:<23} {:>10} {:>10} {:>10} {:>10} {:>6}",
+        "operation", "kind", "median", "min", "p90", "max", "iters"
     );
-    let _ = writeln!(out, "  {}", "-".repeat(94));
+    let _ = writeln!(out, "  {}", "-".repeat(120));
     for measurement in measurements {
         let _ = writeln!(
             out,
-            "  {:<42} {:>10} {:>10} {:>10} {:>10} {:>6}",
+            "  {:<42} {:<23} {:>10} {:>10} {:>10} {:>10} {:>6}",
             measurement.operation,
+            measurement_kind(measurement),
             ms(measurement.median_ms),
             ms(measurement.min_ms),
             ms(measurement.p90_ms),
@@ -308,7 +331,7 @@ fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &
             let cache = if native.cache_hit { "hit" } else { "miss" };
             let _ = writeln!(
                 out,
-                "    artifacts: cache {cache}, C {} B, objects {} B, executable {} B",
+                "    artifacts: cache {cache}, application C {} B, all objects {} B, executable {} B",
                 native.generated_c_bytes, native.object_bytes, native.executable_bytes
             );
         }
@@ -334,18 +357,20 @@ fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
         .filter(|m| m.workload == info.name)
         .collect();
 
+    render_linked_note(out, &mine);
     let _ = writeln!(
         out,
-        "  {:<24} {:>10} {:>10} {:>10} {:>10} {:>10} {:>6} {:>8}",
-        "operation", "median", "min", "p90", "max", "goal", "iters", "vs goal"
+        "  {:<28} {:<23} {:>10} {:>10} {:>10} {:>10} {:>10} {:>6} {:>8}",
+        "operation", "kind", "median", "min", "p90", "max", "goal", "iters", "vs goal"
     );
-    let _ = writeln!(out, "  {}", "-".repeat(92));
+    let _ = writeln!(out, "  {}", "-".repeat(126));
     for m in &mine {
         let goal = m.goal_ms.map_or_else(|| "-".to_string(), ms);
         let _ = writeln!(
             out,
-            "  {:<24} {:>10} {:>10} {:>10} {:>10} {:>10} {:>6} {:>8}",
+            "  {:<28} {:<23} {:>10} {:>10} {:>10} {:>10} {:>10} {:>6} {:>8}",
             m.operation,
+            measurement_kind(m),
             ms(m.median_ms),
             ms(m.min_ms),
             ms(m.p90_ms),
@@ -396,6 +421,55 @@ fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
     out.push('\n');
 
     render_thesis(out, report, &info.name);
+}
+
+/// Linked rows exercise the real entry-rooted module graph. The graph itself is deliberately not
+/// a database query yet: every iteration builds a fresh traversal, while each provider may reuse
+/// memoized per-module `module_ir`. Keep this distinction visible beside the timings so DB cache
+/// counters are not mistaken for graph-traversal counters.
+fn render_linked_note(out: &mut String, measurements: &[&Measurement]) {
+    if measurements
+        .iter()
+        .any(|measurement| is_linked(measurement))
+    {
+        let _ = writeln!(
+            out,
+            "  linked graph rows rebuild a fresh entry-rooted graph each iteration over memoized per-module module_ir where available; traversal and link validation are not memoized"
+        );
+    }
+}
+
+fn is_linked(measurement: &Measurement) -> bool {
+    let id = measurement.id.to_ascii_lowercase();
+    let operation = measurement.operation.to_ascii_lowercase();
+    id.contains("linked")
+        || id.contains("graph")
+        || operation.contains("linked")
+        || operation.contains("graph")
+}
+
+/// Human-only classification. This is intentionally derived from IDs/labels rather than added to
+/// `Measurement`, so the JSON shape and baseline compatibility stay unchanged.
+fn measurement_kind(measurement: &Measurement) -> &'static str {
+    if measurement.native.is_some() || measurement.workload == "native" {
+        if is_linked(measurement) {
+            "native linked graph"
+        } else {
+            "native build"
+        }
+    } else if is_linked(measurement) {
+        "linked interpreter"
+    } else if measurement.workload == "conformance" {
+        "conformance"
+    } else {
+        let id = measurement.id.to_ascii_lowercase();
+        let operation = measurement.operation.to_ascii_lowercase();
+        if id.contains("execute") || operation.contains("interpreted") {
+            "scalar interpreter"
+        } else {
+            "incremental queries"
+        }
+    }
 }
 
 /// The side-by-side the whole design turns on.
@@ -662,5 +736,51 @@ mod tests {
         assert_eq!(back.measurements[0].id, r.measurements[0].id);
         assert_eq!(back.measurements[0].median_ms, 1.5);
         assert_eq!(back.schema, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn linked_rows_are_labelled_and_explain_fresh_graph_traversal() {
+        let mut r = Report::new("linked graph warm iteration");
+        r.workloads.push(WorkloadInfo {
+            name: "small".to_string(),
+            modules: 3,
+            layers: 2,
+            import_edges: 2,
+            source_lines: 12,
+            edit_target: "src/app/main.ts".to_string(),
+            edit_target_dependents: 1,
+        });
+        let mut linked = measurement("small/warm-linked-body-edit", 2.0, 1);
+        linked.operation = "linked graph body edit".to_string();
+        r.measurements.push(linked);
+
+        let text = render_human(&r);
+        assert!(text.contains("linked interpreter"), "{text}");
+        assert!(text.contains("fresh entry-rooted graph"), "{text}");
+        assert!(text.contains("memoized per-module module_ir"), "{text}");
+        assert!(
+            !text.contains("no module-to-module edges"),
+            "stale graph narrative leaked into report: {text}"
+        );
+    }
+
+    #[test]
+    fn measurement_kind_distinguishes_scalar_linked_and_native_work() {
+        let scalar = measurement("small/warm-execute", 1.0, 1);
+        assert_eq!(measurement_kind(&scalar), "scalar interpreter");
+
+        let mut linked = measurement("small/warm-linked-noop", 1.0, 0);
+        linked.operation = "linked interpreter no-op".to_string();
+        assert_eq!(measurement_kind(&linked), "linked interpreter");
+
+        let mut native = measurement("native/graph-warm-build", 1.0, 0);
+        native.workload = "native".to_string();
+        native.native = Some(NativeArtifactInfo {
+            cache_hit: true,
+            generated_c_bytes: 1,
+            object_bytes: 1,
+            executable_bytes: 1,
+        });
+        assert_eq!(measurement_kind(&native), "native linked graph");
     }
 }

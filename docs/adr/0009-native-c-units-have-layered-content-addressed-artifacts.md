@@ -21,15 +21,20 @@ would be fast but unsound.
 ## Decision
 
 `kiln-backend-c` deterministically emits one C translation unit and stable external symbol per
-bytecode module. It validates bytecode version, control flow, indices, and stack shape before
-emission. The translation unit calls the numeric HostOps callback and contains no stdout, process,
-or command-line behavior.
+bytecode module. Standalone units retain a content-derived symbol. A linked graph instead assigns
+each unit a symbol derived from its normalized project-relative logical path, never from an
+absolute checkout path. The graph rejects any symbol collision before invoking the linker. This
+distinction lets a body-only edit change the module C/object keys without changing the launcher
+source that names the module. Artifact integrity and ABI compatibility remain content-addressed in
+the versioned native cache keys; a symbol is a link identity, not a cache proof. The backend
+validates bytecode version, control flow, indices, and stack shape before emission. The translation
+unit calls the numeric HostOps callback and contains no stdout, process, or command-line behavior.
 
 The command-line runtime is a separate, program-independent C translation unit. A tiny generated
-launcher binds that runtime to one module symbol. This split lets an application object survive a
-runtime implementation change and lets the runtime object be reused across applications. The
-current compiler only accepts single-module programs, but the toolchain and ordered link inputs are
-multi-unit from the outset.
+launcher binds that runtime to one standalone module or an ordered linked graph. This split lets an
+application object survive a runtime implementation change and lets the runtime object be reused
+across applications. Linked modules compile independently, while the launcher owns dependency
+ordering and import/export-array wiring.
 
 `kiln-artifact-cache` stores typed records addressed by SHA-256 keys. Keys include artifact kind,
 compiler/backend identity, HostOps/runtime ABI, target, CPU policy, build profile, compatibility
@@ -57,8 +62,9 @@ locale-dependent semantics.
 
 ## Consequences
 
-- Editing one module invalidates that module's C and object plus the final link, not the runtime or
-  unrelated application objects.
+- Editing one module body invalidates that module's C and object plus the final link, not the
+  runtime, graph launcher, or unrelated application objects. Moving or renaming the logical module
+  intentionally changes its linker identity.
 - Changing HostOps or the native runtime invalidates exactly the artifacts whose ABI or contents
   changed.
 - Compiler versions, targets, profiles, and ordered link inputs cannot accidentally share objects.
@@ -70,6 +76,6 @@ locale-dependent semantics.
   temporary concatenation allocations for a process lifetime. Those are explicit equivalence and
   ownership gaps to close before claiming complete JavaScript number formatting or long-lived
   native embedding; they are not accepted as silent conformance success.
-- A 128-bit deterministic module symbol is still not the artifact integrity boundary. SHA-256
-  cache keys protect artifact reuse, and future multi-module linking must additionally reject any
-  symbol collision before invoking the linker.
+- A 128-bit deterministic module symbol is not the artifact integrity boundary. SHA-256 cache keys
+  protect artifact reuse, and multi-module linking rejects any symbol collision before invoking
+  the linker.

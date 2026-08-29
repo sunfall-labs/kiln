@@ -14,7 +14,7 @@ use std::path::Path;
 /// stop at the module's interface, an interface edit must not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind {
-    /// Same exports, different function bodies.
+    /// Same exports, different implementation expressions.
     Implementation,
     /// Same bodies, different export set.
     Interface,
@@ -97,6 +97,10 @@ impl Module {
     fn export_alpha(&self) -> String {
         format!("{}_alpha", self.stem)
     }
+
+    fn export_value(&self) -> String {
+        format!("{}_value", self.stem)
+    }
 }
 
 pub struct Workload {
@@ -104,10 +108,15 @@ pub struct Workload {
     pub modules: Vec<Module>,
     /// The unedited text of each module, i.e. `variant(i, _, 0)`.
     pub base_texts: Vec<String>,
+    /// Executable scalar counterparts used only by linked-module scenarios.
+    pub linked_base_texts: Vec<String>,
     /// Module the warm-edit scenarios touch: the one with the most dependents, so the edit is
     /// the worst realistic case rather than a leaf nobody imports.
     pub edit_target: usize,
 }
+
+const ENTRY_FILE: &str = "entry.ts";
+const LINKED_DIR: &str = "linked";
 
 impl Workload {
     pub fn generate(spec: &'static WorkloadSpec) -> Workload {
@@ -115,11 +124,15 @@ impl Workload {
         let base_texts = (0..modules.len())
             .map(|i| render(spec, &modules, i, 0, 0))
             .collect();
+        let linked_base_texts = (0..modules.len())
+            .map(|i| render_linked(spec, &modules, i, 0))
+            .collect();
         let edit_target = pick_edit_target(&modules);
         Workload {
             spec,
             modules,
             base_texts,
+            linked_base_texts,
             edit_target,
         }
     }
@@ -136,12 +149,30 @@ impl Workload {
         }
     }
 
+    pub fn linked_variant(&self, idx: usize, n: u32) -> String {
+        render_linked(self.spec, &self.modules, idx, n)
+    }
+
     pub fn import_edges(&self) -> usize {
         self.modules.iter().map(|m| m.imports.len()).sum()
     }
 
     pub fn total_lines(&self) -> usize {
         self.base_texts.iter().map(|t| t.lines().count()).sum()
+    }
+
+    /// The synthetic entry imports every generated module so linked benchmarks cover the whole
+    /// generated workload, not an accidental entry-rooted subset of the random DAG.
+    pub fn entry_path(&self) -> &'static str {
+        ENTRY_FILE
+    }
+
+    pub fn linked_dir(&self) -> &'static str {
+        LINKED_DIR
+    }
+
+    pub fn entry_text(&self) -> String {
+        render_entry(self.spec, &self.modules)
     }
 
     /// Number of modules that import [`Workload::edit_target`], directly.
@@ -186,6 +217,18 @@ impl Workload {
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
             fs::write(&file, text).map_err(|e| format!("writing {}: {e}", file.display()))?;
         }
+        for (module, text) in self.modules.iter().zip(&self.linked_base_texts) {
+            let file = dir.join(self.linked_dir()).join(module.path());
+            let parent = file
+                .parent()
+                .ok_or_else(|| format!("{} has no parent", file.display()))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+            fs::write(&file, text).map_err(|e| format!("writing {}: {e}", file.display()))?;
+        }
+        let entry = dir.join(self.linked_dir()).join(self.entry_path());
+        fs::write(&entry, self.entry_text())
+            .map_err(|e| format!("writing {}: {e}", entry.display()))?;
         fs::write(&manifest, format!("{want}\n"))
             .map_err(|e| format!("writing {}: {e}", manifest.display()))?;
         Ok(true)
@@ -199,8 +242,15 @@ impl Workload {
             h.write(module.path().as_bytes());
             h.write(text.as_bytes());
         }
+        h.write(self.linked_dir().as_bytes());
+        for (module, text) in self.modules.iter().zip(&self.linked_base_texts) {
+            h.write(module.path().as_bytes());
+            h.write(text.as_bytes());
+        }
+        h.write(self.entry_path().as_bytes());
+        h.write(self.entry_text().as_bytes());
         format!(
-            "kiln-bench-workload-v1 {:016x} {}",
+            "kiln-bench-workload-v2 {:016x} {}",
             h.finish(),
             self.modules.len()
         )
@@ -284,7 +334,7 @@ fn pick_edit_target(modules: &[Module]) -> usize {
         .unwrap_or(0)
 }
 
-/// Render one module.
+/// Render one analysis workload module.
 ///
 /// `body` perturbs a numeric literal inside the exported function without touching any name or
 /// the line count; `extra` appends one additional exported binding. That split is what makes
@@ -308,7 +358,6 @@ fn render(spec: &WorkloadSpec, modules: &[Module], idx: usize, body: u32, extra:
         ));
     }
     s.push_str(&format!("\nconst SEED = {};\n\n", 17 + idx % 97));
-
     for h in 0..spec.helpers_per_module {
         s.push_str(&format!(
             "function {stem}_step{h}(x: number): number {{\n  \
@@ -344,6 +393,87 @@ fn render(spec: &WorkloadSpec, modules: &[Module], idx: usize, body: u32, extra:
             m.stem
         ));
     }
+    s
+}
+
+/// Render the scalar counterpart used by linked execution. Explicit extensions are intentional:
+/// the exact resolver does not perform Node-style extension guessing.
+fn render_linked(spec: &WorkloadSpec, modules: &[Module], idx: usize, body: u32) -> String {
+    let m = &modules[idx];
+    let mut s = String::with_capacity(1024);
+    s.push_str(&format!(
+        "// Generated linked fixture for the \"{}\" workload (seed {:#x}).\n",
+        spec.name, spec.seed
+    ));
+    for &dep in &m.imports {
+        let d = &modules[dep];
+        s.push_str(&format!(
+            "import {{ {} }} from \"../{}/{}.ts\";\n",
+            d.export_value(),
+            d.area,
+            d.stem
+        ));
+    }
+    for h in 0..spec.helpers_per_module {
+        s.push_str(&format!(
+            "const {stem}_step{h}: number = {value};\n",
+            stem = m.stem,
+            value = 3 + h,
+        ));
+    }
+    let dependency_sum = m
+        .imports
+        .iter()
+        .map(|&dep| modules[dep].export_value())
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let dependency_sum = if dependency_sum.is_empty() {
+        "0".to_owned()
+    } else {
+        dependency_sum
+    };
+    let helper_sum = (0..spec.helpers_per_module)
+        .map(|h| format!("{}_step{h}", m.stem))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let helper_sum = if helper_sum.is_empty() {
+        "0".to_owned()
+    } else {
+        helper_sum
+    };
+    s.push_str(&format!(
+        "export const {value}: number = ({seed} + {body} + {helper_sum} + {dependency_sum}) % 1009;\n",
+        value = m.export_value(),
+        seed = 17 + idx % 97,
+    ));
+    s
+}
+
+/// Render the synthetic root used by linked-module benchmarks. It imports every module directly,
+/// making the entry-rooted graph include every generated node even when the random DAG has
+/// multiple branches. All imported values participate in the calculation, while subtracting the
+/// total from itself keeps expected stdout stable across implementation edits.
+fn render_entry(spec: &WorkloadSpec, modules: &[Module]) -> String {
+    let mut s = String::with_capacity(modules.len() * 96);
+    s.push_str(&format!(
+        "// Generated by kiln-bench for the \"{}\" workload (seed {:#x}). Do not edit by hand.\n",
+        spec.name, spec.seed
+    ));
+    for module in modules {
+        s.push_str(&format!(
+            "import {{ {} }} from \"./{}\";\n",
+            module.export_value(),
+            module.path()
+        ));
+    }
+    let values = modules
+        .iter()
+        .map(Module::export_value)
+        .collect::<Vec<_>>()
+        .join(" + ");
+    s.push_str(&format!(
+        "\nconst linked_total = {values};\nconsole.log(\"linked\", linked_total - linked_total);\n"
+    ));
     s
 }
 
@@ -404,6 +534,12 @@ mod tests {
     }
 
     #[test]
+    fn analysis_workload_shape_stays_baseline_compatible() {
+        assert_eq!(Workload::generate(&SMALL).total_lines(), 262);
+        assert_eq!(Workload::generate(&MEDIUM).total_lines(), 16_600);
+    }
+
+    #[test]
     fn import_graph_is_acyclic_and_connected_downward() {
         for spec in ALL {
             let w = Workload::generate(spec);
@@ -439,6 +575,44 @@ mod tests {
     }
 
     #[test]
+    fn generated_runtime_imports_use_explicit_extensions() {
+        let w = Workload::generate(&SMALL);
+        for text in &w.linked_base_texts {
+            assert!(
+                !text.contains("function "),
+                "linked workload must stay within the scalar execution subset"
+            );
+            for line in text.lines().filter(|line| line.starts_with("import ")) {
+                assert!(
+                    line.contains(".ts\";"),
+                    "resolver requires explicit source extensions: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_entry_reaches_every_generated_module() {
+        let w = Workload::generate(&SMALL);
+        let entry = w.entry_text();
+        assert_eq!(
+            entry
+                .lines()
+                .filter(|line| line.starts_with("import "))
+                .count(),
+            w.modules.len()
+        );
+        for module in &w.modules {
+            assert!(
+                entry.contains(&format!("./{}", module.path())),
+                "entry is missing {}",
+                module.path()
+            );
+        }
+        assert!(entry.contains("linked_total - linked_total"));
+    }
+
+    #[test]
     fn implementation_variants_preserve_the_export_set() {
         let w = Workload::generate(&SMALL);
         let idx = w.edit_target;
@@ -447,6 +621,17 @@ mod tests {
         assert_ne!(a, b, "an implementation edit must change the text");
         assert_eq!(exports(&a), exports(&b), "it must not change the exports");
         assert_eq!(a.lines().count(), b.lines().count(), "nor the line count");
+    }
+
+    #[test]
+    fn linked_implementation_variants_preserve_the_export_set() {
+        let w = Workload::generate(&SMALL);
+        let idx = w.edit_target;
+        let a = w.linked_variant(idx, 1);
+        let b = w.linked_variant(idx, 2);
+        assert_ne!(a, b);
+        assert_eq!(exports(&a), exports(&b));
+        assert_eq!(a.lines().count(), b.lines().count());
     }
 
     #[test]
@@ -463,8 +648,16 @@ mod tests {
         assert_eq!(exports(&b).len(), base + 1);
     }
 
-    /// Approximates whatever the frontend will do, well enough to police the fixtures.
-    fn exports(text: &str) -> Vec<&str> {
-        text.lines().filter(|l| l.starts_with("export ")).collect()
+    /// Approximates exported declaration identities, ignoring initializer/body text.
+    fn exports(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|line| line.starts_with("export "))
+            .map(|line| {
+                line.split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
     }
 }

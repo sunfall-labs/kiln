@@ -102,7 +102,7 @@ fn run(args: &Args) -> Result<Outcome, String> {
         report.workloads.push(WorkloadInfo::of(w));
         report
             .measurements
-            .extend(scenarios::run_all(w, args.budget)?);
+            .extend(scenarios::run_all(w, args.budget, &args.examples_dir)?);
     }
     report
         .measurements
