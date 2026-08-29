@@ -681,7 +681,13 @@ fn stack_effect(
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
         | Instruction::LoadBuiltin(_)
-        | Instruction::New { .. } => Err(EmitError::Unsupported {
+        | Instruction::New { .. }
+        | Instruction::Dup2
+        | Instruction::NewArray { .. }
+        | Instruction::GetComputed
+        | Instruction::SetComputed
+        | Instruction::CallMethod { .. }
+        | Instruction::CallComputed { .. } => Err(EmitError::Unsupported {
             feature: "functions and objects in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
@@ -894,7 +900,13 @@ fn emit_instruction(
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
         | Instruction::LoadBuiltin(_)
-        | Instruction::New { .. } => {
+        | Instruction::New { .. }
+        | Instruction::Dup2
+        | Instruction::NewArray { .. }
+        | Instruction::GetComputed
+        | Instruction::SetComputed
+        | Instruction::CallMethod { .. }
+        | Instruction::CallComputed { .. } => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -999,6 +1011,8 @@ fn binary_code(operator: BinaryOp) -> u16 {
         BinaryOp::LessThanOrEqual => 10,
         BinaryOp::GreaterThan => 11,
         BinaryOp::GreaterThanOrEqual => 12,
+        // Stable codes: a new operator takes the next free value.
+        BinaryOp::In => 13,
     }
 }
 
@@ -1059,6 +1073,22 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // Tags are a persisted cache key: existing ones never change, new instructions
             // take the next free values. Reusing a tag would make two different programs hash
             // alike and serve one's object file for the other.
+            Instruction::CallMethod { name, argc } => {
+                byte(&mut hash, 31);
+                word(&mut hash, u64::from(*name));
+                word(&mut hash, u64::from(*argc));
+            }
+            Instruction::CallComputed { argc } => {
+                byte(&mut hash, 32);
+                word(&mut hash, u64::from(*argc));
+            }
+            Instruction::Dup2 => byte(&mut hash, 27),
+            Instruction::NewArray { count } => {
+                byte(&mut hash, 28);
+                word(&mut hash, u64::from(*count));
+            }
+            Instruction::GetComputed => byte(&mut hash, 29),
+            Instruction::SetComputed => byte(&mut hash, 30),
             Instruction::LoadBuiltin(builtin) => {
                 byte(&mut hash, 25);
                 word(&mut hash, *builtin as u64);

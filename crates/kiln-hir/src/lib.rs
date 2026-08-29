@@ -198,6 +198,23 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept
+    /// from `undefined` elements and are refused by the frontend rather than flattened here.
+    Array {
+        elements: Vec<Expression>,
+    },
+    /// `object[property]`, where the key is computed rather than written.
+    ComputedMember {
+        object: Box<Expression>,
+        property: Box<Expression>,
+    },
+    /// `object[property] = value`, including the compound forms.
+    ComputedAssignment {
+        operator: AssignmentOperator,
+        object: Box<Expression>,
+        property: Box<Expression>,
+        value: Box<Expression>,
+    },
     /// `new callee(...arguments)`.
     New {
         callee: Box<Expression>,
@@ -251,6 +268,8 @@ pub enum UnaryOperator {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
+    /// `key in object`. Presence, which a read-and-compare cannot express.
+    In,
     Add,
     Subtract,
     Multiply,
