@@ -443,13 +443,20 @@ impl QueryEngine for MemoEngine {
     }
 
     fn set_source(&mut self, file: FileId, text: String) {
+        // Writing byte-identical text is not an edit. Marking it as one was the deliberate
+        // choice here at first - "the input really was written" - but nothing observable
+        // distinguishes the two cases, and the cost was not hypothetical. A stateless client
+        // that re-ingests the whole project on every command made every command reparse every
+        // file; early cutoff contained the damage at the interface, so the rollup stayed
+        // correct and the waste sat one layer below anything that was asserting on it.
+        if self.file(file).source == text {
+            return;
+        }
         self.epoch = self.epoch.next();
         self.revision = Revision(self.revision.0 + 1);
         let epoch = self.epoch;
         let state = self.file_mut(file);
         state.source = text;
-        // Marked changed even if the text is identical: the input really was written, and the
-        // engine's job is to cut that off downstream rather than to pretend it did not happen.
         state.source_changed_at = epoch;
     }
 
@@ -676,7 +683,7 @@ mod tests {
     /// A write is a write even when the bytes are the same, so parse reruns - and then the
     /// equal-value check stops it there, one level earlier than a body edit does.
     #[test]
-    fn rewriting_identical_text_cuts_off_at_parse() {
+    fn rewriting_identical_text_is_not_an_edit() {
         let (mut db, files) = cold_project();
 
         db.set_source(files[0], A_V1.to_string());
@@ -685,13 +692,14 @@ mod tests {
         assert_eq!(
             db.stats(),
             Stats {
-                revision: 3,
-                parse_computed: 1,
+                revision: 2,
+                parse_computed: 0,
                 interface_computed: 0,
                 project_computed: 0,
-                validated: 4,
-                early_cutoff: 1,
-            }
+                validated: 1,
+                early_cutoff: 0,
+            },
+            "re-ingesting unchanged text must cost nothing, not one parse per file"
         );
     }
 

@@ -15,6 +15,21 @@ kiln-daemon = { path = "crates/kiln-daemon" }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
+# Declared centrally so no workstream has to edit this file. A crate opts in from its own
+# manifest with `{ workspace = true }`; a dependency listed here that nobody names costs
+# nothing but a lockfile entry.
+#
+# proptest is a dev-dependency wherever it is used: it never reaches a consumer's build graph,
+# which is why it does not conflict with the foundational-crate rule in docs/adr/0004.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+# Filesystem events. The debouncer is not optional: editors write-then-rename and emit several
+# events per save.
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-full = { version = "0.7", default-features = false }
+# FxHashMap. For process-local tables where SipHash's DoS resistance and cross-release
+# stability are both irrelevant. Never for a hash that is persisted or sent on the wire.
+rustc-hash = { version = "2.1", default-features = false, features = ["std"] }
+
 [profile.release]
 debug = 1
 

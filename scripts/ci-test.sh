@@ -19,9 +19,9 @@ cd "$(kiln_repo_root)"
 # reproducibility bug, and CI is the right place to notice it.
 if cargo nextest --version >/dev/null 2>&1; then
 	echo "test runner: cargo-nextest"
-	cargo nextest run --workspace --locked
-	cargo test --workspace --locked --doc
+	kiln_cargo nextest run --workspace --locked
+	kiln_cargo test --workspace --locked --doc
 else
 	echo "test runner: cargo test (cargo-nextest is not installed)"
-	cargo test --workspace --locked
+	kiln_cargo test --workspace --locked
 fi

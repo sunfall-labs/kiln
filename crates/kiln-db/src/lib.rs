@@ -70,8 +70,12 @@ pub trait QueryEngine {
     /// Intern a path, creating a [`FileId`] if new.
     fn intern(&mut self, path: &str) -> FileId;
 
-    /// Replace an input. Bumps the revision even if the text is unchanged; the engine is
-    /// expected to cut that off downstream rather than pretend the write did not happen.
+    /// Replace an input.
+    ///
+    /// Writing byte-identical text is not an edit: the revision does not move, nothing is
+    /// invalidated, and no dependent recomputes. A caller may therefore re-send state it is
+    /// not certain the engine already holds without paying for it, which is what makes a
+    /// stateless client safe to point at a warm daemon.
     fn set_source(&mut self, file: FileId, text: String);
 
     fn source(&self, file: FileId) -> Option<&str>;

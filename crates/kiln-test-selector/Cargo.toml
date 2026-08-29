@@ -1,0 +1,10 @@
+[package]
+name = "kiln-test-selector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Test selection is intentionally dependency-free. It is used by local tooling and should
+# remain cheap to build even when the compiler crates are being rebuilt.
+[dependencies]
