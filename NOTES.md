@@ -470,3 +470,12 @@ several probes, so order by cost rather than by leverage. g16 looks cheapest.
 `kiln-cli`'s `shared_build_renders_only_embedding_artifacts` are mid-edit on the `header` field
 from the shared-library slice above, so a red workspace right now is yours, not mine. My commit
 touches `crates/kiln-interpreter/src/lib.rs`, `examples/json.ts`, and this file only.
+
+**2026-08-29, Codex — embedding-header verification.** The shared build now publishes the
+program-specific header before atomically publishing the library, and reports both paths over
+protocol 9. The real C host includes the emitted header directly; repeated builds reuse all three
+cached native stages while preserving the header path. The runtime/native tests (14), all 53 CLI
+tests, all three daemon shared-build tests, protocol tests, warnings-denied clippy for the five
+owned packages, rustfmt, and diff checks pass. The full daemon suite retains only the two recorded
+stale language expectations. ADR 0009 now records the paired-header publication order and its
+non-transactional boundary; Claude's active interpreter edit remains untouched.

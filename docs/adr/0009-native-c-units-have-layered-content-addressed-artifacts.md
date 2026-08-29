@@ -62,12 +62,20 @@ locale-dependent semantics.
 
 Embedding uses the same module entry ABI without linking the command-line runtime or launcher.
 `kiln-native-runtime` publishes a deterministic, self-contained C header for the versioned value
-layout, status codes, and HostOps callback. A shared-library build compiles the application unit as
-position-independent code, links only that unit (plus required system libraries), and returns its
-stable module symbol for the embedder to declare and call. PIC objects and shared links have cache
-identities distinct from executable objects and links; an executable cache hit is never accepted as
-an embedding artifact. Shared-library linking is initially supported on macOS and Linux, where the
-toolchain flags and dynamic-loader behavior are exercised by real C-host integration tests.
+layout, status codes, and HostOps callback. For each scalar build it composes those declarations
+with the content-derived entry symbol under a module-specific include guard. The native coordinator
+publishes that program header at `output.with_extension("h")` before atomically publishing the
+shared library, then reports both paths over the versioned protocol. Library outputs ending in
+`.h` are rejected, and coordination layers reject a derived header that would overwrite the source.
+Each file publication is atomic, but the pair is not transactional; the library is the final ready
+signal until a future versioned package-directory design can swap a manifest for the pair.
+
+A shared-library build compiles the application unit as position-independent code and links only
+that unit (plus required system libraries). PIC objects and shared links have cache identities
+distinct from executable objects and links; an executable cache hit is never accepted as an
+embedding artifact. Shared-library linking is initially supported on macOS and Linux, where the
+toolchain flags, emitted header, and dynamic-loader behavior are exercised by real C-host
+integration tests.
 
 ## Consequences
 
@@ -81,6 +89,8 @@ toolchain flags and dynamic-loader behavior are exercised by real C-host integra
   correctness/performance evidence.
 - Native embedding keeps ownership and I/O policy in the host process: the library exports module
   computation, while every external effect still crosses the same numeric HostOps callback.
+- Embedders consume the header emitted by the same build as the library, so a content-derived
+  symbol change cannot silently leave a hand-written declaration stale.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
 - The initial scalar C backend still uses `%.17g` for number-to-string conversion and retains

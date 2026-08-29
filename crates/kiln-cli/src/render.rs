@@ -208,6 +208,7 @@ pub fn native_shared_build(source: &str, summary: &NativeSharedLibrarySummary) -
     let mut out = format!("native shared build {source}  {}ms\n", summary.total_millis);
     row(&mut out, "module", &summary.module_symbol);
     row(&mut out, "output", &summary.output_path);
+    row(&mut out, "header", &summary.header_path);
     row(&mut out, "compiler", &summary.compiler_identity);
     row(
         &mut out,
@@ -450,6 +451,7 @@ mod tests {
             &NativeSharedLibrarySummary {
                 module_symbol: "kiln_module_main".to_owned(),
                 output_path: ".kiln/lib/main.so".to_owned(),
+                header_path: ".kiln/lib/main.h".to_owned(),
                 compiler_identity: "cc".to_owned(),
                 generated_c_cache_hit: true,
                 object_cache_hit: false,
@@ -464,6 +466,7 @@ mod tests {
             },
         );
         assert!(out.contains("native shared build src/main.ts"), "{out}");
+        assert!(out.contains("header          .kiln/lib/main.h"), "{out}");
         assert!(out.contains("PIC object"), "{out}");
         assert!(out.contains("shared library"), "{out}");
         assert!(!out.contains("runtime object"), "{out}");
