@@ -848,15 +848,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let flat = self.stack.split_off(self.stack.len() - count * 2);
                     let mut object = ObjectData::default();
                     for pair in flat.chunks_exact(2) {
-                        // A duplicate key in a literal keeps the last value and the first
-                        // position, which is what `set` already does.
-                        let Value::String(key) = &pair[0] else {
-                            return Err(ExecutionError::InvalidPropertyKey {
-                                instruction: current,
-                                value: pair[0].type_name(),
-                            });
-                        };
-                        object.set(key, pair[1].clone());
+                        // Any value can be a computed key: it is converted the same way a
+                        // property read converts one, so `{ [Symbol.iterator]: f }` and
+                        // `o[Symbol.iterator]` name the same property. A duplicate key keeps
+                        // the last value and the first position, which is what `set` does.
+                        object.set(&pair[0].property_key(), pair[1].clone());
                     }
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(object))));

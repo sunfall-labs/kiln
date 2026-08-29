@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, ExportName, ExportOrigin, Expression, ExpressionKind,
-    Function, ImportName, Literal, LogicalOperator, Module, Span, Statement, StatementKind,
-    UnaryOperator, VariableKind,
+    Function, ImportName, Literal, LogicalOperator, Module, ObjectKey, Span, Statement,
+    StatementKind, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -769,6 +769,11 @@ impl Compiler {
             ExpressionKind::Call { callee, arguments } => {
                 self.call(callee, arguments, expression.span)
             }
+            ExpressionKind::Function(function) => {
+                if let Some(index) = self.compile_function(function, expression.span) {
+                    self.code.push(Instruction::MakeFunction(index));
+                }
+            }
             ExpressionKind::Array { elements } => {
                 if elements.len() > u32::MAX as usize {
                     self.error(Some(expression.span), "array literal has too many elements");
@@ -820,7 +825,14 @@ impl Compiler {
                     return;
                 }
                 for property in properties {
-                    self.push_constant(Constant::String(property.key.clone()));
+                    match &property.key {
+                        ObjectKey::Static(key) => {
+                            self.push_constant(Constant::String(key.clone()));
+                        }
+                        // Evaluated in source order, between the properties around it, because
+                        // a computed key is an arbitrary expression and may have side effects.
+                        ObjectKey::Computed(key) => self.expression(key),
+                    }
                     self.expression(&property.value);
                 }
                 self.code.push(Instruction::NewObject {
@@ -1423,13 +1435,24 @@ fn collect_nested_function_names(
     }
 }
 
+/// Walk an expression, recording identifiers when `collecting`.
+///
+/// It descends unconditionally and gates only the recording. That distinction matters: a function
+/// *expression* nested in a `return` is a nested function whose free names are captures, and an
+/// early return on `!collecting` would never reach it. That was a real bug -- `function f(n) {
+/// return (m) => n + m; }` compiled with `n` unboxed, so the arrow could not resolve it.
 fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, collecting: bool) {
-    if !collecting {
-        return;
-    }
     match &expression.kind {
+        // A nested function's body is always collected, whatever the enclosing flag says.
+        ExpressionKind::Function(function) => {
+            for statement in &function.body {
+                collect_nested_function_names(statement, names, true);
+            }
+        }
         ExpressionKind::Identifier(name) => {
-            names.insert(name.clone());
+            if collecting {
+                names.insert(name.clone());
+            }
         }
         ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => {}
         ExpressionKind::Unary { argument, .. } => collect_identifiers(argument, names, collecting),
@@ -1439,7 +1462,9 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(right, names, collecting);
         }
         ExpressionKind::Assignment { target, value, .. } => {
-            names.insert(target.clone());
+            if collecting {
+                names.insert(target.clone());
+            }
             collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Conditional {
@@ -1452,6 +1477,12 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(alternate, names, collecting);
         }
         ExpressionKind::Call { callee, arguments } => {
+            collect_identifiers(callee, names, collecting);
+            for argument in arguments {
+                collect_identifiers(argument, names, collecting);
+            }
+        }
+        ExpressionKind::New { callee, arguments } => {
             collect_identifiers(callee, names, collecting);
             for argument in arguments {
                 collect_identifiers(argument, names, collecting);
@@ -1476,18 +1507,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(property, names, collecting);
             collect_identifiers(value, names, collecting);
         }
-        ExpressionKind::New { callee, arguments } => {
-            collect_identifiers(callee, names, collecting);
-            for argument in arguments {
-                collect_identifiers(argument, names, collecting);
-            }
-        }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Object { properties } => {
             for property in properties {
+                if let ObjectKey::Computed(key) = &property.key {
+                    collect_identifiers(key, names, collecting);
+                }
                 collect_identifiers(&property.value, names, collecting);
             }
         }
@@ -1548,9 +1576,11 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
         }
-        ExpressionKind::Object { properties } => properties
-            .iter()
-            .any(|property| expression_references(&property.value, name)),
+        ExpressionKind::Function(_) => false,
+        ExpressionKind::Object { properties } => properties.iter().any(|property| {
+            expression_references(&property.value, name)
+                || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
+        }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => false,
     }
@@ -1598,6 +1628,7 @@ mod tests {
     fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
         statement(StatementKind::Function(Box::new(kiln_hir::Function {
             name: Some(name.to_owned()),
+            arrow: false,
             parameters: parameters
                 .iter()
                 .map(|name| kiln_hir::Parameter {
@@ -1622,6 +1653,108 @@ mod tests {
     /// cell, or the second one reads a stale copy.
     /// A compound member assignment must evaluate its receiver once. Compiling the object
     /// expression twice would be the easy mistake and would double any side effect in it.
+    fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
+        Expression {
+            kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
+                name: None,
+                arrow: true,
+                parameters: parameters
+                    .iter()
+                    .map(|name| kiln_hir::Parameter {
+                        name: (*name).to_owned(),
+                        span: Span::default(),
+                    })
+                    .collect(),
+                body,
+                span: Span::default(),
+            })),
+            span: Span::default(),
+        }
+    }
+
+    /// The capture analysis has to descend into a function *expression* nested in a `return`.
+    /// It did not at first -- it stopped as soon as it was not already collecting -- so
+    /// `function f(n) { return (m) => n + m; }` compiled with `n` unboxed and the arrow could
+    /// not resolve it. This is that program.
+    #[test]
+    fn an_arrow_returned_from_a_function_captures_its_parameter() {
+        let program = compile(&module(vec![function(
+            "make_adder",
+            &["n"],
+            vec![statement(StatementKind::Return(Some(arrow(
+                &["m"],
+                vec![statement(StatementKind::Return(Some(Expression {
+                    kind: ExpressionKind::Binary {
+                        operator: kiln_hir::BinaryOperator::Add,
+                        left: Box::new(identifier("n")),
+                        right: Box::new(identifier("m")),
+                    },
+                    span: Span::default(),
+                })))],
+            ))))],
+        )]))
+        .expect("compiles");
+
+        let outer = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("make_adder"))
+            .expect("outer proto");
+        assert!(
+            outer
+                .code
+                .iter()
+                .any(|i| matches!(i, Instruction::NewCell(_))),
+            "the captured parameter must be boxed"
+        );
+        let inner = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.is_none())
+            .expect("the arrow has no name");
+        assert!(inner.code.contains(&Instruction::LoadUpvalue(0)));
+    }
+
+    /// A computed key is an arbitrary expression evaluated in source order, so it must be
+    /// compiled rather than folded into a constant.
+    #[test]
+    fn a_computed_object_key_is_evaluated_not_interned() {
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Object {
+                    properties: vec![
+                        kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Static("fixed".into()),
+                            value: number(1.0),
+                            span: Span::default(),
+                        },
+                        kiln_hir::ObjectProperty {
+                            key: kiln_hir::ObjectKey::Computed(Expression {
+                                kind: ExpressionKind::Binary {
+                                    operator: kiln_hir::BinaryOperator::Add,
+                                    left: Box::new(number(1.0)),
+                                    right: Box::new(number(2.0)),
+                                },
+                                span: Span::default(),
+                            }),
+                            value: number(3.0),
+                            span: Span::default(),
+                        },
+                    ],
+                },
+                span: Span::default(),
+            },
+        ))]))
+        .expect("compiles");
+        assert!(
+            program
+                .code
+                .iter()
+                .any(|i| matches!(i, Instruction::Binary(_))),
+            "the computed key is evaluated, not folded to a constant"
+        );
+    }
+
     #[test]
     fn a_compound_member_assignment_evaluates_its_receiver_once() {
         let program = compile(&module(vec![
