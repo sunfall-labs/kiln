@@ -42,6 +42,25 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             Next::Continue,
         ),
 
+        Request::Sync { files } => {
+            // The daemon holds the authoritative copy, so it decides what it is missing rather
+            // than the client guessing. Hashing what we hold on demand costs microseconds and
+            // avoids a second cache that could disagree with the engine.
+            //
+            // Note what this does NOT do: a file the daemon holds and the client omits is left
+            // alone. Dropping it would need a removal on QueryEngine, which does not exist yet;
+            // the pre-existing behaviour was the same, so nothing regresses here.
+            let mut needed = Vec::new();
+            for file in files {
+                let id = engine.intern(&file.path);
+                let held = engine.source(id).map(kiln_db::content_hash);
+                if held != Some(file.hash) {
+                    needed.push(file.path);
+                }
+            }
+            (Response::Needed { paths: needed }, Next::Continue)
+        }
+
         Request::SetSource { path, text } => {
             let file = engine.intern(&path);
             engine.set_source(file, text);
