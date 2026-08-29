@@ -112,6 +112,30 @@ pub enum ObjectKey {
     Computed(Expression),
 }
 
+/// A class: a constructor function plus methods installed on its prototype.
+///
+/// Kept as its own node rather than desugared in the frontend. The desugaring is real -- a class
+/// *is* a constructor and a prototype -- but doing it here would lose which methods were static,
+/// which were accessors, and where `super` appeared, all of which later passes need and none of
+/// which survives a lowering to plain assignments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Class {
+    pub name: Option<String>,
+    pub superclass: Option<Expression>,
+    /// `None` when the class declares no constructor; one is synthesized.
+    pub constructor: Option<Function>,
+    pub methods: Vec<ClassMethod>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMethod {
+    pub key: ObjectKey,
+    pub function: Function,
+    /// Static methods go on the constructor; instance methods go on its prototype.
+    pub is_static: bool,
+}
+
 /// An owned executable statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
@@ -144,6 +168,8 @@ pub enum StatementKind {
     /// only inside it. Flattening it here keeps later passes from unwrapping a block that never
     /// had block semantics.
     Function(Box<Function>),
+    /// A class declaration.
+    Class(Box<Class>),
     /// `return`, where no expression means `return undefined`.
     ///
     /// Kept as an `Option` so a frontend never has to synthesize a source-less expression to
@@ -212,6 +238,9 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
+    /// as a name would let a binding called `this` capture it.
+    This,
     /// A function expression or arrow function used as a value.
     Function(Box<Function>),
     /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept

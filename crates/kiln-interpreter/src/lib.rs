@@ -93,14 +93,41 @@ impl PartialEq for ObjectData {
 #[derive(Debug, Default)]
 pub struct ObjectData {
     properties: Vec<(String, Value)>,
+    /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
+    /// that exists only on the prototype creates an own property rather than mutating the shared
+    /// one, which is what keeps two instances of a class independent.
+    prototype: Option<Value>,
 }
 
 impl ObjectData {
-    pub fn get(&self, key: &str) -> Option<&Value> {
+    /// An own property, ignoring the prototype chain.
+    pub fn get_own(&self, key: &str) -> Option<&Value> {
         self.properties
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
+    }
+
+    /// A property, following the prototype chain.
+    ///
+    /// Returns an owned value rather than a reference because the answer may live in another
+    /// object behind an `Rc<RefCell<_>>`, whose borrow cannot outlive this call.
+    pub fn get(&self, key: &str) -> Option<Value> {
+        if let Some(own) = self.get_own(key) {
+            return Some(own.clone());
+        }
+        match &self.prototype {
+            Some(Value::Object(parent)) => parent.borrow().get(key),
+            _ => None,
+        }
+    }
+
+    pub fn prototype(&self) -> Option<&Value> {
+        self.prototype.as_ref()
+    }
+
+    pub fn set_prototype(&mut self, prototype: Value) {
+        self.prototype = Some(prototype);
     }
 
     /// Insert or overwrite, preserving the position of an existing key.
@@ -124,6 +151,21 @@ pub struct Closure {
     pub function: u32,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
+    /// `this` captured where the closure was written, for an arrow function.
+    ///
+    /// An arrow has no `this` of its own: it uses the one from its defining scope, permanently.
+    /// Capturing it here rather than at the call is the whole difference between an arrow and an
+    /// ordinary function, and it is why `arrow` has to survive lowering.
+    pub captured_this: Option<Value>,
+    /// The object `new` gives instances of this function as their prototype.
+    ///
+    /// Lazily installed: an ordinary function never used as a constructor never allocates one.
+    pub prototype: RefCell<Option<Value>>,
+    /// Own properties of the function itself, which is where static methods live.
+    ///
+    /// A function is an object in JavaScript, and a class's statics are properties of the
+    /// constructor. Without this, `class C { static f() {} }` would have nowhere to put `f`.
+    pub properties: RefCell<ObjectData>,
 }
 
 /// A shared, mutable binding.
@@ -551,6 +593,7 @@ pub fn execute<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals: vec![Value::Undefined; program.local_count as usize],
         function: None,
+        this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
         steps: 0,
@@ -592,6 +635,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         stack: Vec::new(),
         locals,
         function: None,
+        this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
         steps: 0,
@@ -620,6 +664,12 @@ pub fn execute_module<H: HostOps + ?Sized>(
 struct Frame {
     /// The closure that was running, or `None` for the module body.
     function: Option<Rc<Closure>>,
+    this_value: Value,
+    /// The instance being built, when this frame is a `new` call.
+    ///
+    /// Held here rather than in a parallel stack so that `Return` can decide locally: a
+    /// constructor yields its instance unless the body returned an object, which wins.
+    constructing: Option<Value>,
     locals: Vec<Value>,
     /// Where to resume in the caller.
     instruction: usize,
@@ -635,6 +685,9 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     function: Option<Rc<Closure>>,
+    /// `this` in the running frame. At module scope it is `undefined`, because a module body is
+    /// always strict and strict code does not get the global object.
+    this_value: Value,
     frames: Vec<Frame>,
     instruction: usize,
     steps: u64,
@@ -810,6 +863,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.set_computed(&target, &key, value.clone(), current)?;
                     self.stack.push(value);
                 }
+                Instruction::LoadThis => {
+                    let this_value = self.this_value.clone();
+                    self.stack.push(this_value);
+                }
                 Instruction::LoadBuiltin(builtin) => {
                     self.stack.push(Value::Native(match builtin {
                         kiln_ir::Builtin::Error => Native::Error,
@@ -828,15 +885,35 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                     let arguments = self.stack.split_off(self.stack.len() - argc);
                     let callee = self.pop(current)?;
-                    let Value::Native(Native::Error) = callee else {
-                        // Only built-in constructors exist so far. A user-defined one needs a
-                        // prototype and a `this` binding, which is the class slice.
-                        return Err(ExecutionError::NotConstructable {
-                            instruction: current,
-                            value: callee.type_name(),
-                        });
-                    };
-                    self.stack.push(construct_error(&arguments));
+                    match callee {
+                        Value::Native(Native::Error) => {
+                            self.stack.push(construct_error(&arguments));
+                        }
+                        Value::Function(closure) => {
+                            // `new` creates the instance, runs the body with it as `this`, and
+                            // yields the instance -- unless the body returned an object, which
+                            // wins. That override is what makes factory constructors work.
+                            let instance = self.instantiate(&closure);
+                            self.stack.push(Value::Undefined);
+                            let argc = arguments.len();
+                            for argument in arguments {
+                                self.stack.push(argument);
+                            }
+                            self.call_with_this(
+                                Rc::clone(&closure),
+                                argc as u16,
+                                current,
+                                instance.clone(),
+                                Some(instance),
+                            )?;
+                        }
+                        other => {
+                            return Err(ExecutionError::NotConstructable {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
                 }
                 Instruction::NewObject { count } => {
                     let count = *count as usize;
@@ -866,16 +943,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let Value::Object(object) = &target else {
-                        // Assigning a property of a primitive is silently discarded in sloppy
-                        // mode and a TypeError in strict mode. Modules are always strict, and
-                        // there is nowhere to throw yet, so it is an execution error.
-                        return Err(ExecutionError::NotAnObject {
-                            instruction: current,
-                            value: target.type_name(),
-                        });
-                    };
-                    object.borrow_mut().set(&name, value.clone());
+                    // Assigning a property of a primitive is silently discarded in sloppy mode
+                    // and a TypeError in strict mode. Modules are always strict, and there is
+                    // nowhere to throw yet, so it is an execution error.
+                    self.set_computed(&target, &Value::String(name), value.clone(), current)?;
                     self.stack.push(value);
                 }
                 Instruction::NewCell(slot) => {
@@ -944,7 +1015,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.set_global(*slot as usize, value)?;
                 }
                 Instruction::Return => {
-                    let value = self.stack.pop().unwrap_or(Value::Undefined);
+                    let mut value = self.stack.pop().unwrap_or(Value::Undefined);
                     let Some(frame) = self.frames.pop() else {
                         return Ok(ExecutionResult {
                             value,
@@ -956,7 +1027,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.stack.truncate(frame.stack_base);
                     self.locals = frame.locals;
                     self.function = frame.function;
+                    self.this_value = frame.this_value;
                     self.instruction = frame.instruction;
+                    if let Some(instance) = frame.constructing
+                        && !matches!(value, Value::Object(_) | Value::Array(_))
+                    {
+                        // A constructor yields its instance unless the body returned an object,
+                        // which wins. That override is what makes a factory constructor work,
+                        // and it is why an accidental `return 1` is harmless rather than
+                        // producing a number where an instance was expected.
+                        value = instance;
+                    }
                     self.stack.push(value);
                 }
             }
@@ -1003,6 +1084,23 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
     }
 
+    /// The object a `new` call starts from: an empty object whose prototype is the function's.
+    ///
+    /// The prototype object is created on first use rather than with every closure, so an
+    /// ordinary function never used as a constructor never allocates one.
+    fn instantiate(&mut self, closure: &Rc<Closure>) -> Value {
+        let prototype = closure
+            .prototype
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Value::Object(Rc::new(RefCell::new(ObjectData::default()))));
+        *closure.prototype.borrow_mut() = Some(prototype.clone());
+
+        let mut instance = ObjectData::default();
+        instance.set_prototype(prototype);
+        Value::Object(Rc::new(RefCell::new(instance)))
+    }
+
     /// Build a closure, resolving each upvalue descriptor against the frame creating it.
     fn make_closure(&mut self, function: u32) -> Result<Rc<Closure>, ExecutionError> {
         let Some(proto) = self.program.functions.get(function as usize) else {
@@ -1027,7 +1125,19 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             };
             upvalues.push(cell);
         }
-        Ok(Rc::new(Closure { function, upvalues }))
+        Ok(Rc::new(Closure {
+            function,
+            upvalues,
+            // An arrow takes `this` from where it is written; an ordinary function takes it from
+            // how it is called, so it captures nothing here.
+            captured_this: if proto.arrow {
+                Some(self.this_value.clone())
+            } else {
+                None
+            },
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        }))
     }
 
     /// A property read. Missing properties are `undefined`, which is not an error in JavaScript.
@@ -1038,12 +1148,23 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// value rather than a plausible one.
     fn property(&self, target: &Value, name: &str) -> Value {
         match target {
-            Value::Object(object) => object
+            Value::Object(object) => object.borrow().get(name).unwrap_or(Value::Undefined),
+            Value::Native(native) => native.property(name).unwrap_or(Value::Undefined),
+            // `f.prototype` is the object `new f()` gives instances. Reading it creates it, so
+            // that `f.prototype.m = ...` before any `new` reaches the same object the instances
+            // will see.
+            Value::Function(closure) if name != "prototype" => closure
+                .properties
                 .borrow()
                 .get(name)
-                .cloned()
                 .unwrap_or(Value::Undefined),
-            Value::Native(native) => native.property(name).unwrap_or(Value::Undefined),
+            Value::Function(closure) if name == "prototype" => {
+                let mut slot = closure.prototype.borrow_mut();
+                slot.get_or_insert_with(|| {
+                    Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+                })
+                .clone()
+            }
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
@@ -1081,14 +1202,14 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         match method {
             Value::Native(native) => Ok(Some(call_native(native, &receiver, &arguments))),
             Value::Function(closure) => {
-                // A compiled method ignores the receiver until `this` exists; pushing the
-                // arguments back is how the shared call path receives them.
-                self.stack.push(Value::Function(Rc::clone(&closure)));
+                // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
+                // the shared call path receives them; it pops the placeholder as the callee.
+                self.stack.push(Value::Undefined);
                 let argc = arguments.len();
                 for argument in arguments {
                     self.stack.push(argument);
                 }
-                self.call(closure, argc as u16, instruction)?;
+                self.call_with_this(closure, argc as u16, instruction, receiver, None)?;
                 Ok(None)
             }
             other => Err(ExecutionError::NotCallable {
@@ -1157,6 +1278,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 object.borrow_mut().set(&key.property_key(), value);
                 Ok(())
             }
+            Value::Function(closure) => {
+                closure
+                    .properties
+                    .borrow_mut()
+                    .set(&key.property_key(), value);
+                Ok(())
+            }
             other => Err(ExecutionError::NotAnObject {
                 instruction,
                 value: other.type_name(),
@@ -1207,6 +1335,18 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         argc: u16,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        self.call_with_this(closure, argc, instruction, Value::Undefined, None)
+    }
+
+    /// Enter a closure with an explicit receiver.
+    fn call_with_this(
+        &mut self,
+        closure: Rc<Closure>,
+        argc: u16,
+        instruction: usize,
+        this_value: Value,
+        constructing: Option<Value>,
+    ) -> Result<(), ExecutionError> {
         let function = closure.function;
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
@@ -1232,8 +1372,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             locals[slot] = argument;
         }
 
+        // An arrow ignores the receiver entirely and uses what it captured.
+        let entering = match &closure.captured_this {
+            Some(captured) => captured.clone(),
+            None => this_value,
+        };
         self.frames.push(Frame {
             function: self.function.take(),
+            this_value: std::mem::replace(&mut self.this_value, entering),
+            constructing,
             locals: std::mem::replace(&mut self.locals, locals),
             instruction: self.instruction,
             stack_base: self.stack.len(),
@@ -1556,6 +1703,7 @@ mod tests {
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
                 name: Some("second".to_owned()),
+                arrow: false,
                 parameter_count: 2,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
@@ -1673,7 +1821,7 @@ mod tests {
         let Value::Object(data) = &with_cause else {
             panic!("construct_error returns an object");
         };
-        assert_eq!(data.borrow().get("cause"), Some(&Value::Undefined));
+        assert_eq!(data.borrow().get("cause"), Some(Value::Undefined));
 
         let without = construct_error(&[Value::String("m".to_owned())]);
         let Value::Object(data) = &without else {
@@ -1693,7 +1841,7 @@ mod tests {
         let Value::Object(data) = &outer else {
             panic!("construct_error returns an object");
         };
-        let cause = data.borrow().get("cause").cloned().expect("cause present");
+        let cause = data.borrow().get("cause").expect("cause present");
         assert!(strict_equal(&cause, &inner), "cause is the same object");
     }
 
@@ -1706,11 +1854,11 @@ mod tests {
             };
             assert_eq!(
                 data.borrow().get("stack"),
-                Some(&Value::String("Error".to_owned()))
+                Some(Value::String("Error".to_owned()))
             );
             assert_eq!(
                 data.borrow().get("message"),
-                Some(&Value::String(String::new()))
+                Some(Value::String(String::new()))
             );
         }
     }
@@ -1749,6 +1897,45 @@ mod tests {
         ));
     }
 
+    /// A write must create an own property rather than mutating the shared prototype, or two
+    /// instances of one class would not be independent.
+    #[test]
+    fn a_write_does_not_reach_through_the_prototype() {
+        let shared = Rc::new(RefCell::new(ObjectData::default()));
+        shared.borrow_mut().set("value", Value::Number(1.0));
+
+        let mut instance = ObjectData::default();
+        instance.set_prototype(Value::Object(Rc::clone(&shared)));
+        assert_eq!(instance.get("value"), Some(Value::Number(1.0)), "inherited");
+
+        instance.set("value", Value::Number(2.0));
+        assert_eq!(instance.get("value"), Some(Value::Number(2.0)), "own wins");
+        assert_eq!(
+            shared.borrow().get_own("value"),
+            Some(&Value::Number(1.0)),
+            "the prototype is untouched"
+        );
+    }
+
+    /// Reads follow the chain to any depth; `get_own` never does. The two are separate because
+    /// `in` and property assignment need opposite answers.
+    #[test]
+    fn reads_follow_the_prototype_chain_and_own_reads_do_not() {
+        let grandparent = Rc::new(RefCell::new(ObjectData::default()));
+        grandparent.borrow_mut().set("deep", Value::Number(3.0));
+
+        let mut parent_data = ObjectData::default();
+        parent_data.set_prototype(Value::Object(grandparent));
+        let parent = Rc::new(RefCell::new(parent_data));
+
+        let mut child = ObjectData::default();
+        child.set_prototype(Value::Object(parent));
+
+        assert_eq!(child.get("deep"), Some(Value::Number(3.0)));
+        assert_eq!(child.get_own("deep"), None);
+        assert_eq!(child.get("absent"), None);
+    }
+
     #[test]
     fn reassigning_a_property_keeps_its_position() {
         let mut data = ObjectData::default();
@@ -1756,7 +1943,7 @@ mod tests {
         data.set("second", Value::Number(2.0));
         data.set("first", Value::Number(99.0));
         assert_eq!(data.keys().collect::<Vec<_>>(), ["first", "second"]);
-        assert_eq!(data.get("first"), Some(&Value::Number(99.0)));
+        assert_eq!(data.get("first"), Some(Value::Number(99.0)));
     }
 
     /// `===` on objects asks whether two references name the same object. Structural equality
@@ -1825,6 +2012,7 @@ mod tests {
             functions: vec![
                 kiln_ir::FunctionProto {
                     name: Some("outer".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -1838,6 +2026,7 @@ mod tests {
                 },
                 kiln_ir::FunctionProto {
                     name: Some("inner".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -1873,6 +2062,7 @@ mod tests {
             functions: vec![
                 kiln_ir::FunctionProto {
                     name: Some("outer".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -1886,6 +2076,7 @@ mod tests {
                 },
                 kiln_ir::FunctionProto {
                     name: Some("read".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
@@ -1905,6 +2096,7 @@ mod tests {
             local_count: 1,
             functions: vec![kiln_ir::FunctionProto {
                 name: None,
+                arrow: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![Instruction::Return],
@@ -1993,6 +2185,7 @@ mod tests {
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
                 name: Some("forever".to_owned()),
+                arrow: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![
@@ -2033,6 +2226,7 @@ mod tests {
             functions: vec![
                 kiln_ir::FunctionProto {
                     name: Some("write".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -2045,6 +2239,7 @@ mod tests {
                 },
                 kiln_ir::FunctionProto {
                     name: Some("read".to_owned()),
+                    arrow: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],
