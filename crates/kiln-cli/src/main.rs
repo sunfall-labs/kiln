@@ -146,6 +146,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             changed,
             parse_only,
+            output,
         } => {
             let mut backend = open(one_shot, &socket)?;
             report(commands::test(
@@ -154,6 +155,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &root,
                 changed,
                 parse_only,
+                output.as_deref(),
             )?)
         }
         Command::Project => {
@@ -251,6 +253,7 @@ mod tests {
             "--one-shot",
             "--socket",
             "--interval",
+            "--out",
             "--help",
             "--version",
             "exit status",

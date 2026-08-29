@@ -15,14 +15,9 @@ name: Conformance
 #              baseline, and fail if a test that used to pass no longer does. The blocking half.
 #
 # `conformance/status.sh --gate` is deliberately not what the gate job runs, although it exists
-# and stays red for exactly as long as nothing in the corpus can run. Two reasons. Its red is the
-# same red on every run until an interpreter lands, and a check that is red unconditionally is
-# one people learn to scroll past - which would cost more than it buys on the day it means
-# something. And the fact it would be shouting is already recorded, in
-# conformance/results/baseline.json, where a reviewer meets it as a diff rather than as an
-# annotation. The gate job reports that state as "skipped" - never as "passed" - and starts
-# blocking the moment a runner exists. Run `--gate` locally, or on a branch that is trying to
-# make the corpus run, where its red is news.
+# and reports the corpus inventory as a human-readable diagnostic. The gate job compares the
+# runner's per-test document against the committed baseline; `--gate` remains useful locally when
+# developing the corpus because it also fails while tests remain unrun or failing.
 
 on:
   push:
@@ -57,10 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Installs the toolchain named by rust-toolchain.toml. The corpus runner will be a cargo
-      # binary when it exists; until then this job resolves that there is no runner and finishes
-      # without compiling anything, which is a minute of runner time in exchange for the step not
-      # having to appear on the day the runner lands.
+      # Installs the toolchain named by rust-toolchain.toml. conformance/run.sh invokes the public
+      # kiln CLI through cargo, with --locked so CI and local runs use the same dependency graph.
       - run: rustup toolchain install --no-self-update
       # Third-party, but it prunes stale artifacts out of the cached target directory, which a
       # hand-rolled actions/cache does not - without that the cache grows without bound and
@@ -70,9 +63,9 @@ jobs:
           key: conformance
       - run: bash scripts/ci-conformance.sh
       # Uploaded even when the comparison failed: a run that just tripped the gate is exactly the
-      # one whose per-test detail is worth reading. `ignore` rather than `warn` because there is
-      # legitimately no document while there is no runner, and a warning annotation on every run
-      # is how a warning stops being read.
+      # one whose per-test detail is worth reading. `ignore` rather than `warn` because a runner
+      # that fails before writing a document is diagnosed by the gate itself, and a warning
+      # annotation on every run is how a warning stops being read.
       - if: always()
         uses: actions/upload-artifact@v4
         with:

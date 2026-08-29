@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use kiln_conformance::{CaseResult, ConformanceTest, Outcome, ReasonReport, RunMode};
+use kiln_conformance::{CaseResult, ConformanceTest, Outcome, Provenance, ReasonReport, RunMode};
 use kiln_proto::{
     Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestReasonSummary, TestSummary,
 };
@@ -53,7 +53,13 @@ pub fn run(
         };
         for variant in test.run(run_mode) {
             let variant_name = variant.variant.name();
-            let id = format!("{}#{variant_name}", selected.id);
+            let id = match test.provenance() {
+                // A manifest expectation records one observed invocation, so its stable manifest
+                // ID already names the complete case. Realm suffixes distinguish only the
+                // multiple executions required by Test262 frontmatter.
+                Provenance::Manifest => selected.id.to_string(),
+                Provenance::Frontmatter => format!("{}#{variant_name}", selected.id),
+            };
             let outcome = wire_outcome(variant.result.outcome);
             count(&mut summary, outcome);
             summary.cases.push(TestCaseSummary {
@@ -421,6 +427,13 @@ mod tests {
                 case.id
             );
         }
+        assert!(
+            summary
+                .cases
+                .iter()
+                .all(|case| case.id == case.path && !case.id.contains('#')),
+            "manifest IDs already describe their single observed invocation"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{NativeProfile, SourceHash, TestMode, TestOutcome, TestSummary};
+use serde_json::json;
 
 /// What a command produced: `text` is the answer, `notes` are diagnostics for stderr.
 #[derive(Debug)]
@@ -307,9 +308,29 @@ pub fn test(
     project_root: &Path,
     changed: bool,
     parse_only: bool,
+    output: Option<&Path>,
 ) -> Result<Output> {
     let corpus = canonical_path(corpus)?;
     let state_path = project_root.join(".kiln/test-failures.json");
+    let results_path = output.map(|output| {
+        if output.is_absolute() {
+            output.to_path_buf()
+        } else {
+            project_root.join(output)
+        }
+    });
+    if results_path.as_ref().is_some_and(|results| {
+        results == &state_path
+            || std::fs::canonicalize(results)
+                .ok()
+                .zip(std::fs::canonicalize(&state_path).ok())
+                .is_some_and(|(results, state)| results == state)
+    }) {
+        return Err(Error::BadInput(format!(
+            "conformance results would overwrite failure state {}",
+            state_path.display()
+        )));
+    }
     let previous = read_failures(&state_path)?;
     let changed_paths = changed
         .then(|| git_changed_paths(project_root))
@@ -327,6 +348,9 @@ pub fn test(
     )?;
     let failures = updated_failures(previous, &summary);
     write_failures(&state_path, &failures)?;
+    if let Some(output) = results_path {
+        write_conformance_results(&output, &summary)?;
+    }
 
     Ok(Output {
         text: render_test(&corpus, &summary),
@@ -404,6 +428,77 @@ fn outcome_name(outcome: TestOutcome) -> &'static str {
     }
 }
 
+fn outcome_tag(outcome: TestOutcome) -> &'static str {
+    match outcome {
+        TestOutcome::Pass => "pass",
+        TestOutcome::Fail => "fail",
+        TestOutcome::Unsupported => "unsupported",
+        TestOutcome::Skipped => "skipped",
+    }
+}
+
+/// Write the schema-1 document consumed by `scripts/ci-conformance.sh`.
+///
+/// The report is assembled from the cases rather than the summary counters so its totals always
+/// agree with the detail that the gate reads. Sorting the stable ids makes repeated runs produce
+/// the same document even if discovery order changes.
+fn write_conformance_results(path: &Path, summary: &TestSummary) -> Result<()> {
+    let mut cases = summary
+        .cases
+        .iter()
+        .map(|case| (case.id.clone(), outcome_tag(case.outcome)))
+        .collect::<Vec<_>>();
+    cases.sort_by(|left, right| left.0.cmp(&right.0));
+    if cases.is_empty() {
+        return Err(Error::BadInput(
+            "cannot write conformance results for a run that selected no cases".to_owned(),
+        ));
+    }
+    if let Some(duplicate) = cases
+        .windows(2)
+        .find(|pair| pair[0].0 == pair[1].0)
+        .map(|pair| pair[0].0.as_str())
+    {
+        return Err(Error::Protocol(format!(
+            "cannot write conformance results: duplicate test id {duplicate}"
+        )));
+    }
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut unsupported = 0usize;
+    let mut skipped = 0usize;
+    let tests = cases
+        .iter()
+        .map(|(id, outcome)| {
+            match *outcome {
+                "pass" => passed += 1,
+                "fail" => failed += 1,
+                "unsupported" => unsupported += 1,
+                "skipped" => skipped += 1,
+                _ => unreachable!("outcome_tag only returns known outcomes"),
+            }
+            json!({"id": id, "outcome": outcome})
+        })
+        .collect::<Vec<_>>();
+    let document = json!({
+        "schema": 1,
+        "runner": format!("kiln-cli {}", env!("CARGO_PKG_VERSION")),
+        "totals": {
+            "total": tests.len(),
+            "passed": passed,
+            "failed": failed,
+            "unsupported": unsupported,
+            "skipped": skipped,
+            "not_yet_runnable": 0,
+        },
+        "tests": tests,
+    });
+    let text = serde_json::to_string_pretty(&document)
+        .map_err(|error| Error::Protocol(format!("cannot encode conformance results: {error}")))?;
+    write_json_atomically(path, &text, "conformance results")
+}
+
 fn read_failures(path: &Path) -> Result<BTreeSet<String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -420,17 +515,22 @@ fn read_failures(path: &Path) -> Result<BTreeSet<String>> {
 }
 
 fn write_failures(path: &Path, failures: &BTreeSet<String>) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::BadInput(format!("{} has no parent directory", path.display())))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| Error::io(format!("cannot create {}", parent.display()), error))?;
     let text = serde_json::to_string_pretty(&failures.iter().collect::<Vec<_>>())
         .map_err(|error| Error::Protocol(format!("cannot encode failure state: {error}")))?;
+    write_json_atomically(path, &text, "failure state")
+}
+
+fn write_json_atomically(path: &Path, text: &str, label: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| Error::io(format!("cannot create {}", parent.display()), error))?;
     let temporary = temporary_state_path(path);
     std::fs::write(&temporary, format!("{text}\n")).map_err(|error| {
         Error::io(
-            format!("cannot write temporary state {}", temporary.display()),
+            format!("cannot write temporary {label} {}", temporary.display()),
             error,
         )
     })?;
@@ -579,6 +679,7 @@ mod tests {
         seen: Vec<Request>,
         stats: Stats,
         diagnostics: Vec<Diagnostic>,
+        test_summary: TestSummary,
         /// Added to the counters after each `Check`, standing in for engine work.
         per_check: Stats,
     }
@@ -589,6 +690,7 @@ mod tests {
                 seen: Vec::new(),
                 stats: Stats::default(),
                 diagnostics: Vec::new(),
+                test_summary: TestSummary::default(),
                 per_check: Stats {
                     parse_computed: 1,
                     interface_computed: 1,
@@ -722,7 +824,7 @@ mod tests {
                         total_millis: 3,
                     },
                 }),
-                Request::Test { .. } => Response::Tested(TestSummary::default()),
+                Request::Test { .. } => Response::Tested(self.test_summary.clone()),
                 Request::Project => Response::Project(ProjectSummary {
                     modules: 2,
                     exports: 3,
@@ -873,6 +975,189 @@ mod tests {
                     || path.ends_with(".kiln/lib/main.dll"))
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn conformance_results_are_sorted_and_totals_match_cases() {
+        let path = std::env::temp_dir().join(format!(
+            "kiln-cli-conformance-results-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let summary = TestSummary {
+            // Deliberately do not use these counters: the report must describe its own cases.
+            passed: 99,
+            failed: 99,
+            cases: vec![
+                TestCaseSummary {
+                    id: "z-last".to_owned(),
+                    path: "z.js".to_owned(),
+                    variant: "module".to_owned(),
+                    outcome: TestOutcome::Skipped,
+                    elapsed_nanos: 0,
+                    diagnostics: Vec::new(),
+                },
+                TestCaseSummary {
+                    id: "a-first".to_owned(),
+                    path: "a.js".to_owned(),
+                    variant: "module".to_owned(),
+                    outcome: TestOutcome::Pass,
+                    elapsed_nanos: 0,
+                    diagnostics: Vec::new(),
+                },
+                TestCaseSummary {
+                    id: "m-middle".to_owned(),
+                    path: "m.js".to_owned(),
+                    variant: "module".to_owned(),
+                    outcome: TestOutcome::Unsupported,
+                    elapsed_nanos: 0,
+                    diagnostics: Vec::new(),
+                },
+                TestCaseSummary {
+                    id: "b-fail".to_owned(),
+                    path: "b.js".to_owned(),
+                    variant: "module".to_owned(),
+                    outcome: TestOutcome::Fail,
+                    elapsed_nanos: 0,
+                    diagnostics: Vec::new(),
+                },
+            ],
+            ..TestSummary::default()
+        };
+
+        write_conformance_results(&path, &summary).expect("write results");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read results"))
+                .expect("valid results JSON");
+        assert_eq!(document["schema"], 1);
+        assert_eq!(
+            document["runner"],
+            format!("kiln-cli {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            document["tests"],
+            serde_json::json!([
+                {"id": "a-first", "outcome": "pass"},
+                {"id": "b-fail", "outcome": "fail"},
+                {"id": "m-middle", "outcome": "unsupported"},
+                {"id": "z-last", "outcome": "skipped"},
+            ])
+        );
+        assert_eq!(
+            document["totals"],
+            serde_json::json!({
+                "total": 4,
+                "passed": 1,
+                "failed": 1,
+                "unsupported": 1,
+                "skipped": 1,
+                "not_yet_runnable": 0,
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn conformance_results_refuse_empty_and_duplicate_case_sets() {
+        let path = std::env::temp_dir().join(format!(
+            "kiln-cli-invalid-conformance-results-{}.json",
+            std::process::id()
+        ));
+        let empty = write_conformance_results(&path, &TestSummary::default())
+            .expect_err("an empty gate document is not evidence");
+        assert!(empty.to_string().contains("selected no cases"));
+
+        let case = TestCaseSummary {
+            id: "duplicate".to_owned(),
+            path: "case.js".to_owned(),
+            variant: "sloppy".to_owned(),
+            outcome: TestOutcome::Pass,
+            elapsed_nanos: 0,
+            diagnostics: Vec::new(),
+        };
+        let duplicate = write_conformance_results(
+            &path,
+            &TestSummary {
+                cases: vec![case.clone(), case],
+                ..TestSummary::default()
+            },
+        )
+        .expect_err("duplicate gate identities are ambiguous");
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate test id duplicate")
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn conformance_results_cannot_overwrite_persisted_failure_state() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cli-results-state-collision-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let corpus = root.join("corpus");
+        std::fs::create_dir_all(&corpus).expect("create corpus");
+        std::fs::write(corpus.join("case.js"), "let case_ = 1;").expect("write case");
+
+        let error = test(
+            &mut Fake::new(),
+            &corpus,
+            &root,
+            false,
+            false,
+            Some(Path::new(".kiln/test-failures.json")),
+        )
+        .expect_err("results and failure state need distinct paths");
+        assert!(error.to_string().contains("overwrite failure state"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_writes_results_before_returning_a_nonzero_test_status() {
+        let root = std::env::temp_dir().join(format!("kiln-cli-test-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let corpus = root.join("corpus");
+        std::fs::create_dir_all(&corpus).expect("create corpus");
+        std::fs::write(corpus.join("case.js"), "let case_ = 1;").expect("write case");
+
+        let mut fake = Fake::new();
+        fake.test_summary = TestSummary {
+            selected: 1,
+            failed: 1,
+            cases: vec![TestCaseSummary {
+                id: "case.js".to_owned(),
+                path: "case.js".to_owned(),
+                variant: "module".to_owned(),
+                outcome: TestOutcome::Fail,
+                elapsed_nanos: 0,
+                diagnostics: Vec::new(),
+            }],
+            ..TestSummary::default()
+        };
+        let output = test(
+            &mut fake,
+            &corpus,
+            &root,
+            false,
+            false,
+            Some(Path::new("target/results.json")),
+        )
+        .expect("test run completes");
+        assert_eq!(output.exit_code, 1);
+        let report = root.join("target/results.json");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).expect("read report"))
+                .expect("valid report");
+        assert_eq!(document["tests"][0]["outcome"], "fail");
+        assert!(
+            std::fs::read_to_string(root.join(".kiln/test-failures.json"))
+                .expect("read failure state")
+                .contains("case.js")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

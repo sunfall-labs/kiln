@@ -67,6 +67,7 @@ pub enum Command {
         path: PathBuf,
         changed: bool,
         parse_only: bool,
+        output: Option<PathBuf>,
     },
     Project,
     Stats,
@@ -98,6 +99,7 @@ where
     let mut parse_only = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
+    let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut shared = false;
     let mut only_positional = false;
@@ -146,6 +148,9 @@ where
             "--output" => {
                 output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
+            "--out" => {
+                test_output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
             "--profile" => {
                 let raw = value_for(&flag, inline, &mut args)?;
                 profile = Some(parse_profile(&raw)?);
@@ -169,6 +174,19 @@ where
     }
     if output.is_some() && name != "build" {
         return Err(Error::usage("--output only applies to `kiln build`"));
+    }
+    if test_output.is_some() && name != "test" {
+        return Err(Error::usage("--out only applies to `kiln test`"));
+    }
+    if test_output.is_some() && changed {
+        return Err(Error::usage(
+            "--out cannot be combined with `kiln test --changed`: results must cover the full corpus",
+        ));
+    }
+    if test_output.is_some() && parse_only {
+        return Err(Error::usage(
+            "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
+        ));
     }
     if profile.is_some() && name != "build" && !native {
         return Err(Error::usage(
@@ -195,6 +213,7 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             changed,
             parse_only,
+            output: test_output,
         },
         "project" => {
             no_operands(&name, &mut positional)?;
@@ -351,6 +370,7 @@ options:
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --output <path>    with `build`, write the native executable or shared library here
+    --out <path>       with `test`, write schema-1 conformance results here
     --profile <name>   native-dev, native-check, or native-release
     -h, --help         show this help
     -V, --version      show version and protocol information
@@ -479,10 +499,29 @@ mod tests {
                 path: PathBuf::from("test262"),
                 changed: true,
                 parse_only: true,
+                output: None,
+            }
+        );
+        assert_eq!(
+            run(&["test", "test262", "--out=target/results.json"]).command,
+            Command::Test {
+                path: PathBuf::from("test262"),
+                changed: false,
+                parse_only: false,
+                output: Some(PathBuf::from("target/results.json")),
             }
         );
         assert!(usage_error(&["check", "a.js", "--changed"]).contains("only applies"));
         assert!(usage_error(&["run", "a.js", "--parse-only"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--out", "result.json"]).contains("only applies"));
+        assert!(
+            usage_error(&["test", "test262", "--changed", "--out", "result.json"])
+                .contains("full corpus")
+        );
+        assert!(
+            usage_error(&["test", "test262", "--parse-only", "--out", "result.json"])
+                .contains("interpreter run")
+        );
     }
 
     #[test]

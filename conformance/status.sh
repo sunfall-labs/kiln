@@ -4,10 +4,9 @@
 #
 # What this script can honestly say, and what it must never say:
 #
-# Every test in manifest.toml has status "not-yet-runnable". Kiln cannot execute JavaScript yet -
-# there is no interpreter, so there is no runner, so not one of these 32 tests has ever produced
-# a result. A summary line reading "32 tests, 0 failures" would be true in the arithmetic and a
-# lie in the only sense anyone reads it: it says the corpus passed when the corpus did not run.
+# Manifest status and recorded execution are intentionally different facts. A summary line such
+# as "37 tests, 0 failures" would be true arithmetic and a lie when some tests were skipped or
+# never ran: it says the corpus passed when the corpus produced no such evidence.
 #
 # This is the same failure mode scripts/lib.sh already refuses to allow. kiln_report_has_
 # measurements exists because a benchmark report with no measurements in it must be called
@@ -107,6 +106,7 @@ count() { printf '%s\n' "$1" | grep -c . || true; }
 TOTAL="$(count "$TESTS")"
 GUARD="$(count "$(printf '%s\n' "$TESTS" | grep '	guard	' || true)")"
 EFFECT="$(count "$(printf '%s\n' "$TESTS" | grep '	effect	' || true)")"
+REGRESS="$(count "$(printf '%s\n' "$TESTS" | grep '	regress	' || true)")"
 FIXTURE_COUNT="$(count "$FIXTURES")"
 
 # One line per test: its id, the outcome that is true of it, and its feature tags. A recorded
@@ -154,6 +154,7 @@ kiln_say '```'
 	printf 'group    tests  description\n'
 	printf 'guard    %5s  standalone probes, one JavaScript behaviour each\n' "$GUARD"
 	printf 'effect   %5s  real Effect-TS programs, whole-library at once\n' "$EFFECT"
+	printf 'regress  %5s  Kiln-native regressions, one fixed defect each\n' "$REGRESS"
 	printf '                %s committed input fixture(s), not counted as tests\n' "$FIXTURE_COUNT"
 	printf -- '-------  -----\n'
 	printf 'total    %5s\n' "$TOTAL"
@@ -187,8 +188,7 @@ kiln_say ""
 if [[ $EXECUTED -eq 0 && $UNRUNNABLE -eq $TOTAL ]]; then
 	kiln_say "**Nothing in this corpus has run.** All $TOTAL tests are \`not-yet-runnable\`."
 	kiln_say ""
-	kiln_say "Kiln cannot execute JavaScript yet. There is no interpreter, so there is no"
-	kiln_say "runner, so not one of these tests has ever produced a result:"
+	kiln_say "The recorded document names no completed runner result for any test:"
 elif [[ $EXECUTED -eq 0 ]]; then
 	# A runner exists and reached none of them. Distinct from the state above, and worth saying
 	# separately: "all not-yet-runnable" is a compiler that cannot start, while this is a corpus
@@ -236,8 +236,7 @@ kiln_say '```'
 kiln_say ""
 kiln_say "\`features\` follows docs/design.md §9 and is what a changed-test selector will key on."
 kiln_say "Expected output for every test is recorded in \`conformance/manifest.toml\`; see"
-kiln_say "\`conformance/README.md\` for how it was obtained and what still needs to exist before"
-kiln_say "any of it can be checked."
+kiln_say "\`conformance/README.md\` for how it was obtained and how the runner records results."
 
 if [[ $GATE -eq 1 && $EXECUTED -eq 0 ]]; then
 	kiln_say ""
