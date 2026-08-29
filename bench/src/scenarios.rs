@@ -9,15 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use kiln_artifact_cache::{
-    ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, Digest, Lookup,
-};
-use kiln_backend_c::emit_c;
 use kiln_db::{FileId, MemoEngine, QueryEngine, Stats as DbStats};
-use kiln_native_runtime::{launcher_source, runtime_source};
-use kiln_native_toolchain::{
-    BuildOptions, CompileOptions, CompileUnit, LinkOptions, Toolchain, ToolchainError,
+use kiln_ir::{
+    BYTECODE_VERSION, Constant, ExportBinding, HostOp, ImportBinding, Instruction, ModuleProgram,
+    Program,
 };
+use kiln_module_graph::ModuleGraph;
+use kiln_native::{NativeBuildOptions, NativeBuilder, NativeProfile};
+use kiln_native_toolchain::{Toolchain, ToolchainError};
 
 use crate::report::{Measurement, NativeArtifactInfo, Scenario};
 use crate::timing::Samples;
@@ -30,7 +29,7 @@ fn new_engine() -> impl QueryEngine {
 /// What one warm iteration does. Named here because the human report prints it: a latency
 /// number is meaningless without saying which work it covers.
 pub const WARM_PIPELINE: &str =
-    "warm edit -> memoized parse/IR/interface queries -> project or interpreter";
+    "warm edit -> memoized queries -> project, scalar interpreter, or fresh linked graph";
 
 /// Iteration budgets. Warm edits are cheap and noisy, so they get more samples; the cold
 /// scenarios rebuild the whole project every iteration and get fewer.
@@ -44,8 +43,6 @@ const NATIVE_COLD_WARMUP: usize = 1;
 const NATIVE_COLD_ITERS: usize = 3;
 const NATIVE_CACHE_WARMUP: usize = 2;
 const NATIVE_CACHE_ITERS: usize = 15;
-const NATIVE_LINK_WARMUP: usize = 1;
-const NATIVE_LINK_ITERS: usize = 5;
 
 /// Overrides from the command line, applied to every scenario when present.
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,13 +60,18 @@ impl Budget {
     }
 }
 
-pub fn run_all(w: &Workload, budget: Budget) -> Result<Vec<Measurement>, String> {
+pub fn run_all(
+    w: &Workload,
+    budget: Budget,
+    examples_dir: &Path,
+) -> Result<Vec<Measurement>, String> {
     Ok(vec![
         startup(w, budget),
         cold(w, budget),
         warm(w, EditKind::Implementation, budget)?,
         warm_execution(w, budget)?,
         warm(w, EditKind::Interface, budget)?,
+        warm_linked_execution(w, examples_dir, budget)?,
     ])
 }
 
@@ -122,10 +124,11 @@ pub fn targeted_conformance(budget: Budget) -> Result<Measurement, String> {
     ))
 }
 
-/// Measure the native seam on a tiny scalar module. Cold builds intentionally run only a few
-/// times: this is a toolchain smoke measurement, not a reason to burn minutes recompiling C.
-/// Once one build has populated the layered cache, the warm scenario repeatedly validates every
-/// generated-C/object/executable entry without invoking the compiler.
+/// Measure the real native linked-graph seam on two scalar modules. The graph is rebuilt for every
+/// sample so the operation includes graph construction as well as `NativeBuilder::build_graph`.
+/// Cold samples use isolated caches; warm samples prove whole-graph reuse and one-module
+/// invalidation. The fixture deliberately supplies precompiled scalar module IR with no functions
+/// or closures, isolating graph/native-cache cost from the source-to-IR work measured elsewhere.
 pub fn native(budget: Budget) -> Result<Option<Vec<Measurement>>, String> {
     let toolchain = match Toolchain::discover() {
         Ok(toolchain) => toolchain,
@@ -138,263 +141,339 @@ pub fn native(budget: Budget) -> Result<Option<Vec<Measurement>>, String> {
         }
         Err(error) => return Err(format!("discovering native compiler: {error}")),
     };
-
-    let program = native_program()?;
-    let module = emit_c(&program).map_err(|error| format!("emitting native fixture: {error}"))?;
-    let runtime = runtime_source().to_owned();
-    let launcher = launcher_source(&module.symbol)
-        .map_err(|error| format!("emitting native launcher: {error}"))?;
-    let root = native_temp_dir();
-    fs::create_dir_all(&root).map_err(|error| format!("creating {}: {error}", root.display()))?;
-    let cache = ArtifactCache::new(root.join("cache"));
-    let source_digest = Digest::hash(module.source.as_bytes());
-    let runtime_digest = Digest::hash(runtime.as_bytes());
-    let launcher_digest = Digest::hash(launcher.as_bytes());
-    let compiler = toolchain.identity();
-    let module_key = native_key(ArtifactKind::GeneratedC, compiler, [source_digest]);
-    let runtime_key = native_key(ArtifactKind::GeneratedC, compiler, [runtime_digest]);
-    let launcher_key = native_key(ArtifactKind::GeneratedC, compiler, [launcher_digest]);
-    let module_object_key = native_key(ArtifactKind::NativeObject, compiler, [source_digest]);
-    let runtime_object_key = native_key(ArtifactKind::NativeObject, compiler, [runtime_digest]);
-    let launcher_object_key = native_key(ArtifactKind::NativeObject, compiler, [launcher_digest]);
-
-    let (cold_warmup, cold, build) = native_cold_builds(
-        &toolchain,
-        &root,
-        &module.source,
-        &runtime,
-        &launcher,
-        budget,
-    )?;
-    let object_digests = build
-        .objects
-        .iter()
-        .map(|object| {
-            fs::read(&object.output_path)
-                .map(|bytes| Digest::hash(&bytes))
-                .map_err(|error| format!("reading {}: {error}", object.output_path.display()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let executable_bytes = fs::read(&build.executable.output_path).map_err(|error| {
-        format!(
-            "reading {}: {error}",
-            build.executable.output_path.display()
-        )
-    })?;
-    let executable_key = native_key(ArtifactKind::LinkedArtifact, compiler, object_digests);
-    cache
-        .put(&module_key, module.source.as_bytes())
-        .map_err(|error| format!("caching generated C: {error}"))?;
-    cache
-        .put(&runtime_key, runtime.as_bytes())
-        .map_err(|error| format!("caching runtime C: {error}"))?;
-    cache
-        .put(&launcher_key, launcher.as_bytes())
-        .map_err(|error| format!("caching launcher C: {error}"))?;
-    for (key, object) in [
-        (&module_object_key, &build.objects[0]),
-        (&runtime_object_key, &build.objects[1]),
-        (&launcher_object_key, &build.objects[2]),
-    ] {
-        let bytes = fs::read(&object.output_path)
-            .map_err(|error| format!("reading {}: {error}", object.output_path.display()))?;
-        cache
-            .put(key, &bytes)
-            .map_err(|error| format!("caching native object: {error}"))?;
-    }
-    cache
-        .put(&executable_key, &executable_bytes)
-        .map_err(|error| format!("caching linked executable: {error}"))?;
-
-    let sizes = NativeArtifactInfo {
-        cache_hit: false,
-        generated_c_bytes: module.source.len() as u64,
-        object_bytes: build.objects.iter().map(|object| object.output_size).sum(),
-        executable_bytes: build.executable.output_size,
-    };
-    let mut measurements = vec![native_measurement(
-        "cold-build",
-        "cold native C/object/link build",
-        cold_warmup,
-        cold,
-        sizes.clone(),
-    )];
-
-    let (cache_warmup, warm) = native_cache_hits(
-        &cache,
-        budget,
-        [
-            &module_key,
-            &runtime_key,
-            &launcher_key,
-            &module_object_key,
-            &runtime_object_key,
-            &launcher_object_key,
-            &executable_key,
-        ],
-    )?;
-    measurements.push(native_measurement(
-        "warm-cache-build",
-        "warm native cache-hit build",
-        cache_warmup,
-        warm,
-        NativeArtifactInfo {
-            cache_hit: true,
-            ..sizes.clone()
-        },
-    ));
-
-    let (link_warmup, link) = native_link_latency(&toolchain, &root, &build, budget)?;
-    measurements.push(native_measurement(
-        "link",
-        "native link latency",
-        link_warmup,
-        link,
-        sizes.clone(),
-    ));
-
-    let equivalence = native_equivalence(&build.executable.output_path, &program)?;
-    measurements.push(native_measurement(
-        "equivalence",
-        "interpreter/native stdout equivalence",
-        0,
-        vec![equivalence],
-        NativeArtifactInfo {
-            cache_hit: true,
-            ..sizes
-        },
-    ));
-    let _ = fs::remove_dir_all(&root);
+    let mut measurements = Vec::with_capacity(4);
+    measurements.push(native_cold_graph(&toolchain, budget)?);
+    let (warm, body_edit, graph, report, _cleanup) = native_warm_graph(&toolchain, budget)?;
+    measurements.push(warm);
+    measurements.push(body_edit);
+    let equivalence = native_equivalence(&graph, &report)?;
+    measurements.push(equivalence);
     Ok(Some(measurements))
 }
 
-fn native_program() -> Result<kiln_ir::Program, String> {
-    let source = "let total: number = 0;\nwhile (total < 3) total += 1;\nconst state = total === 3 ? \"ready\" : \"wrong\";\nconsole.log(\"kiln\", state, total);\n";
-    let mut engine = MemoEngine::new(frontend_oxc::parse);
-    let file = engine.intern("examples/hello.ts");
-    engine.set_source(file, source.to_owned());
-    engine
-        .ir(file)
-        .map_err(|diagnostics| format!("compiling native fixture: {diagnostics:?}"))
-}
-
-fn native_cold_builds(
-    toolchain: &Toolchain,
-    root: &Path,
-    module: &str,
-    runtime: &str,
-    launcher: &str,
-    budget: Budget,
-) -> Result<(usize, Vec<Duration>, kiln_native_toolchain::BuildReport), String> {
+fn native_cold_graph(toolchain: &Toolchain, budget: Budget) -> Result<Measurement, String> {
     let (warmup, iterations) = budget.apply(NATIVE_COLD_WARMUP, NATIVE_COLD_ITERS);
     let mut durations = Vec::with_capacity(iterations);
-    let mut first_build = None;
+    let mut sizes = None;
     for index in 0..warmup + iterations {
-        let dir = root.join(format!("cold-{index}"));
-        fs::create_dir_all(&dir).map_err(|error| format!("creating {}: {error}", dir.display()))?;
-        let module_source = dir.join("module.c");
-        let runtime_source_path = dir.join("runtime.c");
-        let launcher_source_path = dir.join("launcher.c");
-        fs::write(&module_source, module)
-            .and_then(|_| fs::write(&runtime_source_path, runtime))
-            .and_then(|_| fs::write(&launcher_source_path, launcher))
-            .map_err(|error| format!("writing native sources: {error}"))?;
-        let units = vec![
-            CompileUnit::new(&module_source, dir.join("module.o")),
-            CompileUnit::new(&runtime_source_path, dir.join("runtime.o")),
-            CompileUnit::new(&launcher_source_path, dir.join("launcher.o")),
-        ];
-        let executable = dir.join("hello");
-        let started = Instant::now();
-        let build = toolchain
-            .build(&units, &executable, &native_build_options())
-            .map_err(|error| format!("native cold build: {error}"))?;
-        let elapsed = started.elapsed();
+        let root = native_temp_dir();
+        let _cleanup = TempTree(root.clone());
+        native_fixture_files(&root)?;
+        let builder = NativeBuilder::new(
+            kiln_artifact_cache::ArtifactCache::new(root.join("cache")),
+            toolchain.clone(),
+        );
+        let (_, report, elapsed) = timed_native_graph(&builder, &root, 42, index)?;
+        assert_cold_report(&report)?;
+        sizes = Some(native_sizes(&report));
         if index >= warmup {
             durations.push(elapsed);
         }
-        if first_build.is_none() {
-            first_build = Some(build);
-        }
     }
-    Ok((
+    Ok(native_measurement(
+        "graph-cold-build",
+        "cold linked graph native build",
         warmup,
         durations,
-        first_build.expect("native build iterations always include one warmup or sample"),
+        sizes.expect("native cold loop always has one iteration"),
     ))
 }
 
-fn native_cache_hits(
-    cache: &ArtifactCache,
-    budget: Budget,
-    keys: [&ArtifactKey; 7],
-) -> Result<(usize, Vec<Duration>), String> {
-    let (warmup, iterations) = budget.apply(NATIVE_CACHE_WARMUP, NATIVE_CACHE_ITERS);
-    let mut durations = Vec::with_capacity(iterations);
-    for index in 0..warmup + iterations {
-        let started = Instant::now();
-        for key in keys {
-            if !matches!(cache.lookup(key), Ok(Lookup::Hit(_))) {
-                return Err(format!("native cache key {} was not a hit", key.digest()));
-            }
-        }
-        if index >= warmup {
-            durations.push(started.elapsed());
-        }
-    }
-    Ok((warmup, durations))
-}
-
-fn native_link_latency(
+fn native_warm_graph(
     toolchain: &Toolchain,
-    root: &Path,
-    build: &kiln_native_toolchain::BuildReport,
     budget: Budget,
-) -> Result<(usize, Vec<Duration>), String> {
-    let (warmup, iterations) = budget.apply(NATIVE_LINK_WARMUP, NATIVE_LINK_ITERS);
-    let objects = build
-        .objects
-        .iter()
-        .map(|object| object.output_path.clone())
-        .collect::<Vec<_>>();
-    let mut durations = Vec::with_capacity(iterations);
+) -> Result<
+    (
+        Measurement,
+        Measurement,
+        ModuleGraph,
+        kiln_native::NativeBuildReport,
+        TempTree,
+    ),
+    String,
+> {
+    let root = native_temp_dir();
+    let cleanup = TempTree(root.clone());
+    native_fixture_files(&root)?;
+    let builder = NativeBuilder::new(
+        kiln_artifact_cache::ArtifactCache::new(root.join("cache")),
+        toolchain.clone(),
+    );
+    let (graph, initial, _) = timed_native_graph(&builder, &root, 42, 0)?;
+    assert_cold_report(&initial)?;
+    let (warmup, iterations) = budget.apply(NATIVE_CACHE_WARMUP, NATIVE_CACHE_ITERS);
+    let mut warm_durations = Vec::with_capacity(iterations);
+    let mut warm_sizes = native_sizes(&initial);
+    let mut warm_report = None;
     for index in 0..warmup + iterations {
-        let executable = root.join(format!("link-{index}"));
-        let started = Instant::now();
-        toolchain
-            .link_executable(&objects, &executable, &native_link_options())
-            .map_err(|error| format!("native link: {error}"))?;
+        let (_, report, elapsed) = timed_native_graph(&builder, &root, 42, index + 1)?;
+        assert_warm_report(&report)?;
+        warm_sizes = native_sizes(&report);
+        warm_report = Some(report);
         if index >= warmup {
-            durations.push(started.elapsed());
+            warm_durations.push(elapsed);
         }
     }
-    Ok((warmup, durations))
+
+    let (edit_warmup, edit_iterations) = budget.apply(NATIVE_CACHE_WARMUP, NATIVE_CACHE_ITERS);
+    let mut edit_durations = Vec::with_capacity(edit_iterations);
+    let mut edit_sizes = warm_sizes.clone();
+    for index in 0..edit_warmup + edit_iterations {
+        let value = 1000 + index as u64;
+        let (_, report, elapsed) = timed_native_graph(&builder, &root, value, index + 1)?;
+        assert_body_edit_report(&report)?;
+        edit_sizes = native_sizes(&report);
+        if index >= edit_warmup {
+            edit_durations.push(elapsed);
+        }
+    }
+    let warm_report = warm_report.expect("native warm loop always has one iteration");
+    Ok((
+        native_measurement(
+            "graph-warm-build",
+            "warm unchanged linked graph build",
+            warmup,
+            warm_durations,
+            NativeArtifactInfo {
+                cache_hit: true,
+                ..warm_sizes
+            },
+        ),
+        native_measurement(
+            "graph-body-edit",
+            "precompiled body-edit native rebuild",
+            edit_warmup,
+            edit_durations,
+            NativeArtifactInfo {
+                cache_hit: false,
+                ..edit_sizes
+            },
+        ),
+        graph,
+        warm_report,
+        cleanup,
+    ))
 }
 
-fn native_equivalence(executable: &Path, program: &kiln_ir::Program) -> Result<Duration, String> {
-    let mut host = kiln_runtime::CaptureHost::new();
+fn timed_native_graph(
+    builder: &NativeBuilder,
+    root: &Path,
+    dependency_value: u64,
+    output_index: usize,
+) -> Result<(ModuleGraph, kiln_native::NativeBuildReport, Duration), String> {
     let started = Instant::now();
-    kiln_interpreter::execute(program, &mut host, Default::default())
-        .map_err(|error| format!("interpreter equivalence run: {error}"))?;
-    let native = Command::new(executable)
-        .output()
-        .map_err(|error| format!("native equivalence run: {error}"))?;
-    if !native.status.success() {
+    let graph = native_graph(root, dependency_value)?;
+    let output = root.join(format!("output-{dependency_value}-{output_index}"));
+    let report = builder
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output,
+                profile: NativeProfile::Dev,
+            },
+        )
+        .map_err(|error| format!("native linked graph build: {error}"))?;
+    Ok((graph, report, started.elapsed()))
+}
+
+fn native_graph(root: &Path, dependency_value: u64) -> Result<ModuleGraph, String> {
+    let entry = root.join("main.js");
+    let dependency = root.join("dep.js");
+    let entry_program = native_entry_program();
+    let dependency_program = native_dependency_program(dependency_value);
+    let canonical_dependency = dependency
+        .canonicalize()
+        .map_err(|error| format!("canonicalizing {}: {error}", dependency.display()))?;
+    ModuleGraph::build_with_modules(entry, root, move |path| {
+        if path == canonical_dependency.as_path() {
+            dependency_program.clone()
+        } else {
+            entry_program.clone()
+        }
+    })
+    .map_err(|error| format!("constructing native module graph: {error}"))
+}
+
+fn native_fixture_files(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|error| format!("creating {}: {error}", root.display()))?;
+    fs::write(root.join("dep.js"), "export const value = 42;\n")
+        .and_then(|_| fs::write(root.join("main.js"), "import { value } from './dep.js';\n"))
+        .map_err(|error| format!("writing native graph fixture: {error}"))
+}
+
+fn native_dependency_program(value: u64) -> ModuleProgram {
+    ModuleProgram {
+        program: Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Number((value as f64).to_bits())],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::StoreLocal(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: Vec::new(),
+        },
+        dependencies: Vec::new(),
+        imports: Vec::new(),
+        exports: vec![ExportBinding {
+            exported: "value".to_owned(),
+            local_slot: 0,
+        }],
+    }
+}
+
+fn native_entry_program() -> ModuleProgram {
+    ModuleProgram {
+        program: Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![
+                Instruction::LoadLocal(0),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: Vec::new(),
+        },
+        dependencies: vec!["./dep.js".to_owned()],
+        imports: vec![ImportBinding {
+            source: "./dep.js".to_owned(),
+            imported: "value".to_owned(),
+            local: "value".to_owned(),
+            local_slot: 0,
+        }],
+        exports: Vec::new(),
+    }
+}
+
+fn native_sizes(report: &kiln_native::NativeBuildReport) -> NativeArtifactInfo {
+    NativeArtifactInfo {
+        cache_hit: report.cache_hits.executable,
+        generated_c_bytes: report.sizes.generated_c,
+        object_bytes: report.sizes.application_object
+            + report.sizes.runtime_object
+            + report.sizes.launcher_object,
+        executable_bytes: report.sizes.executable,
+    }
+}
+
+fn assert_cold_report(report: &kiln_native::NativeBuildReport) -> Result<(), String> {
+    if report.module_artifacts.len() != 2
+        || report
+            .module_artifacts
+            .iter()
+            .any(|module| module.generated_c_cache_hit || module.object_cache_hit)
+        || report.runtime_generated_c_cache_hit
+        || report.launcher_generated_c_cache_hit
+        || report.cache_hits.runtime_object
+        || report.cache_hits.launcher_object
+        || report.cache_hits.executable
+    {
         return Err(format!(
-            "native equivalence process failed with {:?}: {}",
+            "native cold graph unexpectedly reused artifacts: {report:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn assert_warm_report(report: &kiln_native::NativeBuildReport) -> Result<(), String> {
+    if report.module_artifacts.len() != 2
+        || report
+            .module_artifacts
+            .iter()
+            .any(|module| !module.generated_c_cache_hit || !module.object_cache_hit)
+        || !report.runtime_generated_c_cache_hit
+        || !report.launcher_generated_c_cache_hit
+        || !report.cache_hits.generated_c
+        || !report.cache_hits.application_object
+        || !report.cache_hits.runtime_object
+        || !report.cache_hits.launcher_object
+        || !report.cache_hits.executable
+    {
+        return Err(format!("native warm graph missed an artifact: {report:?}"));
+    }
+    Ok(())
+}
+
+fn assert_body_edit_report(report: &kiln_native::NativeBuildReport) -> Result<(), String> {
+    let misses = report
+        .module_artifacts
+        .iter()
+        .filter(|module| !module.generated_c_cache_hit)
+        .count();
+    let object_misses = report
+        .module_artifacts
+        .iter()
+        .filter(|module| !module.object_cache_hit)
+        .count();
+    let dependency = report
+        .module_artifacts
+        .iter()
+        .find(|module| module.logical_path.as_deref() == Some("dep.js"));
+    let sibling = report
+        .module_artifacts
+        .iter()
+        .find(|module| module.logical_path.as_deref() == Some("main.js"));
+    if misses != 1
+        || object_misses != 1
+        || report.cache_hits.generated_c
+        || report.cache_hits.application_object
+        || dependency.is_none_or(|module| module.generated_c_cache_hit || module.object_cache_hit)
+        || sibling.is_none_or(|module| !module.generated_c_cache_hit || !module.object_cache_hit)
+        || !report.runtime_generated_c_cache_hit
+        || !report.launcher_generated_c_cache_hit
+        || !report.cache_hits.runtime_object
+        || !report.cache_hits.launcher_object
+        || report.cache_hits.executable
+    {
+        return Err(format!(
+            "native body edit invalidated the wrong artifacts: {report:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn native_equivalence(
+    graph: &ModuleGraph,
+    report: &kiln_native::NativeBuildReport,
+) -> Result<Measurement, String> {
+    let started = Instant::now();
+    let mut host = kiln_runtime::CaptureHost::new();
+    graph
+        .execute(&mut host, Default::default())
+        .map_err(|error| format!("interpreter graph equivalence run: {error}"))?;
+    let native = Command::new(&report.output)
+        .output()
+        .map_err(|error| format!("native graph equivalence run: {error}"))?;
+    if !native.status.success() || !native.stderr.is_empty() {
+        return Err(format!(
+            "native graph equivalence process failed with {:?}: {}",
             native.status.code(),
             String::from_utf8_lossy(&native.stderr)
         ));
     }
-    let native_stdout = String::from_utf8_lossy(&native.stdout);
-    if native_stdout != host.stdout() {
+    let expected = host.stdout().as_bytes();
+    if native.stdout != expected {
         return Err(format!(
-            "interpreter/native stdout mismatch: interpreter {:?}, native {:?}",
+            "interpreter/native graph stdout mismatch: interpreter {:?}, native {:?}",
             host.stdout(),
-            native_stdout
+            String::from_utf8_lossy(&native.stdout)
         ));
     }
-    Ok(started.elapsed())
+    Ok(native_measurement(
+        "graph-equivalence",
+        "linked interpreter/native stdout equivalence",
+        0,
+        vec![started.elapsed()],
+        NativeArtifactInfo {
+            cache_hit: report.cache_hits.executable,
+            ..native_sizes(report)
+        },
+    ))
 }
 
 fn native_measurement(
@@ -420,51 +499,6 @@ fn native_measurement(
     measurement
 }
 
-fn native_build_options() -> BuildOptions {
-    BuildOptions {
-        compile: CompileOptions::default(),
-        link: native_link_options(),
-    }
-}
-
-fn native_link_options() -> LinkOptions {
-    LinkOptions {
-        libraries: if cfg!(windows) {
-            Vec::new()
-        } else {
-            vec!["m".to_owned()]
-        },
-        ..LinkOptions::default()
-    }
-}
-
-fn native_key(
-    kind: ArtifactKind,
-    compiler: &kiln_native_toolchain::ToolIdentity,
-    inputs: impl IntoIterator<Item = Digest>,
-) -> ArtifactKey {
-    ArtifactKey::new(
-        kind,
-        compiler.stable_key(),
-        Backend::C,
-        format!(
-            "kiln-native-runtime-{}",
-            kiln_native_runtime::NATIVE_RUNTIME_VERSION
-        ),
-        format!(
-            "{}:{}-{}",
-            compiler.target,
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ),
-        "default",
-        CacheProfile::Debug,
-        "none",
-        Digest::hash(b"kiln-bench-native-v1"),
-        inputs,
-    )
-}
-
 fn native_temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!(
         "kiln-bench-native-{}-{}",
@@ -473,6 +507,14 @@ fn native_temp_dir() -> PathBuf {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
     ))
+}
+
+struct TempTree(PathBuf);
+
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Cost of standing a session up: intern every path and ingest every source, deriving nothing.
@@ -587,6 +629,164 @@ fn warm_execution(w: &Workload, budget: Budget) -> Result<Measurement, String> {
         "warm interpreted execution",
         Some(w.spec.warm_goal_ms),
     ))
+}
+
+/// The linked compiler-user loop: edit one scalar module, rebuild the entry-rooted module graph
+/// from memoized module IR, and execute every linked module. The synthetic entry imports every
+/// generated module, so this measures the full deterministic graph rather than one random branch.
+fn warm_linked_execution(
+    w: &Workload,
+    examples_dir: &Path,
+    budget: Budget,
+) -> Result<Measurement, String> {
+    let (warmup, iters) = budget.apply(WARM_WARMUP, WARM_ITERS);
+    let root = fs::canonicalize(examples_dir.join(w.spec.name).join(w.linked_dir()))
+        .map_err(|error| format!("locating materialized workload {}: {error}", w.spec.name))?;
+    let paths = linked_paths(w, &root);
+    let mut ids = Vec::with_capacity(paths.len());
+    let mut e = new_engine();
+    let mut texts = w.linked_base_texts.clone();
+    texts.push(w.entry_text());
+    load(&mut e, &paths, texts, &mut ids);
+
+    let entry = root.join(w.entry_path());
+    let (graph, provider_calls) = build_linked_graph(&mut e, &entry, &root)?;
+    let accounting = LinkedGraphAccounting::of(&graph, provider_calls);
+    validate_linked_graph_accounting(w, accounting)?;
+    let stdout = execute_linked(&graph)?;
+    if stdout != "linked 0\n" {
+        return Err(format!(
+            "workload {} linked graph produced {stdout:?}, expected \"linked 0\\n\"",
+            w.spec.name
+        ));
+    }
+
+    let target = ids[w.edit_target];
+    let target_path = root.join(w.modules[w.edit_target].path());
+    let base_target_program = graph
+        .module(&target_path)
+        .ok_or_else(|| format!("linked graph omitted edit target {}", target_path.display()))?
+        .program
+        .clone();
+    e.reset_stats();
+
+    let mut acc = Accumulator::new(warmup, iters);
+    for i in 0..warmup + iters {
+        let text = w.linked_variant(w.edit_target, 1 + (i % 2) as u32);
+        e.reset_stats();
+        let started = Instant::now();
+        e.set_source(target, text);
+        let (graph, provider_calls) = build_linked_graph(&mut e, &entry, &root)?;
+        validate_linked_graph_accounting(w, LinkedGraphAccounting::of(&graph, provider_calls))?;
+        if graph
+            .module(&target_path)
+            .is_some_and(|module| module.program == base_target_program)
+        {
+            return Err(format!(
+                "workload {} body edit did not change linked target IR",
+                w.spec.name
+            ));
+        }
+        let stdout = execute_linked(&graph)?;
+        if stdout != "linked 0\n" {
+            return Err(format!(
+                "workload {} linked graph produced {stdout:?}, expected \"linked 0\\n\"",
+                w.spec.name
+            ));
+        }
+        acc.push(started.elapsed(), e.stats());
+    }
+
+    Ok(acc.finish(
+        w,
+        "warm-linked-execute",
+        "linked interpreter body edit",
+        None,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinkedGraphAccounting {
+    modules: usize,
+    edges: usize,
+    provider_calls: usize,
+}
+
+impl LinkedGraphAccounting {
+    fn of(graph: &ModuleGraph, provider_calls: usize) -> Self {
+        Self {
+            modules: graph.module_count(),
+            edges: graph
+                .modules()
+                .map(|module| module.dependencies.len())
+                .sum(),
+            provider_calls,
+        }
+    }
+}
+
+fn validate_linked_graph_accounting(
+    w: &Workload,
+    accounting: LinkedGraphAccounting,
+) -> Result<(), String> {
+    if accounting.modules != w.modules.len() + 1
+        || accounting.edges != w.import_edges() + w.modules.len()
+        || accounting.provider_calls != accounting.modules
+    {
+        return Err(format!(
+            "workload {} linked graph accounting mismatch: {:?}",
+            w.spec.name, accounting
+        ));
+    }
+    Ok(())
+}
+
+fn linked_paths(w: &Workload, root: &Path) -> Vec<String> {
+    w.modules
+        .iter()
+        .map(|module| root.join(module.path()).display().to_string())
+        .chain(std::iter::once(
+            root.join(w.entry_path()).display().to_string(),
+        ))
+        .collect()
+}
+
+fn build_linked_graph(
+    e: &mut impl QueryEngine,
+    entry: &Path,
+    project_root: &Path,
+) -> Result<(ModuleGraph, usize), String> {
+    let mut provider_calls = 0;
+    let graph = ModuleGraph::build_with_module_provider(entry, project_root, |module_path| {
+        provider_calls += 1;
+        let module_path_string = module_path.to_str().ok_or_else(|| {
+            kiln_module_graph::ModuleGraphError::FrontendPath {
+                path: module_path.to_path_buf(),
+            }
+        })?;
+        let file = e.intern(module_path_string);
+        if e.source(file).is_none() {
+            return Err(kiln_module_graph::ModuleGraphError::Source {
+                path: module_path.to_path_buf(),
+                message: "source is not synchronized".to_owned(),
+            });
+        }
+        e.module_ir(file)
+            .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
+                path: module_path.to_path_buf(),
+                diagnostics,
+            })
+    })
+    .map_err(|error| format!("building linked graph: {error}"))?;
+    Ok((graph, provider_calls))
+}
+
+fn execute_linked(graph: &ModuleGraph) -> Result<String, String> {
+    let mut host = kiln_runtime::CaptureHost::new();
+    graph
+        .execute(&mut host, Default::default())
+        .map_err(|error| format!("executing linked graph: {error}"))?;
+    Ok(host.into_stdout())
 }
 
 fn execution_source(seed: u32) -> String {
@@ -711,4 +911,46 @@ fn recompute_counters(s: &DbStats) -> [u64; 6] {
         s.validated,
         s.early_cutoff,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::{SMALL, Workload};
+
+    fn temp_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kiln-bench-linked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ))
+    }
+
+    #[test]
+    fn linked_small_scenario_rebuilds_one_edited_module_and_emits_stable_output() {
+        let root = temp_root();
+        let _cleanup = TempTree(root.clone());
+        let workload = Workload::generate(&SMALL);
+        workload
+            .materialise(&root, true)
+            .expect("materialise linked fixture");
+
+        let measurement = warm_linked_execution(
+            &workload,
+            &root,
+            Budget {
+                warmup: Some(0),
+                iterations: Some(1),
+            },
+        )
+        .expect("linked scenario");
+
+        assert_eq!(measurement.id, "small/warm-linked-execute");
+        assert_eq!(measurement.stats.parse_computed, 1);
+        assert_eq!(measurement.stats.ir_computed, 1);
+        assert_eq!(measurement.stats.project_computed, 0);
+        assert!(measurement.steady_state);
+    }
 }

@@ -8,7 +8,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +18,7 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
-use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module};
+use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path};
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
@@ -79,7 +79,9 @@ pub struct NativeBuildOptions {
 /// Which artifact stages were reused without invoking the platform compiler or linker.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CacheHits {
+    /// For graph builds, true only when every module's generated C artifact hit.
     pub generated_c: bool,
+    /// For graph builds, true only when every module's application object hit.
     pub application_object: bool,
     pub runtime_object: bool,
     pub launcher_object: bool,
@@ -94,6 +96,18 @@ pub struct ArtifactSizes {
     pub runtime_object: u64,
     pub launcher_object: u64,
     pub executable: u64,
+}
+
+/// Cache facts for one graph module, in deterministic dependency-first graph order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleArtifactInfo {
+    /// Project-relative logical path, using `/` separators. `None` is used by the single-module
+    /// API, which has no source path in its input contract.
+    pub logical_path: Option<String>,
+    pub generated_c_cache_hit: bool,
+    pub object_cache_hit: bool,
+    pub generated_c_bytes: u64,
+    pub object_bytes: u64,
 }
 
 /// Time spent in the native pipeline. Cache hits contribute no compile/link time.
@@ -114,6 +128,11 @@ pub struct NativeBuildReport {
     pub cache_hits: CacheHits,
     pub sizes: ArtifactSizes,
     pub timings: BuildTimings,
+    /// Per-module cache facts. Graph entries are ordered like `ModuleGraph::module_order`.
+    pub module_artifacts: Vec<ModuleArtifactInfo>,
+    /// Cache status of the generated runtime and graph-launcher C sources.
+    pub runtime_generated_c_cache_hit: bool,
+    pub launcher_generated_c_cache_hit: bool,
 }
 
 /// Captured result of launching a freshly built or cached executable.
@@ -312,7 +331,7 @@ impl NativeBuilder {
             Digest::hash(b"portable-runtime-c11"),
             [Digest::hash(runtime.as_bytes())],
         );
-        let (runtime_bytes, runtime_source_digest, _) =
+        let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
 
         let launcher_source_key = key(
@@ -325,7 +344,7 @@ impl NativeBuilder {
             Digest::hash(b"portable-launcher-c11"),
             [Digest::hash(launcher.as_bytes())],
         );
-        let (launcher_bytes, launcher_source_digest, _) =
+        let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
         let object_options =
@@ -478,6 +497,15 @@ impl NativeBuilder {
                 link: link_elapsed,
                 total: total_started.elapsed(),
             },
+            module_artifacts: vec![ModuleArtifactInfo {
+                logical_path: None,
+                generated_c_cache_hit: generated_c_hit,
+                object_cache_hit: application_hit,
+                generated_c_bytes: module_source.len() as u64,
+                object_bytes: application.len() as u64,
+            }],
+            runtime_generated_c_cache_hit,
+            launcher_generated_c_cache_hit,
         })
     }
 
@@ -495,14 +523,17 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut modules = Vec::with_capacity(graph.module_count());
+        let mut logical_paths = Vec::with_capacity(graph.module_count());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
-            let emitted = emit_module(&node.program)?;
+            let logical_path = logical_module_path(graph.project_root(), &node.path)?;
+            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
                 });
             }
+            logical_paths.push(logical_path);
             modules.push((node, emitted));
         }
         let launcher = graph_launcher_source(graph, &modules)?;
@@ -542,7 +573,7 @@ impl NativeBuilder {
             Digest::hash(b"portable-runtime-c11"),
             [Digest::hash(runtime.as_bytes())],
         );
-        let (runtime_bytes, runtime_source_digest, _) =
+        let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
         let launcher_source_key = key(
             ArtifactKind::GeneratedC,
@@ -557,7 +588,7 @@ impl NativeBuilder {
                 graph_topology_digest(graph, &modules),
             ],
         );
-        let (launcher_bytes, launcher_source_digest, _launcher_source_hit) =
+        let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
         let object_options =
@@ -569,19 +600,16 @@ impl NativeBuilder {
         let compile_started = Instant::now();
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, (_, _module)) in modules.iter().enumerate() {
-            let (_, source_digest, source_hit) = &module_sources[index];
-            module_keys.push((
-                key(
-                    ArtifactKind::NativeObject,
-                    &compiler,
-                    Backend::C,
-                    &module_abi,
-                    &target,
-                    profile.cache(),
-                    object_options,
-                    [*source_digest],
-                ),
-                *source_hit,
+            let (_, source_digest, _) = &module_sources[index];
+            module_keys.push(key(
+                ArtifactKind::NativeObject,
+                &compiler,
+                Backend::C,
+                &module_abi,
+                &target,
+                profile.cache(),
+                object_options,
+                [*source_digest],
             ));
         }
         let runtime_key = key(
@@ -630,7 +658,7 @@ impl NativeBuilder {
                         chunk
                             .iter()
                             .map(|&index| {
-                                let (object_key, source_hit) = &module_keys_ref[index];
+                                let object_key = &module_keys_ref[index];
                                 let result = self.object(
                                     object_key,
                                     &module_sources_ref[index].0,
@@ -641,7 +669,7 @@ impl NativeBuilder {
                                 (
                                     index,
                                     result.map(|(object, digest, hit, _elapsed)| {
-                                        (object, digest, hit && *source_hit)
+                                        (object, digest, hit)
                                     }),
                                 )
                             })
@@ -749,6 +777,20 @@ impl NativeBuilder {
         debug_assert_eq!(executable_digest, Digest::hash(&executable));
         materialize(&options.output, &executable, true)?;
 
+        let module_artifacts = (0..modules.len())
+            .map(|index| {
+                let (source, _, source_hit) = &module_sources[index];
+                let (object, _, object_hit) = &module_objects[index];
+                ModuleArtifactInfo {
+                    logical_path: Some(logical_paths[index].clone()),
+                    generated_c_cache_hit: *source_hit,
+                    object_cache_hit: *object_hit,
+                    generated_c_bytes: source.len() as u64,
+                    object_bytes: object.len() as u64,
+                }
+            })
+            .collect();
+
         let entry_symbol = modules
             .iter()
             .find(|(node, _)| node.path == graph.entry())
@@ -788,6 +830,9 @@ impl NativeBuilder {
                 link: link_elapsed,
                 total: total_started.elapsed(),
             },
+            module_artifacts,
+            runtime_generated_c_cache_hit,
+            launcher_generated_c_cache_hit,
         })
     }
 
@@ -934,6 +979,55 @@ fn target_identity(identity: &ToolIdentity) -> String {
 
 fn compiler_identity(identity: &ToolIdentity) -> String {
     identity.stable_key()
+}
+
+fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        NativeError::Emit(EmitError::InvalidProgram {
+            message: format!(
+                "module path {} is outside project root {}",
+                path.display(),
+                root.display()
+            ),
+        })
+    })?;
+    let mut logical = String::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!(
+                    "module path {} is not a normalized project-relative path",
+                    path.display()
+                ),
+            }));
+        };
+        let component = component.to_str().ok_or_else(|| {
+            NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("module path {} is not valid UTF-8", path.display()),
+            })
+        })?;
+        if component.is_empty() || component.contains(['\\', '\0']) {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!(
+                    "module path {} is not a normalized slash-separated path",
+                    path.display()
+                ),
+            }));
+        }
+        if !logical.is_empty() {
+            logical.push('/');
+        }
+        logical.push_str(component);
+    }
+    if logical.is_empty() {
+        return Err(NativeError::Emit(EmitError::InvalidProgram {
+            message: format!(
+                "module path {} has no logical relative path",
+                path.display()
+            ),
+        }));
+    }
+    Ok(logical)
 }
 
 fn graph_topology_digest(
@@ -1387,6 +1481,7 @@ mod tests {
                 Instruction::Return,
             ],
             local_count: 0,
+            functions: Vec::new(),
         };
 
         let first = builder
@@ -1543,6 +1638,7 @@ mod tests {
                     Instruction::Return,
                 ],
                 local_count: 1,
+                functions: Vec::new(),
             },
             dependencies: Vec::new(),
             imports: Vec::new(),
@@ -1564,6 +1660,7 @@ mod tests {
                     Instruction::Return,
                 ],
                 local_count: 1,
+                functions: Vec::new(),
             },
             dependencies: vec!["./dep.js".into()],
             imports: vec![ImportBinding {
@@ -1593,7 +1690,12 @@ mod tests {
         let second_graph = make_graph(&second_project);
         let first_modules = first_graph
             .modules()
-            .map(|node| (node, emit_module(&node.program).expect("module emits")))
+            .map(|node| {
+                (
+                    node,
+                    kiln_backend_c::emit_module(&node.program).expect("module emits"),
+                )
+            })
             .collect::<Vec<_>>();
         let launcher = graph_launcher_source(&first_graph, &first_modules).expect("launcher emits");
         let main = launcher.find("int main(void)").expect("launcher has main");
@@ -1626,6 +1728,89 @@ mod tests {
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
         assert_eq!(second.stdout, b"42\n");
+
+        assert_eq!(
+            second
+                .build
+                .module_artifacts
+                .iter()
+                .map(|module| module.logical_path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("dep.js"), Some("main.js")]
+        );
+        assert!(second.build.runtime_generated_c_cache_hit);
+        assert!(second.build.launcher_generated_c_cache_hit);
+
+        let edited_dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(43.0_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let edited_graph = {
+            let entry_path = first_project.join("main.js");
+            let dependency_path =
+                fs::canonicalize(first_project.join("dep.js")).expect("canonical dependency");
+            let edited_dependency = edited_dependency.clone();
+            let entry = entry.clone();
+            ModuleGraph::build_with_modules(entry_path, &first_project, move |path| {
+                if path == dependency_path {
+                    edited_dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct edited graph")
+        };
+        let edited = builder
+            .build_graph(
+                &edited_graph,
+                &NativeBuildOptions {
+                    output: root.join("edited-program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("edited graph build succeeds");
+        let generated_c_misses = edited
+            .module_artifacts
+            .iter()
+            .filter(|module| !module.generated_c_cache_hit)
+            .count();
+        let object_misses = edited
+            .module_artifacts
+            .iter()
+            .filter(|module| !module.object_cache_hit)
+            .count();
+        assert_eq!(generated_c_misses, 1);
+        assert_eq!(object_misses, 1);
+        assert_eq!(
+            edited.module_artifacts[0].logical_path.as_deref(),
+            Some("dep.js")
+        );
+        assert!(!edited.module_artifacts[0].generated_c_cache_hit);
+        assert!(!edited.module_artifacts[0].object_cache_hit);
+        assert!(edited.module_artifacts[1].generated_c_cache_hit);
+        assert!(edited.module_artifacts[1].object_cache_hit);
+        assert!(edited.cache_hits.runtime_object);
+        assert!(edited.cache_hits.launcher_object);
+        assert!(edited.runtime_generated_c_cache_hit);
+        assert!(edited.launcher_generated_c_cache_hit);
+        assert!(!edited.cache_hits.executable);
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1642,6 +1827,7 @@ mod tests {
                 Instruction::Return,
             ],
             local_count: 0,
+            functions: Vec::new(),
         }
     }
 
@@ -1678,6 +1864,7 @@ mod tests {
                         Instruction::Return,
                     ],
                     local_count: 1,
+                    functions: Vec::new(),
                 },
             ),
             (
@@ -1702,6 +1889,7 @@ mod tests {
                         Instruction::Return,
                     ],
                     local_count: 0,
+                    functions: Vec::new(),
                 },
             ),
             (
@@ -1723,6 +1911,7 @@ mod tests {
                         Instruction::Return,
                     ],
                     local_count: 0,
+                    functions: Vec::new(),
                 },
             ),
             (
@@ -1745,6 +1934,7 @@ mod tests {
                         Instruction::Return,
                     ],
                     local_count: 0,
+                    functions: Vec::new(),
                 },
             ),
         ]
