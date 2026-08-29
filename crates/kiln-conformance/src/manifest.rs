@@ -338,7 +338,7 @@ ok
         let manifest = Manifest::read(&path).expect("the corpus manifest is in the subset");
         // 32 ported plus the regression probes authored here, which are a separate group so
         // the ported counts keep meaning what they say.
-        assert_eq!(manifest.tests().len(), 38);
+        assert_eq!(manifest.tests().len(), 39);
         assert_eq!(
             manifest
                 .tests_under(&manifest.directory().join("guard"))
@@ -349,7 +349,7 @@ ok
             manifest
                 .tests_under(&manifest.directory().join("regress"))
                 .count(),
-            6
+            7
         );
         let probe = manifest
             .tests()
