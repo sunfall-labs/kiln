@@ -118,6 +118,10 @@ impl ObjectData {
         }
         match &self.prototype {
             Some(Value::Object(parent)) => parent.borrow().get(key),
+            // A class's statics are inherited through the constructor, and a constructor is a
+            // function whose own properties live in its own store. Without this arm the chain
+            // would stop at the first function in it.
+            Some(Value::Function(parent)) => parent.properties.borrow().get(key),
             _ => None,
         }
     }
@@ -862,6 +866,68 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let target = self.pop(current)?;
                     self.set_computed(&target, &key, value.clone(), current)?;
                     self.stack.push(value);
+                }
+                Instruction::SetPrototype => {
+                    let prototype = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    match &target {
+                        Value::Object(object) => object.borrow_mut().set_prototype(prototype),
+                        Value::Function(closure) => {
+                            // A derived constructor inherits its parent's statics through the
+                            // constructor's own property store.
+                            closure.properties.borrow_mut().set_prototype(prototype);
+                        }
+                        other => {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
+                    self.stack.push(target);
+                }
+                Instruction::SuperCall { argc } => {
+                    let arguments = self.take_call_arguments(*argc, current)?;
+                    let parent = self.pop(current)?;
+                    let this_value = self.this_value.clone();
+                    match parent {
+                        Value::Function(closure) => {
+                            // The parent initialises the *existing* instance rather than
+                            // allocating one, so this is an ordinary call with `this` threaded
+                            // through and no `constructing` slot.
+                            self.stack.push(Value::Undefined);
+                            let argc = arguments.len();
+                            for argument in arguments {
+                                self.stack.push(argument);
+                            }
+                            self.call_with_this(closure, argc as u16, current, this_value, None)?;
+                        }
+                        Value::Native(Native::Error) => {
+                            // A native parent leaves no frame, so the expression's value has to
+                            // be pushed here to match what a compiled parent's `Return` does.
+                            self.stack.push(Value::Undefined);
+                            // A native constructor builds its own object, so its own properties
+                            // are copied onto the instance. That is what `class E extends Error`
+                            // needs: message, name, stack and cause end up on `this`.
+                            if let (Value::Object(instance), Value::Object(built)) =
+                                (&this_value, &construct_error(&arguments))
+                            {
+                                let built = built.borrow();
+                                let mut instance = instance.borrow_mut();
+                                for key in built.keys().map(str::to_owned).collect::<Vec<_>>() {
+                                    if let Some(value) = built.get_own(&key) {
+                                        instance.set(&key, value.clone());
+                                    }
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(ExecutionError::NotConstructable {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
                 }
                 Instruction::LoadThis => {
                     let this_value = self.this_value.clone();

@@ -449,6 +449,18 @@ impl Lowerer {
                 consequent: Box::new(self.expression(&expression.consequent)),
                 alternate: Box::new(self.expression(&expression.alternate)),
             },
+            Expression::CallExpression(expression)
+                if !expression.optional && matches!(&expression.callee, Expression::Super(_)) =>
+            {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    let Some(argument) = argument.as_expression() else {
+                        return self.unsupported_expression("spread argument", expression_span);
+                    };
+                    arguments.push(self.expression(argument));
+                }
+                HirExpressionKind::SuperCall { arguments }
+            }
             Expression::CallExpression(expression) if !expression.optional => {
                 let mut arguments = Vec::with_capacity(expression.arguments.len());
                 for argument in &expression.arguments {
@@ -461,6 +473,13 @@ impl Lowerer {
                 HirExpressionKind::Call {
                     callee: Box::new(self.expression(&expression.callee)),
                     arguments,
+                }
+            }
+            Expression::StaticMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                HirExpressionKind::SuperMember {
+                    property: member.property.name.to_string(),
                 }
             }
             Expression::StaticMemberExpression(member) if !member.optional => {

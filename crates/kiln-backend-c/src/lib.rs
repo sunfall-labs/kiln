@@ -688,7 +688,9 @@ fn stack_effect(
         | Instruction::SetComputed
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
-        | Instruction::LoadThis => Err(EmitError::Unsupported {
+        | Instruction::LoadThis
+        | Instruction::SetPrototype
+        | Instruction::SuperCall { .. } => Err(EmitError::Unsupported {
             feature: "functions and objects in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
@@ -908,7 +910,9 @@ fn emit_instruction(
         | Instruction::SetComputed
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
-        | Instruction::LoadThis => {
+        | Instruction::LoadThis
+        | Instruction::SetPrototype
+        | Instruction::SuperCall { .. } => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -1082,6 +1086,11 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::CallComputed { argc } => {
                 byte(&mut hash, 32);
+                word(&mut hash, u64::from(*argc));
+            }
+            Instruction::SetPrototype => byte(&mut hash, 34),
+            Instruction::SuperCall { argc } => {
+                byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));
             }
             Instruction::LoadThis => byte(&mut hash, 33),
