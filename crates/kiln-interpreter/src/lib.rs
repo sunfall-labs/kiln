@@ -54,10 +54,14 @@ pub enum Native {
     JsonStringify,
     /// `Array.prototype.join`.
     ArrayJoin,
+    /// `next` on an array iterator.
+    ArrayIteratorNext,
     ArrayPush,
     ArrayPop,
     ArrayIndexOf,
     ArrayIncludes,
+    /// Returns its own receiver, so an iterator is iterable.
+    IteratorSelf,
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
     /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
     ArrayValues,
@@ -1788,13 +1792,71 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         // -- for-of is a later step -- and the corpus only checks the function's identity and
         // type, so returning undefined is the honest placeholder rather than a fake iterator
         // that would break the moment anything called `.next()` on it.
-        Native::ArrayValues => Value::Undefined,
+        // A real iterator object: state lives in reserved properties on the iterator itself,
+        // so it needs no special value kind and `next` is an ordinary method call.
+        Native::ArrayValues => match receiver {
+            Value::Array(_) => {
+                let mut iterator = ObjectData::default();
+                iterator.set("@@iterated", receiver.clone());
+                iterator.set("@@index", Value::Number(0.0));
+                iterator.set("next", Value::Native(Native::ArrayIteratorNext));
+                // An iterator is itself iterable, which is what lets one be passed straight to
+                // another `for-of` or to `Array.from`.
+                iterator.set(
+                    WellKnown::Iterator.property_key(),
+                    Value::Native(Native::IteratorSelf),
+                );
+                Value::Object(Rc::new(RefCell::new(iterator)))
+            }
+            _ => Value::Undefined,
+        },
+        Native::IteratorSelf => receiver.clone(),
+        Native::ArrayIteratorNext => {
+            let Value::Object(state) = receiver else {
+                return iteration_result(Value::Undefined, true);
+            };
+            let (iterated, index) = {
+                let state = state.borrow();
+                (
+                    state.get("@@iterated").unwrap_or(Value::Undefined),
+                    state
+                        .get("@@index")
+                        .unwrap_or(Value::Number(0.0))
+                        .as_number(),
+                )
+            };
+            let Value::Array(items) = &iterated else {
+                return iteration_result(Value::Undefined, true);
+            };
+            let index = index as usize;
+            // Re-read the length every step. An array shortened during iteration must stop
+            // early rather than read past its end, which is exactly what a cached length would
+            // do -- and is the mutation-during-iteration case the corpus checks.
+            let item = items.borrow().get(index).cloned();
+            match item {
+                Some(value) => {
+                    state
+                        .borrow_mut()
+                        .set("@@index", Value::Number(index as f64 + 1.0));
+                    iteration_result(value, false)
+                }
+                None => iteration_result(Value::Undefined, true),
+            }
+        }
         Native::Error
         | Native::SymbolConstructor
         | Native::ArrayConstructor
         | Native::ObjectConstructor
         | Native::Json => Value::Undefined,
     }
+}
+
+/// `{ value, done }`, the shape every `next` returns.
+fn iteration_result(value: Value, done: bool) -> Value {
+    let mut result = ObjectData::default();
+    result.set("value", value);
+    result.set("done", Value::Boolean(done));
+    Value::Object(Rc::new(RefCell::new(result)))
 }
 
 /// Whether a value inherits `Error.prototype.toString`.

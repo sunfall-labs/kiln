@@ -23,7 +23,7 @@ use oxc_ast::ast::{
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
     VariableDeclaration, VariableDeclarationKind,
 };
-use oxc_ast::ast::{ForStatementInit, SimpleAssignmentTarget};
+use oxc_ast::ast::{ForStatementInit, ForStatementLeft, SimpleAssignmentTarget};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
@@ -255,8 +255,41 @@ impl Lowerer {
                     .map(|update| self.expression(update)),
                 body: Box::new(self.statement_or_unsupported(&statement.body)),
             },
+            Statement::ForOfStatement(statement) if !statement.r#await => {
+                let ForStatementLeft::VariableDeclaration(declaration) = &statement.left else {
+                    return Some(HirStatement {
+                        kind: self.unsupported_statement(
+                            "for-of over an existing binding",
+                            statement_span,
+                        ),
+                        span: statement_span,
+                    });
+                };
+                let Some(declarator) = declaration.declarations.first() else {
+                    return Some(HirStatement {
+                        kind: self.unsupported_statement("for-of binding", statement_span),
+                        span: statement_span,
+                    });
+                };
+                let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                    return Some(HirStatement {
+                        kind: self.unsupported_statement("destructuring in for-of", statement_span),
+                        span: statement_span,
+                    });
+                };
+                HirStatementKind::ForOf {
+                    kind: match declaration.kind {
+                        VariableDeclarationKind::Var => HirVariableKind::Var,
+                        VariableDeclarationKind::Const => HirVariableKind::Const,
+                        _ => HirVariableKind::Let,
+                    },
+                    name: identifier.name.to_string(),
+                    iterable: self.expression(&statement.right),
+                    body: Box::new(self.statement_or_unsupported(&statement.body)),
+                }
+            }
             Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
-                self.unsupported_statement("for-in or for-of statement", statement_span)
+                self.unsupported_statement("for-in or for-await-of statement", statement_span)
             }
             Statement::BreakStatement(statement) => HirStatementKind::Break {
                 label: statement.label.as_ref().map(|label| label.name.to_string()),
