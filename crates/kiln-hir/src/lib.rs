@@ -198,6 +198,11 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    /// `new callee(...arguments)`.
+    New {
+        callee: Box<Expression>,
+        arguments: Vec<Expression>,
+    },
     /// `object.property = value`, including the compound forms.
     ///
     /// Kept separate from `Assignment` rather than widening its target into an enum: the two
@@ -239,6 +244,9 @@ pub enum UnaryOperator {
     Plus,
     Negate,
     Not,
+    /// `typeof`. Note that `typeof undeclaredName` is legal and yields "undefined" rather than
+    /// throwing, which is why it cannot be lowered as an ordinary operand evaluation.
+    TypeOf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
