@@ -107,7 +107,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             ..
         } => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::run(backend.as_mut(), &path)?)
+            report(commands::run(backend.as_mut(), &path, &root)?)
         }
         Command::Run {
             path,

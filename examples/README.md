@@ -1,9 +1,12 @@
 # Reference workloads
 
-These are the fixture projects `kiln-bench` measures against (design.md §13). They are
-**generated, not authored** — `kiln-bench` renders them from a fixed seed on every run and
-rewrites this directory whenever what is on disk no longer matches the generator, so an edit
-made here will be silently reverted. The generator lives in `bench/src/workload.rs`.
+`small/` and `medium/` are the fixture projects `kiln-bench` measures against (design.md §13).
+They are **generated, not authored** — `kiln-bench` renders them from a fixed seed and rewrites
+those two owned directories whenever their manifests no longer match. The generator lives in
+`bench/src/workload.rs`.
+
+`hello.ts` and `modules/` are small, hand-authored public CLI smoke fixtures. The latter exercises
+exact relative resolution, dependency-first side effects, and a named scalar import.
 
 | workload | modules | shape                                                    |
 |----------|---------|----------------------------------------------------------|

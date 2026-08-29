@@ -4,6 +4,7 @@
 //! while the engine lock is held, so it must be short, and it must be testable without a server.
 
 use kiln_db::QueryEngine;
+use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary, Stats,
@@ -68,15 +69,21 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
         }
 
         Request::Check { path } => (check(engine, path), Next::Continue),
-        Request::Run { path } => (run(engine, path), Next::Continue),
+        Request::Run { path, project_root } => (run(engine, path, project_root), Next::Continue),
         Request::NativeBuild {
             path,
             project_root,
             output,
             profile,
         } => (
-            match native_program(engine, &path) {
-                Ok(program) => native_build_program(program, path, project_root, output, profile),
+            match native_graph(engine, &path, &project_root) {
+                Ok(Some(graph)) => native_build_graph(graph, path, project_root, output, profile),
+                Ok(None) => match native_program(engine, &path) {
+                    Ok(program) => {
+                        native_build_program(program, path, project_root, output, profile)
+                    }
+                    Err(message) => Response::Error { message },
+                },
                 Err(message) => Response::Error { message },
             },
             Next::Continue,
@@ -86,8 +93,12 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             project_root,
             profile,
         } => (
-            match native_program(engine, &path) {
-                Ok(program) => native_run_program(program, path, project_root, profile),
+            match native_graph(engine, &path, &project_root) {
+                Ok(Some(graph)) => native_run_graph(graph, path, project_root, profile),
+                Ok(None) => match native_program(engine, &path) {
+                    Ok(program) => native_run_program(program, path, project_root, profile),
+                    Err(message) => Response::Error { message },
+                },
                 Err(message) => Response::Error { message },
             },
             Next::Continue,
@@ -163,11 +174,128 @@ fn check<E: QueryEngine>(engine: &mut E, path: String) -> Response {
     })
 }
 
-fn run<E: QueryEngine>(engine: &mut E, path: String) -> Response {
+fn run<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
     let file = match ensure_source(engine, &path) {
         Ok(file) => file,
         Err(message) => return Response::Error { message },
     };
+
+    // A daemon may still receive a relative, editor-only path (the historical single-file API
+    // allowed this). Use the graph whenever the entry exists on disk; retain the scalar fallback
+    // for an unsaved buffer so that existing `SetSource` + `Run` clients keep working.
+    let entry = std::fs::canonicalize(&path).or_else(|_| {
+        let candidate = Path::new(&project_root).join(&path);
+        std::fs::canonicalize(candidate)
+    });
+    if let Ok(entry) = entry {
+        // Direct daemon clients historically used relative paths. Alias an existing overlay to
+        // the graph's canonical spelling so a relative `SetSource` remains authoritative.
+        alias_source(engine, file, &entry);
+        return run_graph(engine, path, project_root, file, entry);
+    }
+
+    run_single(engine, path, file)
+}
+
+fn run_graph<E: QueryEngine>(
+    engine: &mut E,
+    path: String,
+    project_root: String,
+    file: kiln_db::FileId,
+    entry: PathBuf,
+) -> Response {
+    let graph = build_graph(engine, &entry, &project_root);
+
+    let mut host = kiln_runtime::CaptureHost::new();
+    let result = match graph {
+        Ok(graph) => graph.execute(&mut host, Default::default()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(execution) => Response::Ran(RunSummary {
+            path,
+            file: FileId(file.0),
+            succeeded: true,
+            stdout: host.into_stdout(),
+            value: Some(execution.value.to_display_string()),
+            instructions: execution.steps,
+            diagnostics: Vec::new(),
+        }),
+        Err(error) => Response::Ran(RunSummary {
+            path,
+            file: FileId(file.0),
+            succeeded: false,
+            stdout: host.into_stdout(),
+            value: None,
+            instructions: 0,
+            diagnostics: module_graph_diagnostics(error),
+        }),
+    }
+}
+
+fn build_graph<E: QueryEngine>(
+    engine: &mut E,
+    entry: &Path,
+    project_root: &str,
+) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    ModuleGraph::build_with_module_provider(entry, project_root, |module_path| {
+        let module_path_string = module_path.to_str().ok_or_else(|| {
+            kiln_module_graph::ModuleGraphError::FrontendPath {
+                path: module_path.to_path_buf(),
+            }
+        })?;
+        let module_file = engine.intern(module_path_string);
+        if engine.source(module_file).is_none() {
+            return Err(kiln_module_graph::ModuleGraphError::Source {
+                path: module_path.to_path_buf(),
+                message: "source is not synchronized".to_owned(),
+            });
+        }
+        engine.module_ir(module_file).map_err(|diagnostics| {
+            kiln_module_graph::ModuleGraphError::Compile {
+                path: module_path.to_path_buf(),
+                diagnostics,
+            }
+        })
+    })
+}
+
+fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<Diagnostic> {
+    match error {
+        kiln_module_graph::ModuleGraphError::Compile { diagnostics, .. } => diagnostics
+            .into_iter()
+            .map(|diagnostic| Diagnostic {
+                message: diagnostic.message,
+                start: diagnostic.span.map(|span| span.start),
+                end: diagnostic.span.map(|span| span.end),
+            })
+            .collect(),
+        error => vec![Diagnostic {
+            message: error.to_string(),
+            start: None,
+            end: None,
+        }],
+    }
+}
+
+pub(crate) fn native_graph<E: QueryEngine>(
+    engine: &mut E,
+    path: &str,
+    project_root: &str,
+) -> Result<Option<ModuleGraph>, String> {
+    let file = ensure_source(engine, path)?;
+    let entry = std::fs::canonicalize(path)
+        .or_else(|_| std::fs::canonicalize(Path::new(project_root).join(path)));
+    let Ok(entry) = entry else {
+        return Ok(None);
+    };
+    alias_source(engine, file, &entry);
+    build_graph(engine, &entry, project_root)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileId) -> Response {
     let program = match engine.ir(file) {
         Ok(program) => program,
         Err(diagnostics) => {
@@ -259,6 +387,48 @@ pub(crate) fn native_build_program(
     }
 }
 
+pub(crate) fn native_build_graph(
+    graph: ModuleGraph,
+    path: String,
+    project_root: String,
+    output: Option<String>,
+    profile: NativeProfile,
+) -> Response {
+    let project_root = PathBuf::from(project_root);
+    let output = output.map_or_else(
+        || default_native_output(&project_root, &path),
+        PathBuf::from,
+    );
+    if output == Path::new(&path)
+        || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&path))
+    {
+        return Response::Error {
+            message: format!("native output would overwrite source file {path}"),
+        };
+    }
+    let builder =
+        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
+            Ok(builder) => builder,
+            Err(error) => {
+                return Response::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+    match builder.build_graph(
+        &graph,
+        &kiln_native::NativeBuildOptions {
+            output,
+            profile: native_profile(profile),
+        },
+    ) {
+        Ok(report) => Response::NativeBuilt(native_summary(report)),
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
 pub(crate) fn native_run_program(
     program: kiln_ir::Program,
     path: String,
@@ -278,6 +448,42 @@ pub(crate) fn native_run_program(
         };
     match builder.run(
         &program,
+        &kiln_native::NativeBuildOptions {
+            output,
+            profile: native_profile(profile),
+        },
+    ) {
+        Ok(report) => Response::NativeRan(NativeRunSummary {
+            exit_code: report.exit_code,
+            stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
+            build: native_summary(report.build),
+        }),
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+pub(crate) fn native_run_graph(
+    graph: ModuleGraph,
+    path: String,
+    project_root: String,
+    profile: NativeProfile,
+) -> Response {
+    let project_root = PathBuf::from(project_root);
+    let output = default_native_output(&project_root, &path);
+    let builder =
+        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
+            Ok(builder) => builder,
+            Err(error) => {
+                return Response::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+    match builder.run_graph(
+        &graph,
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
@@ -375,6 +581,22 @@ fn ensure_source<E: QueryEngine>(engine: &mut E, path: &str) -> Result<kiln_db::
         engine.set_source(file, text);
     }
     Ok(file)
+}
+
+/// Keep a canonical graph key synchronized with a legacy relative-path overlay. Editors may
+/// resend the relative spelling after every edit, so only filling a missing canonical slot would
+/// leave the graph executing stale bytecode.
+fn alias_source<E: QueryEngine>(engine: &mut E, file: kiln_db::FileId, entry: &Path) {
+    let Some(entry_string) = entry.to_str() else {
+        return;
+    };
+    let canonical_file = engine.intern(entry_string);
+    let Some(source) = engine.source(file).map(str::to_owned) else {
+        return;
+    };
+    if engine.source(canonical_file) != Some(source.as_str()) {
+        engine.set_source(canonical_file, source);
+    }
 }
 
 fn stats<E: QueryEngine>(engine: &E) -> Stats {

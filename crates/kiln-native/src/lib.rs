@@ -5,6 +5,7 @@
 //! generated module C, application object, reusable runtime object, launcher object, executable.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -17,9 +18,10 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
-use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c};
+use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module};
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
+use kiln_module_graph::{ModuleGraph, ModuleGraphError};
 use kiln_native_runtime::{
     NATIVE_RUNTIME_VERSION, RuntimeSourceError, launcher_source, runtime_source,
 };
@@ -133,6 +135,7 @@ impl NativeRunReport {
 #[derive(Debug)]
 pub enum NativeError {
     Emit(EmitError),
+    Graph(ModuleGraphError),
     Runtime(RuntimeSourceError),
     Cache(CacheError),
     Toolchain(ToolchainError),
@@ -148,12 +151,16 @@ pub enum NativeError {
     WorkerPanic {
         stage: &'static str,
     },
+    SymbolCollision {
+        symbol: String,
+    },
 }
 
 impl fmt::Display for NativeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Emit(error) => write!(formatter, "native emission failed: {error}"),
+            Self::Graph(error) => write!(formatter, "native module graph failed: {error}"),
             Self::Runtime(error) => write!(formatter, "native runtime source failed: {error}"),
             Self::Cache(error) => write!(formatter, "native cache failed: {error}"),
             Self::Toolchain(error) => write!(formatter, "native toolchain failed: {error}"),
@@ -174,6 +181,9 @@ impl fmt::Display for NativeError {
                 )
             }
             Self::WorkerPanic { stage } => write!(formatter, "native {stage} worker panicked"),
+            Self::SymbolCollision { symbol } => {
+                write!(formatter, "native module symbol collision: {symbol}")
+            }
         }
     }
 }
@@ -182,11 +192,12 @@ impl std::error::Error for NativeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Emit(error) => Some(error),
+            Self::Graph(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Cache(error) => Some(error),
             Self::Toolchain(error) => Some(error),
             Self::Io { source, .. } | Self::Launch { source, .. } => Some(source),
-            Self::WorkerPanic { .. } => None,
+            Self::WorkerPanic { .. } | Self::SymbolCollision { .. } => None,
         }
     }
 }
@@ -194,6 +205,12 @@ impl std::error::Error for NativeError {
 impl From<EmitError> for NativeError {
     fn from(value: EmitError) -> Self {
         Self::Emit(value)
+    }
+}
+
+impl From<ModuleGraphError> for NativeError {
+    fn from(value: ModuleGraphError) -> Self {
+        Self::Graph(value)
     }
 }
 
@@ -464,6 +481,349 @@ impl NativeBuilder {
         })
     }
 
+    /// Build every module in an acyclic graph into one executable.
+    ///
+    /// Modules are emitted and compiled independently in the graph's dependency-first order.
+    /// The generated launcher then evaluates each module once, wiring each import to the
+    /// provider's ordered export array. Consequently, changing one module can reuse unchanged
+    /// sibling C and object artifacts from the same cache.
+    pub fn build_graph(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeBuildReport, NativeError> {
+        let total_started = Instant::now();
+        let emit_started = Instant::now();
+        let mut modules = Vec::with_capacity(graph.module_count());
+        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
+        for node in graph.modules() {
+            let emitted = emit_module(&node.program)?;
+            if !symbols.insert(emitted.symbol.clone()) {
+                return Err(NativeError::SymbolCollision {
+                    symbol: emitted.symbol,
+                });
+            }
+            modules.push((node, emitted));
+        }
+        let launcher = graph_launcher_source(graph, &modules)?;
+        let emit_elapsed = emit_started.elapsed();
+        let runtime = runtime_source();
+
+        let workspace = WorkDirectory::create()?;
+        let paths = GraphBuildPaths::new(workspace.path(), modules.len());
+        let identity = self.toolchain.identity().clone();
+        let profile = options.profile;
+        let module_abi = module_abi_identity();
+        let runtime_abi = runtime_abi_identity();
+        let target = target_identity(&identity);
+        let compiler = compiler_identity(&identity);
+
+        let mut module_sources = Vec::with_capacity(modules.len());
+        for (_, module) in &modules {
+            let source_key = key(
+                ArtifactKind::GeneratedC,
+                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                Backend::C,
+                &module_abi,
+                &target,
+                CacheProfile::Debug,
+                Digest::hash(b"deterministic-c11-module"),
+                [Digest::hash(module.source.as_bytes())],
+            );
+            module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
+        }
+        let runtime_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-runtime-source".to_owned()),
+            &runtime_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-runtime-c11"),
+            [Digest::hash(runtime.as_bytes())],
+        );
+        let (runtime_bytes, runtime_source_digest, _) =
+            self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
+        let launcher_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-graph-launcher-source".to_owned()),
+            &runtime_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-graph-launcher-c11"),
+            [
+                Digest::hash(launcher.as_bytes()),
+                graph_topology_digest(graph, &modules),
+            ],
+        );
+        let (launcher_bytes, launcher_source_digest, _launcher_source_hit) =
+            self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
+
+        let object_options =
+            Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
+        let compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            ..CompileOptions::default()
+        };
+        let compile_started = Instant::now();
+        let mut module_keys = Vec::with_capacity(modules.len());
+        for (index, (_, _module)) in modules.iter().enumerate() {
+            let (_, source_digest, source_hit) = &module_sources[index];
+            module_keys.push((
+                key(
+                    ArtifactKind::NativeObject,
+                    &compiler,
+                    Backend::C,
+                    &module_abi,
+                    &target,
+                    profile.cache(),
+                    object_options,
+                    [*source_digest],
+                ),
+                *source_hit,
+            ));
+        }
+        let runtime_key = key(
+            ArtifactKind::RuntimeLibrary,
+            &compiler,
+            Backend::Custom("native-runtime".to_owned()),
+            &runtime_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [runtime_source_digest],
+        );
+        let launcher_key = key(
+            ArtifactKind::NativeObject,
+            &compiler,
+            Backend::Custom("native-graph-launcher".to_owned()),
+            &runtime_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [launcher_source_digest],
+        );
+        let (module_objects, runtime_object, launcher_object) = std::thread::scope(|scope| {
+            let worker_count = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(modules.len().max(1));
+            let chunk_size = modules.len().div_ceil(worker_count).max(1);
+            let index_chunks = (0..modules.len())
+                .collect::<Vec<_>>()
+                .chunks(chunk_size)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            let module_keys_ref = &module_keys;
+            let module_sources_ref = &module_sources;
+            let module_c_ref = &paths.module_c;
+            let module_o_ref = &paths.module_o;
+            let compile_options_ref = &compile_options;
+            let runtime_c_ref = &paths.runtime_c;
+            let runtime_o_ref = &paths.runtime_o;
+            let launcher_c_ref = &paths.launcher_c;
+            let launcher_o_ref = &paths.launcher_o;
+            let module_handles = index_chunks
+                .into_iter()
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|&index| {
+                                let (object_key, source_hit) = &module_keys_ref[index];
+                                let result = self.object(
+                                    object_key,
+                                    &module_sources_ref[index].0,
+                                    &module_c_ref[index],
+                                    &module_o_ref[index],
+                                    compile_options_ref,
+                                );
+                                (
+                                    index,
+                                    result.map(|(object, digest, hit, _elapsed)| {
+                                        (object, digest, hit && *source_hit)
+                                    }),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let runtime = scope.spawn(move || {
+                self.object(
+                    &runtime_key,
+                    &runtime_bytes,
+                    runtime_c_ref,
+                    runtime_o_ref,
+                    compile_options_ref,
+                )
+            });
+            let launcher = scope.spawn(move || {
+                self.object(
+                    &launcher_key,
+                    &launcher_bytes,
+                    launcher_c_ref,
+                    launcher_o_ref,
+                    compile_options_ref,
+                )
+            });
+            let modules = (|| {
+                let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
+                for handle in module_handles {
+                    for (index, result) in join_worker(handle.join(), "module compile")? {
+                        modules[index] = Some(result?);
+                    }
+                }
+                modules
+                    .into_iter()
+                    .map(|result| {
+                        result.ok_or(NativeError::WorkerPanic {
+                            stage: "module compile",
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })();
+            let module_objects = modules?;
+            let runtime_object = join_worker(runtime.join(), "runtime compile")??;
+            let launcher_object = join_worker(launcher.join(), "launcher compile")??;
+            Ok::<_, NativeError>((module_objects, runtime_object, launcher_object))
+        })?;
+        let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object;
+        let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object;
+        let compile_elapsed =
+            if module_objects.iter().all(|(_, _, hit)| *hit) && runtime_hit && launcher_hit {
+                Duration::ZERO
+            } else {
+                compile_started.elapsed()
+            };
+
+        let link_options_digest =
+            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes());
+        let mut link_inputs = module_objects
+            .iter()
+            .map(|(_, digest, _)| *digest)
+            .collect::<Vec<_>>();
+        link_inputs.push(runtime_digest);
+        link_inputs.push(launcher_digest);
+        let executable_key = key(
+            ArtifactKind::LinkedArtifact,
+            &compiler,
+            Backend::C,
+            &runtime_abi,
+            &target,
+            profile.cache(),
+            link_options_digest,
+            link_inputs,
+        );
+        let (executable, executable_digest, executable_hit, link_elapsed) = match self
+            .cache
+            .lookup(&executable_key)?
+        {
+            Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
+            Lookup::Miss => {
+                let mut objects = Vec::with_capacity(modules.len() + 2);
+                for (index, (object, _, _)) in module_objects.iter().enumerate() {
+                    materialize(&paths.module_o[index], object, false)?;
+                    objects.push(paths.module_o[index].clone());
+                }
+                materialize(&paths.runtime_o, &runtime_object, false)?;
+                materialize(&paths.launcher_o, &launcher_object, false)?;
+                objects.push(paths.runtime_o.clone());
+                objects.push(paths.launcher_o.clone());
+                let mut link_options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    link_options.libraries.push("m".to_owned());
+                }
+                let report =
+                    self.toolchain
+                        .link_executable(&objects, &paths.executable, &link_options)?;
+                let bytes = read(&paths.executable, "read linked executable")?;
+                let digest = Digest::hash(&bytes);
+                self.cache.put(&executable_key, &bytes)?;
+                (bytes, digest, false, report.elapsed)
+            }
+        };
+        debug_assert_eq!(executable_digest, Digest::hash(&executable));
+        materialize(&options.output, &executable, true)?;
+
+        let entry_symbol = modules
+            .iter()
+            .find(|(node, _)| node.path == graph.entry())
+            .map(|(_, module)| module.symbol.clone())
+            .ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: graph.entry().to_path_buf(),
+                })
+            })?;
+        Ok(NativeBuildReport {
+            output: options.output.clone(),
+            module_symbol: entry_symbol,
+            tool: identity,
+            cache_hits: CacheHits {
+                generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
+                application_object: module_objects.iter().all(|(_, _, hit)| *hit),
+                runtime_object: runtime_hit,
+                launcher_object: launcher_hit,
+                executable: executable_hit,
+            },
+            sizes: ArtifactSizes {
+                generated_c: module_sources
+                    .iter()
+                    .map(|(bytes, _, _)| bytes.len() as u64)
+                    .sum(),
+                application_object: module_objects
+                    .iter()
+                    .map(|(bytes, _, _)| bytes.len() as u64)
+                    .sum(),
+                runtime_object: runtime_object.len() as u64,
+                launcher_object: launcher_object.len() as u64,
+                executable: executable.len() as u64,
+            },
+            timings: BuildTimings {
+                emit: emit_elapsed,
+                compile: compile_elapsed,
+                link: link_elapsed,
+                total: total_started.elapsed(),
+            },
+        })
+    }
+
+    /// Build and execute a module graph with captured output.
+    pub fn run_graph(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeRunReport, NativeError> {
+        let workspace = WorkDirectory::create()?;
+        let private_output = workspace.path().join(if cfg!(windows) {
+            "run-graph.exe"
+        } else {
+            "run-graph"
+        });
+        let mut private_options = options.clone();
+        private_options.output = private_output.clone();
+        let mut build = self.build_graph(graph, &private_options)?;
+        let output =
+            Command::new(&private_output)
+                .output()
+                .map_err(|source| NativeError::Launch {
+                    executable: private_output.clone(),
+                    source,
+                })?;
+        let executable = read(&private_output, "read private native executable")?;
+        materialize(&options.output, &executable, true)?;
+        build.output = options.output.clone();
+        Ok(NativeRunReport {
+            build,
+            exit_code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
     /// Build and execute one native module with captured output.
     pub fn run(
         &self,
@@ -574,6 +934,209 @@ fn target_identity(identity: &ToolIdentity) -> String {
 
 fn compiler_identity(identity: &ToolIdentity) -> String {
     identity.stable_key()
+}
+
+fn graph_topology_digest(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Digest {
+    let mut bytes = Vec::new();
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let entry_index = modules
+        .iter()
+        .position(|(node, _)| node.path == graph.entry())
+        .unwrap_or(usize::MAX);
+    bytes.extend_from_slice(entry_index.to_string().as_bytes());
+    bytes.push(0);
+    for (node, module) in modules {
+        bytes.extend_from_slice(module.symbol.as_bytes());
+        bytes.push(0);
+        for dependency in &node.dependencies {
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for import in &node.program.imports {
+            bytes.extend_from_slice(import.source.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.imported.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.local.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.local_slot.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for export in &node.program.exports {
+            bytes.extend_from_slice(export.exported.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(export.local_slot.to_string().as_bytes());
+            bytes.push(0);
+        }
+    }
+    Digest::hash(&bytes)
+}
+
+fn graph_launcher_source(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Result<String, NativeError> {
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let mut output = String::with_capacity(2048 + modules.len() * 512);
+    output.push_str(
+        r#"/* Kiln native graph launcher. */
+#include <locale.h>
+#include <stddef.h>
+#include <stdint.h>
+
+enum kiln_value_tag {
+    KILN_VALUE_UNDEFINED = 0,
+    KILN_VALUE_NULL = 1,
+    KILN_VALUE_BOOLEAN = 2,
+    KILN_VALUE_NUMBER = 3,
+    KILN_VALUE_STRING = 4
+};
+
+typedef struct kiln_value {
+    uint32_t tag;
+    uint32_t reserved;
+    uint64_t bits;
+    const char *ptr;
+    size_t len;
+} kiln_value;
+
+typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
+                                 const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_host {
+    kiln_host_call_fn call;
+    void *context;
+} kiln_host;
+
+extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
+                              const kiln_value *arguments, kiln_value *result);
+"#,
+    );
+    for (_, module) in modules {
+        writeln!(
+            output,
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            module.symbol
+        )
+        .unwrap();
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if !node.program.exports.is_empty() {
+            writeln!(
+                output,
+                "static kiln_value kiln_exports_{index}[{}];",
+                node.program.exports.len()
+            )
+            .unwrap();
+        }
+        if !node.program.imports.is_empty() {
+            writeln!(
+                output,
+                "static kiln_value kiln_imports_{index}[{}];",
+                node.program.imports.len()
+            )
+            .unwrap();
+        }
+    }
+    output.push_str(
+        r#"
+int main(void) {
+    kiln_host host;
+    kiln_value result;
+    int status;
+"#,
+    );
+    output.push_str(
+        r#"    if (setlocale(LC_NUMERIC, "C") == NULL) {
+        return 1;
+    }
+    host.call = kiln_cli_host_call;
+    host.context = NULL;
+"#,
+    );
+    for (index, (node, module)) in modules.iter().enumerate() {
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            let dependency = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .ok_or_else(|| {
+                    NativeError::Graph(ModuleGraphError::UnresolvedImport {
+                        importer: node.path.clone(),
+                        source: import.source.clone(),
+                    })
+                })?;
+            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: dependency.target.clone(),
+                })
+            })?;
+            let export_index = modules[provider_index]
+                .0
+                .program
+                .exports
+                .iter()
+                .position(|export| export.exported == import.imported)
+                .ok_or_else(|| {
+                    NativeError::Graph(ModuleGraphError::MissingExport {
+                        importer: node.path.clone(),
+                        provider: dependency.target.clone(),
+                        name: import.imported.clone(),
+                    })
+                })?;
+            writeln!(
+                output,
+                "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
+            )
+            .unwrap();
+        }
+        let imports = if node.program.imports.is_empty() {
+            "NULL".to_owned()
+        } else {
+            format!("kiln_imports_{index}")
+        };
+        let exports = if node.program.exports.is_empty() {
+            "NULL".to_owned()
+        } else {
+            format!("kiln_exports_{index}")
+        };
+        writeln!(
+            output,
+            "    status = {}(&host, &result, {}, (size_t){}, {}, (size_t){});",
+            module.symbol,
+            imports,
+            node.program.imports.len(),
+            exports,
+            node.program.exports.len()
+        )
+        .unwrap();
+        output.push_str("    if (status != 0) return 1;\n");
+    }
+    output.push_str("    return 0;\n}\n");
+    // Keep this check in the launcher generation path so an unexpectedly empty graph fails as a
+    // structured graph error instead of producing a linker error with little context.
+    if modules.is_empty() {
+        return Err(NativeError::Graph(
+            ModuleGraphError::InternalMissingModule {
+                path: graph.entry().to_path_buf(),
+            },
+        ));
+    }
+    Ok(output)
 }
 
 fn join_worker<T>(result: std::thread::Result<T>, stage: &'static str) -> Result<T, NativeError> {
@@ -732,6 +1295,40 @@ struct BuildPaths {
     executable: PathBuf,
 }
 
+struct GraphBuildPaths {
+    module_c: Vec<PathBuf>,
+    module_o: Vec<PathBuf>,
+    runtime_c: PathBuf,
+    runtime_o: PathBuf,
+    launcher_c: PathBuf,
+    launcher_o: PathBuf,
+    executable: PathBuf,
+}
+
+impl GraphBuildPaths {
+    fn new(root: &Path, module_count: usize) -> Self {
+        let mut module_c = Vec::with_capacity(module_count);
+        let mut module_o = Vec::with_capacity(module_count);
+        for index in 0..module_count {
+            module_c.push(root.join(format!("module-{index}.c")));
+            module_o.push(root.join(format!("module-{index}.o")));
+        }
+        Self {
+            module_c,
+            module_o,
+            runtime_c: root.join("runtime.c"),
+            runtime_o: root.join("runtime.o"),
+            launcher_c: root.join("launcher.c"),
+            launcher_o: root.join("launcher.o"),
+            executable: root.join(if cfg!(windows) {
+                "program.exe"
+            } else {
+                "program"
+            }),
+        }
+    }
+}
+
 impl BuildPaths {
     fn new(root: &Path) -> Self {
         Self {
@@ -753,7 +1350,10 @@ impl BuildPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_ir::{BYTECODE_VERSION, Constant, HostOp, Instruction};
+    use kiln_ir::{
+        BYTECODE_VERSION, Constant, ExportBinding, HostOp, ImportBinding, Instruction,
+        ModuleProgram,
+    };
     use std::sync::{Arc, Barrier};
 
     #[test]
@@ -911,6 +1511,121 @@ mod tests {
             assert_eq!(native.stdout, expected, "fixture {name}");
             assert!(native.stderr.is_empty(), "fixture {name}");
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_build_reuses_sibling_objects_across_different_roots() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native graph integration: no C compiler found");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "kiln-native-graph-test-{}-{}",
+            std::process::id(),
+            WORK_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let first_project = root.join("first");
+        let second_project = root.join("second");
+        for project in [&first_project, &second_project] {
+            fs::create_dir_all(project).expect("create graph project");
+            fs::write(project.join("main.js"), "").expect("write graph entry");
+            fs::write(project.join("dep.js"), "").expect("write graph dependency");
+        }
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(42.0_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Return,
+                ],
+                local_count: 1,
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let make_graph = |project: &Path| {
+            let entry_path = project.join("main.js");
+            let dependency_path =
+                fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
+            let dependency = dependency.clone();
+            let entry = entry.clone();
+            ModuleGraph::build_with_modules(entry_path, project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct graph")
+        };
+        let first_graph = make_graph(&first_project);
+        let second_graph = make_graph(&second_project);
+        let first_modules = first_graph
+            .modules()
+            .map(|node| (node, emit_module(&node.program).expect("module emits")))
+            .collect::<Vec<_>>();
+        let launcher = graph_launcher_source(&first_graph, &first_modules).expect("launcher emits");
+        let main = launcher.find("int main(void)").expect("launcher has main");
+        assert!(launcher[..main].contains("static kiln_value kiln_exports_"));
+        assert!(launcher[..main].contains("static kiln_value kiln_imports_"));
+        assert!(!launcher[main..].contains("kiln_value kiln_exports_"));
+        assert!(!launcher[main..].contains("kiln_value kiln_imports_"));
+        let builder = NativeBuilder::new(ArtifactCache::new(root.join("cache")), toolchain);
+        let first = builder
+            .build_graph(
+                &first_graph,
+                &NativeBuildOptions {
+                    output: root.join("first-program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("first graph build succeeds");
+        assert!(!first.cache_hits.application_object);
+        let second = builder
+            .run_graph(
+                &second_graph,
+                &NativeBuildOptions {
+                    output: root.join("second-program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("second graph build succeeds");
+        assert!(second.build.cache_hits.generated_c);
+        assert!(second.build.cache_hits.application_object);
+        assert!(second.build.cache_hits.launcher_object);
+        assert!(second.build.cache_hits.executable);
+        assert_eq!(second.stdout, b"42\n");
         let _ = fs::remove_dir_all(root);
     }
 

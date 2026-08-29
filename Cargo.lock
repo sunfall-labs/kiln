@@ -215,6 +215,7 @@ dependencies = [
  "kiln-db",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-module-graph",
  "kiln-native",
  "kiln-proto",
  "kiln-runtime",
@@ -257,6 +258,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-module-graph"
+version = "0.0.0"
+dependencies = [
+ "frontend-oxc",
+ "kiln-hir",
+ "kiln-host-abi",
+ "kiln-interpreter",
+ "kiln-ir",
+ "kiln-module-resolver",
+]
+
+[[package]]
 name = "kiln-module-resolver"
 version = "0.0.0"
 
@@ -269,6 +282,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-module-graph",
  "kiln-native-runtime",
  "kiln-native-toolchain",
  "kiln-runtime",

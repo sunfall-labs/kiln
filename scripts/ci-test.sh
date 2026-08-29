@@ -51,3 +51,30 @@ if [[ $KILN_CI_NATIVE_STDOUT != "$KILN_CI_INTERPRETER_STDOUT" ]]; then
 	printf 'interpreter: %s\nnative: %s\n' "$KILN_CI_INTERPRETER_STDOUT" "$KILN_CI_NATIVE_STDOUT" >&2
 	exit 1
 fi
+
+# Exercise the public graph path as well: exact relative resolution, dependency-first side
+# effects, an imported scalar value, per-module native artifacts, and interpreter/native
+# equivalence all have to survive the CLI/daemon boundary.
+KILN_CI_MODULE_OUTPUT="target/kiln-ci-native-modules"
+cargo run -p kiln-cli --locked -- --one-shot build examples/modules/main.ts \
+	--output "$KILN_CI_MODULE_OUTPUT" >/dev/null
+KILN_CI_MODULE_WARM_BUILD="$(cargo run -p kiln-cli --locked -- --one-shot build \
+	examples/modules/main.ts --output "$KILN_CI_MODULE_OUTPUT")"
+KILN_CI_MODULE_HIT_COUNT="$(printf '%s\n' "$KILN_CI_MODULE_WARM_BUILD" | grep -c '(hit)')"
+if [[ $KILN_CI_MODULE_HIT_COUNT -ne 5 ]]; then
+	echo "expected five native graph cache hits on the warm build" >&2
+	printf '%s\n' "$KILN_CI_MODULE_WARM_BUILD" >&2
+	exit 1
+fi
+KILN_CI_MODULE_INTERPRETER_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/main.ts)"
+KILN_CI_MODULE_NATIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/main.ts --native)"
+KILN_CI_MODULE_EXPECTED=$'dependency\n42'
+if [[ $KILN_CI_MODULE_INTERPRETER_STDOUT != "$KILN_CI_MODULE_EXPECTED" || \
+	$KILN_CI_MODULE_NATIVE_STDOUT != "$KILN_CI_MODULE_EXPECTED" ]]; then
+	echo "linked module output is wrong or differs between execution engines" >&2
+	printf 'expected: %s\ninterpreter: %s\nnative: %s\n' "$KILN_CI_MODULE_EXPECTED" \
+		"$KILN_CI_MODULE_INTERPRETER_STDOUT" "$KILN_CI_MODULE_NATIVE_STDOUT" >&2
+	exit 1
+fi

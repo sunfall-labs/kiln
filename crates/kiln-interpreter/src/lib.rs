@@ -8,7 +8,7 @@
 use std::fmt;
 
 use kiln_host_abi::{HostOps, HostValue};
-use kiln_ir::{BinaryOp, Constant, Instruction, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
 
 /// A JavaScript scalar value represented by the interpreter.
 #[derive(Clone, Debug, PartialEq)]
@@ -117,8 +117,23 @@ pub struct ExecutionResult {
     pub steps: u64,
 }
 
+/// One value published by a completed module evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModuleExportValue {
+    pub name: String,
+    pub value: Value,
+}
+
+/// A completed module invocation, including the values its local export slots hold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModuleExecutionResult {
+    pub execution: ExecutionResult,
+    pub exports: Vec<ModuleExportValue>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExecutionError {
+    ImportCountMismatch { expected: usize, actual: usize },
     StepLimitExceeded { steps: u64, limit: u64 },
     InvalidInstructionPointer { instruction: usize },
     ConstantOutOfBounds { index: usize },
@@ -131,6 +146,10 @@ pub enum ExecutionError {
 impl fmt::Display for ExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ImportCountMismatch { expected, actual } => write!(
+                formatter,
+                "module expected {expected} imported values but received {actual}"
+            ),
             Self::StepLimitExceeded { steps, limit } => {
                 write!(
                     formatter,
@@ -185,6 +204,58 @@ pub fn execute<H: HostOps + ?Sized>(
         limits,
     };
     vm.run()
+}
+
+/// Execute one linkage-aware module after its acyclic dependencies have completed.
+///
+/// `import_values` is ordered exactly like [`ModuleProgram::imports`]. Each value is installed in
+/// the compiler-assigned local slot before the first bytecode instruction executes.
+pub fn execute_module<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    if import_values.len() != module.imports.len() {
+        return Err(ExecutionError::ImportCountMismatch {
+            expected: module.imports.len(),
+            actual: import_values.len(),
+        });
+    }
+
+    let mut locals = vec![Value::Undefined; module.program.local_count as usize];
+    for (binding, value) in module.imports.iter().zip(import_values) {
+        let Some(local) = locals.get_mut(binding.local_slot as usize) else {
+            return Err(ExecutionError::LocalOutOfBounds {
+                index: binding.local_slot as usize,
+            });
+        };
+        *local = value.clone();
+    }
+
+    let mut vm = Vm {
+        program: &module.program,
+        host,
+        stack: Vec::new(),
+        locals,
+        instruction: 0,
+        steps: 0,
+        limits,
+    };
+    let execution = vm.run()?;
+    let mut exports = Vec::with_capacity(module.exports.len());
+    for binding in &module.exports {
+        let Some(value) = vm.locals.get(binding.local_slot as usize) else {
+            return Err(ExecutionError::LocalOutOfBounds {
+                index: binding.local_slot as usize,
+            });
+        };
+        exports.push(ModuleExportValue {
+            name: binding.exported.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(ModuleExecutionResult { execution, exports })
 }
 
 struct Vm<'program, 'host, H: HostOps + ?Sized> {
@@ -588,5 +659,47 @@ mod tests {
             error,
             ExecutionError::StepLimitExceeded { steps: 3, limit: 3 }
         );
+    }
+
+    #[test]
+    fn module_execution_initializes_import_slots_and_publishes_exports() {
+        let module = ModuleProgram {
+            program: Program {
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: vec![number(2.0)],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(BinaryOp::Multiply),
+                    Instruction::StoreLocal(1),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 2,
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![kiln_ir::ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "input".into(),
+                local_slot: 0,
+            }],
+            exports: vec![kiln_ir::ExportBinding {
+                exported: "answer".into(),
+                local_slot: 1,
+            }],
+        };
+        let mut host = TestHost { calls: Vec::new() };
+
+        let result = execute_module(
+            &module,
+            &[Value::Number(21.0)],
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .expect("module executes");
+
+        assert_eq!(result.exports[0].name, "answer");
+        assert_eq!(result.exports[0].value, Value::Number(42.0));
     }
 }

@@ -16,6 +16,8 @@ kiln-hir = { path = "crates/kiln-hir" }
 kiln-host-abi = { path = "crates/kiln-host-abi" }
 kiln-ir = { path = "crates/kiln-ir" }
 kiln-interpreter = { path = "crates/kiln-interpreter" }
+kiln-module-graph = { path = "crates/kiln-module-graph" }
+kiln-module-resolver = { path = "crates/kiln-module-resolver" }
 kiln-native = { path = "crates/kiln-native" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-runtime = { path = "crates/kiln-runtime" }

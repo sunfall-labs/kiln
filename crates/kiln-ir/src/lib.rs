@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, Expression, ExpressionKind, Literal, LogicalOperator,
-    Module, Span, Statement, StatementKind, UnaryOperator, VariableKind,
+    AssignmentOperator, BinaryOperator, ExportName, ExportOrigin, Expression, ExpressionKind,
+    ImportName, Literal, LogicalOperator, Module, Span, Statement, StatementKind, UnaryOperator,
+    VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -87,6 +88,34 @@ pub struct Program {
     pub local_count: u32,
 }
 
+/// A runtime import lowered to a local slot. The graph linker initializes the slot from the
+/// provider module before evaluation; cyclic graphs are rejected by this first implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportBinding {
+    pub source: String,
+    pub imported: String,
+    pub local: String,
+    pub local_slot: u32,
+}
+
+/// A provider-visible name backed by one module-scope local slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportBinding {
+    pub exported: String,
+    pub local_slot: u32,
+}
+
+/// Linkage-aware bytecode for one module. [`Program`] stays parser- and graph-independent so the
+/// existing single-file interpreter and native backend APIs remain stable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleProgram {
+    pub program: Program,
+    /// Runtime evaluation dependencies, including side-effect-only imports, in source order.
+    pub dependencies: Vec<String>,
+    pub imports: Vec<ImportBinding>,
+    pub exports: Vec<ExportBinding>,
+}
+
 /// A source-located compiler failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileDiagnostic {
@@ -96,28 +125,12 @@ pub struct CompileDiagnostic {
 
 /// Compile owned HIR into stack bytecode.
 pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
-    let mut compiler = Compiler {
-        constants: Vec::new(),
-        code: Vec::new(),
-        scopes: vec![HashMap::new()],
-        local_count: 0,
-        diagnostics: Vec::new(),
-    };
+    let mut compiler = Compiler::new(module);
 
-    if module.panicked {
-        compiler.error(None, "frontend could not produce an executable module");
-    }
-    for diagnostic in &module.diagnostics {
-        compiler.diagnostics.push(CompileDiagnostic {
-            message: diagnostic.message.clone(),
-            span: diagnostic.span,
-        });
-    }
-    if !module.requested_modules.is_empty() {
-        for requested in &module.requested_modules {
-            let span = requested.occurrences.first().copied();
+    for requested in module.runtime_requested_modules() {
+        if let Some(occurrence) = requested.occurrences.first() {
             compiler.error(
-                span,
+                Some(occurrence.specifier_span),
                 format!(
                     "module dependency `{}` is not supported by this execution backend",
                     requested.specifier
@@ -126,36 +139,122 @@ pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
         }
     }
     for export in &module.exports {
-        if let Some(source) = &export.source {
-            compiler.error(
+        if export.type_only {
+            continue;
+        }
+        match &export.origin {
+            ExportOrigin::ReExport { source, .. }
+            | ExportOrigin::Star { source }
+            | ExportOrigin::NamespaceReExport { source } => compiler.error(
                 Some(export.span),
                 format!("re-export from `{source}` is not supported by this execution backend"),
-            );
+            ),
+            ExportOrigin::Unsupported { description, .. } => compiler.error(
+                Some(export.span),
+                format!("unsupported export: {description}"),
+            ),
+            ExportOrigin::Local { .. } | ExportOrigin::DefaultExpression => {}
         }
     }
 
-    for statement in &module.body {
-        compiler.statement(statement);
-    }
-    compiler.push_constant(Constant::Undefined);
-    compiler.code.push(Instruction::Return);
+    compiler.compile_body(module);
+    compiler.finish()
+}
 
-    if compiler.diagnostics.is_empty() {
-        Ok(Program {
-            version: BYTECODE_VERSION,
-            constants: compiler.constants,
-            code: compiler.code,
-            local_count: compiler.local_count,
-        })
-    } else {
-        Err(compiler.diagnostics)
+/// Compile one module while preserving the scalar linkage needed by a graph linker.
+///
+/// Named and default value imports are supported. Namespace imports, star/namespace re-exports,
+/// indirect re-exports, default expression exports, and cycles remain explicit unsupported forms.
+pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
+    let mut compiler = Compiler::new(module);
+    let mut imports = Vec::new();
+
+    for import in module.imports.iter().filter(|import| !import.type_only) {
+        let imported = match &import.imported {
+            ImportName::Name(name) => name.clone(),
+            ImportName::Default => "default".to_owned(),
+            ImportName::Namespace => {
+                compiler.error(
+                    Some(import.span),
+                    format!("namespace import `{}` is not supported yet", import.local),
+                );
+                continue;
+            }
+        };
+        if let Some(local_slot) = compiler.declare_import(&import.local, import.span) {
+            imports.push(ImportBinding {
+                source: import.source.clone(),
+                imported,
+                local: import.local.clone(),
+                local_slot,
+            });
+        }
     }
+
+    compiler.compile_body(module);
+
+    let mut exports = Vec::new();
+    for export in module.exports.iter().filter(|export| !export.type_only) {
+        let Some(exported) = export.exported.as_ref().map(ExportName::as_str) else {
+            if !matches!(export.origin, ExportOrigin::Star { .. }) {
+                compiler.error(Some(export.span), "runtime export has no exported name");
+            }
+            continue;
+        };
+        match &export.origin {
+            ExportOrigin::Local { local } => match compiler.resolve_module_local(local) {
+                Some(local_slot) => exports.push(ExportBinding {
+                    exported: exported.to_owned(),
+                    local_slot,
+                }),
+                None => compiler.error(
+                    Some(export.span),
+                    format!("export `{exported}` refers to missing local `{local}`"),
+                ),
+            },
+            ExportOrigin::DefaultExpression => compiler.error(
+                Some(export.span),
+                "default expression exports are not supported yet",
+            ),
+            ExportOrigin::ReExport { source, .. } => compiler.error(
+                Some(export.span),
+                format!("re-export from `{source}` is not supported yet"),
+            ),
+            ExportOrigin::Star { source } => compiler.error(
+                Some(export.span),
+                format!("star re-export from `{source}` is not supported yet"),
+            ),
+            ExportOrigin::NamespaceReExport { source } => compiler.error(
+                Some(export.span),
+                format!("namespace re-export from `{source}` is not supported yet"),
+            ),
+            ExportOrigin::Unsupported { description, .. } => compiler.error(
+                Some(export.span),
+                format!("unsupported export: {description}"),
+            ),
+        }
+    }
+
+    let mut dependencies = Vec::new();
+    for request in module.runtime_requested_modules() {
+        if !dependencies.contains(&request.specifier) {
+            dependencies.push(request.specifier.clone());
+        }
+    }
+
+    compiler.finish().map(|program| ModuleProgram {
+        program,
+        dependencies,
+        imports,
+        exports,
+    })
 }
 
 #[derive(Clone, Copy)]
 struct Local {
     slot: u32,
     kind: VariableKind,
+    imported: bool,
 }
 
 struct Compiler {
@@ -170,6 +269,69 @@ struct Compiler {
 }
 
 impl Compiler {
+    fn new(module: &Module) -> Self {
+        let mut compiler = Self {
+            constants: Vec::new(),
+            code: Vec::new(),
+            scopes: vec![HashMap::new()],
+            local_count: 0,
+            diagnostics: Vec::new(),
+        };
+        if module.panicked {
+            compiler.error(None, "frontend could not produce an executable module");
+        }
+        for diagnostic in &module.diagnostics {
+            compiler.diagnostics.push(CompileDiagnostic {
+                message: diagnostic.message.clone(),
+                span: diagnostic.span,
+            });
+        }
+        compiler
+    }
+
+    fn compile_body(&mut self, module: &Module) {
+        for statement in &module.body {
+            self.statement(statement);
+        }
+        self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::Return);
+    }
+
+    fn finish(self) -> Result<Program, Vec<CompileDiagnostic>> {
+        if self.diagnostics.is_empty() {
+            Ok(Program {
+                version: BYTECODE_VERSION,
+                constants: self.constants,
+                code: self.code,
+                local_count: self.local_count,
+            })
+        } else {
+            Err(self.diagnostics)
+        }
+    }
+
+    fn declare_import(&mut self, name: &str, span: Span) -> Option<u32> {
+        if self.scopes[0].contains_key(name) {
+            self.error(Some(span), format!("duplicate module binding `{name}`"));
+            return None;
+        }
+        let slot = self.local_count;
+        self.local_count += 1;
+        self.scopes[0].insert(
+            name.to_owned(),
+            Local {
+                slot,
+                kind: VariableKind::Const,
+                imported: true,
+            },
+        );
+        Some(slot)
+    }
+
+    fn resolve_module_local(&self, name: &str) -> Option<u32> {
+        self.scopes[0].get(name).map(|local| local.slot)
+    }
+
     fn error(&mut self, span: Option<Span>, message: impl Into<String>) {
         self.diagnostics.push(CompileDiagnostic {
             message: message.into(),
@@ -207,6 +369,10 @@ impl Compiler {
             } => self.if_statement(test, consequent, alternate.as_deref()),
             StatementKind::While { test, body } => self.while_statement(test, body),
             StatementKind::Empty => {}
+            StatementKind::ExportDefault(_) => self.error(
+                Some(statement.span),
+                "default expression exports are not supported yet",
+            ),
             StatementKind::Unsupported { feature } => self.error(
                 Some(statement.span),
                 format!("unsupported statement: {feature}"),
@@ -262,7 +428,14 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
-        self.scopes[scope_index].insert(name.to_owned(), Local { slot, kind });
+        self.scopes[scope_index].insert(
+            name.to_owned(),
+            Local {
+                slot,
+                kind,
+                imported: false,
+            },
+        );
         if let Some(initializer) = initializer {
             self.expression(initializer);
         } else {
@@ -409,7 +582,10 @@ impl Compiler {
         value: &Expression,
         span: Span,
     ) {
-        let Some((slot, kind)) = self.resolve(target).map(|local| (local.slot, local.kind)) else {
+        let Some((slot, kind, imported)) = self
+            .resolve(target)
+            .map(|local| (local.slot, local.kind, local.imported))
+        else {
             self.error(
                 Some(span),
                 format!("unresolved assignment target `{target}`"),
@@ -417,7 +593,12 @@ impl Compiler {
             self.push_constant(Constant::Undefined);
             return;
         };
-        if kind == VariableKind::Const {
+        if imported {
+            self.error(
+                Some(span),
+                format!("assignment to imported binding `{target}` is not allowed"),
+            );
+        } else if kind == VariableKind::Const {
             self.error(
                 Some(span),
                 format!("assignment to const local `{target}` is not supported"),
@@ -551,6 +732,7 @@ mod tests {
             items: Vec::new(),
             body,
             requested_modules: Vec::new(),
+            imports: Vec::new(),
             exports: Vec::new(),
             diagnostics: Vec::new(),
             panicked: false,
@@ -714,10 +896,101 @@ mod tests {
         let mut module = module(Vec::new());
         module.requested_modules.push(kiln_hir::RequestedModule {
             specifier: "./dep.js".into(),
-            occurrences: vec![Span::new(0, 9)],
+            occurrences: vec![kiln_hir::ModuleRequestOccurrence {
+                statement_span: Span::new(0, 9),
+                specifier_span: Span::new(0, 9),
+                type_only: false,
+                kind: kiln_hir::ModuleRequestKind::Import,
+            }],
         });
         let diagnostics = compile(&module).expect_err("dependencies are not executable yet");
         assert!(diagnostics[0].message.contains("module dependency"));
         assert_eq!(diagnostics[0].span, Some(Span::new(0, 9)));
+    }
+
+    #[test]
+    fn linkage_compilation_maps_named_imports_and_local_exports_to_slots() {
+        let mut module = module(vec![Statement {
+            kind: StatementKind::Variable {
+                kind: VariableKind::Const,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    name: "answer".into(),
+                    initializer: Some(Expression {
+                        kind: ExpressionKind::Binary {
+                            operator: BinaryOperator::Multiply,
+                            left: Box::new(identifier("input")),
+                            right: Box::new(number(2.0)),
+                        },
+                        span: Span::default(),
+                    }),
+                    span: Span::default(),
+                }],
+            },
+            span: Span::default(),
+        }]);
+        module.requested_modules.push(kiln_hir::RequestedModule {
+            specifier: "./dep.js".into(),
+            occurrences: vec![kiln_hir::ModuleRequestOccurrence {
+                statement_span: Span::new(0, 40),
+                specifier_span: Span::new(23, 33),
+                type_only: false,
+                kind: kiln_hir::ModuleRequestKind::Import,
+            }],
+        });
+        module.imports.push(kiln_hir::Import {
+            source: "./dep.js".into(),
+            imported: ImportName::Name("value".into()),
+            local: "input".into(),
+            type_only: false,
+            span: Span::new(9, 14),
+            statement_span: Span::new(0, 40),
+        });
+        module.exports.push(kiln_hir::Export {
+            exported: Some(ExportName::Name("answer".into())),
+            origin: ExportOrigin::Local {
+                local: "answer".into(),
+            },
+            type_only: false,
+            span: Span::default(),
+            statement_span: Span::default(),
+        });
+
+        let linked = compile_module(&module).expect("named scalar linkage compiles");
+        assert_eq!(linked.dependencies, ["./dep.js"]);
+        assert_eq!(linked.imports[0].imported, "value");
+        assert_eq!(linked.imports[0].local_slot, 0);
+        assert_eq!(linked.exports[0].exported, "answer");
+        assert_eq!(linked.exports[0].local_slot, 1);
+        assert!(linked.program.code.contains(&Instruction::LoadLocal(0)));
+    }
+
+    #[test]
+    fn linkage_compilation_rejects_assignment_to_import() {
+        let mut module = module(vec![Statement {
+            kind: StatementKind::Expression(Expression {
+                kind: ExpressionKind::Assignment {
+                    operator: AssignmentOperator::Assign,
+                    target: "input".into(),
+                    value: Box::new(number(1.0)),
+                },
+                span: Span::default(),
+            }),
+            span: Span::default(),
+        }]);
+        module.imports.push(kiln_hir::Import {
+            source: "./dep.js".into(),
+            imported: ImportName::Name("value".into()),
+            local: "input".into(),
+            type_only: false,
+            span: Span::default(),
+            statement_span: Span::default(),
+        });
+
+        let diagnostics = compile_module(&module).expect_err("imports are immutable bindings");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("imported binding"))
+        );
     }
 }

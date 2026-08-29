@@ -54,6 +54,7 @@ pub struct Module {
     /// Executable, TypeScript-erased module body.
     pub body: Vec<Statement>,
     pub requested_modules: Vec<RequestedModule>,
+    pub imports: Vec<Import>,
     pub exports: Vec<Export>,
     pub diagnostics: Vec<Diagnostic>,
     /// Oxc could not recover far enough to produce a meaningful program.
@@ -85,6 +86,10 @@ pub enum StatementKind {
         body: Box<Statement>,
     },
     Empty,
+    /// A default expression export has runtime work and an exported binding. Keeping it distinct
+    /// prevents later passes from accidentally executing and discarding the value as though it
+    /// were an ordinary expression statement.
+    ExportDefault(Expression),
     /// Syntactically valid JavaScript that this HIR version cannot execute yet.
     Unsupported {
         feature: String,
@@ -213,8 +218,52 @@ impl Module {
         self.exports
             .iter()
             .filter(|export| !export.type_only)
-            .filter_map(|export| export.name.clone())
+            .filter_map(|export| export.exported.as_ref())
+            .map(ExportName::as_str)
+            .map(str::to_owned)
             .collect()
+    }
+
+    /// Static module requests that participate in runtime instantiation/evaluation.
+    ///
+    /// Request-level `type_only` is not sufficient: TypeScript permits an ordinary-looking
+    /// request whose individual bindings are all `type`, such as
+    /// `import { type Shape } from "./shape.ts"`. Conversely, a side-effect import has no
+    /// [`Import`] entry at all and is still a runtime edge.
+    pub fn runtime_requested_modules(&self) -> Vec<&RequestedModule> {
+        self.requested_modules
+            .iter()
+            .filter(|request| {
+                request
+                    .occurrences
+                    .iter()
+                    .any(|occurrence| self.occurrence_is_runtime(*occurrence))
+            })
+            .collect()
+    }
+
+    fn occurrence_is_runtime(&self, occurrence: ModuleRequestOccurrence) -> bool {
+        if occurrence.type_only {
+            return false;
+        }
+        match occurrence.kind {
+            ModuleRequestKind::Import => {
+                let mut bindings = self
+                    .imports
+                    .iter()
+                    .filter(|import| import.statement_span == occurrence.statement_span)
+                    .peekable();
+                bindings.peek().is_none() || bindings.any(|import| !import.type_only)
+            }
+            ModuleRequestKind::Export => {
+                let mut bindings = self
+                    .exports
+                    .iter()
+                    .filter(|export| export.statement_span == occurrence.statement_span)
+                    .peekable();
+                bindings.peek().is_none() || bindings.any(|export| !export.type_only)
+            }
+        }
     }
 }
 
@@ -244,18 +293,95 @@ pub enum ItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestedModule {
     pub specifier: String,
-    pub occurrences: Vec<Span>,
+    pub occurrences: Vec<ModuleRequestOccurrence>,
+}
+
+/// One syntactic occurrence of a static module request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleRequestOccurrence {
+    pub statement_span: Span,
+    pub specifier_span: Span,
+    pub type_only: bool,
+    pub kind: ModuleRequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleRequestKind {
+    Import,
+    Export,
+}
+
+/// The provider-side name selected by an import or re-export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportName {
+    Name(String),
+    Default,
+    Namespace,
+}
+
+/// One runtime or type-only import binding. Side-effect-only imports have no binding and are
+/// represented by [`RequestedModule`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub source: String,
+    pub imported: ImportName,
+    pub local: String,
+    pub type_only: bool,
+    pub span: Span,
+    pub statement_span: Span,
+}
+
+/// A name visible to importers of this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportName {
+    Name(String),
+    Default,
+}
+
+impl ExportName {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Name(name) => name,
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Where an exported binding comes from. These forms are distinct in ECMAScript and must remain
+/// distinct until graph linking; collapsing them loses live-binding and ambiguity semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportOrigin {
+    Local {
+        local: String,
+    },
+    /// `export default <expression>` has no source-level local binding. The IR compiler may
+    /// synthesize one, but the HIR must not invent a JavaScript identifier for it.
+    DefaultExpression,
+    ReExport {
+        source: String,
+        imported: ImportName,
+    },
+    Star {
+        source: String,
+    },
+    NamespaceReExport {
+        source: String,
+    },
+    Unsupported {
+        source: Option<String>,
+        description: String,
+    },
 }
 
 /// An ECMAScript export entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
-    /// The name visible to importers. `None` means `export * from ...`.
-    pub name: Option<String>,
-    /// The source module for a re-export.
-    pub source: Option<String>,
+    /// The name visible to importers. `None` is reserved for `export * from ...`.
+    pub exported: Option<ExportName>,
+    pub origin: ExportOrigin,
     pub type_only: bool,
     pub span: Span,
+    pub statement_span: Span,
 }
 
 #[cfg(test)]
@@ -270,24 +396,34 @@ mod tests {
             items: Vec::new(),
             body: Vec::new(),
             requested_modules: Vec::new(),
+            imports: Vec::new(),
             exports: vec![
                 Export {
-                    name: Some("value".into()),
-                    source: None,
+                    exported: Some(ExportName::Name("value".into())),
+                    origin: ExportOrigin::Local {
+                        local: "value".into(),
+                    },
                     type_only: false,
                     span: Span::default(),
+                    statement_span: Span::default(),
                 },
                 Export {
-                    name: Some("Shape".into()),
-                    source: None,
+                    exported: Some(ExportName::Name("Shape".into())),
+                    origin: ExportOrigin::Local {
+                        local: "Shape".into(),
+                    },
                     type_only: true,
                     span: Span::default(),
+                    statement_span: Span::default(),
                 },
                 Export {
-                    name: None,
-                    source: Some("./other.js".into()),
+                    exported: None,
+                    origin: ExportOrigin::Star {
+                        source: "./other.js".into(),
+                    },
                     type_only: false,
                     span: Span::default(),
+                    statement_span: Span::default(),
                 },
             ],
             diagnostics: Vec::new(),

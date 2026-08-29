@@ -11,10 +11,12 @@ mod hash;
 pub use engine::MemoEngine;
 pub use hash::content_hash;
 pub use kiln_hir::Module as HirModule;
-pub use kiln_ir::{CompileDiagnostic, Program};
+pub use kiln_ir::{CompileDiagnostic, ModuleProgram, Program};
 
 /// Memoized result of lowering owned HIR to parser-independent bytecode.
 pub type Compiled = Result<Program, Vec<CompileDiagnostic>>;
+/// Memoized linkage-aware bytecode for graph execution.
+pub type CompiledModule = Result<ModuleProgram, Vec<CompileDiagnostic>>;
 
 /// A parser/lowerer injected into the memo engine.
 ///
@@ -108,6 +110,11 @@ pub trait QueryEngine {
 
     fn parse(&mut self, file: FileId) -> Parsed;
     fn ir(&mut self, file: FileId) -> Compiled;
+    /// Linkage-aware lowering. Engines may override this to memoize it independently; the
+    /// default preserves compatibility for small test/reference engines.
+    fn module_ir(&mut self, file: FileId) -> CompiledModule {
+        kiln_ir::compile_module(&self.parse(file).module)
+    }
     fn interface(&mut self, file: FileId) -> Interface;
     fn project(&mut self) -> Project;
 

@@ -6,6 +6,7 @@
 //! the daemon, because doing so throws away everything warm.
 
 use kiln_db::{MemoEngine, QueryEngine};
+use kiln_module_graph::ModuleGraph;
 use kiln_proto::{Request, Response};
 use std::collections::HashMap;
 use std::fmt;
@@ -19,7 +20,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
-use crate::dispatch::{Next, dispatch, native_build_program, native_program, native_run_program};
+use crate::dispatch::{
+    Next, dispatch, native_build_graph, native_build_program, native_graph, native_program,
+    native_run_graph, native_run_program,
+};
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
 #[derive(Debug)]
@@ -389,26 +393,64 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
             output,
             profile,
         } => {
-            let program = match prepare_native(engine, &path) {
-                Ok(program) => program,
+            let graph = match prepare_native_graph(engine, &path, &project_root) {
+                Ok(graph) => graph,
                 Err(message) => return (Response::Error { message }, Next::Continue),
             };
-            run_without_engine_lock(|| {
-                native_build_program(program, path, project_root, output, profile)
-            })
+            match graph {
+                Some(graph) => run_without_engine_lock(|| {
+                    native_build_graph(graph, path, project_root, output, profile)
+                }),
+                None => {
+                    let program = match prepare_native(engine, &path) {
+                        Ok(program) => program,
+                        Err(message) => return (Response::Error { message }, Next::Continue),
+                    };
+                    run_without_engine_lock(|| {
+                        native_build_program(program, path, project_root, output, profile)
+                    })
+                }
+            }
         }
         Request::NativeRun {
             path,
             project_root,
             profile,
         } => {
-            let program = match prepare_native(engine, &path) {
-                Ok(program) => program,
+            let graph = match prepare_native_graph(engine, &path, &project_root) {
+                Ok(graph) => graph,
                 Err(message) => return (Response::Error { message }, Next::Continue),
             };
-            run_without_engine_lock(|| native_run_program(program, path, project_root, profile))
+            match graph {
+                Some(graph) => {
+                    run_without_engine_lock(|| native_run_graph(graph, path, project_root, profile))
+                }
+                None => {
+                    let program = match prepare_native(engine, &path) {
+                        Ok(program) => program,
+                        Err(message) => return (Response::Error { message }, Next::Continue),
+                    };
+                    run_without_engine_lock(|| {
+                        native_run_program(program, path, project_root, profile)
+                    })
+                }
+            }
         }
         request => handle_engine_request(engine, request),
+    }
+}
+
+fn prepare_native_graph<E: QueryEngine>(
+    engine: &Mutex<E>,
+    path: &str,
+    project_root: &str,
+) -> Result<Option<ModuleGraph>, String> {
+    let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        native_graph(&mut *guard, path, project_root)
+    })) {
+        Ok(result) => result,
+        Err(payload) => Err(format!("internal error: {}", panic_message(&*payload))),
     }
 }
 
