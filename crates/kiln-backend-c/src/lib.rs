@@ -671,7 +671,12 @@ fn stack_effect(
         Instruction::MakeFunction(_)
         | Instruction::Call { .. }
         | Instruction::LoadGlobal(_)
-        | Instruction::StoreGlobal(_) => Err(EmitError::Unsupported {
+        | Instruction::StoreGlobal(_)
+        | Instruction::NewCell(_)
+        | Instruction::LoadCell(_)
+        | Instruction::StoreCell(_)
+        | Instruction::LoadUpvalue(_)
+        | Instruction::StoreUpvalue(_) => Err(EmitError::Unsupported {
             feature: "function calls in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
@@ -874,7 +879,12 @@ fn emit_instruction(
         Instruction::MakeFunction(_)
         | Instruction::Call { .. }
         | Instruction::LoadGlobal(_)
-        | Instruction::StoreGlobal(_) => {
+        | Instruction::StoreGlobal(_)
+        | Instruction::NewCell(_)
+        | Instruction::LoadCell(_)
+        | Instruction::StoreCell(_)
+        | Instruction::LoadUpvalue(_)
+        | Instruction::StoreUpvalue(_) => {
             unreachable!("verification rejects call instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -1036,6 +1046,26 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // Tags are a persisted cache key: existing ones never change, new instructions
             // take the next free values. Reusing a tag would make two different programs hash
             // alike and serve one's object file for the other.
+            Instruction::NewCell(value) => {
+                byte(&mut hash, 17);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::LoadCell(value) => {
+                byte(&mut hash, 18);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreCell(value) => {
+                byte(&mut hash, 19);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::LoadUpvalue(value) => {
+                byte(&mut hash, 20);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreUpvalue(value) => {
+                byte(&mut hash, 21);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::MakeFunction(value) => {
                 byte(&mut hash, 13);
                 word(&mut hash, u64::from(*value));

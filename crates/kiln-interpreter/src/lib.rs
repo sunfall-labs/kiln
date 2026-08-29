@@ -7,8 +7,36 @@
 
 use std::fmt;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use kiln_host_abi::{HostOps, HostValue};
-use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
+
+/// A callable value: which function body to run, and the bindings it closed over.
+#[derive(Debug)]
+pub struct Closure {
+    pub function: u32,
+    /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
+    pub upvalues: Vec<Cell>,
+}
+
+/// A shared, mutable binding.
+///
+/// Captured variables are shared rather than copied because JavaScript closes over the binding,
+/// not the value: two closures over the same `let` must observe each other's writes, and so must
+/// the enclosing function after they run.
+pub type Cell = Rc<RefCell<Value>>;
+
+/// Two closures are equal when they are the same object, which is what `===` asks.
+///
+/// Structural equality would be wrong: two closures over different cells can have identical
+/// protos and identical current values without being the same function.
+impl PartialEq for Closure {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
 
 /// A JavaScript scalar value represented by the interpreter.
 #[derive(Clone, Debug, PartialEq)]
@@ -18,13 +46,20 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     String(String),
-    /// A callable, identified by its index in [`kiln_ir::Program::functions`].
+    /// A shared binding living in a local slot, put there by `NewCell`.
     ///
-    /// A bare index is enough only because functions cannot capture anything yet: every
-    /// evaluation of the same declaration produces an indistinguishable callable. Closures make
-    /// that false, and this becomes a handle to a heap object holding the proto plus its
-    /// captured cells.
-    Function(u32),
+    /// Never observable from JavaScript: the compiler only emits cell instructions for slots it
+    /// boxed, so a cell is always read through `LoadCell`/`LoadUpvalue`, never pushed as a value.
+    /// It is a variant of `Value` rather than a separate slot type so that a frame's locals stay
+    /// one homogeneous vector.
+    Cell(Cell),
+    /// A callable: a proto plus the cells it captured when it was created.
+    ///
+    /// Shared by `Rc` because two references to the same closure must be the same object --
+    /// `f === f` -- and because a closure outlives the frame that produced it. Reference cycles
+    /// through captured cells are not collected; that is a real limitation and the right fix is
+    /// a collector, not a weaker representation here.
+    Function(Rc<Closure>),
 }
 
 impl Value {
@@ -37,6 +72,7 @@ impl Value {
             Self::Number(_) => "number",
             Self::String(_) => "string",
             Self::Function(_) => "function",
+            Self::Cell(_) => "cell",
         }
     }
 
@@ -54,6 +90,7 @@ impl Value {
             // `Number(fn)` is NaN in JavaScript: a function has no numeric value, and ToNumber
             // on it goes through ToPrimitive, which cannot produce one.
             Self::Function(_) => f64::NAN,
+            Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
 
@@ -65,6 +102,7 @@ impl Value {
             Self::String(value) => !value.is_empty(),
             // Every object is truthy, and a function is an object.
             Self::Function(_) => true,
+            Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
 
@@ -82,7 +120,10 @@ impl Value {
             // Not `Function.prototype.toString`, which returns the source text. Producing that
             // needs the span and the original source, neither of which reaches the VM; naming
             // the function is more useful here than an invented body would be.
-            Self::Function(index) => format!("[Function {index}]"),
+            // Not `Function.prototype.toString`, which returns source text the VM never sees.
+            // The proto index is stable and useful when reading a trace; a made-up body is not.
+            Self::Function(closure) => format!("[Function {}]", closure.function),
+            Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
     }
 }
@@ -111,7 +152,8 @@ impl From<Value> for HostValue {
             // would need the VM to call back into itself, which is a different contract from
             // the one HostOps has. Passing the display form keeps `console.log(fn)` printing
             // something truthful rather than failing.
-            Value::Function(index) => Self::String(format!("[Function {index}]")),
+            Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
+            Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
         }
     }
 }
@@ -205,6 +247,14 @@ pub enum ExecutionError {
     UnknownFunction {
         function: u32,
     },
+    /// A capture descriptor pointing past the creating closure's upvalues.
+    MissingUpvalue {
+        index: u32,
+    },
+    /// A capture or cell access on a slot that was never boxed.
+    NotACell {
+        slot: usize,
+    },
     NotCallable {
         instruction: usize,
         value: &'static str,
@@ -246,6 +296,12 @@ impl fmt::Display for ExecutionError {
                     formatter,
                     "invalid jump from instruction {instruction} to {target}"
                 )
+            }
+            Self::MissingUpvalue { index } => {
+                write!(formatter, "no captured cell at upvalue index {index}")
+            }
+            Self::NotACell { slot } => {
+                write!(formatter, "local slot {slot} does not hold a captured cell")
             }
             Self::UnknownFunction { function } => {
                 write!(formatter, "no compiled function at index {function}")
@@ -354,8 +410,8 @@ pub fn execute_module<H: HostOps + ?Sized>(
 /// The module body is not represented here: it is the bottom of the call stack rather than a
 /// frame in it, which is why an empty `frames` means `Return` ends execution.
 struct Frame {
-    /// Bytecode of the function that was running, or `None` for the module body.
-    function: Option<u32>,
+    /// The closure that was running, or `None` for the module body.
+    function: Option<Rc<Closure>>,
     locals: Vec<Value>,
     /// Where to resume in the caller.
     instruction: usize,
@@ -369,8 +425,8 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     host: &'host mut H,
     stack: Vec<Value>,
     locals: Vec<Value>,
-    /// Bytecode currently executing: `None` is the module body, `Some(i)` is `functions[i]`.
-    function: Option<u32>,
+    /// The closure currently executing: `None` is the module body.
+    function: Option<Rc<Closure>>,
     frames: Vec<Frame>,
     instruction: usize,
     steps: u64,
@@ -482,11 +538,35 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.stack.push(result.into());
                 }
                 Instruction::MakeFunction(index) => {
-                    let index = *index;
-                    if index as usize >= self.program.functions.len() {
-                        return Err(ExecutionError::UnknownFunction { function: index });
-                    }
-                    self.stack.push(Value::Function(index));
+                    let closure = self.make_closure(*index)?;
+                    self.stack.push(Value::Function(closure));
+                }
+                Instruction::NewCell(slot) => {
+                    let slot = *slot as usize;
+                    let cell = Rc::new(RefCell::new(Value::Undefined));
+                    *self
+                        .locals
+                        .get_mut(slot)
+                        .ok_or(ExecutionError::LocalOutOfBounds { index: slot })? =
+                        Value::Cell(cell);
+                }
+                Instruction::LoadCell(slot) => {
+                    let cell = self.cell(*slot as usize)?;
+                    let value = cell.borrow().clone();
+                    self.stack.push(value);
+                }
+                Instruction::StoreCell(slot) => {
+                    let value = self.pop(current)?;
+                    let cell = self.cell(*slot as usize)?;
+                    *cell.borrow_mut() = value;
+                }
+                Instruction::LoadUpvalue(index) => {
+                    let value = self.upvalue(*index)?.borrow().clone();
+                    self.stack.push(value);
+                }
+                Instruction::StoreUpvalue(index) => {
+                    let value = self.pop(current)?;
+                    *self.upvalue(*index)?.borrow_mut() = value;
                 }
                 Instruction::Call { argc } => {
                     let argc = *argc;
@@ -499,14 +579,14 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         .ok_or(ExecutionError::StackUnderflow {
                             instruction: current,
                         })?;
-                    let Value::Function(function) = callee else {
+                    let Value::Function(closure) = callee else {
                         return Err(ExecutionError::NotCallable {
                             instruction: current,
                             value: callee.type_name(),
                         });
                     };
-                    let function = *function;
-                    self.call(function, argc, current)?;
+                    let closure = Rc::clone(closure);
+                    self.call(closure, argc, current)?;
                 }
                 Instruction::LoadGlobal(slot) => {
                     let value = self.global(*slot as usize)?;
@@ -569,10 +649,56 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
 
     /// Bytecode of the function currently executing.
     fn code(&self) -> &'program [Instruction] {
-        match self.function {
+        match &self.function {
             None => &self.program.code,
-            // Validated when the frame was pushed; a call never installs an out-of-range index.
-            Some(index) => &self.program.functions[index as usize].code,
+            // Validated when the closure was created; a call never installs a bad index.
+            Some(closure) => &self.program.functions[closure.function as usize].code,
+        }
+    }
+
+    /// Build a closure, resolving each upvalue descriptor against the frame creating it.
+    fn make_closure(&mut self, function: u32) -> Result<Rc<Closure>, ExecutionError> {
+        let Some(proto) = self.program.functions.get(function as usize) else {
+            return Err(ExecutionError::UnknownFunction { function });
+        };
+        let mut upvalues = Vec::with_capacity(proto.upvalues.len());
+        for descriptor in &proto.upvalues {
+            let cell = match descriptor {
+                Upvalue::ParentLocal(slot) => self.cell(*slot as usize)?,
+                Upvalue::ParentUpvalue(index) => {
+                    let Some(current) = &self.function else {
+                        // Only a nested function has a parent closure to capture from, and the
+                        // compiler never emits ParentUpvalue at module level.
+                        return Err(ExecutionError::MissingUpvalue { index: *index });
+                    };
+                    current
+                        .upvalues
+                        .get(*index as usize)
+                        .cloned()
+                        .ok_or(ExecutionError::MissingUpvalue { index: *index })?
+                }
+            };
+            upvalues.push(cell);
+        }
+        Ok(Rc::new(Closure { function, upvalues }))
+    }
+
+    /// The cell at this closure's upvalue index.
+    fn upvalue(&self, index: u32) -> Result<Cell, ExecutionError> {
+        self.function
+            .as_ref()
+            .and_then(|closure| closure.upvalues.get(index as usize))
+            .cloned()
+            .ok_or(ExecutionError::MissingUpvalue { index })
+    }
+
+    /// The cell held in a local slot, for capture.
+    fn cell(&self, slot: usize) -> Result<Cell, ExecutionError> {
+        match self.locals.get(slot) {
+            Some(Value::Cell(cell)) => Ok(Rc::clone(cell)),
+            // `NewCell` runs before anything can capture the slot, so a non-cell here means the
+            // compiler emitted a capture of a binding it never boxed.
+            Some(_) | None => Err(ExecutionError::NotACell { slot }),
         }
     }
 
@@ -581,7 +707,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// Missing arguments become `undefined` and extra ones are discarded, which is what calling
     /// a JavaScript function with the wrong arity does. Neither is an error, so neither is
     /// reported as one.
-    fn call(&mut self, function: u32, argc: u16, instruction: usize) -> Result<(), ExecutionError> {
+    fn call(
+        &mut self,
+        closure: Rc<Closure>,
+        argc: u16,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let function = closure.function;
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
@@ -607,12 +739,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
 
         self.frames.push(Frame {
-            function: self.function,
+            function: self.function.take(),
             locals: std::mem::replace(&mut self.locals, locals),
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
-        self.function = Some(function);
+        self.function = Some(closure);
         self.instruction = 0;
         Ok(())
     }
@@ -770,6 +902,7 @@ mod tests {
                 parameter_count: 2,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
+                upvalues: Vec::new(),
             }],
         }
     }
@@ -777,6 +910,119 @@ mod tests {
     fn run(program: &Program) -> Result<Value, ExecutionError> {
         let mut host = TestHost { calls: Vec::new() };
         execute(program, &mut host, ExecutionLimits::default()).map(|result| result.value)
+    }
+
+    /// Two closures made by separate calls must not share a cell, and two made by one call must.
+    /// This is the property that separates capturing a binding from capturing a frame.
+    #[test]
+    fn closures_from_separate_calls_capture_separate_cells() {
+        // outer(): let c = <cell>; return closure(inner) -- inner increments and returns c.
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![number(1.0)],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Call { argc: 0 },
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Call { argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![
+                kiln_ir::FunctionProto {
+                    name: Some("outer".to_owned()),
+                    parameter_count: 0,
+                    local_count: 1,
+                    code: vec![
+                        Instruction::NewCell(0),
+                        Instruction::Const(0),
+                        Instruction::StoreCell(0),
+                        Instruction::MakeFunction(1),
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+                kiln_ir::FunctionProto {
+                    name: Some("inner".to_owned()),
+                    parameter_count: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::LoadUpvalue(0),
+                        Instruction::Const(0),
+                        Instruction::Binary(BinaryOp::Add),
+                        Instruction::Dup,
+                        Instruction::StoreUpvalue(0),
+                        Instruction::Return,
+                    ],
+                    upvalues: vec![Upvalue::ParentLocal(0)],
+                },
+            ],
+        };
+        // Each outer() call makes a fresh cell seeded to 1, so each inner() returns 2.
+        assert_eq!(run(&program), Ok(Value::Number(2.0)));
+    }
+
+    /// A closure keeps working after the call that created it has returned, which is the whole
+    /// reason captures are cells rather than pointers into a frame.
+    #[test]
+    fn a_captured_cell_outlives_the_frame_that_created_it() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![number(5.0)],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Call { argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![
+                kiln_ir::FunctionProto {
+                    name: Some("outer".to_owned()),
+                    parameter_count: 0,
+                    local_count: 1,
+                    code: vec![
+                        Instruction::NewCell(0),
+                        Instruction::Const(0),
+                        Instruction::StoreCell(0),
+                        Instruction::MakeFunction(1),
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+                kiln_ir::FunctionProto {
+                    name: Some("read".to_owned()),
+                    parameter_count: 0,
+                    local_count: 0,
+                    code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
+                    upvalues: vec![Upvalue::ParentLocal(0)],
+                },
+            ],
+        };
+        assert_eq!(run(&program), Ok(Value::Number(5.0)));
+    }
+
+    #[test]
+    fn capturing_a_slot_that_was_never_boxed_is_rejected() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::MakeFunction(0), Instruction::Return],
+            local_count: 1,
+            functions: vec![kiln_ir::FunctionProto {
+                name: None,
+                parameter_count: 0,
+                local_count: 0,
+                code: vec![Instruction::Return],
+                upvalues: vec![Upvalue::ParentLocal(0)],
+            }],
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::NotACell { slot: 0 })
+        ));
     }
 
     #[test]
@@ -862,6 +1108,7 @@ mod tests {
                     Instruction::Call { argc: 0 },
                     Instruction::Return,
                 ],
+                upvalues: Vec::new(),
             }],
         };
         let mut host = TestHost { calls: Vec::new() };
@@ -902,12 +1149,14 @@ mod tests {
                         Instruction::Const(0),
                         Instruction::Return,
                     ],
+                    upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
                     name: Some("read".to_owned()),
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],
+                    upvalues: Vec::new(),
                 },
             ],
         };

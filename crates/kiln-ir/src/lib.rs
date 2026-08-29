@@ -4,7 +4,7 @@
 //! consumes only that owned HIR and produces plain data, so an interpreter, serializer, or native
 //! backend can be added without coupling it to Oxc (or to any other parser).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, ExportName, ExportOrigin, Expression, ExpressionKind,
@@ -83,6 +83,19 @@ pub enum Instruction {
     Call {
         argc: u16,
     },
+    /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
+    /// than a copy of its value.
+    ///
+    /// Emitted only for locals a nested function actually refers to. Everything else stays an
+    /// ordinary slot, so the indirection is paid exactly where the semantics require it.
+    NewCell(u32),
+    /// Read through the cell in a local slot.
+    LoadCell(u32),
+    /// Write through the cell in a local slot, so every closure sharing it observes the write.
+    StoreCell(u32),
+    /// Read the cell captured at this closure's upvalue index.
+    LoadUpvalue(u32),
+    StoreUpvalue(u32),
     /// Read a module-scope slot from inside a call frame.
     ///
     /// Distinct from `LoadLocal` because a frame's locals are its own: module bindings outlive
@@ -118,6 +131,21 @@ pub struct FunctionProto {
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
     pub code: Vec<Instruction>,
+    /// Where each captured cell comes from, resolved against the frame creating the closure.
+    pub upvalues: Vec<Upvalue>,
+}
+
+/// Where a closure's captured cell is found when the closure is created.
+///
+/// Resolved against the *creating* frame, not the calling one: a closure captures the bindings
+/// that were live where it was written, which is what makes a returned closure keep working
+/// after its enclosing call has returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upvalue {
+    /// A cell in the enclosing frame's local slot.
+    ParentLocal(u32),
+    /// A cell the enclosing closure had already captured, threaded one level further in.
+    ParentUpvalue(u32),
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the
@@ -287,6 +315,10 @@ struct Local {
     slot: u32,
     kind: VariableKind,
     imported: bool,
+    /// The slot holds a cell rather than the value, because a nested function refers to this
+    /// name. Reads and writes go through `LoadCell`/`StoreCell` so every closure sharing the
+    /// binding sees the same mutations.
+    celled: bool,
 }
 
 /// The per-function half of [`Compiler`], saved and restored around a nested function body.
@@ -297,6 +329,11 @@ struct FunctionState {
     code: Vec<Instruction>,
     scopes: Vec<HashMap<String, Local>>,
     local_count: u32,
+    upvalues: Vec<Upvalue>,
+    /// Names already captured, so a name referenced twice captures one cell rather than two.
+    upvalue_names: HashMap<String, u32>,
+    /// Names this function's nested functions refer to, so declarations know to box themselves.
+    captured: HashSet<String>,
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
@@ -308,7 +345,8 @@ enum Resolution {
     /// A binding in an enclosing *function*. That is a closure capture, and compiling it as
     /// either of the above would read an unrelated slot -- silently, and with a plausible value
     /// in it. Refused until upvalues exist.
-    Captured,
+    /// A binding in an enclosing function, reached through this closure's captured cells.
+    Upvalue(u32),
     Unresolved,
 }
 
@@ -317,6 +355,9 @@ struct Compiler {
     functions: Vec<FunctionProto>,
     /// Enclosing function states, module body first. Empty while compiling the module body.
     enclosing: Vec<FunctionState>,
+    upvalues: Vec<Upvalue>,
+    upvalue_names: HashMap<String, u32>,
+    captured: HashSet<String>,
     code: Vec<Instruction>,
     /// Lexical scopes of the function being compiled, innermost last. At module level the first
     /// entry is module scope itself.
@@ -334,6 +375,9 @@ impl Compiler {
             code: Vec::new(),
             functions: Vec::new(),
             enclosing: Vec::new(),
+            upvalues: Vec::new(),
+            upvalue_names: HashMap::new(),
+            captured: HashSet::new(),
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
@@ -385,6 +429,7 @@ impl Compiler {
                 slot,
                 kind: VariableKind::Const,
                 imported: true,
+                celled: false,
             },
         );
         Some(slot)
@@ -476,7 +521,11 @@ impl Compiler {
             if kind == VariableKind::Var && existing.kind == VariableKind::Var {
                 if let Some(initializer) = initializer {
                     self.expression(initializer);
-                    self.code.push(Instruction::StoreLocal(existing.slot));
+                    self.code.push(if existing.celled {
+                        Instruction::StoreCell(existing.slot)
+                    } else {
+                        Instruction::StoreLocal(existing.slot)
+                    });
                 }
                 return;
             }
@@ -494,20 +543,32 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
+        // Boxed only when a nested function refers to this name. `self.captured` is empty while
+        // compiling the module body, so module bindings -- which functions reach as globals --
+        // never pay for a cell.
+        let celled = self.captured.contains(name);
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
                 slot,
                 kind,
                 imported: false,
+                celled,
             },
         );
+        if celled {
+            self.code.push(Instruction::NewCell(slot));
+        }
         if let Some(initializer) = initializer {
             self.expression(initializer);
         } else {
             self.push_constant(Constant::Undefined);
         }
-        self.code.push(Instruction::StoreLocal(slot));
+        self.code.push(if celled {
+            Instruction::StoreCell(slot)
+        } else {
+            Instruction::StoreLocal(slot)
+        });
     }
 
     fn if_statement(
@@ -541,13 +602,13 @@ impl Compiler {
     fn expression(&mut self, expression: &Expression) {
         match &expression.kind {
             ExpressionKind::Literal(literal) => self.push_literal(literal),
-            ExpressionKind::Identifier(name) => match self.resolve(name) {
+            ExpressionKind::Identifier(name) => match self.resolve_or_capture(name) {
+                Resolution::Local(local) if local.celled => {
+                    self.code.push(Instruction::LoadCell(local.slot))
+                }
                 Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
                 Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-                Resolution::Captured => self.error(
-                    Some(expression.span),
-                    format!("`{name}` is captured from an enclosing function, which is not supported yet"),
-                ),
+                Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
                 Resolution::Unresolved if name == "undefined" => {
                     self.push_constant(Constant::Undefined)
                 }
@@ -653,25 +714,29 @@ impl Compiler {
     ) {
         // Whether the target is a frame local or a module slot decides the store instruction,
         // so it has to be carried alongside the slot rather than assumed.
-        let (slot, global, kind, imported) = match self.resolve(target) {
-            Resolution::Local(local) => (local.slot, false, local.kind, local.imported),
+        enum Place {
+            Local(u32),
+            Cell(u32),
+            Upvalue(u32),
+            Global(u32),
+        }
+        let (place, kind, imported) = match self.resolve_or_capture(target) {
+            Resolution::Local(local) if local.celled => {
+                (Place::Cell(local.slot), local.kind, local.imported)
+            }
+            Resolution::Local(local) => (Place::Local(local.slot), local.kind, local.imported),
+            Resolution::Upvalue(index) => {
+                // The owning declaration decides const-ness, and it was checked where the name
+                // was captured; an upvalue carries no separate mutability of its own.
+                (Place::Upvalue(index), VariableKind::Let, false)
+            }
             Resolution::Global(slot) => {
                 let module = &self.enclosing[0].scopes[0];
                 let local = module
                     .get(target)
                     .copied()
                     .expect("Global resolution just found this name in module scope");
-                (slot, true, local.kind, local.imported)
-            }
-            Resolution::Captured => {
-                self.error(
-                    Some(span),
-                    format!(
-                        "`{target}` is captured from an enclosing function, which is not supported yet"
-                    ),
-                );
-                self.push_constant(Constant::Undefined);
-                return;
+                (Place::Global(slot), local.kind, local.imported)
             }
             Resolution::Unresolved => {
                 self.error(
@@ -682,15 +747,17 @@ impl Compiler {
                 return;
             }
         };
-        let load = if global {
-            Instruction::LoadGlobal(slot)
-        } else {
-            Instruction::LoadLocal(slot)
-        };
-        let store = if global {
-            Instruction::StoreGlobal(slot)
-        } else {
-            Instruction::StoreLocal(slot)
+        let (load, store) = match place {
+            Place::Local(slot) => (Instruction::LoadLocal(slot), Instruction::StoreLocal(slot)),
+            Place::Cell(slot) => (Instruction::LoadCell(slot), Instruction::StoreCell(slot)),
+            Place::Upvalue(index) => (
+                Instruction::LoadUpvalue(index),
+                Instruction::StoreUpvalue(index),
+            ),
+            Place::Global(slot) => (
+                Instruction::LoadGlobal(slot),
+                Instruction::StoreGlobal(slot),
+            ),
         };
         if imported {
             self.error(
@@ -770,7 +837,13 @@ impl Compiler {
             return None;
         }
 
+        // Which of this function's own bindings its nested functions refer to. Computed before
+        // the body is compiled because a declaration has to know, at the point it allocates its
+        // slot, whether that slot holds a value or a cell.
+        let captured = names_captured_by_nested_functions(&function.body);
+
         let mut parameters = HashMap::with_capacity(function.parameters.len());
+        let mut celled_parameters = Vec::new();
         for (slot, parameter) in function.parameters.iter().enumerate() {
             if parameters.contains_key(&parameter.name) {
                 self.error(
@@ -779,12 +852,18 @@ impl Compiler {
                 );
                 return None;
             }
+            let slot = slot as u32;
+            let celled = captured.contains(&parameter.name);
+            if celled {
+                celled_parameters.push(slot);
+            }
             parameters.insert(
                 parameter.name.clone(),
                 Local {
-                    slot: slot as u32,
+                    slot,
                     kind: VariableKind::Let,
                     imported: false,
+                    celled,
                 },
             );
         }
@@ -794,8 +873,19 @@ impl Compiler {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
             local_count: std::mem::replace(&mut self.local_count, parameter_count),
+            upvalues: std::mem::take(&mut self.upvalues),
+            upvalue_names: std::mem::take(&mut self.upvalue_names),
+            captured: std::mem::replace(&mut self.captured, captured),
         };
         self.enclosing.push(outer);
+
+        // A captured parameter arrives as a plain value in its slot, so the cell has to be
+        // created and seeded before the body can read it.
+        for slot in celled_parameters {
+            self.code.push(Instruction::LoadLocal(slot));
+            self.code.push(Instruction::NewCell(slot));
+            self.code.push(Instruction::StoreCell(slot));
+        }
 
         for statement in &function.body {
             self.statement(statement);
@@ -815,8 +905,11 @@ impl Compiler {
             parameter_count,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),
+            upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
         };
         self.scopes = restored.scopes;
+        self.upvalue_names = restored.upvalue_names;
+        self.captured = restored.captured;
 
         let index = self.functions.len() as u32;
         self.functions.push(proto);
@@ -887,18 +980,78 @@ impl Compiler {
         if let Some(local) = module.scopes[0].get(name) {
             return Resolution::Global(local.slot);
         }
-        // Anything visible in a function between the module and here is a capture. Reported as
-        // such rather than as "unresolved", because the name is in scope in the source and
-        // saying otherwise would send the reader looking for a typo.
-        if self
-            .enclosing
-            .iter()
-            .skip(1)
-            .any(|state| state.scopes.iter().any(|scope| scope.contains_key(name)))
-        {
-            return Resolution::Captured;
-        }
         Resolution::Unresolved
+    }
+
+    /// Resolve `name` and, if it lives in an enclosing function, capture it.
+    ///
+    /// Split from [`Compiler::resolve`] because capturing mutates the upvalue lists of every
+    /// function between the binding and here, and a read-only lookup is wanted in places that
+    /// must not have that side effect -- the `console` check in [`Compiler::call`] above all,
+    /// which asks whether a name exists and would otherwise capture one by asking.
+    fn resolve_or_capture(&mut self, name: &str) -> Resolution {
+        match self.resolve(name) {
+            Resolution::Unresolved => {}
+            resolved => return resolved,
+        }
+        match self.capture(name) {
+            Some(index) => Resolution::Upvalue(index),
+            None => Resolution::Unresolved,
+        }
+    }
+
+    /// Thread a binding from the function that owns it down to the one being compiled.
+    ///
+    /// Every function in between gains an upvalue too, because a closure can only reach cells
+    /// its immediately enclosing frame holds -- a two-level capture is two hops, not one long
+    /// one. Levels are indices into `enclosing` followed by the current function.
+    fn capture(&mut self, name: &str) -> Option<u32> {
+        // Level 0 is the module body, whose bindings are globals rather than captures.
+        let owner = (1..self.enclosing.len()).rev().find(|level| {
+            self.enclosing[*level]
+                .scopes
+                .iter()
+                .any(|scope| scope.contains_key(name))
+        })?;
+
+        let local = self.enclosing[owner]
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .copied()
+            .expect("the owning level was just located by this name");
+        if !local.celled {
+            // The capture analysis said no nested function referred to this name, yet here we
+            // are. Compiling it anyway would read an uninitialised slot as though it were a
+            // cell, so refuse rather than emit that.
+            return None;
+        }
+
+        let mut source = Upvalue::ParentLocal(local.slot);
+        for level in (owner + 1)..=self.enclosing.len() {
+            let index = self.add_upvalue(level, name, source);
+            source = Upvalue::ParentUpvalue(index);
+        }
+        // The last index added belongs to the function being compiled.
+        self.upvalue_names.get(name).copied()
+    }
+
+    /// Add one upvalue to the function at `level`, reusing an existing capture of the same name.
+    fn add_upvalue(&mut self, level: usize, name: &str, source: Upvalue) -> u32 {
+        let (upvalues, names) = if level == self.enclosing.len() {
+            (&mut self.upvalues, &mut self.upvalue_names)
+        } else {
+            let state = &mut self.enclosing[level];
+            (&mut state.upvalues, &mut state.upvalue_names)
+        };
+        if let Some(existing) = names.get(name) {
+            return *existing;
+        }
+        let index = upvalues.len() as u32;
+        upvalues.push(source);
+        names.insert(name.to_owned(), index);
+        index
     }
 
     fn compiling_function(&self) -> bool {
@@ -935,6 +1088,114 @@ impl Compiler {
             | Instruction::JumpIfTruthy(offset)
             | Instruction::JumpIfNotNullish(offset) => *offset = target,
             _ => unreachable!("patch_jump called for non-jump instruction"),
+        }
+    }
+}
+
+/// Names that nested functions inside `body` refer to.
+///
+/// Deliberately an over-approximation: it collects every identifier appearing anywhere inside a
+/// nested function, without modelling that function's own shadowing. A local that is boxed but
+/// never actually captured still behaves correctly -- one pointer chase, no semantic difference
+/// -- whereas a captured local that was *missed* would be read out of a dead frame. The analysis
+/// is allowed to be wrong only in the direction that costs performance.
+fn names_captured_by_nested_functions(body: &[Statement]) -> HashSet<String> {
+    let mut captured = HashSet::new();
+    for statement in body {
+        collect_nested_function_names(statement, &mut captured, false);
+    }
+    captured
+}
+
+fn collect_nested_function_names(
+    statement: &Statement,
+    names: &mut HashSet<String>,
+    inside_function: bool,
+) {
+    match &statement.kind {
+        StatementKind::Function(function) => {
+            for statement in &function.body {
+                collect_nested_function_names(statement, names, true);
+            }
+        }
+        StatementKind::Variable { declarations, .. } => {
+            for declaration in declarations {
+                if inside_function {
+                    names.insert(declaration.name.clone());
+                }
+                if let Some(initializer) = &declaration.initializer {
+                    collect_identifiers(initializer, names, inside_function);
+                }
+            }
+        }
+        StatementKind::Expression(expression) | StatementKind::ExportDefault(expression) => {
+            collect_identifiers(expression, names, inside_function);
+        }
+        StatementKind::Return(value) => {
+            if let Some(value) = value {
+                collect_identifiers(value, names, inside_function);
+            }
+        }
+        StatementKind::Block(body) => {
+            for statement in body {
+                collect_nested_function_names(statement, names, inside_function);
+            }
+        }
+        StatementKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            collect_identifiers(test, names, inside_function);
+            collect_nested_function_names(consequent, names, inside_function);
+            if let Some(alternate) = alternate {
+                collect_nested_function_names(alternate, names, inside_function);
+            }
+        }
+        StatementKind::While { test, body } => {
+            collect_identifiers(test, names, inside_function);
+            collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::Empty | StatementKind::Unsupported { .. } => {}
+    }
+}
+
+fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, collecting: bool) {
+    if !collecting {
+        return;
+    }
+    match &expression.kind {
+        ExpressionKind::Identifier(name) => {
+            names.insert(name.clone());
+        }
+        ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => {}
+        ExpressionKind::Unary { argument, .. } => collect_identifiers(argument, names, collecting),
+        ExpressionKind::Binary { left, right, .. }
+        | ExpressionKind::Logical { left, right, .. } => {
+            collect_identifiers(left, names, collecting);
+            collect_identifiers(right, names, collecting);
+        }
+        ExpressionKind::Assignment { target, value, .. } => {
+            names.insert(target.clone());
+            collect_identifiers(value, names, collecting);
+        }
+        ExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            collect_identifiers(test, names, collecting);
+            collect_identifiers(consequent, names, collecting);
+            collect_identifiers(alternate, names, collecting);
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            collect_identifiers(callee, names, collecting);
+            for argument in arguments {
+                collect_identifiers(argument, names, collecting);
+            }
+        }
+        ExpressionKind::StaticMember { object, .. } => {
+            collect_identifiers(object, names, collecting);
         }
     }
 }
@@ -1032,6 +1293,150 @@ mod tests {
             .collect()
     }
 
+    /// A capture must box the *binding*: both closures over one variable have to see the same
+    /// cell, or the second one reads a stale copy.
+    #[test]
+    fn a_captured_local_is_boxed_and_the_capture_points_at_its_slot() {
+        let program = compile(&module(vec![function(
+            "outer",
+            &[],
+            vec![
+                statement(StatementKind::Variable {
+                    kind: VariableKind::Let,
+                    declarations: vec![kiln_hir::VariableDeclarator {
+                        name: "captured".into(),
+                        initializer: Some(number(0.0)),
+                        span: Span::default(),
+                    }],
+                }),
+                function(
+                    "inner",
+                    &[],
+                    vec![statement(StatementKind::Return(Some(identifier(
+                        "captured",
+                    ))))],
+                ),
+            ],
+        )]))
+        .expect("compiles");
+
+        let outer = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("outer"))
+            .expect("outer proto");
+        assert!(
+            outer
+                .code
+                .iter()
+                .any(|i| matches!(i, Instruction::NewCell(_))),
+            "the captured local must be boxed"
+        );
+
+        let inner = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("inner"))
+            .expect("inner proto");
+        assert_eq!(inner.upvalues.len(), 1);
+        assert!(matches!(inner.upvalues[0], Upvalue::ParentLocal(_)));
+        assert!(inner.code.contains(&Instruction::LoadUpvalue(0)));
+    }
+
+    /// A local nothing captures must stay an ordinary slot: the indirection is paid where the
+    /// semantics need it and nowhere else.
+    #[test]
+    fn an_uncaptured_local_is_not_boxed() {
+        let program = compile(&module(vec![function(
+            "plain",
+            &[],
+            vec![statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    name: "local".into(),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            })],
+        )]))
+        .expect("compiles");
+        assert!(
+            !program.functions[0]
+                .code
+                .iter()
+                .any(|i| matches!(i, Instruction::NewCell(_))),
+            "nothing captures this local, so it must not be boxed"
+        );
+    }
+
+    /// Two levels of nesting is two hops: the middle function captures from its parent, and the
+    /// innermost captures from the middle. A single long hop would reach a frame that is gone.
+    #[test]
+    fn a_two_level_capture_threads_through_the_function_between() {
+        let program = compile(&module(vec![function(
+            "outer",
+            &["x"],
+            vec![function(
+                "middle",
+                &[],
+                vec![function(
+                    "inner",
+                    &[],
+                    vec![statement(StatementKind::Return(Some(identifier("x"))))],
+                )],
+            )],
+        )]))
+        .expect("compiles");
+
+        let middle = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("middle"))
+            .expect("middle proto");
+        let inner = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("inner"))
+            .expect("inner proto");
+
+        assert!(
+            matches!(middle.upvalues.as_slice(), [Upvalue::ParentLocal(_)]),
+            "middle captures outer's boxed parameter directly"
+        );
+        assert!(
+            matches!(inner.upvalues.as_slice(), [Upvalue::ParentUpvalue(0)]),
+            "inner captures what middle had already captured"
+        );
+    }
+
+    /// Writing through a capture has to be a write to the shared cell, not to a frame slot.
+    #[test]
+    fn assigning_to_a_captured_name_writes_through_the_cell() {
+        let program = compile(&module(vec![function(
+            "outer",
+            &["seed"],
+            vec![function(
+                "bump",
+                &[],
+                vec![statement(StatementKind::Expression(Expression {
+                    kind: ExpressionKind::Assignment {
+                        operator: AssignmentOperator::Assign,
+                        target: "seed".into(),
+                        value: Box::new(number(1.0)),
+                    },
+                    span: Span::default(),
+                }))],
+            )],
+        )]))
+        .expect("compiles");
+        let bump = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("bump"))
+            .expect("bump proto");
+        assert!(bump.code.contains(&Instruction::StoreUpvalue(0)));
+    }
+
     #[test]
     fn a_function_body_compiles_into_its_own_proto() {
         let program = compile(&module(vec![function(
@@ -1101,12 +1506,13 @@ mod tests {
         );
     }
 
-    /// The whole point of refusing captures rather than compiling them: `LoadLocal` on an
-    /// enclosing function's slot would read whatever the *callee's* frame happens to hold
-    /// there, which is a plausible-looking wrong answer instead of a diagnostic.
+    /// Step 1a refused captures outright; 1b compiles them. What must remain true is that a
+    /// capture never becomes a `LoadLocal` on the enclosing frame's slot -- that would read
+    /// whatever the callee's own frame happened to hold there, which is a plausible wrong
+    /// answer rather than a diagnostic.
     #[test]
-    fn capturing_an_enclosing_functions_local_is_refused() {
-        let messages = errors(vec![function(
+    fn a_capture_never_compiles_to_a_frame_local_read() {
+        let program = compile(&module(vec![function(
             "outer",
             &["x"],
             vec![function(
@@ -1114,13 +1520,21 @@ mod tests {
                 &[],
                 vec![statement(StatementKind::Return(Some(identifier("x"))))],
             )],
-        )]);
+        )]))
+        .expect("compiles");
+        let inner = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("inner"))
+            .expect("inner proto");
         assert!(
-            messages
+            !inner
+                .code
                 .iter()
-                .any(|message| message.contains("captured from an enclosing function")),
-            "got: {messages:?}"
+                .any(|i| matches!(i, Instruction::LoadLocal(_))),
+            "inner has no locals of its own; reading x must go through an upvalue"
         );
+        assert!(inner.code.contains(&Instruction::LoadUpvalue(0)));
     }
 
     #[test]
