@@ -9,16 +9,17 @@ use std::path::Path;
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
     Export, ExportName, ExportOrigin, Expression as HirExpression,
-    ExpressionKind as HirExpressionKind, Import, ImportName, Item, ItemKind, Literal as HirLiteral,
-    LogicalOperator as HirLogicalOperator, Module, ModuleRequestKind, ModuleRequestOccurrence,
-    RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
+    ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
+    ItemKind, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
+    ModuleRequestKind, ModuleRequestOccurrence, Parameter as HirParameter, RequestedModule,
+    SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, UnaryOperator as HirUnaryOperator,
     VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     AssignmentTarget, BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    Statement, VariableDeclaration, VariableDeclarationKind,
+    Function, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -223,8 +224,8 @@ impl Lowerer {
             | Statement::TSGlobalDeclaration(_)
             | Statement::TSNamespaceExportDeclaration(_) => return None,
 
-            Statement::FunctionDeclaration(_) => {
-                self.unsupported_statement("function declaration", statement_span)
+            Statement::FunctionDeclaration(declaration) => {
+                self.function_declaration(declaration, statement_span)
             }
             Statement::ClassDeclaration(_) => {
                 self.unsupported_statement("class declaration", statement_span)
@@ -240,9 +241,12 @@ impl Lowerer {
             Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
                 self.unsupported_statement("break or continue statement", statement_span)
             }
-            Statement::ReturnStatement(_) => {
-                self.unsupported_statement("return statement", statement_span)
-            }
+            Statement::ReturnStatement(statement) => HirStatementKind::Return(
+                statement
+                    .argument
+                    .as_ref()
+                    .map(|value| self.expression(value)),
+            ),
             Statement::SwitchStatement(_) => {
                 self.unsupported_statement("switch statement", statement_span)
             }
@@ -526,6 +530,73 @@ impl Lowerer {
             kind,
             span: expression_span,
         }
+    }
+
+    /// Lower a function declaration, or refuse it as a whole.
+    ///
+    /// Refusing the declaration outright rather than lowering a partial function is deliberate:
+    /// a generator whose `yield`s were dropped, or an async function whose `await`s were, would
+    /// be a function that runs and produces a confidently wrong answer. A missing function is a
+    /// diagnostic; a silently altered one is a bug report six months later.
+    fn function_declaration(
+        &mut self,
+        declaration: &Function<'_>,
+        statement_span: HirSpan,
+    ) -> HirStatementKind {
+        let Some(function) = self.function(declaration, statement_span) else {
+            return HirStatementKind::Unsupported {
+                feature: "function declaration".to_string(),
+            };
+        };
+        HirStatementKind::Function(Box::new(function))
+    }
+
+    /// The shared part of every function form. `None` means a diagnostic was already recorded.
+    fn function(
+        &mut self,
+        declaration: &Function<'_>,
+        statement_span: HirSpan,
+    ) -> Option<HirFunction> {
+        if declaration.r#async {
+            self.unsupported("async function", statement_span);
+            return None;
+        }
+        if declaration.generator {
+            self.unsupported("generator function", statement_span);
+            return None;
+        }
+        if declaration.params.rest.is_some() {
+            self.unsupported("rest parameter", statement_span);
+            return None;
+        }
+
+        let mut parameters = Vec::with_capacity(declaration.params.items.len());
+        for item in &declaration.params.items {
+            let BindingPattern::BindingIdentifier(identifier) = &item.pattern else {
+                // Destructuring, defaults and rest each have their own semantics. Naming the
+                // parameter anyway would produce a function that binds the wrong thing.
+                self.unsupported("destructuring parameter", span(item.span));
+                return None;
+            };
+            parameters.push(HirParameter {
+                name: identifier.name.to_string(),
+                span: span(identifier.span),
+            });
+        }
+
+        let body = declaration.body.as_ref()?;
+        let statements = body
+            .statements
+            .iter()
+            .filter_map(|statement| self.statement(statement))
+            .collect();
+
+        Some(HirFunction {
+            name: declaration.id.as_ref().map(|id| id.name.to_string()),
+            parameters,
+            body: statements,
+            span: statement_span,
+        })
     }
 
     fn unsupported_statement(&mut self, feature: &str, feature_span: HirSpan) -> HirStatementKind {

@@ -61,6 +61,30 @@ pub struct Module {
     pub panicked: bool,
 }
 
+/// A function's name, parameters and body.
+///
+/// Boxed at its use site: this is much larger than the other statement payloads, and an unboxed
+/// variant would widen `StatementKind` for every statement in the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    /// `None` for a function expression that was never given one.
+    pub name: Option<String>,
+    pub parameters: Vec<Parameter>,
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+/// One declared parameter.
+///
+/// Simple identifier bindings only. Destructuring, defaults and rest are separate features with
+/// their own semantics; representing them as a plain identifier here would be a lie that later
+/// passes could not detect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub name: String,
+    pub span: Span,
+}
+
 /// An owned executable statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
@@ -86,6 +110,18 @@ pub enum StatementKind {
         body: Box<Statement>,
     },
     Empty,
+    /// A hoisted function declaration.
+    ///
+    /// The body is a statement list rather than a `Block` because a function body is not a block
+    /// statement: its scope is the call, its parameters are bound in it, and `return` is legal
+    /// only inside it. Flattening it here keeps later passes from unwrapping a block that never
+    /// had block semantics.
+    Function(Box<Function>),
+    /// `return`, where no expression means `return undefined`.
+    ///
+    /// Kept as an `Option` so a frontend never has to synthesize a source-less expression to
+    /// represent the absence of one.
+    Return(Option<Expression>),
     /// A default expression export has runtime work and an exported binding. Keeping it distinct
     /// prevents later passes from accidentally executing and discarding the value as though it
     /// were an ordinary expression statement.
