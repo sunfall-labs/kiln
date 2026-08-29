@@ -1,9 +1,9 @@
 # JavaScript conformance corpus
 
-**The corpus runs. Nothing in it passes yet.** `kiln test conformance/guard` executes all
-twenty probes and reports `0 pass, 20 fail`, exiting non-zero. That is the intended state: read
-this directory as a specification of behaviour kiln will have to get right, not as a suite that
-is currently green.
+**The corpus runs, and its remaining failures are intentional work items.**
+`kiln test conformance/guard` executes all twenty probes and reports each per-test result,
+exiting non-zero when any probe fails. Read this directory as a specification of behaviour kiln
+will have to get right, not as a suite whose current pass count is the whole story.
 
 The pass count is the least interesting thing it produces. The valuable output is the **reason
 distribution** printed after the results — every probe's blocker, grouped and ranked, which is
@@ -189,6 +189,17 @@ cost/benefit — the first turns a loud TypeError into a hang on an infinite ite
 
 ## Methodology — the part worth keeping
 
+The repository runner is `conformance/run.sh`. It accepts the gate's `--out <path>` contract and
+invokes the public one-shot command from the repository root:
+
+```sh
+conformance/run.sh --out target/conformance/results.json
+```
+
+The command writes the schema-1 results document at the requested path. Its exit status still
+reports whether the corpus passed; the CI gate reads the document even when that status is
+non-zero so it can name per-test regressions.
+
 The source project ran three gates, and the reason all three existed is the single most
 transferable thing here.
 
@@ -350,10 +361,10 @@ rather than a hollow green.
   carry no expected output and no per-file rationale, so porting them would add a hundred
   fixtures nobody could act on. The findings they support are summarised above instead.
 - **`guard/run.sh` and `effect/run.sh`.** Both invoke the `porf` binary and diff against a live
-  `node` run. Kiln has no runner to substitute, and a script that cannot run is worse than none.
-  Their method is worth keeping and is recorded here: strip ANSI escapes, compare merged
-  stdout+stderr byte for byte against `node`, run the cases in parallel because almost all the
-  wall time is compilation. When kiln has an interpreter, that is the shape to rebuild.
+  `node` run. Kiln's equivalent is `conformance/run.sh`, which delegates to the public one-shot
+  test command and writes the gate's schema-1 results document. Their method is still worth
+  keeping: strip ANSI escapes, compare merged stdout+stderr byte for byte against `node`, and run
+  the cases in parallel because almost all the wall time is compilation.
 - **`guard/ab.sh`.** A test262 A/B harness specific to porffor's test262 runner and its
   `--json-results` flag. `crates/kiln-test262` is the right home for the equivalent. The lesson
   it encodes — a partial run must never write a full baseline — is recorded above.
