@@ -577,9 +577,12 @@ impl Lowerer {
                 };
                 HirExpressionKind::Function(Box::new(function))
             }
-            Expression::ClassExpression(_) => {
-                return self.unsupported_expression("class expression", expression_span);
-            }
+            Expression::ClassExpression(class) => match self.class(class, expression_span) {
+                Some(class) => HirExpressionKind::Class(Box::new(class)),
+                None => {
+                    return self.unsupported_expression("class expression", expression_span);
+                }
+            },
             Expression::NewExpression(expression) => {
                 let mut arguments = Vec::with_capacity(expression.arguments.len());
                 for argument in &expression.arguments {
@@ -715,10 +718,24 @@ impl Lowerer {
     fn class(&mut self, class: &Class<'_>, statement_span: HirSpan) -> Option<kiln_hir::Class> {
         let mut constructor = None;
         let mut methods = Vec::new();
+        let mut fields = Vec::new();
 
         for element in &class.body.body {
+            if let ClassElement::PropertyDefinition(property) = element {
+                let key = if property.computed {
+                    kiln_hir::ObjectKey::Computed(self.expression(property.key.as_expression()?))
+                } else {
+                    kiln_hir::ObjectKey::Static(property.key.static_name()?.to_string())
+                };
+                fields.push(kiln_hir::ClassField {
+                    key,
+                    value: property.value.as_ref().map(|value| self.expression(value)),
+                    is_static: property.r#static,
+                });
+                continue;
+            }
             let ClassElement::MethodDefinition(method) = element else {
-                self.unsupported("class field or static block", statement_span);
+                self.unsupported("class static block", statement_span);
                 return None;
             };
             if method.value.r#async || method.value.generator {
@@ -756,6 +773,7 @@ impl Lowerer {
                 .map(|heritage| self.expression(&heritage.expression)),
             constructor,
             methods,
+            fields,
             span: statement_span,
         })
     }

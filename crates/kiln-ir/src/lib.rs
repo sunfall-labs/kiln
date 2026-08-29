@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, Class, ExportName, ExportOrigin, Expression,
+    AssignmentOperator, BinaryOperator, Class, ClassField, ExportName, ExportOrigin, Expression,
     ExpressionKind, Function, ImportName, Literal, LogicalOperator, Module, ObjectKey, Span,
     Statement, StatementKind, UnaryOperator, VariableKind,
 };
@@ -1087,6 +1087,7 @@ impl Compiler {
                 self.call(callee, arguments, expression.span)
             }
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::Class(class) => self.class_expression(class, expression.span),
             ExpressionKind::Update {
                 increment,
                 prefix,
@@ -1303,6 +1304,31 @@ impl Compiler {
     /// The desugaring is not a shortcut -- a class really is a constructor function whose
     /// `prototype` holds the instance methods -- so it reuses the machinery `new` already needs
     /// rather than introducing a parallel object model for classes.
+    /// A class expression leaves its constructor on the stack.
+    fn class_expression(&mut self, class: &Class, span: Span) {
+        // A class expression may be anonymous, and its name -- when it has one -- is visible only
+        // inside its own body. Compiling it through a hidden binding gives methods a way to refer
+        // to it without leaking the name into the enclosing scope.
+        let binding = format!("%class{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+
+        self.scopes.push(HashMap::new());
+        let mut named = class.clone();
+        named.name = Some(binding.clone());
+        self.class_declaration(&named);
+        match self.resolve(&binding) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            _ => {
+                self.error(Some(span), "could not bind class expression");
+                self.push_constant(Constant::Undefined);
+            }
+        }
+        self.scopes.pop().expect("class scope was just pushed");
+    }
+
     fn class_declaration(&mut self, class: &Class) {
         let Some(name) = class.name.clone() else {
             self.error(Some(class.span), "a class declaration requires a name");
@@ -1339,13 +1365,19 @@ impl Compiler {
             },
         };
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
-        let Some(index) = self.compile_function_with(
+        let instance_fields: Vec<&ClassField> = class
+            .fields
+            .iter()
+            .filter(|field| !field.is_static)
+            .collect();
+        let Some(index) = self.compile_constructor(
             &constructor,
             class.span,
             // A *derived* class with no constructor is not empty: it forwards its arguments to
             // the parent. Without that, `class F extends Error {}` would construct an error with
             // no message.
             synthesized_derived,
+            &instance_fields,
         ) else {
             return;
         };
@@ -1376,6 +1408,24 @@ impl Compiler {
             self.load_local_or_cell(local);
             self.load_super();
             self.code.push(Instruction::SetPrototype);
+            self.code.push(Instruction::Pop);
+        }
+
+        // Static fields are ordinary properties of the constructor, assigned once here.
+        for field in class.fields.iter().filter(|field| field.is_static) {
+            self.load_local_or_cell(local);
+            match &field.key {
+                ObjectKey::Static(key) => {
+                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetProperty(name));
+                }
+                ObjectKey::Computed(key) => {
+                    self.expression(key);
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetComputed);
+                }
+            }
             self.code.push(Instruction::Pop);
         }
 
@@ -1429,6 +1479,14 @@ impl Compiler {
                 self.error(None, "`super` outside of a derived class");
                 self.push_constant(Constant::Undefined);
             }
+        }
+    }
+
+    /// A field with no initialiser is `undefined`, not absent: the property exists.
+    fn emit_field_value(&mut self, field: &ClassField) {
+        match &field.value {
+            Some(value) => self.expression(value),
+            None => self.push_constant(Constant::Undefined),
         }
     }
 
@@ -1487,6 +1545,21 @@ impl Compiler {
         function: &Function,
         span: Span,
         forwards_to_super: bool,
+    ) -> Option<u32> {
+        self.compile_constructor(function, span, forwards_to_super, &[])
+    }
+
+    /// Compile a constructor, whose prologue initialises the class's instance fields.
+    ///
+    /// Fields run after `super()` and before the body, which is the order the language specifies
+    /// and the only one that works: a field initialiser may read `this`, and in a derived class
+    /// `this` does not exist until the parent has run.
+    fn compile_constructor(
+        &mut self,
+        function: &Function,
+        span: Span,
+        forwards_to_super: bool,
+        fields: &[&ClassField],
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
@@ -1550,6 +1623,22 @@ impl Compiler {
         if forwards_to_super {
             self.load_super();
             self.code.push(Instruction::SuperForward);
+            self.code.push(Instruction::Pop);
+        }
+        for field in fields {
+            self.code.push(Instruction::LoadThis);
+            match &field.key {
+                ObjectKey::Static(key) => {
+                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetProperty(name));
+                }
+                ObjectKey::Computed(key) => {
+                    self.expression(key);
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetComputed);
+                }
+            }
             self.code.push(Instruction::Pop);
         }
         for statement in &function.body {
@@ -1959,15 +2048,7 @@ fn collect_nested_function_names(
             if let Some(superclass) = &class.superclass {
                 collect_identifiers(superclass, names, inside_function);
             }
-            let bodies = class
-                .constructor
-                .iter()
-                .chain(class.methods.iter().map(|method| &method.function));
-            for function in bodies {
-                for statement in &function.body {
-                    collect_nested_function_names(statement, names, true);
-                }
-            }
+            collect_class_names(class, names);
         }
         StatementKind::Variable { declarations, .. } => {
             for declaration in declarations {
@@ -2041,6 +2122,30 @@ fn collect_nested_function_names(
 /// *expression* nested in a `return` is a nested function whose free names are captures, and an
 /// early return on `!collecting` would never reach it. That was a real bug -- `function f(n) {
 /// return (m) => n + m; }` compiled with `n` unboxed, so the arrow could not resolve it.
+/// Names a class's methods and field initialisers refer to.
+///
+/// Field initialisers count: they run inside the constructor, so a name one of them reads is
+/// captured by the constructor exactly as a method body's would be.
+fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
+    let bodies = class
+        .constructor
+        .iter()
+        .chain(class.methods.iter().map(|method| &method.function));
+    for function in bodies {
+        for statement in &function.body {
+            collect_nested_function_names(statement, names, true);
+        }
+    }
+    for field in &class.fields {
+        if let ObjectKey::Computed(key) = &field.key {
+            collect_identifiers(key, names, true);
+        }
+        if let Some(value) = &field.value {
+            collect_identifiers(value, names, true);
+        }
+    }
+}
+
 fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, collecting: bool) {
     match &expression.kind {
         // A nested function's body is always collected, whatever the enclosing flag says.
@@ -2048,6 +2153,11 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             for statement in &function.body {
                 collect_nested_function_names(statement, names, true);
             }
+        }
+        // A class expression's methods and field initialisers are nested functions too, and a
+        // field initialiser closing over the enclosing scope is exactly what g03 exercises.
+        ExpressionKind::Class(class) => {
+            collect_class_names(class, names);
         }
         ExpressionKind::Identifier(name) => {
             if collecting {
@@ -2189,7 +2299,8 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
         }
-        ExpressionKind::This
+        ExpressionKind::Class(_)
+        | ExpressionKind::This
         | ExpressionKind::Function(_)
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::Unsupported { .. } => false,

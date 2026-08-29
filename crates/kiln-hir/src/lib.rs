@@ -125,7 +125,22 @@ pub struct Class {
     /// `None` when the class declares no constructor; one is synthesized.
     pub constructor: Option<Function>,
     pub methods: Vec<ClassMethod>,
+    /// Field initialisers, in source order.
+    ///
+    /// An instance field runs inside the constructor, after `super()` and before the body, and
+    /// it is evaluated in the class's enclosing scope -- so a field can close over a variable
+    /// the class was defined next to. Keeping them here rather than rewriting them into the
+    /// constructor at lowering preserves that they are fields.
+    pub fields: Vec<ClassField>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassField {
+    pub key: ObjectKey,
+    /// `None` for `x;`, which initialises to undefined.
+    pub value: Option<Expression>,
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +303,8 @@ pub enum ExpressionKind {
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.
     This,
+    /// A class expression.
+    Class(Box<Class>),
     /// A function expression or arrow function used as a value.
     Function(Box<Function>),
     /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept
