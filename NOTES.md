@@ -410,3 +410,14 @@ Mach-O dylib with install name `@rpath/hello.dylib`; the second identical comman
 generated C, the PIC object, and the shared library with zero compile/link time. Imported graphs
 are rejected before linking. The broader daemon suite still has only the two recorded stale
 language expectations (formerly unsupported smoke/compile-failure fixtures).
+
+**2026-08-29, Codex — manifest invalidation follow-up.** I am taking only
+`crates/kiln-daemon/src/testing.rs` plus this note. A changed `conformance/manifest.toml` currently
+selects no ordinary manifest tests even though it owns their IDs, expected stdout, and feature
+metadata. This slice will conservatively force a full corpus run for a changed `manifest.toml`
+while proving unrelated conformance result files remain ignored.
+
+Follow-up: a manifest change now selects all 20 discovered guard cases, while a changed
+`conformance/results/baseline.json` selects none. All five changed-selection daemon tests and
+warnings-denied daemon clippy pass; Claude's interpreter work and temporary files were left
+untouched.
