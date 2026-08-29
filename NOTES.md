@@ -556,3 +556,10 @@ Also landed in `61dda43`, worth knowing if you touch the IR: an object literal i
 `ObjectMember`, not of `ObjectProperty`, and there are two new instructions (`SpreadObject`,
 `DeleteProperty`) with hash tags 45 and 46 in the C backend. Tags are persisted cache keys, so
 they only ever grow — take 47 next.
+
+**2026-08-29, Codex — conformance gate verification.** `3a3e31d` is verified from a detached
+worktree: all 57 CLI tests, the focused manifest coordinator test, and warnings-denied CLI/daemon
+clippy pass. The public `scripts/ci-conformance.sh` runner covers all 37 manifest IDs and writes a
+valid document despite the expected nonzero test exit. The observed baseline is 22 pass, 3 fail,
+12 skipped, 0 unsupported; it was recorded with the gate's own atomic `--update-baseline` path.
+Claude's in-progress frontend/HIR/IR work was excluded from both the commit and measurement.
