@@ -669,9 +669,13 @@ impl Lowerer {
             Expression::AwaitExpression(_) => {
                 return self.unsupported_expression("await expression", expression_span);
             }
-            Expression::YieldExpression(_) => {
-                return self.unsupported_expression("yield expression", expression_span);
-            }
+            Expression::YieldExpression(yielded) => HirExpressionKind::Yield {
+                delegate: yielded.delegate,
+                value: yielded
+                    .argument
+                    .as_ref()
+                    .map(|value| Box::new(self.expression(value))),
+            },
             Expression::UpdateExpression(update) => {
                 let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
                     &update.argument
@@ -806,8 +810,8 @@ impl Lowerer {
                 self.unsupported("class static block", statement_span);
                 return None;
             };
-            if method.value.r#async || method.value.generator {
-                self.unsupported("async or generator method", statement_span);
+            if method.value.r#async {
+                self.unsupported("async method", statement_span);
                 return None;
             }
             let lowered = self.function(&method.value, span(method.span))?;
@@ -900,6 +904,7 @@ impl Lowerer {
         Some(HirFunction {
             name: None,
             arrow: true,
+            generator: false,
             parameters,
             body,
             span: expression_span,
@@ -914,10 +919,6 @@ impl Lowerer {
     ) -> Option<HirFunction> {
         if declaration.r#async {
             self.unsupported("async function", statement_span);
-            return None;
-        }
-        if declaration.generator {
-            self.unsupported("generator function", statement_span);
             return None;
         }
         if declaration.params.rest.is_some() {
@@ -949,6 +950,7 @@ impl Lowerer {
         Some(HirFunction {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
             arrow: false,
+            generator: declaration.generator,
             parameters,
             body: statements,
             span: statement_span,
