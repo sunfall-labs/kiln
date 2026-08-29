@@ -1,6 +1,6 @@
 //! Hand-rolled argument parsing.
 //!
-//! Six commands and five flags do not justify a derive-macro dependency on the rebuild path
+//! Eight commands and ten flags do not justify a derive-macro dependency on the rebuild path
 //! of the tool whose whole pitch is rebuild speed (docs/adr/0004). The parser is a plain
 //! loop, and it is strict: a flag that cannot apply to the chosen command is an error rather
 //! than something silently ignored.
@@ -9,12 +9,27 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
+use kiln_proto::NativeProfile;
 
-/// Polling cadence for `kiln watch`. Short enough to feel immediate, long enough that an
-/// idle watcher costs nothing measurable.
-const DEFAULT_WATCH_INTERVAL: Duration = Duration::from_millis(200);
-const MIN_WATCH_INTERVAL_MS: u64 = 10;
-const MAX_WATCH_INTERVAL_MS: u64 = 60_000;
+// `--interval` outlived the poll it was written for, but it now names the debounce window
+// rather than a cadence. Dropping it was the alternative, and it was tempting: one fewer
+// flag, one fewer thing to document. It loses, because the window is the entire delay
+// `watch` still adds on purpose between a save and an answer, charged against the 200ms
+// design.md §13 budgets, and hiding the only remaining cost of the loop inside a constant is
+// the opposite of what the rest of this CLI does. It is also the one number a user on a
+// filesystem that reports a save as a longer burst may genuinely have to raise. So it stays,
+// with a new meaning, a new range and new help text: the old cadence values are mostly
+// errors now, which is the right way for a meaning to change.
+
+/// Debounce window for `kiln watch`: how long the file must stop changing before it is
+/// re-checked. An editor's atomic save arrives as a burst within a millisecond or two, so
+/// this only has to be long enough to swallow the burst - and it is paid in full on every
+/// save, so it is kept far below the budget it spends from.
+const DEFAULT_WATCH_INTERVAL: Duration = Duration::from_millis(25);
+/// Under a millisecond there is nothing left to coalesce; over a couple of seconds the
+/// watcher feels broken, which is a mistake rather than a preference.
+const MIN_WATCH_INTERVAL_MS: u64 = 1;
+const MAX_WATCH_INTERVAL_MS: u64 = 2_000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Parsed {
@@ -34,10 +49,30 @@ pub struct Invocation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Check { path: PathBuf },
+    Check {
+        path: PathBuf,
+    },
+    Run {
+        path: PathBuf,
+        native: bool,
+        profile: NativeProfile,
+    },
+    Build {
+        path: PathBuf,
+        output: Option<PathBuf>,
+        profile: NativeProfile,
+    },
+    Test {
+        path: PathBuf,
+        changed: bool,
+        parse_only: bool,
+    },
     Project,
     Stats,
-    Watch { path: PathBuf, interval: Duration },
+    Watch {
+        path: PathBuf,
+        interval: Duration,
+    },
     Daemon(DaemonAction),
 }
 
@@ -58,6 +93,11 @@ where
     let mut one_shot = false;
     let mut socket: Option<PathBuf> = None;
     let mut interval: Option<Duration> = None;
+    let mut changed = false;
+    let mut parse_only = false;
+    let mut native = false;
+    let mut output: Option<PathBuf> = None;
+    let mut profile: Option<NativeProfile> = None;
     let mut only_positional = false;
 
     let mut args = args.into_iter();
@@ -85,22 +125,66 @@ where
                 let raw = value_for(&flag, inline, &mut args)?;
                 interval = Some(parse_interval(&raw)?);
             }
+            "--changed" => {
+                reject_inline_value(&flag, &inline)?;
+                changed = true;
+            }
+            "--parse-only" => {
+                reject_inline_value(&flag, &inline)?;
+                parse_only = true;
+            }
+            "--native" => {
+                reject_inline_value(&flag, &inline)?;
+                native = true;
+            }
+            "--output" => {
+                output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
+            "--profile" => {
+                let raw = value_for(&flag, inline, &mut args)?;
+                profile = Some(parse_profile(&raw)?);
+            }
             _ => {
-                return Err(Error::usage(format!(
-                    "unknown option `{arg}` (try `kiln --help`)"
-                )));
+                return Err(Error::usage(format!("unknown option `{arg}`")));
             }
         }
     }
 
     let mut positional = positional.into_iter();
     let Some(name) = positional.next() else {
-        return Err(Error::usage("no command given (try `kiln --help`)"));
+        return Err(Error::usage("no command given"));
     };
+
+    if native && name != "run" {
+        return Err(Error::usage("--native only applies to `kiln run`"));
+    }
+    if output.is_some() && name != "build" {
+        return Err(Error::usage("--output only applies to `kiln build`"));
+    }
+    if profile.is_some() && name != "build" && !native {
+        return Err(Error::usage(
+            "--profile only applies to native `kiln run` or `kiln build`",
+        ));
+    }
 
     let command = match name.as_str() {
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
+        },
+        "run" => Command::Run {
+            path: PathBuf::from(one_operand(&name, &mut positional)?),
+            native,
+            profile: profile.unwrap_or_default(),
+        },
+        "build" => Command::Build {
+            path: PathBuf::from(one_operand(&name, &mut positional)?),
+            output,
+            profile: profile.unwrap_or_default(),
+        },
+        "test" => Command::Test {
+            path: PathBuf::from(one_operand(&name, &mut positional)?),
+            changed,
+            parse_only,
         },
         "project" => {
             no_operands(&name, &mut positional)?;
@@ -130,9 +214,7 @@ where
             Command::Daemon(action)
         }
         other => {
-            return Err(Error::usage(format!(
-                "unknown command `{other}` (try `kiln --help`)"
-            )));
+            return Err(Error::usage(format!("unknown command `{other}`")));
         }
     };
 
@@ -140,6 +222,12 @@ where
     // ignored: silently dropping `--one-shot` would hide which engine actually ran.
     if interval.is_some() && !matches!(command, Command::Watch { .. }) {
         return Err(Error::usage("--interval only applies to `kiln watch`"));
+    }
+    if changed && !matches!(command, Command::Test { .. }) {
+        return Err(Error::usage("--changed only applies to `kiln test`"));
+    }
+    if parse_only && !matches!(command, Command::Test { .. }) {
+        return Err(Error::usage("--parse-only only applies to `kiln test`"));
     }
     if one_shot && matches!(command, Command::Daemon(_)) {
         return Err(Error::usage(
@@ -183,6 +271,17 @@ fn parse_interval(raw: &str) -> Result<Duration> {
     Ok(Duration::from_millis(ms))
 }
 
+fn parse_profile(raw: &str) -> Result<NativeProfile> {
+    match raw {
+        "native-dev" => Ok(NativeProfile::Dev),
+        "native-check" => Ok(NativeProfile::Check),
+        "native-release" => Ok(NativeProfile::Release),
+        _ => Err(Error::usage(format!(
+            "--profile expects native-dev, native-check, or native-release, got `{raw}`"
+        ))),
+    }
+}
+
 fn one_operand<I>(command: &str, rest: &mut I) -> Result<String>
 where
     I: Iterator<Item = String>,
@@ -209,15 +308,18 @@ where
 pub const HELP: &str = "\
 kiln - an incremental compiler for JavaScript and TypeScript
 
-kiln does not run or emit code yet. What it does today is drive the incremental
-query pipeline and show you what it had to recompute, which is the property the
-rest of the compiler is built on.
+kiln runs a deliberately growing JavaScript/TypeScript subset through an incremental
+compiler and interpreter. `check` accepts the full syntax understood by the frontend;
+`run` reports source-ranged diagnostics for execution features not implemented yet.
 
 usage:
     kiln [options] <command>
 
 commands:
+    run <file>         compile and execute one module (or use --native)
+    build <file>       compile and link one native executable
     check <file>       check one file and report what was recomputed
+    test <directory>   run a Test262 tree or Kiln's local conformance corpus
     project            summarise the whole project
     stats              print the daemon's recompute counters
     watch <file>       re-check <file> whenever it changes on disk
@@ -230,11 +332,19 @@ options:
     --socket <path>    daemon socket to use. Defaults to a path under $TMPDIR
                        derived from the working directory, so one daemon serves
                        one project. $KILN_SOCKET sets the same thing.
-    --interval <ms>    poll interval for `watch` (default 200, min 10, max 60000)
+    --interval <ms>    how long `watch` waits for a file to stop changing before it
+                       re-checks it (default 25, min 1, max 2000). `watch` is
+                       event-driven, so this coalesces one save's burst of writes;
+                       it is not a polling cadence.
+    --changed          with `test`, run failures, smoke, and affected tests only
+    --parse-only       with `test`, classify parser outcomes without interpreting
+    --native           with `run`, execute through the native backend
+    --output <path>    with `build`, write the native executable here
+    --profile <name>   native-dev, native-check, or native-release
     -h, --help         show this help
     -V, --version      show version and protocol information
 
-check, project, stats and watch start the daemon if it is not already running:
+run, check, test, project, stats and watch start the daemon if it is not already running:
 the everyday loop should not need a separate step.
 
 exit status:
@@ -280,6 +390,40 @@ mod tests {
     }
 
     #[test]
+    fn native_build_and_run_profiles_parse() {
+        assert_eq!(
+            run(&[
+                "build",
+                "src/main.ts",
+                "--output",
+                "bin/app",
+                "--profile=native-release"
+            ])
+            .command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: Some(PathBuf::from("bin/app")),
+                profile: NativeProfile::Release,
+            }
+        );
+        assert_eq!(
+            run(&[
+                "run",
+                "src/main.ts",
+                "--native",
+                "--profile",
+                "native-check"
+            ])
+            .command,
+            Command::Run {
+                path: PathBuf::from("src/main.ts"),
+                native: true,
+                profile: NativeProfile::Check,
+            }
+        );
+    }
+
+    #[test]
     fn socket_accepts_both_spellings() {
         let split = run(&["--socket", "/tmp/k.sock", "stats"]);
         let inline = run(&["--socket=/tmp/k.sock", "stats"]);
@@ -299,6 +443,20 @@ mod tests {
             panic!("expected watch");
         };
         assert_eq!(interval, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_mode_options_are_explicit_and_scoped() {
+        assert_eq!(
+            run(&["test", "test262", "--changed", "--parse-only"]).command,
+            Command::Test {
+                path: PathBuf::from("test262"),
+                changed: true,
+                parse_only: true,
+            }
+        );
+        assert!(usage_error(&["check", "a.js", "--changed"]).contains("only applies"));
+        assert!(usage_error(&["run", "a.js", "--parse-only"]).contains("only applies"));
     }
 
     #[test]
@@ -331,6 +489,12 @@ mod tests {
         assert!(usage_error(&["check", "a.js", "--interval=50"]).contains("--interval only"));
         assert!(usage_error(&["--one-shot", "daemon", "start"]).contains("--one-shot cannot"));
         assert!(usage_error(&["watch", "a.js", "--interval=0"]).contains("must be between"));
+        // A debounce window that long is a hung watcher, not a preference - and it is what
+        // the flag used to accept, so rejecting it is how the change of meaning gets noticed.
+        assert!(usage_error(&["watch", "a.js", "--interval=60000"]).contains("must be between"));
         assert!(usage_error(&["watch", "a.js", "--interval=soon"]).contains("milliseconds"));
+        assert!(usage_error(&["run", "a.js", "--profile=native-dev"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--native"]).contains("only applies"));
+        assert!(usage_error(&["build", "a.js", "--profile=debug"]).contains("expects"));
     }
 }

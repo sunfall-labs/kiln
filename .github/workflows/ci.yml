@@ -1,12 +1,12 @@
 name: CI
 
-# The fast, blocking loop: formatting, lints, tests. Anything that measures wall-clock time
-# lives in perf.yml, because it needs a different cache policy and a different idea of what
-# "failing" means.
+# The fast, blocking loop: formatting, lints, tests, supply chain. Anything that measures
+# wall-clock time lives in perf.yml, because it needs a different cache policy and a different
+# idea of what "failing" means.
 #
 # design.md ranks iteration speed second only to correctness, and CI is one of the loops that
-# gets iterated on. The three jobs below are independent on purpose so that a formatting slip
-# is reported in well under a minute instead of behind a full workspace build.
+# gets iterated on. The jobs below are independent on purpose so that a formatting slip is
+# reported in well under a minute instead of behind a full workspace build.
 
 on:
   push:
@@ -35,10 +35,17 @@ jobs:
       # components it declares. With no toolchain argument rustup installs the active one, so
       # the pin lives in exactly one place.
       - run: rustup toolchain install --no-self-update
+      # Registry only: `cargo fmt --all` resolves the workspace before it formats anything, and
+      # this job is meant to be the one that answers in under a minute.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fmt
+          cache-targets: "false"
       - run: cargo fmt --all --check
       # The scripts these workflows call are as much a part of the build as the Rust is.
-      # shellcheck is preinstalled on the runner image.
-      - run: shellcheck scripts/*.sh
+      # shellcheck is preinstalled on the runner image. --external-sources so it follows
+      # scripts/lib.sh into the scripts that source it instead of reporting SC1091.
+      - run: shellcheck --external-sources scripts/*.sh
 
   clippy:
     name: Lints
@@ -66,3 +73,19 @@ jobs:
       # Invoked through bash rather than by its executable bit, so a checkout that lost the
       # mode still runs.
       - run: bash scripts/ci-test.sh
+
+  deny:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The action ships the cargo-deny binary, so this job compiles nothing: it reads
+      # Cargo.lock and the manifests and finishes in seconds, which is what keeps it off the
+      # critical path of the build jobs above. It also fails loudly if the binary cannot be
+      # installed, where a `cargo install || true` style step would report a green tick for a
+      # policy nobody checked.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Named explicitly rather than left to the action's default, so a change to that
+          # default cannot quietly stop checking one of the four.
+          command: check advisories licenses bans sources

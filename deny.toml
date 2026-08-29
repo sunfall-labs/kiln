@@ -1,0 +1,81 @@
+# Supply-chain policy, enforced by `cargo deny check` in CI (.github/workflows/ci.yml).
+#
+# The dependency tree is deliberately tiny (docs/adr/0004), so this file is written to notice
+# the moment that stops being true: a new licence, a second copy of a crate, or a source other
+# than crates.io all fail rather than arrive unremarked.
+#
+# When a new dependency trips one of these checks, widen the policy here in the same commit
+# that adds the dependency, and say in the commit message why the new licence, duplicate or
+# source is acceptable. Do not reach for `ignore`/`skip` to get a build green: those entries
+# are exceptions with a reason attached, not a mute button.
+
+[graph]
+all-features = true
+
+[advisories]
+# A yanked crate is not a vulnerability, but it is always someone telling us not to use this
+# version, and the lockfile is committed so the fix is a deliberate bump either way.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# The workspace is MIT and most of the tree offers MIT among its options. The rest are here
+# because a dependency offers nothing else, not because the policy was relaxed to get green:
+#
+#   Unicode-3.0    an addition rather than an alternative - unicode-ident is
+#                  "(MIT OR Apache-2.0) AND Unicode-3.0", so its data tables carry the Unicode
+#                  licence whichever half of the OR we take.
+#   Apache-2.0     offered alongside MIT by most of the tree; required outright by a few.
+#   Apache-2.0 WITH LLVM-exception
+#                  dragonbox_ecma and wasi. The exception only widens what linking is allowed.
+#   BSL-1.0        dragonbox_ecma's other half. Permissive, no attribution in binaries.
+#   CC0-1.0        notify. A public-domain dedication.
+#   ISC            inotify / inotify-sys, reached through notify on Linux. BSD-equivalent.
+#   Unlicense      memchr, walkdir, same-file, winapi-util, each "Unlicense OR MIT".
+#
+# All permissive and all compatible with shipping an MIT binary. Nothing copyleft is allowed,
+# and a new entry here needs a line saying which crate forced it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Two versions of one crate is the usual first symptom of the tree growing sideways, and it
+# costs build time - the thing this project is about - so it fails here rather than in a
+# quarterly audit.
+multiple-versions = "deny"
+# Exceptions, each with a reason. Both are transitive and neither is ours to collapse: the
+# duplicate disappears when the upstream crates converge, not when we change anything here.
+skip = [
+    # serde_derive is on syn 3; oxc's proc-macros and phf are still on syn 2. Both are
+    # build-time only and neither reaches a shipped binary.
+    { crate = "syn@2", reason = "oxc_ast_macros and phf_macros have not moved to syn 3" },
+    # notify pulls windows-sys 0.60 while mio is on 0.61. Neither is built on this project's
+    # target platforms at all; they are in the graph because `all-features = true` above
+    # resolves every target.
+    { crate = "windows-sys@0.60", reason = "notify trails mio by one minor; not built on unix" },
+]
+# Only a warning, and reluctantly. A path dependency carries no version requirement, so every
+# `kiln-*` crate depending on another reads as a wildcard; `allow-wildcard-paths` is the
+# intended exemption but cargo-deny applies it only to crates marked `publish = false`, which
+# none of ours are. Warning keeps the signal that matters - a `"*"` requirement on a crates.io
+# dependency - visible in the job log without failing on the workspace's own path edges.
+# Promote this to "deny" the day the workspace crates declare `publish = false`.
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
