@@ -20,7 +20,10 @@ use std::collections::HashMap;
 #[cfg(test)]
 use crate::hash::content_hash;
 use crate::hash::{Fnv1a, hash_names};
-use crate::{Compiled, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision, Stats};
+use crate::{
+    Compiled, CompiledModule, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision,
+    Stats,
+};
 #[cfg(test)]
 use kiln_hir::{Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceKind, Span};
 
@@ -51,6 +54,7 @@ enum QueryKey {
     FileSet,
     Parse(FileId),
     Ir(FileId),
+    ModuleIr(FileId),
     Interface(FileId),
     Project,
     /// Test-only query whose dependency is the other `Cyclic`. The v0 graph is acyclic by
@@ -87,6 +91,7 @@ struct FileState {
     source_changed_at: Epoch,
     parse: Option<Memo<Parsed>>,
     ir: Option<Memo<Compiled>>,
+    module_ir: Option<Memo<CompiledModule>>,
     interface: Option<Memo<Interface>>,
 }
 
@@ -215,6 +220,18 @@ impl MemoEngine {
                 let index = file.0 as usize;
                 store(&mut self.files[index].ir, value, deps, now, &mut self.stats)
             }
+            QueryKey::ModuleIr(file) => {
+                let (value, deps) = self.compute_module_ir(file);
+                self.stats.ir_computed += 1;
+                let index = file.0 as usize;
+                store(
+                    &mut self.files[index].module_ir,
+                    value,
+                    deps,
+                    now,
+                    &mut self.stats,
+                )
+            }
             QueryKey::Interface(file) => {
                 let (value, deps) = self.compute_interface(file);
                 self.stats.interface_computed += 1;
@@ -260,6 +277,13 @@ impl MemoEngine {
         self.force(dep);
         let parsed = self.file(file).parse.as_ref().expect(FORCED);
         (kiln_ir::compile(&parsed.value.module), vec![dep])
+    }
+
+    fn compute_module_ir(&mut self, file: FileId) -> (CompiledModule, Vec<QueryKey>) {
+        let dep = QueryKey::Parse(file);
+        self.force(dep);
+        let parsed = self.file(file).parse.as_ref().expect(FORCED);
+        (kiln_ir::compile_module(&parsed.value.module), vec![dep])
     }
 
     fn compute_interface(&mut self, file: FileId) -> (Interface, Vec<QueryKey>) {
@@ -314,6 +338,7 @@ impl MemoEngine {
             QueryKey::Source(_) | QueryKey::FileSet => None,
             QueryKey::Parse(file) => self.file(file).parse.as_ref().map(|memo| &memo.meta),
             QueryKey::Ir(file) => self.file(file).ir.as_ref().map(|memo| &memo.meta),
+            QueryKey::ModuleIr(file) => self.file(file).module_ir.as_ref().map(|memo| &memo.meta),
             QueryKey::Interface(file) => self.file(file).interface.as_ref().map(|memo| &memo.meta),
             QueryKey::Project => self.project.as_ref().map(|memo| &memo.meta),
             #[cfg(test)]
@@ -330,6 +355,11 @@ impl MemoEngine {
                 .as_mut()
                 .map(|memo| &mut memo.meta),
             QueryKey::Ir(file) => self.file_mut(file).ir.as_mut().map(|memo| &mut memo.meta),
+            QueryKey::ModuleIr(file) => self
+                .file_mut(file)
+                .module_ir
+                .as_mut()
+                .map(|memo| &mut memo.meta),
             QueryKey::Interface(file) => self
                 .file_mut(file)
                 .interface
@@ -375,6 +405,7 @@ impl MemoEngine {
             QueryKey::FileSet => "file_set()".to_string(),
             QueryKey::Parse(file) => format!("parse({})", path(file)),
             QueryKey::Ir(file) => format!("ir({})", path(file)),
+            QueryKey::ModuleIr(file) => format!("module_ir({})", path(file)),
             QueryKey::Interface(file) => format!("interface({})", path(file)),
             QueryKey::Project => "project()".to_string(),
             #[cfg(test)]
@@ -498,6 +529,7 @@ impl QueryEngine for MemoEngine {
             source_changed_at: self.epoch,
             parse: None,
             ir: None,
+            module_ir: None,
             interface: None,
         });
         self.by_path.insert(path.to_string(), file);
@@ -537,6 +569,16 @@ impl QueryEngine for MemoEngine {
     fn ir(&mut self, file: FileId) -> Compiled {
         self.force(QueryKey::Ir(file));
         self.file(file).ir.as_ref().expect(FORCED).value.clone()
+    }
+
+    fn module_ir(&mut self, file: FileId) -> CompiledModule {
+        self.force(QueryKey::ModuleIr(file));
+        self.file(file)
+            .module_ir
+            .as_ref()
+            .expect(FORCED)
+            .value
+            .clone()
     }
 
     fn interface(&mut self, file: FileId) -> Interface {
@@ -680,6 +722,34 @@ mod tests {
         db.reset_stats();
         db.set_source(files[0], A_BODY_EDIT.to_string());
         assert_eq!(db.ir(files[0]).expect("edited fixture HIR compiles"), first);
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+        assert_eq!(db.stats().early_cutoff, 1);
+    }
+
+    #[test]
+    fn linkage_bytecode_is_memoized_independently() {
+        let (mut db, files) = engine(&[("a.js", "const hidden = 1;\n")]);
+        let first = db.module_ir(files[0]).expect("fixture module compiles");
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().ir_computed, 1);
+
+        db.reset_stats();
+        assert_eq!(
+            db.module_ir(files[0])
+                .expect("cached module IR remains valid"),
+            first
+        );
+        assert_eq!(db.stats().ir_computed, 0);
+        assert_eq!(db.stats().validated, 1);
+
+        db.reset_stats();
+        db.set_source(files[0], "const hidden = 2;\n".to_owned());
+        assert_eq!(
+            db.module_ir(files[0])
+                .expect("edited fixture module compiles"),
+            first
+        );
         assert_eq!(db.stats().parse_computed, 1);
         assert_eq!(db.stats().ir_computed, 1);
         assert_eq!(db.stats().early_cutoff, 1);

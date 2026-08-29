@@ -10,6 +10,7 @@ kiln-artifact-cache = { workspace = true }
 kiln-backend-c = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-module-graph = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
 

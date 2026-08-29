@@ -10,13 +10,14 @@ is built before the compiler gets large, not retrofitted once it hurts. The inte
 is a tool that feels like an interpreter or a modern dev server while still producing
 aggressively optimized native binaries.
 
-## Status: first interpreter and native slices work
+## Status: first linked interpreter and native slices work
 
 This repository is at v0. It now has a production Oxc frontend, owned executable HIR, memoized
-stack bytecode, a scalar interpreter, deterministic C emission, a versioned HostOps boundary, and
-a layered native artifact cache. `kiln run` executes a deliberately small but real
-JavaScript/TypeScript subset immediately; `kiln build` and `kiln run --native` compile that same
-bytecode to a native executable through Zig, Clang, `cc`, or GCC.
+stack bytecode, an exact-path module graph, a scalar interpreter, deterministic per-module C
+emission, a versioned HostOps boundary, and a layered native artifact cache. `kiln run` executes a
+deliberately small but real JavaScript/TypeScript subset immediately; `kiln build` and
+`kiln run --native` compile that same graph to a native executable through Zig, Clang, `cc`, or
+GCC.
 
 What exists today:
 
@@ -26,6 +27,7 @@ What exists today:
 | `crates/frontend-oxc` | The Oxc adapter. Parses JS, JSX, TS and TSX and lowers into owned HIR. |
 | `crates/kiln-ir` | Parser-independent, versioned stack bytecode and HIR compiler. |
 | `crates/kiln-interpreter` | Deterministic scalar VM with bounded execution. |
+| `crates/kiln-module-resolver` / `crates/kiln-module-graph` | Project-confined exact-path resolution, deterministic graph construction, link validation, and acyclic execution order. |
 | `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
 | `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
@@ -34,18 +36,20 @@ What exists today:
 | `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
 | `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
 | `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 5, including structured interpreter, native-build, native-run, and test results. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 7, including structured interpreter, native-build, native-run, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
 
 The executable subset currently covers scalar literals, variables, arithmetic, strict equality
 and comparisons, assignment, blocks, `if`/`else`, `while`, short-circuit expressions,
-conditionals, and `console.log`. Unsupported valid syntax is rejected with a source range during
-IR compilation. Module linking, functions, objects, exceptions, async behavior, built-ins, the
-Test262 harness, realms, and broad language coverage remain to be implemented. The initial native
-runtime's number-to-string edge cases and process-lifetime string allocations are also explicit
-equivalence/ownership work; they are not treated as conformance successes.
+conditionals, `console.log`, side-effect imports, and named/default scalar imports and exports in
+acyclic graphs. Unsupported valid syntax is rejected with a source range during IR compilation.
+Live bindings and cycles, namespace imports, re-exports, functions, objects, exceptions, async
+behavior, built-ins, the full Test262 harness, realms, and broad language coverage remain to be
+implemented. The initial native runtime's number-to-string edge cases and process-lifetime string
+allocations are also explicit equivalence/ownership work; they are not treated as conformance
+successes.
 
 The useful thing that does work is the invalidation behavior. Editing a file's contents
 reparses that file; if the edit does not change what the module exports, the project-level query
@@ -102,6 +106,7 @@ also need Zig, Clang, a compatible `cc`, or GCC on `PATH`.
 cargo build              # build the workspace
 cargo test               # the invalidation tests are the interesting ones
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts
+cargo run -p kiln-cli -- --one-shot run examples/modules/main.ts
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native
 cargo run -p kiln-cli -- --one-shot build examples/hello.ts --profile native-dev
 cargo run -p kiln-cli -- --one-shot test tests/conformance/smoke
@@ -142,6 +147,11 @@ is visible next to the reasoning for it.
 - [0009](docs/adr/0009-native-c-units-have-layered-content-addressed-artifacts.md) — deterministic
   per-module C, the HostOps runtime, launcher, objects, and executable are separately keyed native
   artifacts behind a portable compiler boundary.
+- [0010](docs/adr/0010-hashing-strategy.md) — stable protocol-visible hashes use a specified
+  SHA-256 truncation, while cache keys retain the full digest and explicitly encode their inputs.
+- [0011](docs/adr/0011-explicit-module-graph-and-acyclic-scalar-linking.md) — module resolution and
+  graph traversal are explicit, deterministic layers; the first linkage slice copies acyclic
+  scalar exports while reserving live cells and strongly connected components for the next step.
 
 ## License
 

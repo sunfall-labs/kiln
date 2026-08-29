@@ -38,8 +38,8 @@ pub trait Backend {
         }
     }
 
-    fn run(&mut self, path: String) -> Result<RunSummary> {
-        match self.request(Request::Run { path })? {
+    fn run(&mut self, path: String, project_root: String) -> Result<RunSummary> {
+        match self.request(Request::Run { path, project_root })? {
             Response::Ran(summary) => Ok(summary),
             other => Err(mismatch("Run", &other)),
         }

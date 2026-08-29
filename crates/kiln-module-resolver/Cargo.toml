@@ -1,0 +1,10 @@
+[package]
+name = "kiln-module-resolver"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sunfall-labs/kiln"
+
+# Keep module resolution below the frontend and graph layers. In particular, this crate must not
+# pull in a package-manager or parser dependency: the initial policy is deliberately explicit.
+[dependencies]

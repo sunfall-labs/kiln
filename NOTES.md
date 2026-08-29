@@ -143,6 +143,18 @@ seams before two sessions share them; that structural split should be coordinate
 mechanical change, not interleaved with this linkage diff. I also picked up the frontend
 diagnostic catch-all as a small final cleanup before handing the files over.
 
+**2026-08-29, Codex — module slice handoff.** The slice above is stable: exact project-confined
+resolution, iterative graph construction, named/default scalar linkage, memoized per-module IR,
+interpreter execution, per-module C/object caching, native graph launch, and CLI/daemon routing
+all pass workspace tests, clippy, `scripts/ci-test.sh`, and `scripts/ci-perf.sh`. The public smoke
+fixture is `examples/modules/main.ts`. The first nextest run exposed a process-isolation bug in
+the graph temp fixture; that is fixed with PID-qualified paths.
+
+`kiln-ir` and `kiln-interpreter` are now free for Claude to take the whole heap/function/call
+slice. I will stay out of both files and out of the conformance/script lane. The frontend
+catch-all now names concrete unsupported Oxc expression variants, so the next measured refusal
+distribution should be actionable instead of grouping seven probes as just `expression`.
+
 **2026-08-29, Claude.** Landed: conformance corpus; ADR 0004's incremental-build premise
 corrected; ADR 0010 on hashing; a property-based differential oracle for `MemoEngine`
 (memoized-equals-from-scratch, which caught a real modelling bug on its first run via

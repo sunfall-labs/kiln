@@ -5,10 +5,10 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::fmt::Write as _;
+use std::{collections::HashSet, fmt::Write as _};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
-use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, Program, UnaryOp};
+use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
@@ -20,7 +20,7 @@ pub struct CModule {
     pub symbol: String,
     /// Complete, self-contained C99 source for one translation unit.
     pub source: String,
-    /// Stable primary FNV-1a identity of the bytecode input.
+    /// Stable primary FNV-1a identity of the bytecode input and, for [`emit_module`], linkage.
     pub program_hash: u64,
 }
 
@@ -73,6 +73,32 @@ pub fn emit(program: &Program) -> Result<CModule, EmitError> {
 /// Explicitly named spelling for users integrating several backend implementations.
 pub fn emit_c(program: &Program) -> Result<CModule, EmitError> {
     emit(program)
+}
+
+/// Emit one linkage-aware module as a deterministic C99 translation unit.
+///
+/// The generated entry point extends the scalar ABI while retaining the original `host` and
+/// `result` arguments at the front of the signature:
+///
+/// ```text
+/// int symbol(kiln_host *host, kiln_value *result,
+///            const kiln_value *imports, size_t import_count,
+///            kiln_value *exports, size_t export_count)
+/// ```
+///
+/// Imports are ordered like [`ModuleProgram::imports`] and exports are ordered like
+/// [`ModuleProgram::exports`].  Import slots are initialized before the first instruction and
+/// export slots are written only after successful execution.
+pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
+    let max_stack = validate_module(module)?;
+    let (program_hash, symbol_hash) = hash_module_pair(module);
+    let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
+    let source = render_module(module, max_stack, program_hash, &symbol);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
 }
 
 const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
@@ -529,6 +555,41 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
     Ok(max_height.max(1))
 }
 
+fn validate_module(module: &ModuleProgram) -> Result<usize, EmitError> {
+    let max_stack = validate(&module.program)?;
+    let local_count = u64::from(module.program.local_count);
+    let mut initialized_slots = HashSet::with_capacity(module.imports.len());
+    for (index, binding) in module.imports.iter().enumerate() {
+        if u64::from(binding.local_slot) >= local_count {
+            return Err(EmitError::InvalidProgram {
+                message: format!(
+                    "import {index} local slot {} is out of bounds (local count {})",
+                    binding.local_slot, module.program.local_count
+                ),
+            });
+        }
+        if !initialized_slots.insert(binding.local_slot) {
+            return Err(EmitError::InvalidProgram {
+                message: format!(
+                    "import {index} local slot {} is initialized more than once",
+                    binding.local_slot
+                ),
+            });
+        }
+    }
+    for (index, binding) in module.exports.iter().enumerate() {
+        if u64::from(binding.local_slot) >= local_count {
+            return Err(EmitError::InvalidProgram {
+                message: format!(
+                    "export {index} local slot {} is out of bounds (local count {})",
+                    binding.local_slot, module.program.local_count
+                ),
+            });
+        }
+    }
+    Ok(max_stack)
+}
+
 fn invalid(index: usize, message: impl Into<String>) -> EmitError {
     EmitError::InvalidProgram {
         message: format!("instruction {index}: {}", message.into()),
@@ -647,6 +708,85 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
             &program.constants,
             index,
             symbol,
+            None,
+        );
+    }
+    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    output
+}
+
+fn render_module(
+    module: &ModuleProgram,
+    max_stack: usize,
+    program_hash: u64,
+    symbol: &str,
+) -> String {
+    let program = &module.program;
+    let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
+    output.push_str(HEADER);
+    writeln!(
+        output,
+        "/* Module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
+        module.imports.len(),
+        module.exports.len()
+    )
+    .unwrap();
+    for (index, constant) in program.constants.iter().enumerate() {
+        if let Constant::String(value) = constant {
+            writeln!(
+                output,
+                "static const char {symbol}_constant_{index}[] = {};",
+                c_string(value)
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
+    )
+    .unwrap();
+    output.push_str("    size_t sp = 0;\n");
+    writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
+    writeln!(
+        output,
+        "    kiln_value locals[{}];",
+        usize::try_from(program.local_count).unwrap().max(1)
+    )
+    .unwrap();
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    writeln!(
+        output,
+        "    if (import_count != (size_t){} || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+        module.imports.len()
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    if (export_count != (size_t){} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+        module.exports.len()
+    )
+    .unwrap();
+    for local in 0..program.local_count {
+        writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
+    }
+    for (index, binding) in module.imports.iter().enumerate() {
+        writeln!(
+            output,
+            "    locals[{}] = imports[{index}];",
+            binding.local_slot
+        )
+        .unwrap();
+    }
+    for index in 0..program.code.len() {
+        writeln!(output, "kiln_label_{index}:;").unwrap();
+        emit_instruction(
+            &mut output,
+            &program.code[index],
+            &program.constants,
+            index,
+            symbol,
+            Some(&module.exports),
         );
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
@@ -659,6 +799,7 @@ fn emit_instruction(
     constants: &[Constant],
     index: usize,
     symbol: &str,
+    exports: Option<&[kiln_ir::ExportBinding]>,
 ) {
     let _ = index;
     match instruction {
@@ -698,7 +839,25 @@ fn emit_instruction(
         Instruction::HostCall { op, argc } => {
             writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
         }
-        Instruction::Return => output.push_str("    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n"),
+        Instruction::Return => match exports {
+            None => output.push_str(
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+            ),
+            Some(exports) => {
+                output.push_str(
+                    "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
+                );
+                for (index, binding) in exports.iter().enumerate() {
+                    writeln!(
+                        output,
+                        "    exports[{index}] = locals[{}];",
+                        binding.local_slot
+                    )
+                    .unwrap();
+                }
+                output.push_str("    return KILN_C99_OK;\n");
+            }
+        },
     }
 }
 
@@ -850,6 +1009,56 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     hash
 }
 
+fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
+    (
+        hash_module_with_seed(module, 0xcbf29ce484222325),
+        hash_module_with_seed(module, 0x84222325cbf29ce4),
+    )
+}
+
+fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
+    let mut hash = hash_program_with_seed(&module.program, seed);
+    fn byte(hash: &mut u64, value: u8) {
+        *hash ^= u64::from(value);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    fn word(hash: &mut u64, value: u64) {
+        for value in value.to_le_bytes() {
+            byte(hash, value);
+        }
+    }
+    fn text(hash: &mut u64, value: &str) {
+        word(hash, value.len() as u64);
+        for byte in value.bytes() {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    // Tags and lengths make the linkage stream unambiguous even when names happen to share
+    // prefixes.  Preserve the source order promised by ModuleProgram for all three lists.
+    byte(&mut hash, 0x40);
+    word(&mut hash, module.dependencies.len() as u64);
+    for dependency in &module.dependencies {
+        text(&mut hash, dependency);
+    }
+    byte(&mut hash, 0x41);
+    word(&mut hash, module.imports.len() as u64);
+    for binding in &module.imports {
+        text(&mut hash, &binding.source);
+        text(&mut hash, &binding.imported);
+        text(&mut hash, &binding.local);
+        word(&mut hash, u64::from(binding.local_slot));
+    }
+    byte(&mut hash, 0x42);
+    word(&mut hash, module.exports.len() as u64);
+    for binding in &module.exports {
+        text(&mut hash, &binding.exported);
+        word(&mut hash, u64::from(binding.local_slot));
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +1071,19 @@ mod tests {
             constants,
             code,
             local_count,
+        }
+    }
+
+    fn module(
+        program: Program,
+        imports: Vec<kiln_ir::ImportBinding>,
+        exports: Vec<kiln_ir::ExportBinding>,
+    ) -> ModuleProgram {
+        ModuleProgram {
+            program,
+            dependencies: Vec::new(),
+            imports,
+            exports,
         }
     }
 
@@ -887,6 +1109,158 @@ mod tests {
             "int {}(kiln_host *host, kiln_value *result)",
             first.symbol
         )));
+    }
+
+    #[test]
+    fn module_linkage_is_deterministic_and_part_of_identity() {
+        let body = program(
+            vec![Constant::Number(1.0f64.to_bits())],
+            vec![Instruction::LoadLocal(0), Instruction::Return],
+            1,
+        );
+        let first = module(
+            body.clone(),
+            vec![kiln_ir::ImportBinding {
+                source: "dep".into(),
+                imported: "value".into(),
+                local: "input".into(),
+                local_slot: 0,
+            }],
+            Vec::new(),
+        );
+        let second = module(
+            body,
+            vec![kiln_ir::ImportBinding {
+                source: "other-dep".into(),
+                imported: "value".into(),
+                local: "input".into(),
+                local_slot: 0,
+            }],
+            Vec::new(),
+        );
+        let emitted = emit_module(&first).expect("module emits");
+        assert_eq!(emitted, emit_module(&first).expect("module emits again"));
+        assert_ne!(
+            emitted.program_hash,
+            emit_module(&second).unwrap().program_hash
+        );
+        assert!(emitted.source.contains("const kiln_value *imports"));
+        assert!(emitted.source.contains("size_t import_count"));
+    }
+
+    #[test]
+    fn rejects_invalid_module_linkage_metadata() {
+        let body = program(Vec::new(), vec![Instruction::Return], 1);
+        let out_of_bounds = module(
+            body.clone(),
+            vec![kiln_ir::ImportBinding {
+                source: "dep".into(),
+                imported: "value".into(),
+                local: "input".into(),
+                local_slot: 1,
+            }],
+            Vec::new(),
+        );
+        assert!(matches!(
+            emit_module(&out_of_bounds),
+            Err(EmitError::InvalidProgram { message }) if message.contains("import 0") && message.contains("out of bounds")
+        ));
+        let duplicate = module(
+            body.clone(),
+            vec![
+                kiln_ir::ImportBinding {
+                    source: "a".into(),
+                    imported: "x".into(),
+                    local: "x".into(),
+                    local_slot: 0,
+                },
+                kiln_ir::ImportBinding {
+                    source: "b".into(),
+                    imported: "y".into(),
+                    local: "y".into(),
+                    local_slot: 0,
+                },
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(
+            emit_module(&duplicate),
+            Err(EmitError::InvalidProgram { message }) if message.contains("initialized more than once")
+        ));
+        let bad_export = module(
+            body,
+            Vec::new(),
+            vec![kiln_ir::ExportBinding {
+                exported: "value".into(),
+                local_slot: 1,
+            }],
+        );
+        assert!(matches!(
+            emit_module(&bad_export),
+            Err(EmitError::InvalidProgram { message }) if message.contains("export 0") && message.contains("out of bounds")
+        ));
+    }
+
+    #[test]
+    fn emitted_module_initializes_imports_and_publishes_exports() {
+        let generated = emit_module(&module(
+            program(
+                vec![Constant::Number(2.0f64.to_bits())],
+                vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(BinaryOp::Add),
+                    Instruction::StoreLocal(1),
+                    Instruction::LoadLocal(1),
+                    Instruction::Return,
+                ],
+                2,
+            ),
+            vec![kiln_ir::ImportBinding {
+                source: "dep".into(),
+                imported: "value".into(),
+                local: "input".into(),
+                local_slot: 0,
+            }],
+            vec![kiln_ir::ExportBinding {
+                exported: "answer".into(),
+                local_slot: 1,
+            }],
+        ))
+        .expect("module emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value input = kiln_c99_number(40.0); kiln_value output; kiln_value result; if ({}(NULL, &result, &input, 1, &output, 1) != 0) return 2; if (output.tag != KILN_VALUE_NUMBER || output.bits != kiln_c99_number(42.0).bits) return 3; if ({}(NULL, &result, NULL, 0, &output, 1) != KILN_C99_INVALID_ARGUMENT) return 4; return 0; }}\n",
+            generated.symbol, generated.symbol
+        );
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(std::env::temp_dir().join(format!("kiln-backend-c-module-{}", std::process::id())))
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(format!("{}{}", generated.source, wrapper).as_bytes())
+            .expect("source is accepted by cc stdin");
+        let output_path =
+            std::env::temp_dir().join(format!("kiln-backend-c-module-{}", std::process::id()));
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated module C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&output_path)
+            .output()
+            .expect("generated executable runs");
+        let _ = std::fs::remove_file(output_path);
+        assert!(
+            run.status.success(),
+            "generated module returned the wrong result"
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@ crate sits rather than of what it depends on.
 That correction matters because the rule was load-bearing in the wrong direction. "Adding a
 dependency to either crate is an ADR, not a commit" turned a false premise into a procedural
 barrier, and the first thing it blocks is something the project needs: a real hash function
-(ADR 0007) and a non-SipHash map for process-local tables. A rule that is expensive to follow
+(ADR 0010) and a non-SipHash map for process-local tables. A rule that is expensive to follow
 should at least be true.
 
 ## Decision
@@ -65,7 +65,7 @@ script, a small API of concrete functions and types — is not what this rule is
 adding one is a commit rather than an ADR. The commit records the check: what the dependency's
 macro, build-script and generic surface is, and the `cargo build --timings` critical path before
 and after. Anything that fails that test still needs an ADR first. The expectation is that most
-such ADRs conclude no; ADR 0007 is the first one and does not, which is the argument for a
+such ADRs conclude no; ADR 0010 is the first one and does not, which is the argument for a
 written case rather than a ban.
 
 Salsa remains the rule's real target and is still excluded by it. Its ergonomics come from

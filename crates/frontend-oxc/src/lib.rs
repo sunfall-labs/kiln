@@ -8,9 +8,10 @@ use std::path::Path;
 
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
-    Export, Expression as HirExpression, ExpressionKind as HirExpressionKind, Item, ItemKind,
-    Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module, RequestedModule,
-    SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
+    Export, ExportName, ExportOrigin, Expression as HirExpression,
+    ExpressionKind as HirExpressionKind, Import, ImportName, Item, ItemKind, Literal as HirLiteral,
+    LogicalOperator as HirLogicalOperator, Module, ModuleRequestKind, ModuleRequestOccurrence,
+    RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, UnaryOperator as HirUnaryOperator,
     VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
 };
@@ -21,7 +22,10 @@ use oxc_ast::ast::{
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
-use oxc_syntax::module_record::ExportExportName;
+use oxc_syntax::module_record::{
+    ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
+    ImportImportName,
+};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 
 /// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
@@ -61,7 +65,16 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
             specifier: specifier.to_string(),
             occurrences: occurrences
                 .iter()
-                .map(|occurrence| span(occurrence.statement_span))
+                .map(|occurrence| ModuleRequestOccurrence {
+                    statement_span: span(occurrence.statement_span),
+                    specifier_span: span(occurrence.span),
+                    type_only: occurrence.is_type,
+                    kind: if occurrence.is_import {
+                        ModuleRequestKind::Import
+                    } else {
+                        ModuleRequestKind::Export
+                    },
+                })
                 .collect(),
         })
         .collect::<Vec<_>>();
@@ -69,10 +82,25 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         request
             .occurrences
             .first()
-            .copied()
+            .map(|occurrence| occurrence.statement_span)
             .unwrap_or_default()
             .start
     });
+
+    let mut imports = parsed
+        .module_record
+        .import_entries
+        .iter()
+        .map(|entry| Import {
+            source: entry.module_request.name.to_string(),
+            imported: lower_import_name(&entry.import_name),
+            local: entry.local_name.name.to_string(),
+            type_only: entry.is_type,
+            span: span(entry.local_name.span),
+            statement_span: span(entry.statement_span),
+        })
+        .collect::<Vec<_>>();
+    imports.sort_by_key(|entry| (entry.statement_span.start, entry.span.start));
 
     // Use the spec-shaped entries rather than `exported_bindings`: the latter intentionally
     // excludes `default` and erases TypeScript's type-only bit, both of which affect Kiln's
@@ -82,31 +110,11 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         .local_export_entries
         .iter()
         .chain(parsed.module_record.indirect_export_entries.iter())
-        .map(|entry| Export {
-            name: match &entry.export_name {
-                ExportExportName::Name(name) => Some(name.name.to_string()),
-                ExportExportName::Default(_) => Some("default".to_string()),
-                ExportExportName::Null => None,
-            },
-            source: entry
-                .module_request
-                .as_ref()
-                .map(|request| request.name.to_string()),
-            type_only: entry.is_type,
-            span: span(entry.span),
-        })
+        .map(lower_export)
         .collect::<Vec<_>>();
 
     for entry in &parsed.module_record.star_export_entries {
-        exports.push(Export {
-            name: None,
-            source: entry
-                .module_request
-                .as_ref()
-                .map(|request| request.name.to_string()),
-            type_only: entry.is_type,
-            span: span(entry.span),
-        });
+        exports.push(lower_export(entry));
     }
     exports.sort_by_key(|export| export.span.start);
 
@@ -152,6 +160,7 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
             .collect(),
         body,
         requested_modules,
+        imports,
         exports,
         diagnostics,
         panicked: parsed.panicked,
@@ -170,7 +179,7 @@ impl Lowerer {
             }
             Statement::ExportDefaultDeclaration(declaration) => {
                 if let Some(expression) = declaration.declaration.as_expression() {
-                    HirStatementKind::Expression(self.expression(expression))
+                    HirStatementKind::ExportDefault(self.expression(expression))
                 } else if matches!(
                     declaration.declaration,
                     ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
@@ -321,6 +330,9 @@ impl Lowerer {
 
     fn expression(&mut self, expression: &Expression<'_>) -> HirExpression {
         let expression_span = span(expression.span());
+        // Oxc's current enum is exhaustive, but retain a defensive fallback for future AST
+        // variants rather than silently treating a newly added expression as supported.
+        #[allow(unreachable_patterns)]
         let kind = match expression {
             Expression::BooleanLiteral(literal) => {
                 HirExpressionKind::Literal(HirLiteral::Boolean(literal.value))
@@ -436,6 +448,78 @@ impl Lowerer {
             Expression::CallExpression(_) | Expression::StaticMemberExpression(_) => {
                 return self.unsupported_expression("optional chaining", expression_span);
             }
+            Expression::ObjectExpression(_) => {
+                return self.unsupported_expression("object expression", expression_span);
+            }
+            Expression::ArrayExpression(_) => {
+                return self.unsupported_expression("array expression", expression_span);
+            }
+            Expression::ArrowFunctionExpression(_) => {
+                return self.unsupported_expression("arrow function expression", expression_span);
+            }
+            Expression::FunctionExpression(_) => {
+                return self.unsupported_expression("function expression", expression_span);
+            }
+            Expression::ClassExpression(_) => {
+                return self.unsupported_expression("class expression", expression_span);
+            }
+            Expression::NewExpression(_) => {
+                return self.unsupported_expression("new expression", expression_span);
+            }
+            Expression::TemplateLiteral(_) | Expression::TaggedTemplateExpression(_) => {
+                return self.unsupported_expression("template literal", expression_span);
+            }
+            Expression::AwaitExpression(_) => {
+                return self.unsupported_expression("await expression", expression_span);
+            }
+            Expression::YieldExpression(_) => {
+                return self.unsupported_expression("yield expression", expression_span);
+            }
+            Expression::UpdateExpression(_) => {
+                return self.unsupported_expression("update expression", expression_span);
+            }
+            Expression::ThisExpression(_) => {
+                return self.unsupported_expression("this expression", expression_span);
+            }
+            Expression::SequenceExpression(_) => {
+                return self.unsupported_expression("sequence expression", expression_span);
+            }
+            Expression::BigIntLiteral(_) => {
+                return self.unsupported_expression("bigint literal", expression_span);
+            }
+            Expression::RegExpLiteral(_) => {
+                return self.unsupported_expression("regular expression literal", expression_span);
+            }
+            Expression::Super(_) => {
+                return self.unsupported_expression("super expression", expression_span);
+            }
+            Expression::ChainExpression(_) => {
+                return self.unsupported_expression("chain expression", expression_span);
+            }
+            Expression::ImportExpression(_) => {
+                return self.unsupported_expression("dynamic import expression", expression_span);
+            }
+            Expression::PrivateInExpression(_) => {
+                return self.unsupported_expression("private-in expression", expression_span);
+            }
+            Expression::ImportMeta(_) => {
+                return self.unsupported_expression("import.meta expression", expression_span);
+            }
+            Expression::NewTarget(_) => {
+                return self.unsupported_expression("new.target expression", expression_span);
+            }
+            Expression::JSXElement(_) | Expression::JSXFragment(_) => {
+                return self.unsupported_expression("JSX expression", expression_span);
+            }
+            Expression::TSInstantiationExpression(_) => {
+                return self.unsupported_expression(
+                    "TypeScript instantiation expression",
+                    expression_span,
+                );
+            }
+            Expression::V8IntrinsicExpression(_) => {
+                return self.unsupported_expression("V8 intrinsic expression", expression_span);
+            }
             _ => return self.unsupported_expression("expression", expression_span),
         };
         HirExpression {
@@ -466,6 +550,50 @@ impl Lowerer {
         // IR compiler. Keeping it out of parser diagnostics lets `kiln check` remain a syntax
         // check even while the execution surface grows.
         let _ = (feature, feature_span);
+    }
+}
+
+fn lower_import_name(name: &ImportImportName<'_>) -> ImportName {
+    match name {
+        ImportImportName::Name(name) => ImportName::Name(name.name.to_string()),
+        ImportImportName::NamespaceObject => ImportName::Namespace,
+        ImportImportName::Default(_) => ImportName::Default,
+    }
+}
+
+fn lower_export(entry: &OxcExportEntry<'_>) -> Export {
+    let exported = match &entry.export_name {
+        ExportExportName::Name(name) => Some(ExportName::Name(name.name.to_string())),
+        ExportExportName::Default(_) => Some(ExportName::Default),
+        ExportExportName::Null => None,
+    };
+    let source = entry
+        .module_request
+        .as_ref()
+        .map(|request| request.name.to_string());
+    let origin = match (source, &entry.import_name, &entry.local_name) {
+        (None, ExportImportName::Null, ExportLocalName::Name(local))
+        | (None, ExportImportName::Null, ExportLocalName::Default(local)) => ExportOrigin::Local {
+            local: local.name.to_string(),
+        },
+        (None, ExportImportName::Null, ExportLocalName::Null) => ExportOrigin::DefaultExpression,
+        (Some(source), ExportImportName::Name(imported), _) => ExportOrigin::ReExport {
+            source,
+            imported: ImportName::Name(imported.name.to_string()),
+        },
+        (Some(source), ExportImportName::All, _) => ExportOrigin::NamespaceReExport { source },
+        (Some(source), ExportImportName::AllButDefault, _) => ExportOrigin::Star { source },
+        (source, import_name, _) => ExportOrigin::Unsupported {
+            source,
+            description: format!("unexpected export import name {import_name:?}"),
+        },
+    };
+    Export {
+        exported,
+        origin,
+        type_only: entry.is_type,
+        span: span(entry.span),
+        statement_span: span(entry.statement_span),
     }
 }
 
@@ -615,10 +743,134 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["./a.js", "./b.js"]
         );
-        assert!(
-            module.exports.iter().any(|export| {
-                export.name.is_none() && export.source.as_deref() == Some("./b.js")
-            })
+        assert!(module.exports.iter().any(|export| {
+            export.exported.is_none()
+                && matches!(
+                    &export.origin,
+                    ExportOrigin::Star { source } if source == "./b.js"
+                )
+        }));
+        assert_eq!(module.imports.len(), 1);
+        assert_eq!(module.imports[0].source, "./a.js");
+        assert_eq!(module.imports[0].local, "a");
+        assert_eq!(module.imports[0].imported, ImportName::Name("a".into()));
+        assert_eq!(
+            module.requested_modules[0].occurrences[0].kind,
+            ModuleRequestKind::Import
+        );
+        assert_eq!(
+            module.requested_modules[1].occurrences[0].kind,
+            ModuleRequestKind::Export
+        );
+    }
+
+    #[test]
+    fn preserves_aliases_defaults_namespaces_and_type_only_bindings() {
+        let module = parse(
+            "module.ts",
+            r#"
+                import primary, { value as local, type Shape } from "./dep.ts";
+                import * as namespace from "./other.ts";
+                const result = local;
+                export { result as answer };
+                export { value as forwarded } from "./dep.ts";
+            "#,
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.imports.len(), 4);
+        assert!(module.imports.iter().any(|entry| {
+            entry.local == "primary" && entry.imported == ImportName::Default && !entry.type_only
+        }));
+        assert!(module.imports.iter().any(|entry| {
+            entry.local == "local"
+                && entry.imported == ImportName::Name("value".into())
+                && !entry.type_only
+        }));
+        assert!(module.imports.iter().any(|entry| {
+            entry.local == "Shape"
+                && entry.imported == ImportName::Name("Shape".into())
+                && entry.type_only
+        }));
+        assert!(module.imports.iter().any(|entry| {
+            entry.local == "namespace" && entry.imported == ImportName::Namespace
+        }));
+        assert!(module.exports.iter().any(|entry| {
+            entry.exported == Some(ExportName::Name("answer".into()))
+                && entry.origin
+                    == ExportOrigin::Local {
+                        local: "result".into(),
+                    }
+        }));
+        assert!(module.exports.iter().any(|entry| {
+            entry.exported == Some(ExportName::Name("forwarded".into()))
+                && entry.origin
+                    == ExportOrigin::ReExport {
+                        source: "./dep.ts".into(),
+                        imported: ImportName::Name("value".into()),
+                    }
+        }));
+    }
+
+    #[test]
+    fn default_expression_is_not_lowered_as_a_discarded_expression() {
+        let module = parse("module.js", "export default 40 + 2;");
+
+        assert!(matches!(
+            module.body.as_slice(),
+            [HirStatement {
+                kind: HirStatementKind::ExportDefault(_),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            module.exports[0].origin,
+            ExportOrigin::DefaultExpression
+        ));
+    }
+
+    #[test]
+    fn unsupported_expression_diagnostics_name_the_oxc_variant() {
+        let cases = [
+            ("const value = {};", "object expression"),
+            ("const value = [];", "array expression"),
+            ("const value = () => 1;", "arrow function expression"),
+        ];
+        for (source, expected) in cases {
+            let module = parse("module.js", source);
+            let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+                panic!("expected variable declaration for {source:?}");
+            };
+            let initializer = declarations[0]
+                .initializer
+                .as_ref()
+                .expect("fixture has an initializer");
+            assert!(matches!(
+                &initializer.kind,
+                HirExpressionKind::Unsupported { feature } if feature == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn runtime_requests_exclude_inline_type_only_bindings_but_keep_side_effects() {
+        let module = parse(
+            "module.ts",
+            r#"
+                import { type Shape } from "./shape.ts";
+                export { type Id } from "./id.ts";
+                import "./side-effect.ts";
+            "#,
+        );
+
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(
+            module
+                .runtime_requested_modules()
+                .into_iter()
+                .map(|request| request.specifier.as_str())
+                .collect::<Vec<_>>(),
+            ["./side-effect.ts"]
         );
     }
 

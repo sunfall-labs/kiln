@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-const SOURCE_EXTENSIONS: [&str; 6] = ["js", "jsx", "mjs", "cjs", "ts", "tsx"];
+const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
 
 /// Directories that are never project sources. Anything starting with `.` is skipped too.
 const SKIP_DIRS: [&str; 5] = ["node_modules", "target", "dist", "build", "coverage"];
@@ -108,6 +108,8 @@ mod tests {
         tree.file("src/b.ts");
         tree.file("src/a.js");
         tree.file("src/nested/c.tsx");
+        tree.file("src/nested/d.mts");
+        tree.file("src/nested/e.cts");
         tree.file("readme.md");
         tree.file("node_modules/dep/index.js");
         tree.file("dist/bundle.js");
@@ -125,7 +127,16 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(found, vec!["src/a.js", "src/b.ts", "src/nested/c.tsx"]);
+        assert_eq!(
+            found,
+            vec![
+                "src/a.js",
+                "src/b.ts",
+                "src/nested/c.tsx",
+                "src/nested/d.mts",
+                "src/nested/e.cts"
+            ]
+        );
         assert!(!walk.truncated);
     }
 

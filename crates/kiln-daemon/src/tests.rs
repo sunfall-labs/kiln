@@ -727,7 +727,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         })
         .expect("set source");
     let Response::Ran(first) = client
-        .request(&Request::Run { path: path.clone() })
+        .request(&Request::Run {
+            path: path.clone(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
         .expect("run")
     else {
         panic!("expected run response");
@@ -740,7 +743,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .request(&Request::ResetStats)
         .expect("reset counters");
     let Response::Ran(second) = client
-        .request(&Request::Run { path: path.clone() })
+        .request(&Request::Run {
+            path: path.clone(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
         .expect("warm run")
     else {
         panic!("expected run response");
@@ -763,7 +769,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         })
         .expect("set unsupported source");
     let Response::Ran(failed) = client
-        .request(&Request::Run { path })
+        .request(&Request::Run {
+            path,
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
         .expect("compile failure is a response")
     else {
         panic!("expected run response");
@@ -782,4 +791,232 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("dependency.js");
+    let entry = fixture.dir.join("entry.js");
+    std::fs::write(
+        &dependency,
+        "console.log('dependency'); export const answer = 42;\n",
+    )
+    .expect("write dependency");
+    std::fs::write(
+        &entry,
+        "import { answer } from './dependency.js'; console.log(answer);\n",
+    )
+    .expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    for path in [&dependency, &entry] {
+        let path = std::fs::canonicalize(path).expect("canonical source");
+        client
+            .request(&Request::SetSource {
+                path: path.to_string_lossy().into_owned(),
+                text: std::fs::read_to_string(path).expect("read source"),
+            })
+            .expect("set source");
+    }
+
+    let response = client
+        .request(&Request::Run {
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("run graph");
+    let Response::Ran(first) = response else {
+        panic!("expected run response");
+    };
+    assert!(first.succeeded, "{:?}", first.diagnostics);
+    assert_eq!(first.stdout, "dependency\n42\n");
+    assert!(first.instructions > 0);
+
+    client.request(&Request::ResetStats).expect("reset stats");
+    let Response::Ran(second) = client
+        .request(&Request::Run {
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("warm graph run")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(second.stdout, first.stdout);
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.parse_computed, 0);
+    assert_eq!(stats.ir_computed, 0);
+
+    std::fs::write(
+        &dependency,
+        "import './entry.js'; export const answer = 42;\n",
+    )
+    .expect("write cycle");
+    client
+        .request(&Request::SetSource {
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: "import './entry.js'; export const answer = 42;\n".into(),
+        })
+        .expect("set cycle");
+    let Response::Ran(cycle) = client
+        .request(&Request::Run {
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root,
+        })
+        .expect("cycle is structured")
+    else {
+        panic!("expected run response");
+    };
+    assert!(!cycle.succeeded);
+    assert!(
+        cycle
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cycle"))
+    );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("overlay.js");
+    std::fs::write(&entry, "console.log('disk');\n").expect("write entry");
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+
+    for (source, expected) in [
+        ("console.log('first');\n", "first\n"),
+        ("console.log('second');\n", "second\n"),
+    ] {
+        client
+            .request(&Request::SetSource {
+                path: "overlay.js".into(),
+                text: source.into(),
+            })
+            .expect("set relative overlay");
+        let Response::Ran(result) = client
+            .request(&Request::Run {
+                path: "overlay.js".into(),
+                project_root: root.clone(),
+            })
+            .expect("run overlay")
+        else {
+            panic!("expected run response");
+        };
+        assert!(result.succeeded, "{:?}", result.diagnostics);
+        assert_eq!(result.stdout, expected);
+    }
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("native-dependency.js");
+    let entry = fixture.dir.join("native-entry.js");
+    std::fs::write(
+        &dependency,
+        "console.log('native dependency'); export const answer = 42;\n",
+    )
+    .expect("write dependency");
+    std::fs::write(
+        &entry,
+        "import { answer } from './native-dependency.js'; console.log(answer);\n",
+    )
+    .expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let canonical_dependency = std::fs::canonicalize(&dependency).expect("canonical dependency");
+    let canonical_entry = std::fs::canonicalize(&entry).expect("canonical entry");
+    for path in [&canonical_dependency, &canonical_entry] {
+        client
+            .request(&Request::SetSource {
+                path: path.to_string_lossy().into_owned(),
+                text: std::fs::read_to_string(path).expect("read source"),
+            })
+            .expect("set source");
+    }
+    let request = Request::NativeRun {
+        path: canonical_entry.to_string_lossy().into_owned(),
+        project_root: root,
+        profile: NativeProfile::Dev,
+    };
+    let first = client.request(&request).expect("native graph run");
+    let Response::NativeRan(first) = first else {
+        if let Response::Error { ref message } = first
+            && message.contains("no supported C compiler")
+        {
+            eprintln!("skipping native graph integration: {message}");
+            return;
+        }
+        panic!("expected native run, got {first:?}");
+    };
+    assert_eq!(first.exit_code, Some(0));
+    assert_eq!(first.stdout, "native dependency\n42\n");
+
+    let Response::NativeRan(second) = client.request(&request).expect("cached native graph run")
+    else {
+        panic!("expected cached native run");
+    };
+    assert_eq!(second.stdout, first.stdout);
+    assert!(second.build.generated_c_cache_hit);
+    assert!(second.build.app_object_cache_hit);
+
+    client
+        .request(&Request::SetSource {
+            path: canonical_dependency.to_string_lossy().into_owned(),
+            text: "import './native-entry.js'; export const answer = 42;\n".into(),
+        })
+        .expect("set cycle");
+    let response = client.request(&request).expect("cycle response");
+    let Response::Error { message } = response else {
+        panic!("expected native cycle error, got {response:?}");
+    };
+    assert!(message.contains("cycle"), "{message}");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
