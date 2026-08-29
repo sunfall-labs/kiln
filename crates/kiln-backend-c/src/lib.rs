@@ -690,7 +690,8 @@ fn stack_effect(
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
         | Instruction::SetPrototype
-        | Instruction::SuperCall { .. } => Err(EmitError::Unsupported {
+        | Instruction::SuperCall { .. }
+        | Instruction::SuperForward => Err(EmitError::Unsupported {
             feature: "functions and objects in the native backend".to_string(),
         }),
         Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
@@ -912,7 +913,8 @@ fn emit_instruction(
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
         | Instruction::SetPrototype
-        | Instruction::SuperCall { .. } => {
+        | Instruction::SuperCall { .. }
+        | Instruction::SuperForward => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -1019,6 +1021,7 @@ fn binary_code(operator: BinaryOp) -> u16 {
         BinaryOp::GreaterThanOrEqual => 12,
         // Stable codes: a new operator takes the next free value.
         BinaryOp::In => 13,
+        BinaryOp::InstanceOf => 14,
     }
 }
 
@@ -1088,6 +1091,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 32);
                 word(&mut hash, u64::from(*argc));
             }
+            Instruction::SuperForward => byte(&mut hash, 36),
             Instruction::SetPrototype => byte(&mut hash, 34),
             Instruction::SuperCall { argc } => {
                 byte(&mut hash, 35);

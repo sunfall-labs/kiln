@@ -920,6 +920,7 @@ fn lower_binary_operator(operator: BinaryOperator) -> Option<HirBinaryOperator> 
         BinaryOperator::Exponential => Some(HirBinaryOperator::Exponentiate),
         BinaryOperator::StrictEquality => Some(HirBinaryOperator::StrictEqual),
         BinaryOperator::In => Some(HirBinaryOperator::In),
+        BinaryOperator::Instanceof => Some(HirBinaryOperator::InstanceOf),
         BinaryOperator::StrictInequality => Some(HirBinaryOperator::StrictNotEqual),
         BinaryOperator::LessThan => Some(HirBinaryOperator::LessThan),
         BinaryOperator::LessEqualThan => Some(HirBinaryOperator::LessThanOrEqual),
