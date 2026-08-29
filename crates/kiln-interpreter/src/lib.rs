@@ -85,6 +85,13 @@ pub enum Native {
     MapDelete,
     CollectionValues,
     CollectionIteratorNext,
+    /// The value thrown into a generator by `.return()`.
+    ///
+    /// A marker rather than a flag because the unwinding it needs is exactly the unwinding an
+    /// exception needs -- through every `finally` on the way out -- and reusing the exception
+    /// path means there is one implementation of that rather than two. No expression produces
+    /// it, so a program cannot catch it by accident.
+    ReturnSignal,
     /// A deleted slot in a Set or Map.
     ///
     /// Deletion leaves a hole rather than compacting, because compacting a dense array under a
@@ -197,6 +204,13 @@ impl ObjectData {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.properties.iter().map(|(name, _)| name.as_str())
     }
+
+    /// Own properties in insertion order, which is the order JavaScript enumerates them in.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.properties
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+    }
 }
 
 /// A generator's saved execution state.
@@ -214,6 +228,14 @@ pub struct GeneratorState {
     instruction: usize,
     this_value: Value,
     arguments: Vec<Value>,
+    /// Handlers registered inside the generator, held while it is suspended.
+    ///
+    /// Stored as offsets rather than absolute positions: a generator's operand stack is placed
+    /// wherever the resuming caller's stack happens to end, so a handler recorded during one
+    /// resumption points at the wrong place during the next. That is only visible when the two
+    /// resumptions happen at different stack depths -- `JSON.stringify(it.return(x))` is such a
+    /// case, and is what found it.
+    handlers: Vec<(usize, usize, usize)>,
     /// False until the first `next`, which starts the body rather than resuming a `yield`.
     started: bool,
     done: bool,
@@ -579,6 +601,15 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// `JSON.stringify` reached a value that contains itself.
+    ///
+    /// The specification throws a catchable `TypeError` here. A native cannot yet raise a value
+    /// the program can catch, so this is fatal instead -- wrong in a way that is loud and easy
+    /// to fix later, rather than quiet and wrong now.
+    CyclicJson,
+    /// A `.return()` signal finished unwinding a generator. Never surfaces to a caller: it is
+    /// caught by the `return` that raised it.
+    GeneratorReturned,
     /// An exception that reached the top of the program.
     Uncaught {
         instruction: usize,
@@ -647,6 +678,8 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
+            Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
+            Self::GeneratorReturned => write!(formatter, "generator returned"),
             Self::Uncaught { message, .. } => write!(formatter, "uncaught {message}"),
             Self::NotAnObject { instruction, value } => write!(
                 formatter,
@@ -1208,7 +1241,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                                         },
                                         &collection,
                                         &[key, value],
-                                    );
+                                    )?;
                                 }
                             }
                             self.stack.push(collection);
@@ -1319,7 +1352,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Value::Native(native) => {
                             let native = *native;
                             let arguments = self.take_arguments(argc, current)?;
-                            let result = call_native(native, &Value::Undefined, &arguments);
+                            let result = call_native(native, &Value::Undefined, &arguments)?;
                             self.stack.push(result);
                         }
                         other => {
@@ -1382,6 +1415,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// crossing a call must leave the machine in the same shape a normal return does.
     fn unwind(&mut self, thrown: Value, instruction: usize) -> Result<(), ExecutionError> {
         let Some(handler) = self.handlers.pop() else {
+            // A `.return()` signal that reaches the top has run every `finally` between the
+            // suspension point and here, which is the whole reason it was thrown.
+            if matches!(thrown, Value::Native(Native::ReturnSignal)) {
+                return Err(ExecutionError::GeneratorReturned);
+            }
             return Err(ExecutionError::Uncaught {
                 instruction,
                 message: describe_thrown(&thrown),
@@ -1427,6 +1465,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             closure: Rc::clone(closure),
             locals,
             stack: Vec::new(),
+            handlers: Vec::new(),
             instruction: 0,
             this_value: Value::Undefined,
             arguments: received,
@@ -1442,17 +1481,38 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
+        self.resume_generator_with(generator, sent, instruction, false)
+    }
+
+    /// Resume a generator, optionally by throwing the `.return()` signal into it.
+    fn resume_generator_with(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        sent: Value,
+        instruction: usize,
+        returning: bool,
+    ) -> Result<(Value, bool), ExecutionError> {
         if generator.borrow().done {
             return Ok((Value::Undefined, true));
         }
         let depth = self.frames.len();
         let stack_base = self.stack.len();
-        let (closure, locals, saved_stack, instruction_pointer, this_value, arguments, started) = {
+        let (
+            closure,
+            locals,
+            saved_stack,
+            saved_handlers,
+            instruction_pointer,
+            this_value,
+            arguments,
+            started,
+        ) = {
             let state = generator.borrow();
             (
                 Rc::clone(&state.closure),
                 state.locals.clone(),
                 state.stack.clone(),
+                state.handlers.clone(),
                 state.instruction,
                 state.this_value.clone(),
                 state.arguments.clone(),
@@ -1472,28 +1532,68 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         self.function = Some(closure);
         self.instruction = instruction_pointer;
         self.stack.extend(saved_stack);
-        if started {
-            // The value the caller sent becomes the result of the `yield` that suspended.
-            self.stack.push(sent);
+        // Re-base the generator's handlers onto wherever its stack landed this time.
+        for (target, frame_offset, stack_offset) in saved_handlers {
+            self.handlers.push(Handler {
+                target,
+                frame_depth: depth + 1 + frame_offset,
+                stack_height: stack_base + stack_offset,
+            });
+        }
+        if started && !returning {
+            // The value the caller sent becomes the result of the `yield` that suspended. A
+            // `.return()` does not resume the yield at all, so it pushes nothing.
+            self.stack.push(sent.clone());
         }
 
         self.suspended = false;
-        let outcome = self.run_frames(depth)?;
+        let outcome = if returning {
+            // Throwing at the suspension point runs every `finally` between there and the top of
+            // the generator, then arrives as `GeneratorReturned`.
+            match self
+                .unwind(Value::Native(Native::ReturnSignal), instruction)
+                .and_then(|()| self.run_frames(depth))
+            {
+                Err(ExecutionError::GeneratorReturned) => {
+                    // The generator's own operand stack is abandoned along with it; without
+                    // this the caller inherits whatever it had part-way through an expression.
+                    self.stack.truncate(stack_base);
+                    self.restore_caller_frame();
+                    generator.borrow_mut().done = true;
+                    return Ok((sent.clone(), true));
+                }
+                other => other?,
+            }
+        } else {
+            self.run_frames(depth)?
+        };
 
         if self.suspended {
+            // Take back the handlers belonging to the generator, as offsets.
+            let mut retained = Vec::new();
+            while self
+                .handlers
+                .last()
+                .is_some_and(|handler| handler.frame_depth > depth)
+            {
+                let handler = self.handlers.pop().expect("checked by the loop condition");
+                retained.push((
+                    handler.target,
+                    handler.frame_depth - depth - 1,
+                    handler.stack_height.saturating_sub(stack_base),
+                ));
+            }
+            retained.reverse();
+
             let mut state = generator.borrow_mut();
             state.locals = std::mem::take(&mut self.locals);
             state.instruction = self.instruction;
             state.stack = self.stack.split_off(stack_base);
+            state.handlers = retained;
             state.started = true;
             drop(state);
 
-            let frame = self.frames.pop().expect("this resumption pushed a frame");
-            self.locals = frame.locals;
-            self.function = frame.function;
-            self.this_value = frame.this_value;
-            self.arguments = frame.arguments;
-            self.instruction = frame.instruction;
+            self.restore_caller_frame();
             self.suspended = false;
             return Ok((outcome.value, false));
         }
@@ -1502,6 +1602,19 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         generator.borrow_mut().done = true;
         let _ = instruction;
         Ok((outcome.value, true))
+    }
+
+    /// Put back the frame a generator resumption displaced.
+    fn restore_caller_frame(&mut self) {
+        let frame = self
+            .frames
+            .pop()
+            .expect("a resumption always pushes a frame");
+        self.locals = frame.locals;
+        self.function = frame.function;
+        self.this_value = frame.this_value;
+        self.arguments = frame.arguments;
+        self.instruction = frame.instruction;
     }
 
     /// Collect every value an iterable yields.
@@ -1622,7 +1735,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         match callee {
-            Value::Native(native) => Ok(call_native(*native, &this_value, &arguments)),
+            Value::Native(native) => call_native(*native, &this_value, &arguments),
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
@@ -1917,7 +2030,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         match method {
-            Value::Native(native) => Ok(Some(call_native(native, &receiver, &arguments))),
+            Value::Native(native) => call_native(native, &receiver, &arguments).map(Some),
             // Generator methods drive the machine, so they cannot go through `array_callback`.
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
@@ -1929,14 +2042,19 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     });
                 };
                 let generator = Rc::clone(generator);
+                let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let (value, done) = if matches!(method, CallbackMethod::GeneratorReturn) {
-                    // `return(v)` finishes the generator without resuming it. A full
-                    // implementation would run the body's `finally` blocks first; this does not,
-                    // which is a real gap and is why g14 still fails.
-                    generator.borrow_mut().done = true;
-                    (arguments.first().cloned().unwrap_or(Value::Undefined), true)
+                    let started = generator.borrow().started;
+                    if started {
+                        // A started generator has to unwind: every `finally` between the
+                        // suspension point and the top runs before it is done.
+                        self.resume_generator_with(&generator, sent, instruction, true)?
+                    } else {
+                        // Never entered, so there is nothing to unwind.
+                        generator.borrow_mut().done = true;
+                        (sent, true)
+                    }
                 } else {
-                    let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
                     self.resume_generator(&generator, sent, instruction)?
                 };
                 Ok(Some(iteration_result(value, done)))
@@ -2251,13 +2369,166 @@ fn build_error(arguments: &[Value]) -> Value {
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
+/// The `space` argument of `JSON.stringify`, resolved to the literal indent for one level.
+///
+/// A number is that many spaces and a string is used as-is, both capped at ten characters, which
+/// is what the specification says and what keeps a hostile argument from blowing up the output.
+fn json_indent(space: Option<&Value>) -> String {
+    const MAX: usize = 10;
+    match space {
+        Some(Value::Number(count)) if *count >= 1.0 => " ".repeat((*count as usize).min(MAX)),
+        Some(Value::String(text)) => text.chars().take(MAX).collect(),
+        _ => String::new(),
+    }
+}
+
+/// Serialise one value as JSON.
+///
+/// `None` is "not representable" -- `undefined`, a function, a symbol. The distinction matters
+/// because the caller decides what to do with it: an object property is dropped, an array
+/// element becomes `null`, and at the top level the whole call returns `undefined`.
+///
+/// Not supported yet: the `replacer` argument and `toJSON` hooks, both of which call back into
+/// the program and so need an interpreter this function does not have. Neither appears in the
+/// corpus; when one does, this grows a `&mut Interpreter` and moves onto the type.
+fn json_stringify(
+    value: &Value,
+    indent: &str,
+    current: &str,
+    seen: &mut Vec<usize>,
+) -> Result<Option<String>, ExecutionError> {
+    let nested = format!("{current}{indent}");
+    // With no indent every separator is empty, which collapses the pretty form to the compact
+    // one and lets both share this single code path.
+    let (open, separator, close) = if indent.is_empty() {
+        (String::new(), ",".to_owned(), String::new())
+    } else {
+        (
+            format!("\n{nested}"),
+            format!(",\n{nested}"),
+            format!("\n{current}"),
+        )
+    };
+    let colon = if indent.is_empty() { ":" } else { ": " };
+
+    Ok(match value {
+        // Omitted rather than serialised: JSON has no way to spell any of these.
+        Value::Undefined | Value::Function(_) | Value::Native(_) | Value::Callback(_) => None,
+        // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
+        Value::Symbol(_) => None,
+        Value::Null => Some("null".to_owned()),
+        Value::Boolean(value) => Some(value.to_string()),
+        // NaN and both infinities have no JSON spelling, so they serialise as null.
+        Value::Number(number) if number.is_finite() => Some(number_string(*number)),
+        Value::Number(_) => Some("null".to_owned()),
+        Value::String(text) => Some(json_quote(text)),
+        Value::Array(items) => {
+            let guard = CycleGuard::enter(seen, Rc::as_ptr(items).cast::<()>())?;
+            let items = items.borrow();
+            let parts = items
+                .iter()
+                .map(|item| {
+                    // An element that is not representable becomes null rather than vanishing,
+                    // because dropping it would renumber every element after it.
+                    json_stringify(item, indent, &nested, guard.seen)
+                        .map(|part| part.unwrap_or_else(|| "null".to_owned()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(if parts.is_empty() {
+                "[]".to_owned()
+            } else {
+                format!("[{open}{}{close}]", parts.join(&separator))
+            })
+        }
+        Value::Object(object) => {
+            let guard = CycleGuard::enter(seen, Rc::as_ptr(object).cast::<()>())?;
+            let object = object.borrow();
+            let mut parts = Vec::new();
+            for (key, property) in object.entries() {
+                // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
+                // own enumerable string property, so it is not part of the object's JSON.
+                if key.starts_with("@@") {
+                    continue;
+                }
+                if let Some(part) = json_stringify(property, indent, &nested, guard.seen)? {
+                    parts.push(format!("{}{colon}{part}", json_quote(key)));
+                }
+            }
+            Some(if parts.is_empty() {
+                "{}".to_owned()
+            } else {
+                format!("{{{open}{}{close}}}", parts.join(&separator))
+            })
+        }
+        // Neither has own enumerable properties, so both serialise as the empty object -- which
+        // is also what a real engine produces for them.
+        Value::Generator(_) => Some("{}".to_owned()),
+        Value::Cell(_) => unreachable!("a cell is never used as a value"),
+    })
+}
+
+/// Tracks the containers on the path from the root, so a value containing itself is caught
+/// rather than recursed into forever.
+///
+/// The identity is the allocation address, which is exactly the identity JavaScript uses. Being
+/// a guard rather than a bare push means the entry is removed on the error path too, so the set
+/// stays the current *path* and a value legitimately reachable twice is not mistaken for a cycle.
+struct CycleGuard<'a> {
+    seen: &'a mut Vec<usize>,
+}
+
+impl<'a> CycleGuard<'a> {
+    fn enter(seen: &'a mut Vec<usize>, container: *const ()) -> Result<Self, ExecutionError> {
+        let identity = container as usize;
+        if seen.contains(&identity) {
+            return Err(ExecutionError::CyclicJson);
+        }
+        seen.push(identity);
+        Ok(Self { seen })
+    }
+}
+
+impl Drop for CycleGuard<'_> {
+    fn drop(&mut self) {
+        self.seen.pop();
+    }
+}
+
+/// A JSON string literal, with the escapes the grammar requires.
+fn json_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\u{c}' => quoted.push_str("\\f"),
+            // Everything else below space has no short escape and must be spelled numerically.
+            control if control < ' ' => {
+                quoted.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Invoke a native built-in.
 ///
 /// Natives take their receiver explicitly rather than through a `this` binding, because there is
 /// no `this` yet. When there is, these become ordinary functions and this dispatch disappears --
 /// which is the point of keeping the set small.
-fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
-    match native {
+fn call_native(
+    native: Native,
+    receiver: &Value,
+    arguments: &[Value],
+) -> Result<Value, ExecutionError> {
+    Ok(match native {
         Native::ArrayIsArray => Value::Boolean(matches!(arguments.first(), Some(Value::Array(_)))),
         Native::ObjectKeys => {
             let keys = match arguments.first() {
@@ -2368,12 +2639,24 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                 _ => Value::String(String::new()),
             }
         }
-        // Present so `typeof` reports "function", which is what the corpus checks. Calling one
-        // returns undefined rather than pretending to parse or serialise, because a wrong answer
-        // here would be much worse than a missing one.
-        Native::JsonParse | Native::JsonStringify | Native::ErrorCaptureStackTrace => {
-            Value::Undefined
+        Native::JsonStringify => {
+            let indent = json_indent(arguments.get(2));
+            let mut seen = Vec::new();
+            match json_stringify(
+                arguments.first().unwrap_or(&Value::Undefined),
+                &indent,
+                "",
+                &mut seen,
+            )? {
+                Some(text) => Value::String(text),
+                // `JSON.stringify(undefined)` is `undefined`, not the string "undefined".
+                None => Value::Undefined,
+            }
         }
+        // Present so `typeof` reports "function", which is what the corpus checks. Calling one
+        // returns undefined rather than pretending to parse, because a wrong answer here would
+        // be much worse than a missing one.
+        Native::JsonParse | Native::ErrorCaptureStackTrace => Value::Undefined,
         // `Array.prototype.values` should return an iterator object. Nothing consumes one yet
         // -- for-of is a later step -- and the corpus only checks the function's identity and
         // type, so returning undefined is the honest placeholder rather than a fake iterator
@@ -2408,7 +2691,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         | Native::StringEndsWith
         | Native::StringRepeat => {
             let Value::String(text) = receiver else {
-                return Value::Undefined;
+                return Ok(Value::Undefined);
             };
             let argument = |index: usize| {
                 arguments
@@ -2471,7 +2754,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::StringValues => {
             let Value::String(text) = receiver else {
-                return Value::Undefined;
+                return Ok(Value::Undefined);
             };
             // A string iterator walks code points, not UTF-16 units: an astral character is one
             // step, which is the difference between iterating a string and indexing it.
@@ -2493,10 +2776,10 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             Value::Object(Rc::new(RefCell::new(iterator)))
         }
         // The state shape is the array iterator's, so the same stepper serves both.
-        Native::StringIteratorNext => call_native(Native::ArrayIteratorNext, receiver, arguments),
+        Native::StringIteratorNext => call_native(Native::ArrayIteratorNext, receiver, arguments)?,
         Native::SetAdd | Native::MapSet => {
             let Some((entries, is_map)) = collection_state(receiver) else {
-                return Value::Undefined;
+                return Ok(Value::Undefined);
             };
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2523,7 +2806,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::SetHas | Native::MapHas => {
             let Some((entries, is_map)) = collection_state(receiver) else {
-                return Value::Boolean(false);
+                return Ok(Value::Boolean(false));
             };
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let found = find_entry(&entries.borrow(), &key, is_map).is_some();
@@ -2531,7 +2814,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::MapGet => {
             let Some((entries, is_map)) = collection_state(receiver) else {
-                return Value::Undefined;
+                return Ok(Value::Undefined);
             };
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let entries = entries.borrow();
@@ -2547,7 +2830,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::SetDelete | Native::MapDelete => {
             let Some((entries, is_map)) = collection_state(receiver) else {
-                return Value::Boolean(false);
+                return Ok(Value::Boolean(false));
             };
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let index = find_entry(&entries.borrow(), &key, is_map);
@@ -2564,7 +2847,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::CollectionValues => {
             let Some((entries, _)) = collection_state(receiver) else {
-                return Value::Undefined;
+                return Ok(Value::Undefined);
             };
             let mut iterator = ObjectData::default();
             iterator.set("@@iterated", Value::Array(entries));
@@ -2578,7 +2861,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         }
         Native::CollectionIteratorNext => {
             let Value::Object(state) = receiver else {
-                return iteration_result(Value::Undefined, true);
+                return Ok(iteration_result(Value::Undefined, true));
             };
             let (iterated, mut index) = {
                 let state = state.borrow();
@@ -2591,7 +2874,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                 )
             };
             let Value::Array(entries) = &iterated else {
-                return iteration_result(Value::Undefined, true);
+                return Ok(iteration_result(Value::Undefined, true));
             };
             // Skip holes left by deletion, and re-read the length each step so entries added
             // during iteration are seen -- both are observable and both are what a Set does.
@@ -2602,22 +2885,23 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                         state
                             .borrow_mut()
                             .set("@@index", Value::Number(index as f64));
-                        return iteration_result(Value::Undefined, true);
+                        return Ok(iteration_result(Value::Undefined, true));
                     }
                     Some(Value::Native(Native::Tombstone)) => index += 1,
                     Some(value) => {
                         state
                             .borrow_mut()
                             .set("@@index", Value::Number(index as f64 + 1.0));
-                        return iteration_result(value, false);
+                        return Ok(iteration_result(value, false));
                     }
                 }
             }
         }
-        Native::Tombstone => Value::Undefined,
+        // Neither is ever called: one marks a deleted slot, the other is thrown by `.return()`.
+        Native::Tombstone | Native::ReturnSignal => Value::Undefined,
         Native::ArrayIteratorNext => {
             let Value::Object(state) = receiver else {
-                return iteration_result(Value::Undefined, true);
+                return Ok(iteration_result(Value::Undefined, true));
             };
             let (iterated, index) = {
                 let state = state.borrow();
@@ -2630,7 +2914,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
                 )
             };
             let Value::Array(items) = &iterated else {
-                return iteration_result(Value::Undefined, true);
+                return Ok(iteration_result(Value::Undefined, true));
             };
             let index = index as usize;
             // Re-read the length every step. An array shortened during iteration must stop
@@ -2653,7 +2937,7 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
         | Native::ArrayConstructor
         | Native::ObjectConstructor
         | Native::Json => Value::Undefined,
-    }
+    })
 }
 
 /// `{ value, done }`, the shape every `next` returns.
@@ -3053,8 +3337,7 @@ mod tests {
         execute(program, &mut host, ExecutionLimits::default()).map(|result| result.value)
     }
 
-    /// Two closures made by separate calls must not share a cell, and two made by one call must.
-    /// This is the property that separates capturing a binding from capturing a frame.
+    /// An object with the given own properties, in order.
     fn object(pairs: &[(&str, Value)]) -> Value {
         let mut data = ObjectData::default();
         for (key, value) in pairs {
@@ -4005,5 +4288,114 @@ mod tests {
 
         assert_eq!(result.exports[0].name, "answer");
         assert_eq!(result.exports[0].value, Value::Number(42.0));
+    }
+
+    fn json(value: &Value) -> Option<String> {
+        json_stringify(value, "", "", &mut Vec::new()).expect("no cycle in this fixture")
+    }
+
+    fn array(items: &[Value]) -> Value {
+        Value::Array(Rc::new(RefCell::new(items.to_vec())))
+    }
+
+    #[test]
+    fn json_scalars_serialise_as_themselves() {
+        assert_eq!(json(&Value::Null).as_deref(), Some("null"));
+        assert_eq!(json(&Value::Boolean(true)).as_deref(), Some("true"));
+        assert_eq!(json(&Value::Number(1.5)).as_deref(), Some("1.5"));
+        assert_eq!(
+            json(&Value::String("hi".to_owned())).as_deref(),
+            Some(r#""hi""#)
+        );
+    }
+
+    #[test]
+    fn json_omits_what_it_cannot_spell() {
+        // The caller turns `None` into `undefined`, a dropped property, or a null element --
+        // three different outcomes that all start here.
+        assert_eq!(json(&Value::Undefined), None);
+        assert_eq!(json(&Value::Symbol(WellKnown::Iterator)), None);
+        assert_eq!(json(&Value::Native(Native::ArrayIsArray)), None);
+    }
+
+    #[test]
+    fn json_writes_non_finite_numbers_as_null() {
+        assert_eq!(json(&Value::Number(f64::NAN)).as_deref(), Some("null"));
+        assert_eq!(json(&Value::Number(f64::INFINITY)).as_deref(), Some("null"));
+    }
+
+    #[test]
+    fn json_drops_unrepresentable_properties_but_nulls_unrepresentable_elements() {
+        // Dropping an array element would renumber every element after it, so the two containers
+        // have to disagree here.
+        let value = object(&[
+            ("kept", Value::Number(1.0)),
+            ("dropped", Value::Undefined),
+            ("items", array(&[Value::Number(1.0), Value::Undefined])),
+        ]);
+        assert_eq!(
+            json(&value).as_deref(),
+            Some(r#"{"kept":1,"items":[1,null]}"#)
+        );
+    }
+
+    #[test]
+    fn json_skips_internal_properties() {
+        // `@@`-prefixed entries are the VM's own bookkeeping -- an iterator cursor, a well-known
+        // symbol -- and are not own enumerable string properties of the object.
+        let value = object(&[
+            ("@@index", Value::Number(0.0)),
+            ("real", Value::Number(1.0)),
+        ]);
+        assert_eq!(json(&value).as_deref(), Some(r#"{"real":1}"#));
+    }
+
+    #[test]
+    fn json_escapes_strings() {
+        let value = Value::String("a\"b\\c\nd\u{1}".to_owned());
+        assert_eq!(json(&value).as_deref(), Some(r#""a\"b\\c\nd\u0001""#));
+    }
+
+    #[test]
+    fn json_empty_containers_stay_on_one_line_when_indented() {
+        let value = object(&[("a", array(&[])), ("b", object(&[]))]);
+        let text = json_stringify(&value, "  ", "", &mut Vec::new()).expect("no cycle");
+        assert_eq!(text.as_deref(), Some("{\n  \"a\": [],\n  \"b\": {}\n}"));
+    }
+
+    #[test]
+    fn json_indents_nested_containers() {
+        let value = object(&[("a", array(&[Value::Number(1.0)]))]);
+        let text = json_stringify(&value, "  ", "", &mut Vec::new()).expect("no cycle");
+        assert_eq!(text.as_deref(), Some("{\n  \"a\": [\n    1\n  ]\n}"));
+    }
+
+    #[test]
+    fn json_rejects_a_value_that_contains_itself() {
+        let items = Rc::new(RefCell::new(Vec::new()));
+        items.borrow_mut().push(Value::Array(Rc::clone(&items)));
+        assert!(matches!(
+            json_stringify(&Value::Array(items), "", "", &mut Vec::new()),
+            Err(ExecutionError::CyclicJson)
+        ));
+    }
+
+    #[test]
+    fn json_allows_the_same_value_twice_in_different_places() {
+        // A diamond is not a cycle. The guard tracks the path from the root, not every value it
+        // has ever seen, which is the whole reason it pops on the way back out.
+        let shared = object(&[("n", Value::Number(1.0))]);
+        let value = array(&[shared.clone(), shared]);
+        assert_eq!(json(&value).as_deref(), Some(r#"[{"n":1},{"n":1}]"#));
+    }
+
+    #[test]
+    fn json_indent_argument_is_capped() {
+        assert_eq!(json_indent(Some(&Value::Number(2.0))), "  ");
+        assert_eq!(json_indent(Some(&Value::Number(50.0))).len(), 10);
+        assert_eq!(json_indent(Some(&Value::String("ab".to_owned()))), "ab");
+        // A fractional or zero count means no indent at all, same as omitting the argument.
+        assert_eq!(json_indent(Some(&Value::Number(0.0))), "");
+        assert_eq!(json_indent(None), "");
     }
 }
