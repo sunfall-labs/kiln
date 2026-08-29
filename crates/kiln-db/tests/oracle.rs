@@ -16,9 +16,11 @@
 //! how a particular engine reaches the answer, and only memoized-equals-fresh survives a change
 //! of backend.
 
-use kiln_db::{FileId, Interface, MemoEngine, Parsed, Project, QueryEngine, Stats};
+use kiln_db::{Compiled, FileId, Interface, MemoEngine, Parsed, Project, QueryEngine, Stats};
 use kiln_hir::{
-    Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceGoal, SourceKind, Span,
+    Export, ExportName, ExportOrigin, Expression as HirExpression,
+    ExpressionKind as HirExpressionKind, Item, ItemKind, Literal, Module, SourceGoal, SourceKind,
+    Span, Statement as HirStatement, StatementKind as HirStatementKind,
 };
 
 /// The oracle supplies its own frontend rather than borrowing a real one.
@@ -71,7 +73,21 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
                 span: Span::new(line as u32, line as u32 + 1),
             })
             .collect(),
-        body: Vec::new(),
+        // A body that varies with the source. It was empty at first, which made every text in
+        // the pool compile to identical bytecode and turned the `irs` comparison in `Observed`
+        // into a comparison of a constant. One statement per line, carrying that line's length,
+        // is enough to make the IR discriminate without pretending this is a real lowering.
+        body: text
+            .lines()
+            .enumerate()
+            .map(|(line, source_line)| HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Literal(Literal::Number(source_line.len() as u64)),
+                    span: Span::new(line as u32, line as u32 + 1),
+                }),
+                span: Span::new(line as u32, line as u32 + 1),
+            })
+            .collect(),
         requested_modules: Vec::new(),
         imports: Vec::new(),
         exports: exports
@@ -140,6 +156,14 @@ fn histories() -> impl Strategy<Value = Vec<Op>> {
 struct Observed {
     sources: Vec<String>,
     parses: Vec<Parsed>,
+    /// Compiled bytecode. Memoized independently of `interface`, with its own `ir_computed`
+    /// counter, so it needs its own comparison: an engine that memoized `ir` wrongly while
+    /// keeping `parse` and `interface` correct would satisfy every other field here.
+    ///
+    /// This was missing when `ir` was added to the trait, which is exactly the failure this
+    /// struct's doc comment warns about. When a query joins `QueryEngine`, add it here in the
+    /// same change.
+    irs: Vec<Compiled>,
     interfaces: Vec<Interface>,
     project: Project,
 }
@@ -152,17 +176,20 @@ fn observe(db: &mut MemoEngine, files: usize, top_down: bool) -> Observed {
 
     let mut sources = Vec::with_capacity(files);
     let mut parses = Vec::with_capacity(files);
+    let mut irs = Vec::with_capacity(files);
     let mut interfaces = Vec::with_capacity(files);
     for index in 0..files {
         let file = FileId(index as u32);
         sources.push(db.source(file).unwrap_or_default().to_string());
         parses.push(db.parse(file));
+        irs.push(db.ir(file));
         interfaces.push(db.interface(file));
     }
 
     Observed {
         sources,
         parses,
+        irs,
         interfaces,
         project: project.unwrap_or_else(|| db.project()),
     }
@@ -243,6 +270,31 @@ fn identical_rewrite_is_free(
     );
     prop_assert_eq!(db.revision(), revision);
     Ok(())
+}
+
+/// Guards the guard: a field in [`Observed`] is only worth comparing if it can actually differ.
+///
+/// If `ir` were constant across the text pool - as it was when this frontend produced an empty
+/// body - then comparing it would pass unconditionally and the coverage would be an illusion.
+/// This fails loudly instead of quietly weakening the oracle.
+#[test]
+fn the_text_pool_produces_distinguishable_ir() {
+    let mut db = MemoEngine::new(oracle_frontend);
+    let file = db.intern("a.js");
+
+    let mut distinct: Vec<Compiled> = Vec::new();
+    for text in TEXTS {
+        db.set_source(file, text.to_string());
+        let compiled = db.ir(file);
+        if !distinct.contains(&compiled) {
+            distinct.push(compiled);
+        }
+    }
+
+    assert!(
+        distinct.len() > 1,
+        "every text in the pool compiled to the same IR, so comparing it proves nothing"
+    );
 }
 
 proptest! {
