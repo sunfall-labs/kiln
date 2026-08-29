@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, ExportName, ExportOrigin, Expression, ExpressionKind,
-    Function, ImportName, Literal, LogicalOperator, Module, ObjectKey, Span, Statement,
-    StatementKind, UnaryOperator, VariableKind,
+    AssignmentOperator, BinaryOperator, Class, ExportName, ExportOrigin, Expression,
+    ExpressionKind, Function, ImportName, Literal, LogicalOperator, Module, ObjectKey, Span,
+    Statement, StatementKind, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -111,6 +111,8 @@ pub enum Instruction {
     },
     /// Write `object[key] = value`. Stack is object, key, value.
     SetComputed,
+    /// Push the current `this`.
+    LoadThis,
     /// Push a built-in global.
     ///
     /// Built-ins are named by index rather than resolved by string at runtime because the
@@ -177,6 +179,8 @@ pub struct Program {
 pub struct FunctionProto {
     /// Diagnostics and stack traces only; calls go by index.
     pub name: Option<String>,
+    /// An arrow function: it has no `this` of its own and captures the defining scope's.
+    pub arrow: bool,
     pub parameter_count: u32,
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
@@ -569,6 +573,7 @@ impl Compiler {
                 self.function_declaration(function, statement.span)
             }
             StatementKind::Return(value) => self.return_statement(value.as_ref(), statement.span),
+            StatementKind::Class(class) => self.class_declaration(class),
             StatementKind::ExportDefault(_) => self.error(
                 Some(statement.span),
                 "default expression exports are not supported yet",
@@ -698,6 +703,7 @@ impl Compiler {
                 Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
                 Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
                 Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+                Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
                 Resolution::Unresolved if name == "undefined" => {
                     self.push_constant(Constant::Undefined)
                 }
@@ -769,6 +775,7 @@ impl Compiler {
             ExpressionKind::Call { callee, arguments } => {
                 self.call(callee, arguments, expression.span)
             }
+            ExpressionKind::This => self.code.push(Instruction::LoadThis),
             ExpressionKind::Function(function) => {
                 if let Some(index) = self.compile_function(function, expression.span) {
                     self.code.push(Instruction::MakeFunction(index));
@@ -952,6 +959,94 @@ impl Compiler {
         self.code.push(store);
     }
 
+    /// Compile a class into a constructor and a prototype.
+    ///
+    /// The desugaring is not a shortcut -- a class really is a constructor function whose
+    /// `prototype` holds the instance methods -- so it reuses the machinery `new` already needs
+    /// rather than introducing a parallel object model for classes.
+    fn class_declaration(&mut self, class: &Class) {
+        let Some(name) = class.name.clone() else {
+            self.error(Some(class.span), "a class declaration requires a name");
+            return;
+        };
+        if class.superclass.is_some() {
+            // A derived class needs `super`, a prototype chain between the two prototypes, and a
+            // constructor that cannot touch `this` before calling `super()`. Half of that would
+            // produce instances that look right and inherit nothing.
+            self.error(
+                Some(class.span),
+                "class inheritance (`extends`) is not supported yet",
+            );
+            return;
+        }
+
+        // Bound before the body is compiled, so a method can refer to the class by name.
+        self.variable(VariableKind::Let, &name, None, class.span);
+
+        let constructor = match &class.constructor {
+            Some(constructor) => constructor.clone(),
+            // A class with no constructor gets an empty one. Synthesizing it here keeps `new`
+            // from needing a special case for classes that declared none.
+            None => Function {
+                name: Some(name.clone()),
+                arrow: false,
+                parameters: Vec::new(),
+                body: Vec::new(),
+                span: class.span,
+            },
+        };
+        let Some(index) = self.compile_function(&constructor, class.span) else {
+            return;
+        };
+
+        let Resolution::Local(local) = self.resolve(&name) else {
+            self.error(Some(class.span), format!("could not bind class `{name}`"));
+            return;
+        };
+        self.code.push(Instruction::MakeFunction(index));
+        self.code.push(if local.celled {
+            Instruction::StoreCell(local.slot)
+        } else {
+            Instruction::StoreLocal(local.slot)
+        });
+
+        let prototype = self.constant_index(Constant::String("prototype".to_owned()));
+        for method in &class.methods {
+            let Some(body) = self.compile_function(&method.function, class.span) else {
+                return;
+            };
+
+            // Static methods hang off the constructor; instance methods off its prototype.
+            self.load_local_or_cell(local);
+            if !method.is_static {
+                self.code.push(Instruction::GetProperty(prototype));
+            }
+
+            match &method.key {
+                ObjectKey::Static(key) => {
+                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.code.push(Instruction::MakeFunction(body));
+                    self.code.push(Instruction::SetProperty(name));
+                }
+                ObjectKey::Computed(key) => {
+                    self.expression(key);
+                    self.code.push(Instruction::MakeFunction(body));
+                    self.code.push(Instruction::SetComputed);
+                }
+            }
+            // Each assignment leaves its value; nothing consumes it.
+            self.code.push(Instruction::Pop);
+        }
+    }
+
+    fn load_local_or_cell(&mut self, local: Local) {
+        self.code.push(if local.celled {
+            Instruction::LoadCell(local.slot)
+        } else {
+            Instruction::LoadLocal(local.slot)
+        });
+    }
+
     /// Compile a function body into its own proto and bind the name to a callable.
     ///
     /// Declarations are not hoisted yet: the binding exists from this point on, so calling a
@@ -1064,6 +1159,7 @@ impl Compiler {
             .expect("this function pushed its own enclosing state");
         let proto = FunctionProto {
             name: function.name.clone(),
+            arrow: function.arrow,
             parameter_count,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),
@@ -1393,6 +1489,21 @@ fn collect_nested_function_names(
                 collect_nested_function_names(statement, names, true);
             }
         }
+        // Every method body is a nested function, so its free names are capture candidates.
+        StatementKind::Class(class) => {
+            if let Some(superclass) = &class.superclass {
+                collect_identifiers(superclass, names, inside_function);
+            }
+            let bodies = class
+                .constructor
+                .iter()
+                .chain(class.methods.iter().map(|method| &method.function));
+            for function in bodies {
+                for statement in &function.body {
+                    collect_nested_function_names(statement, names, true);
+                }
+            }
+        }
         StatementKind::Variable { declarations, .. } => {
             for declaration in declarations {
                 if inside_function {
@@ -1454,7 +1565,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 names.insert(name.clone());
             }
         }
-        ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => {}
+        ExpressionKind::Literal(_) | ExpressionKind::This | ExpressionKind::Unsupported { .. } => {}
         ExpressionKind::Unary { argument, .. } => collect_identifiers(argument, names, collecting),
         ExpressionKind::Binary { left, right, .. }
         | ExpressionKind::Logical { left, right, .. } => {
@@ -1576,7 +1687,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
         }
-        ExpressionKind::Function(_) => false,
+        ExpressionKind::This | ExpressionKind::Function(_) => false,
         ExpressionKind::Object { properties } => properties.iter().any(|property| {
             expression_references(&property.value, name)
                 || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))

@@ -18,9 +18,10 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Declaration,
-    ExportDefaultDeclarationKind, Expression, Function, ObjectExpression, ObjectPropertyKind,
-    PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
+    ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
+    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, Function,
+    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
+    VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -228,8 +229,13 @@ impl Lowerer {
             Statement::FunctionDeclaration(declaration) => {
                 self.function_declaration(declaration, statement_span)
             }
-            Statement::ClassDeclaration(_) => {
-                self.unsupported_statement("class declaration", statement_span)
+            Statement::ClassDeclaration(declaration) => {
+                match self.class(declaration, statement_span) {
+                    Some(class) => HirStatementKind::Class(Box::new(class)),
+                    None => HirStatementKind::Unsupported {
+                        feature: "class declaration".to_string(),
+                    },
+                }
             }
             Statement::DoWhileStatement(_) => {
                 self.unsupported_statement("do-while statement", statement_span)
@@ -534,9 +540,7 @@ impl Lowerer {
             Expression::UpdateExpression(_) => {
                 return self.unsupported_expression("update expression", expression_span);
             }
-            Expression::ThisExpression(_) => {
-                return self.unsupported_expression("this expression", expression_span);
-            }
+            Expression::ThisExpression(_) => HirExpressionKind::This,
             Expression::SequenceExpression(_) => {
                 return self.unsupported_expression("sequence expression", expression_span);
             }
@@ -601,6 +605,58 @@ impl Lowerer {
             };
         };
         HirStatementKind::Function(Box::new(function))
+    }
+
+    /// Lower a class, or refuse it whole.
+    ///
+    /// Refusing wholesale for the same reason a partial function is refused: a class missing a
+    /// method it declared would construct successfully and fail somewhere else entirely.
+    fn class(&mut self, class: &Class<'_>, statement_span: HirSpan) -> Option<kiln_hir::Class> {
+        let mut constructor = None;
+        let mut methods = Vec::new();
+
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                self.unsupported("class field or static block", statement_span);
+                return None;
+            };
+            if method.value.r#async || method.value.generator {
+                self.unsupported("async or generator method", statement_span);
+                return None;
+            }
+            let lowered = self.function(&method.value, span(method.span))?;
+            match method.kind {
+                MethodDefinitionKind::Constructor => constructor = Some(lowered),
+                MethodDefinitionKind::Method => {
+                    let key = if method.computed {
+                        let key = method.key.as_expression()?;
+                        kiln_hir::ObjectKey::Computed(self.expression(key))
+                    } else {
+                        kiln_hir::ObjectKey::Static(method.key.static_name()?.to_string())
+                    };
+                    methods.push(kiln_hir::ClassMethod {
+                        key,
+                        function: lowered,
+                        is_static: method.r#static,
+                    });
+                }
+                MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
+                    self.unsupported("accessor method", statement_span);
+                    return None;
+                }
+            }
+        }
+
+        Some(kiln_hir::Class {
+            name: class.id.as_ref().map(|id| id.name.to_string()),
+            superclass: class
+                .heritage
+                .as_ref()
+                .map(|heritage| self.expression(&heritage.expression)),
+            constructor,
+            methods,
+            span: statement_span,
+        })
     }
 
     /// Lower an arrow function.
