@@ -1,53 +1,162 @@
 {
+  "runner": "kiln-cli 0.0.0",
   "schema": 1,
-  "recorded": "2026-08-29",
-  "recorded_from": "conformance/manifest.toml",
-  "runner": null,
-  "corpus": {
-    "name": "porffor-effect-findings",
-    "source_commit": "bfdd2b0"
-  },
-  "note": "No runner has executed this corpus. Every outcome below is the status recorded in conformance/manifest.toml, not an observation: kiln cannot execute JavaScript yet. Read the zeroes in `totals` as \"no evidence\", never as \"no problems\". The number this file exists to protect is `totals.passed`, whose job for the next while is to go up and never quietly come back down.",
-  "totals": {
-    "total": 32,
-    "passed": 0,
-    "failed": 0,
-    "unsupported": 0,
-    "skipped": 0,
-    "not_yet_runnable": 32
-  },
   "tests": [
-    {"id": "guard/g01-spread-symbols", "outcome": "not-yet-runnable"},
-    {"id": "guard/g02-arrow-arguments", "outcome": "not-yet-runnable"},
-    {"id": "guard/g03-class-field-closure", "outcome": "not-yet-runnable"},
-    {"id": "guard/g04-generic-forof", "outcome": "not-yet-runnable"},
-    {"id": "guard/g05-yieldstar-protocol", "outcome": "not-yet-runnable"},
-    {"id": "guard/g06-array-proto-iterator", "outcome": "not-yet-runnable"},
-    {"id": "guard/g06b-array-iterator-identity", "outcome": "not-yet-runnable"},
-    {"id": "guard/g07-timers-order", "outcome": "not-yet-runnable"},
-    {"id": "guard/g08-finally-paths", "outcome": "not-yet-runnable"},
-    {"id": "guard/g09-error-subclass", "outcome": "not-yet-runnable"},
-    {"id": "guard/g10-builtin-statics", "outcome": "not-yet-runnable"},
-    {"id": "guard/g11-proto-on-function", "outcome": "not-yet-runnable"},
-    {"id": "guard/g12-private-not-inherited", "outcome": "not-yet-runnable"},
-    {"id": "guard/g13-set-mutation", "outcome": "not-yet-runnable"},
-    {"id": "guard/g14-generator-return-finally", "outcome": "not-yet-runnable"},
-    {"id": "guard/g15-error-stack-cause", "outcome": "not-yet-runnable"},
-    {"id": "guard/g16-array-from-iterable", "outcome": "not-yet-runnable"},
-    {"id": "guard/g17-set-map-iterator", "outcome": "not-yet-runnable"},
-    {"id": "guard/g18-iterator-close", "outcome": "not-yet-runnable"},
-    {"id": "guard/g19-subclass-array-map", "outcome": "not-yet-runnable"},
-    {"id": "effect/01-core", "outcome": "not-yet-runnable"},
-    {"id": "effect/02-gen", "outcome": "not-yet-runnable"},
-    {"id": "effect/03-ref", "outcome": "not-yet-runnable"},
-    {"id": "effect/04-all-foreach", "outcome": "not-yet-runnable"},
-    {"id": "effect/05-concurrency", "outcome": "not-yet-runnable"},
-    {"id": "effect/06-sleep", "outcome": "not-yet-runnable"},
-    {"id": "effect/07-interruption", "outcome": "not-yet-runnable"},
-    {"id": "effect/08-scope", "outcome": "not-yet-runnable"},
-    {"id": "effect/09-fiber", "outcome": "not-yet-runnable"},
-    {"id": "effect/10-tagged-error", "outcome": "not-yet-runnable"},
-    {"id": "effect/11-stream", "outcome": "not-yet-runnable"},
-    {"id": "effect/12-service-layer", "outcome": "not-yet-runnable"}
-  ]
+    {
+      "id": "effect/01-core",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/02-gen",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/03-ref",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/04-all-foreach",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/05-concurrency",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/06-sleep",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/07-interruption",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/08-scope",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/09-fiber",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/10-tagged-error",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/11-stream",
+      "outcome": "skipped"
+    },
+    {
+      "id": "effect/12-service-layer",
+      "outcome": "skipped"
+    },
+    {
+      "id": "guard/g01-spread-symbols",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g02-arrow-arguments",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g03-class-field-closure",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g04-generic-forof",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g05-yieldstar-protocol",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g06-array-proto-iterator",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g06b-array-iterator-identity",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g07-timers-order",
+      "outcome": "fail"
+    },
+    {
+      "id": "guard/g08-finally-paths",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g09-error-subclass",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g10-builtin-statics",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g11-proto-on-function",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g12-private-not-inherited",
+      "outcome": "fail"
+    },
+    {
+      "id": "guard/g13-set-mutation",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g14-generator-return-finally",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g15-error-stack-cause",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g16-array-from-iterable",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g17-set-map-iterator",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g18-iterator-close",
+      "outcome": "pass"
+    },
+    {
+      "id": "guard/g19-subclass-array-map",
+      "outcome": "fail"
+    },
+    {
+      "id": "regress/r01-handler-outlives-frame",
+      "outcome": "pass"
+    },
+    {
+      "id": "regress/r02-generator-resumed-at-another-depth",
+      "outcome": "pass"
+    },
+    {
+      "id": "regress/r03-array-from",
+      "outcome": "pass"
+    },
+    {
+      "id": "regress/r04-iterator-close-paths",
+      "outcome": "pass"
+    },
+    {
+      "id": "regress/r05-object-spread-order",
+      "outcome": "pass"
+    }
+  ],
+  "totals": {
+    "failed": 3,
+    "not_yet_runnable": 0,
+    "passed": 22,
+    "skipped": 12,
+    "total": 37,
+    "unsupported": 0
+  }
 }
