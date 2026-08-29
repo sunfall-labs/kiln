@@ -19,7 +19,8 @@ use kiln_hir::{
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     AssignmentTarget, BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, Statement, VariableDeclaration, VariableDeclarationKind,
+    Function, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, VariableDeclaration,
+    VariableDeclarationKind,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -407,15 +408,26 @@ impl Lowerer {
                         expression_span,
                     );
                 };
-                let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left
-                else {
-                    return self
-                        .unsupported_expression("non-identifier assignment", expression_span);
-                };
-                HirExpressionKind::Assignment {
-                    operator,
-                    target: identifier.name.to_string(),
-                    value: Box::new(self.expression(&expression.right)),
+                match &expression.left {
+                    AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                        HirExpressionKind::Assignment {
+                            operator,
+                            target: identifier.name.to_string(),
+                            value: Box::new(self.expression(&expression.right)),
+                        }
+                    }
+                    AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                        HirExpressionKind::MemberAssignment {
+                            operator,
+                            object: Box::new(self.expression(&member.object)),
+                            property: member.property.name.to_string(),
+                            value: Box::new(self.expression(&expression.right)),
+                        }
+                    }
+                    _ => {
+                        return self
+                            .unsupported_expression("non-identifier assignment", expression_span);
+                    }
                 }
             }
             Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
@@ -452,8 +464,8 @@ impl Lowerer {
             Expression::CallExpression(_) | Expression::StaticMemberExpression(_) => {
                 return self.unsupported_expression("optional chaining", expression_span);
             }
-            Expression::ObjectExpression(_) => {
-                return self.unsupported_expression("object expression", expression_span);
+            Expression::ObjectExpression(object) => {
+                return self.object_literal(object, expression_span);
             }
             Expression::ArrayExpression(_) => {
                 return self.unsupported_expression("array expression", expression_span);
@@ -597,6 +609,45 @@ impl Lowerer {
             body: statements,
             span: statement_span,
         })
+    }
+
+    /// Lower an object literal, or refuse the whole literal.
+    ///
+    /// Refusing wholesale rather than dropping the properties it cannot lower: an object missing
+    /// a spread's contributions looks like a valid object and would be wrong everywhere it was
+    /// used, whereas a missing object is a diagnostic at the point of the mistake.
+    fn object_literal(
+        &mut self,
+        expression: &ObjectExpression<'_>,
+        expression_span: HirSpan,
+    ) -> HirExpression {
+        let mut properties = Vec::with_capacity(expression.properties.len());
+        for property in &expression.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return self.unsupported_expression("object spread", expression_span);
+            };
+            if property.computed {
+                return self.unsupported_expression("computed object key", expression_span);
+            }
+            if property.method {
+                return self.unsupported_expression("object method", expression_span);
+            }
+            if !matches!(property.kind, PropertyKind::Init) {
+                return self.unsupported_expression("object getter or setter", expression_span);
+            }
+            let Some(key) = property.key.static_name() else {
+                return self.unsupported_expression("object key", expression_span);
+            };
+            properties.push(kiln_hir::ObjectProperty {
+                key: key.to_string(),
+                value: self.expression(&property.value),
+                span: span(property.span),
+            });
+        }
+        HirExpression {
+            kind: HirExpressionKind::Object { properties },
+            span: expression_span,
+        }
     }
 
     fn unsupported_statement(&mut self, feature: &str, feature_span: HirSpan) -> HirStatementKind {
@@ -902,10 +953,17 @@ mod tests {
 
     #[test]
     fn unsupported_expression_diagnostics_name_the_oxc_variant() {
+        // Object expressions used to be here and are now lowered; what this test protects is
+        // that whatever remains unsupported says which construct it was, rather than falling
+        // into a catch-all that reports the bare word "expression". A third of the guard corpus
+        // was once hidden behind exactly that.
         let cases = [
-            ("const value = {};", "object expression"),
             ("const value = [];", "array expression"),
             ("const value = () => 1;", "arrow function expression"),
+            ("const value = new Thing();", "new expression"),
+            ("const value = `x`;", "template literal"),
+            ("const value = { [key]: 1 };", "computed object key"),
+            ("const value = { ...other };", "object spread"),
         ];
         for (source, expected) in cases {
             let module = parse("module.js", source);

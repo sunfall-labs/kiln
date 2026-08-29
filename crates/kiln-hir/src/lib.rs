@@ -85,6 +85,19 @@ pub struct Parameter {
     pub span: Span,
 }
 
+/// One `key: value` pair in an object literal.
+///
+/// Keys are already strings: an identifier key, a string key and a numeric key all name the same
+/// property, and normalising here means later passes never have to know which syntax produced it.
+/// Computed keys, shorthand methods and spread are separate features and are refused rather than
+/// flattened into this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectProperty {
+    pub key: String,
+    pub value: Expression,
+    pub span: Span,
+}
+
 /// An owned executable statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
@@ -184,6 +197,23 @@ pub enum ExpressionKind {
     Call {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
+    },
+    /// `object.property = value`, including the compound forms.
+    ///
+    /// Kept separate from `Assignment` rather than widening its target into an enum: the two
+    /// have genuinely different evaluation, since this one evaluates an object expression first
+    /// and that one resolves a binding, and a shared shape would have every consumer branch on
+    /// which it was anyway.
+    MemberAssignment {
+        operator: AssignmentOperator,
+        object: Box<Expression>,
+        property: String,
+        value: Box<Expression>,
+    },
+    /// An object literal. Property order is source order, which is the order JavaScript
+    /// enumerates string keys in and therefore not an implementation detail.
+    Object {
+        properties: Vec<ObjectProperty>,
     },
     StaticMember {
         object: Box<Expression>,

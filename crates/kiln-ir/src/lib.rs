@@ -83,6 +83,18 @@ pub enum Instruction {
     Call {
         argc: u16,
     },
+    /// Build an object from `count` key/value pairs on the stack, keys first in each pair and
+    /// the whole run in source order.
+    NewObject {
+        count: u32,
+    },
+    /// Read a property, naming it by constant index. The object is on top of the stack.
+    ///
+    /// The name is a constant rather than an inline string so the constant table deduplicates
+    /// it: `.length` appearing two hundred times costs one entry.
+    GetProperty(u32),
+    /// Write a property. Stack is object, then value.
+    SetProperty(u32),
     /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
     /// than a copy of its value.
     ///
@@ -673,14 +685,32 @@ impl Compiler {
             ExpressionKind::Call { callee, arguments } => {
                 self.call(callee, arguments, expression.span)
             }
+            ExpressionKind::MemberAssignment {
+                operator,
+                object,
+                property,
+                value,
+            } => self.member_assignment(*operator, object, property, value),
+            ExpressionKind::Object { properties } => {
+                if properties.len() > u32::MAX as usize {
+                    self.error(
+                        Some(expression.span),
+                        "object literal has too many properties",
+                    );
+                    return;
+                }
+                for property in properties {
+                    self.push_constant(Constant::String(property.key.clone()));
+                    self.expression(&property.value);
+                }
+                self.code.push(Instruction::NewObject {
+                    count: properties.len() as u32,
+                });
+            }
             ExpressionKind::StaticMember { object, property } => {
-                self.error(
-                    Some(expression.span),
-                    format!("unsupported member access `.{property}`"),
-                );
                 self.expression(object);
-                self.code.push(Instruction::Pop);
-                self.push_constant(Constant::Undefined);
+                let name = self.constant_index(Constant::String(property.clone()));
+                self.code.push(Instruction::GetProperty(name));
             }
             ExpressionKind::Unsupported { feature } => {
                 self.error(
@@ -928,6 +958,44 @@ impl Compiler {
         self.code.push(Instruction::Return);
     }
 
+    /// `object.property = value`, and the compound forms.
+    ///
+    /// The object expression is evaluated once. `o().x += 1` must not call `o` twice, so the
+    /// reference is duplicated on the stack rather than the expression being compiled twice --
+    /// which would be the easy mistake and would double any side effect in the receiver.
+    fn member_assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        object: &Expression,
+        property: &str,
+        value: &Expression,
+    ) {
+        let name = self.constant_index(Constant::String(property.to_owned()));
+        self.expression(object);
+
+        if operator != AssignmentOperator::Assign {
+            // Read the current value from the same object reference the write will use.
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::GetProperty(name));
+            self.expression(value);
+            self.code.push(Instruction::Binary(match operator {
+                AssignmentOperator::Add => BinaryOp::Add,
+                AssignmentOperator::Subtract => BinaryOp::Subtract,
+                AssignmentOperator::Multiply => BinaryOp::Multiply,
+                AssignmentOperator::Divide => BinaryOp::Divide,
+                AssignmentOperator::Remainder => BinaryOp::Remainder,
+                AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
+                AssignmentOperator::Assign => unreachable!("handled above"),
+            }));
+        } else {
+            self.expression(value);
+        }
+
+        // `SetProperty` leaves the assigned value, which is what an assignment expression
+        // evaluates to.
+        self.code.push(Instruction::SetProperty(name));
+    }
+
     fn call(&mut self, callee: &Expression, arguments: &[Expression], span: Span) {
         let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
@@ -1069,9 +1137,26 @@ impl Compiler {
     }
 
     fn push_constant(&mut self, constant: Constant) {
-        let index = self.constants.len();
+        let index = self.constant_index(constant);
+        self.code.push(Instruction::Const(index));
+    }
+
+    /// Intern a constant, returning its table index.
+    ///
+    /// Property names repeat heavily -- every `.length` in a program is the same string -- and
+    /// an instruction that names one by index rather than carrying it inline is what lets the
+    /// table hold one copy.
+    fn constant_index(&mut self, constant: Constant) -> u32 {
+        if let Some(existing) = self
+            .constants
+            .iter()
+            .position(|candidate| *candidate == constant)
+        {
+            return existing as u32;
+        }
+        let index = self.constants.len() as u32;
         self.constants.push(constant);
-        self.code.push(Instruction::Const(index as u32));
+        index
     }
 
     fn emit_jump(&mut self, instruction: Instruction) -> usize {
@@ -1194,6 +1279,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(argument, names, collecting);
             }
         }
+        ExpressionKind::MemberAssignment { object, value, .. } => {
+            collect_identifiers(object, names, collecting);
+            collect_identifiers(value, names, collecting);
+        }
+        ExpressionKind::Object { properties } => {
+            for property in properties {
+                collect_identifiers(&property.value, names, collecting);
+            }
+        }
         ExpressionKind::StaticMember { object, .. } => {
             collect_identifiers(object, names, collecting);
         }
@@ -1226,6 +1320,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                     .iter()
                     .any(|argument| expression_references(argument, name))
         }
+        ExpressionKind::MemberAssignment { object, value, .. } => {
+            expression_references(object, name) || expression_references(value, name)
+        }
+        ExpressionKind::Object { properties } => properties
+            .iter()
+            .any(|property| expression_references(&property.value, name)),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Literal(_) | ExpressionKind::Unsupported { .. } => false,
     }
@@ -1295,6 +1395,85 @@ mod tests {
 
     /// A capture must box the *binding*: both closures over one variable have to see the same
     /// cell, or the second one reads a stale copy.
+    /// A compound member assignment must evaluate its receiver once. Compiling the object
+    /// expression twice would be the easy mistake and would double any side effect in it.
+    #[test]
+    fn a_compound_member_assignment_evaluates_its_receiver_once() {
+        let program = compile(&module(vec![
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    name: "o".into(),
+                    initializer: Some(Expression {
+                        kind: ExpressionKind::Object {
+                            properties: Vec::new(),
+                        },
+                        span: Span::default(),
+                    }),
+                    span: Span::default(),
+                }],
+            }),
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::MemberAssignment {
+                    operator: AssignmentOperator::Add,
+                    object: Box::new(identifier("o")),
+                    property: "count".into(),
+                    value: Box::new(number(1.0)),
+                },
+                span: Span::default(),
+            })),
+        ]))
+        .expect("compiles");
+
+        let loads = program
+            .code
+            .iter()
+            .filter(|i| matches!(i, Instruction::LoadLocal(_)))
+            .count();
+        assert_eq!(loads, 1, "the receiver is loaded once and duplicated");
+        assert!(program.code.contains(&Instruction::Dup));
+    }
+
+    /// Property names repeat across a program, so they are interned rather than carried inline.
+    #[test]
+    fn repeated_property_names_share_one_constant() {
+        let read = |name: &str| {
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::StaticMember {
+                    object: Box::new(identifier("o")),
+                    property: name.into(),
+                },
+                span: Span::default(),
+            }))
+        };
+        let program = compile(&module(vec![
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    name: "o".into(),
+                    initializer: Some(Expression {
+                        kind: ExpressionKind::Object {
+                            properties: Vec::new(),
+                        },
+                        span: Span::default(),
+                    }),
+                    span: Span::default(),
+                }],
+            }),
+            read("length"),
+            read("length"),
+            read("length"),
+        ]))
+        .expect("compiles");
+
+        let names = program
+            .constants
+            .iter()
+            .filter(|constant| **constant == Constant::String("length".to_owned()))
+            .count();
+        assert_eq!(names, 1, "three reads of .length share one constant");
+    }
+
     #[test]
     fn a_captured_local_is_boxed_and_the_capture_points_at_its_slot() {
         let program = compile(&module(vec![function(
