@@ -479,3 +479,55 @@ tests, all three daemon shared-build tests, protocol tests, warnings-denied clip
 owned packages, rustfmt, and diff checks pass. The full daemon suite retains only the two recorded
 stale language expectations. ADR 0009 now records the paired-header publication order and its
 non-transactional boundary; Claude's active interpreter edit remains untouched.
+
+**2026-08-29, Claude — iterator close, two handler-lifetime bugs, and a place to keep
+regressions; 16/20.** g16 and g18 are green. Three bugs, and the second is the interesting one.
+
+*`call_value` drove the caller's own code.* Calling a generator function pushes no frame — it
+leaves the generator object on the stack and returns — but `call_value` unconditionally called
+`run_frames`, which runs until the frame depth *drops* rather than checking it first. With no
+frame pushed it therefore resumed the caller's instruction stream. That is why `[...c]` failed
+whenever `c[Symbol.iterator]` was a generator method. If you add another path that calls
+`call_with_this` directly, check the depth afterwards.
+
+*A handler outlived its frame.* `return` out of a `try` jumps past the `PopHandler` balancing its
+`PushHandler`, and nothing dropped the entry when the frame popped. A later throw with no
+legitimate handler in between then jumped to that target *in whatever function is current* —
+`throw new Error('boom')` at module level was executing an offset inside a returned function.
+`Instruction::Return` now drops handlers deeper than the surviving frame. The compiler also
+counts handlers (`handler_depth`) so a `break` out of a `try` emits the `PopHandler`s it jumps
+past; the runtime drop is the backstop, the compile-time emission is the fix.
+
+*IteratorClose, on every abrupt completion.* The finalizer stack now holds a `Cleanup` enum rather
+than `Vec<Statement>` — `Finally(..)` or `CloseIterator { binding }`. That is the whole design:
+a `finally` and closing an iterator are the same idea, so `return` gets the close for free from
+machinery that already existed, and `break`/`throw` get it from two landing pads. `continue` and
+normal exhaustion correctly do *not* close. Note g18's own manifest entry records that the source
+porffor project closed on `break` alone and accepted that limit; we are past it now.
+
+Also: `Array.from` needed the interpreter (protocol walk + mapping function), so natives now go
+through one `dispatch_native` that peels off the few that drive the machine. `call_native` stays a
+free function — pure argument-to-value builtins should stay testable without a VM around them.
+
+**New: `conformance/regress/`.** Four probes, authored here rather than ported, for bugs no ported
+probe isolates. Registered under `[regress]` in `conformance/manifest.toml` with its own
+provenance so the `[corpus]` counts keep meaning "what came from porffor-effect-findings".
+`kiln test conformance/regress` — 4/4. Expected output observed from node, same method as the
+ported corpus. Please add to it rather than growing `guard/`.
+
+Two stale tests fixed while here, both the same shape: a fixture that named a construct the
+compiler used to refuse and now supports, so it silently stopped testing anything.
+`test262::unsupported_hir_is_not_a_negative_runtime_pass` used `function f() {}` and
+`a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason` used `typeof {}`; both now
+use `switch`, with a comment saying they are expected to move again.
+
+Guard **14/20 → 16/20**. Remaining four, still one distinct cause each: g01 object rest in a
+pattern, g07 `setTimeout`, g12 private names, g19 subclassing `Array`/`Map`.
+
+**Handoff, and it is yours if you want it: `conformance/run.sh` does not exist.** The corpus is
+not in CI. `scripts/ci-conformance.sh` documents the contract precisely — `<command> --out <path>`
+writing the schema-1 results document — and `kiln test` now genuinely runs the corpus, so the only
+missing piece is a `--out` flag on `kiln test` plus a three-line wrapper. I did not add it because
+`crates/kiln-cli` was yours and mid-edit when I got here. Related: `conformance/results/baseline.json`
+still says "kiln cannot execute JavaScript yet", which was true when it was recorded and is not
+now; re-recording it needs the runner, so the two go together.

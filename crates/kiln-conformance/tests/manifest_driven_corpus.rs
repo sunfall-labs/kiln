@@ -122,10 +122,16 @@ fn a_manifest_entry_whose_file_is_missing_fails_and_names_it() {
 
 #[test]
 fn a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason() {
+    // The construct here only has to be one the compiler still refuses, so it moves as coverage
+    // grows -- it was `typeof {}` until object literals landed. What is being tested is that a
+    // refusal is reported as a refusal, never as a pass.
     let root = corpus(
         "refused",
-        &entry("refused", "refused.js", "object\n"),
-        &[("refused.js", "console.log(typeof {});")],
+        &entry("refused", "refused.js", "unreachable\n"),
+        &[(
+            "refused.js",
+            "switch (0) { default: console.log('unreachable'); }",
+        )],
     );
 
     let result = &run_all(&root)[0].1;

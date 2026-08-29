@@ -1352,7 +1352,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Value::Native(native) => {
                             let native = *native;
                             let arguments = self.take_arguments(argc, current)?;
-                            let result = call_native(native, &Value::Undefined, &arguments)?;
+                            let result = self.dispatch_native(
+                                native,
+                                &Value::Undefined,
+                                &arguments,
+                                current,
+                            )?;
                             self.stack.push(result);
                         }
                         other => {
@@ -1382,6 +1387,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     // Discard anything the callee left behind. A well-formed program leaves
                     // nothing, but truncating means a malformed one cannot corrupt its caller.
                     self.stack.truncate(frame.stack_base);
+                    // A handler belongs to the frame that installed it. `return` out of a `try`
+                    // leaves one behind, and a later unrelated throw would then land on a target
+                    // in a function that has already returned -- executing whatever instruction
+                    // happens to live at that offset in the *current* function.
+                    while self
+                        .handlers
+                        .last()
+                        .is_some_and(|handler| handler.frame_depth > self.frames.len())
+                    {
+                        self.handlers.pop();
+                    }
                     self.locals = frame.locals;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
@@ -1621,6 +1637,73 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ///
     /// Drives the same protocol `for-of` uses rather than a second one, so anything iterable in
     /// a loop is iterable in a spread, and a value that is not iterable fails the same way.
+    /// Invoke a native, including the few that need the interpreter itself.
+    ///
+    /// `call_native` is a free function so that the great majority of built-ins -- pure
+    /// transformations of their arguments -- stay testable without a VM around them. The handful
+    /// that drive the machine, by walking the iterator protocol or calling back into user code,
+    /// cannot live there. They are peeled off here, and every call site goes through this, which
+    /// is what stops the two halves from disagreeing about which native is which.
+    fn dispatch_native(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match native {
+            Native::ArrayFrom => self.array_from(arguments, instruction),
+            _ => call_native(native, receiver, arguments),
+        }
+    }
+
+    /// `Array.from(source, mapFn?)`.
+    ///
+    /// Anything iterable is walked through the protocol. Anything else is treated as array-like
+    /// and read by index up to its `length`, which is the other half of what the specification
+    /// says and what makes `Array.from({ length: 2 })` two undefineds rather than an error.
+    fn array_from(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let map = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+
+        let mut items = match &source {
+            // Already the right shape, and copying beats walking an iterator to the same elements.
+            Value::Array(items) => items.borrow().clone(),
+            other
+                if self
+                    .property(other, WellKnown::Iterator.property_key())
+                    .is_nullish() =>
+            {
+                let length = match self.property(other, "length") {
+                    Value::Number(length) if length >= 1.0 => length as usize,
+                    _ => 0,
+                };
+                (0..length)
+                    .map(|index| self.computed(&source, &Value::Number(index as f64)))
+                    .collect()
+            }
+            other => self.drain_iterable(other, instruction)?,
+        };
+
+        if !map.is_nullish() {
+            let mut mapped = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                mapped.push(self.call_value(
+                    &map,
+                    Value::Undefined,
+                    vec![item.clone(), Value::Number(index as f64)],
+                    instruction,
+                )?);
+            }
+            items = mapped;
+        }
+        Ok(Value::Array(Rc::new(RefCell::new(items))))
+    }
+
     fn drain_iterable(
         &mut self,
         value: &Value,
@@ -1735,7 +1818,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         match callee {
-            Value::Native(native) => call_native(*native, &this_value, &arguments),
+            Value::Native(native) => {
+                self.dispatch_native(*native, &this_value, &arguments, instruction)
+            }
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
@@ -1757,6 +1842,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     this_value,
                     None,
                 )?;
+                // Calling a generator function pushes no frame -- it leaves the generator object
+                // on the stack and returns. There is nothing to drive, and driving anyway would
+                // resume the *caller's* instruction stream, since `run_frames` runs until the
+                // frame depth drops rather than checking it first.
+                if self.frames.len() == depth {
+                    return self.pop(instruction);
+                }
                 Ok(self.run_frames(depth)?.value)
             }
             other => Err(ExecutionError::NotCallable {
@@ -2030,7 +2122,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         match method {
-            Value::Native(native) => call_native(native, &receiver, &arguments).map(Some),
+            Value::Native(native) => self
+                .dispatch_native(native, &receiver, &arguments, instruction)
+                .map(Some),
             // Generator methods drive the machine, so they cannot go through `array_callback`.
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
@@ -2582,12 +2676,10 @@ fn call_native(
                 .unwrap_or(Value::Null),
             _ => Value::Null,
         },
-        Native::ArrayFrom => match arguments.first() {
-            Some(Value::Array(items)) => {
-                Value::Array(Rc::new(RefCell::new(items.borrow().clone())))
-            }
-            _ => Value::Array(Rc::new(RefCell::new(Vec::new()))),
-        },
+        // Peeled off by `dispatch_native`, which every call site goes through: walking an
+        // iterable and applying a mapping function both need the interpreter, and this function
+        // deliberately does not have one.
+        Native::ArrayFrom => unreachable!("`Array.from` is dispatched by the interpreter"),
         Native::ArrayPush => match receiver {
             Value::Array(items) => {
                 let mut items = items.borrow_mut();

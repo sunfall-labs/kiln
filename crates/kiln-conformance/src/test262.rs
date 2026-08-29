@@ -442,7 +442,11 @@ mod tests {
 
     #[test]
     fn unsupported_hir_is_not_a_negative_runtime_pass() {
-        let mut negative = case("function f() {}\n");
+        // Whatever construct stands in here has to be one the frontend still refuses, so this
+        // test moves as the language coverage grows -- it last named `function f() {}`, which
+        // stopped refusing when function declarations landed. That churn is the signal working:
+        // a refused construct must never be scored as a negative test's expected failure.
+        let mut negative = case("switch (0) {}\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,
