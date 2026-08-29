@@ -15,8 +15,28 @@
 # the selector confidently wrong instead of conservatively broad. Add `ir` per test when the IR
 # exists and the test has been observed to touch those operations.
 #
-# `status` is "not-yet-runnable" for every test in this file. Nothing here has run under kiln,
-# because kiln cannot execute JavaScript yet. See README.md and status.sh.
+# `status` records whether kiln's runner will attempt a test, and nothing more:
+#
+#     runnable      plain JavaScript; `kiln test conformance/guard` executes it and compares its
+#                   stdout against `expected_stdout` below, byte for byte.
+#     needs-bundle  a TypeScript entry point that imports a library. It runs only as a
+#                   single-file bundle, which effect/build.sh produces out of process (npm ci +
+#                   esbuild), so the runner reports it skipped-with-reason rather than failed.
+#
+# It deliberately says nothing about whether a test passes, and the runner deliberately does not
+# read it - it decides from the file extension instead. A field in the file that records an
+# expectation must never be able to decide whether that expectation is checked.
+#
+# The pass count is therefore not in this file and cannot be derived from it. It comes from
+# `kiln test conformance/guard`, which runs every probe, prints the distribution of reasons for
+# the ones that fail, and exits non-zero while any of them does. At the time of writing that is
+# 0 of 20 passing, all of them refused during lowering: the interpreter supports no user function
+# calls, no objects and no property access. That number is a measurement and will move; this file
+# is not where it is recorded.
+#
+# `status.sh` still only reports what this file says, and still executes nothing. Its `--gate`
+# checks that something *can* run, which is now true, so the gate that matters is the runner's
+# exit code and not `status.sh --gate`.
 #
 # Provenance for the whole corpus is in [corpus] below.
 
@@ -70,7 +90,7 @@ the mock event driver's virtual time rather than by real sleeping, and the tests
 id = "guard/g01-spread-symbols"
 group = "guard"
 source = "guard/g01-spread-symbols.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["object-spread", "object-rest", "symbol-keys", "well-known-symbols", "object-statics"]
 catches = """
 Object spread and rest dropping symbol-keyed own properties. Effect builds every prototype by \
@@ -86,7 +106,7 @@ expected_stdout = """
 id = "guard/g02-arrow-arguments"
 group = "guard"
 source = "guard/g02-arrow-arguments.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["arrow-functions", "arguments-object", "closures", "array-methods"]
 catches = """
 Arrow functions not inheriting `arguments` from the enclosing function. `arguments` in an \
@@ -102,7 +122,7 @@ expected_stdout = """
 id = "guard/g03-class-field-closure"
 group = "guard"
 source = "guard/g03-class-field-closure.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["classes", "class-fields", "closures", "lexical-environments", "arrow-functions"]
 catches = """
 Class instance-field initialisers not capturing the enclosing scope. Constructor-body \
@@ -119,7 +139,7 @@ T T
 id = "guard/g04-generic-forof"
 group = "guard"
 source = "guard/g04-generic-forof.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["iterator-protocol", "well-known-symbols", "for-of", "array-spread", "arrow-functions"]
 catches = """
 No generic iterator protocol: `for..of` and spread dispatching on a fixed set of built-in type \
@@ -135,7 +155,7 @@ expected_stdout = """
 id = "guard/g05-yieldstar-protocol"
 group = "guard"
 source = "guard/g05-yieldstar-protocol.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "classes", "two-way-generators"]
 catches = """
 `yield*` delegation over a user-defined iterable, with values passed back in through \
@@ -152,7 +172,7 @@ one,two ONETWO
 id = "guard/g06-array-proto-iterator"
 group = "guard"
 source = "guard/g06-array-proto-iterator.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "computed-member-access"]
 catches = """
 `Array.prototype[Symbol.iterator]` existing as a real property rather than iteration being \
@@ -169,7 +189,7 @@ function
 id = "guard/g06b-array-iterator-identity"
 group = "guard"
 source = "guard/g06b-array-iterator-identity.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "in-operator", "array-methods", "function-identity"]
 catches = """
 The companion to g06: the property must be *observable* (`Symbol.iterator in []`) and must be \
@@ -185,7 +205,7 @@ true true
 id = "guard/g07-timers-order"
 group = "guard"
 source = "guard/g07-timers-order.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["timers", "microtasks", "event-loop", "callback-ordering", "timer-arguments"]
 catches = """
 Timers existing at all, and firing in the right order relative to each other and to \
@@ -208,7 +228,7 @@ late
 id = "guard/g08-finally-paths"
 group = "guard"
 source = "guard/g08-finally-paths.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["try-finally", "abrupt-completion", "completion-values", "exceptions", "loops", "break-continue"]
 catches = """
 `finally` being skipped on abrupt completion. It ran correctly for normal completion and for a \
@@ -233,7 +253,7 @@ done
 id = "guard/g09-error-subclass"
 group = "guard"
 source = "guard/g09-error-subclass.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["classes", "inheritance", "derived-constructors", "error-objects", "error-subclassing", "instanceof", "global-object", "to-string"]
 catches = """
 `class X extends Error` producing a working Error. The broken version modelled errors as a \
@@ -251,7 +271,7 @@ true g
 id = "guard/g10-builtin-statics"
 group = "guard"
 source = "guard/g10-builtin-statics.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["builtin-statics", "global-object", "object-statics", "array-statics", "json"]
 catches = """
 A constructor's static methods being reachable through a *variable* holding the constructor, \
@@ -269,7 +289,7 @@ true x
 id = "guard/g11-proto-on-function"
 group = "guard"
 source = "guard/g11-proto-on-function.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["set-prototype-of", "prototype-chain", "function-objects", "classes", "inheritance", "static-inheritance", "well-known-symbols"]
 catches = """
 A prototype set on a *function* being honoured for lookups, including symbol-keyed ones, and \
@@ -286,7 +306,7 @@ function f T function T
 id = "guard/g12-private-not-inherited"
 group = "guard"
 source = "guard/g12-private-not-inherited.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["classes", "private-methods", "private-fields", "static-methods", "inheritance", "exceptions", "brand-checks"]
 catches = """
 Private-name brand checks. A static private method called through a subclass must throw a \
@@ -304,7 +324,7 @@ inherited instance private: 1
 id = "guard/g13-set-mutation"
 group = "guard"
 source = "guard/g13-set-mutation.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["set", "iterator-protocol", "for-of", "mutation-during-iteration"]
 catches = """
 Deleting from a Set while iterating it. The broken version compacted the dense backing array \
@@ -320,7 +340,7 @@ expected_stdout = """
 id = "guard/g14-generator-return-finally"
 group = "guard"
 source = "guard/g14-generator-return-finally.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["generators", "generator-return", "try-finally", "abrupt-completion", "json"]
 catches = """
 `generator.return(v)` unwinding the suspended body so its `finally` runs, and then completing \
@@ -337,7 +357,7 @@ cleanup
 id = "guard/g15-error-stack-cause"
 group = "guard"
 source = "guard/g15-error-stack-cause.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["error-objects", "error-cause", "error-stack", "builtin-statics"]
 catches = """
 The three Error surfaces Effect actually reads: `.stack` present and a string, the `cause` \
@@ -354,7 +374,7 @@ string true function
 id = "guard/g16-array-from-iterable"
 group = "guard"
 source = "guard/g16-array-from-iterable.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["array-from", "iterator-protocol", "generators", "array-spread", "well-known-symbols"]
 catches = """
 `Array.from` going through `@@iterator` rather than reading a length, checked against array \
@@ -370,7 +390,7 @@ expected_stdout = """
 id = "guard/g17-set-map-iterator"
 group = "guard"
 source = "guard/g17-set-map-iterator.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["well-known-symbols", "iterator-protocol", "prototype-chain", "set", "map", "string-iteration", "generators"]
 catches = """
 `@@iterator` present as a real property on Set, Map, String and generator objects - the same \
@@ -387,7 +407,7 @@ function
 id = "guard/g18-iterator-close"
 group = "guard"
 source = "guard/g18-iterator-close.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["iterator-protocol", "iterator-close", "for-of", "abrupt-completion", "well-known-symbols"]
 catches = """
 IteratorClose: `break` out of a `for..of` calling the iterator's `return()`. Worth reading \
@@ -404,7 +424,7 @@ closed
 id = "guard/g19-subclass-array-map"
 group = "guard"
 source = "guard/g19-subclass-array-map.js"
-status = "not-yet-runnable"
+status = "runnable"
 features = ["classes", "inheritance", "derived-constructors", "builtin-subclassing", "instanceof", "array-methods", "map"]
 catches = """
 Real derived-constructor semantics over built-ins: `this` binding to the result of `super()` \
@@ -439,7 +459,7 @@ id = "effect/01-core"
 group = "effect"
 source = "effect/src/01-core.ts"
 bundle = "effect/bundle/01-core.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain", "object-spread", "symbol-keys"]
 effect_api = ["Effect.succeed", "Effect.map", "Effect.flatMap", "pipe", "Effect.runSync", "Effect.runPromise"]
 expected_stdout = """
@@ -453,7 +473,7 @@ id = "effect/02-gen"
 group = "effect"
 source = "effect/src/02-gen.ts"
 bundle = "effect/bundle/02-gen.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "object-spread", "symbol-keys", "closures"]
 effect_api = ["Effect.gen", "Effect.succeed", "Effect.runSync"]
 notes = """
@@ -470,7 +490,7 @@ id = "effect/03-ref"
 group = "effect"
 source = "effect/src/03-ref.ts"
 bundle = "effect/bundle/03-ref.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain"]
 effect_api = ["Ref.make", "Ref.update", "Ref.get", "Effect.flatMap", "Effect.runPromise"]
 expected_stdout = """
@@ -482,7 +502,7 @@ id = "effect/04-all-foreach"
 group = "effect"
 source = "effect/src/04-all-foreach.ts"
 bundle = "effect/bundle/04-all-foreach.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "builtin-statics", "global-object", "well-known-symbols", "iterator-protocol", "in-operator", "array-methods", "promises", "microtasks"]
 effect_api = ["Effect.all", "Effect.forEach", "Effect.succeed", "Effect.runPromise"]
 notes = """
@@ -500,7 +520,7 @@ id = "effect/05-concurrency"
 group = "effect"
 source = "effect/src/05-concurrency.ts"
 bundle = "effect/bundle/05-concurrency.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "event-loop", "iterator-protocol", "closures", "callback-ordering"]
 effect_api = ["Effect.forEach", "Effect.runPromise"]
 notes = """
@@ -518,7 +538,7 @@ id = "effect/06-sleep"
 group = "effect"
 source = "effect/src/06-sleep.ts"
 bundle = "effect/bundle/06-sleep.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "timers", "event-loop", "promises", "microtasks"]
 effect_api = ["Effect.sleep", "Effect.andThen", "Effect.succeed", "Effect.runPromise"]
 notes = """
@@ -534,7 +554,7 @@ id = "effect/07-interruption"
 group = "effect"
 source = "effect/src/07-interruption.ts"
 bundle = "effect/bundle/07-interruption.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "timers", "event-loop", "set", "mutation-during-iteration", "iterator-protocol", "generator-return", "try-finally", "abrupt-completion", "promises", "microtasks", "error-objects"]
 effect_api = ["Effect.race", "Effect.timeout", "Effect.sleep", "Effect.flatMap", "Effect.runPromise"]
 notes = """
@@ -559,7 +579,7 @@ id = "effect/08-scope"
 group = "effect"
 source = "effect/src/08-scope.ts"
 bundle = "effect/bundle/08-scope.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "generators", "yield-delegation", "closures", "lexical-environments", "try-finally", "promises", "microtasks"]
 effect_api = ["Effect.scoped", "Effect.acquireRelease", "Effect.gen", "Effect.sync", "Effect.runPromise"]
 notes = """
@@ -575,7 +595,7 @@ id = "effect/09-fiber"
 group = "effect"
 source = "effect/src/09-fiber.ts"
 bundle = "effect/bundle/09-fiber.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "global-object", "in-operator", "timers", "event-loop", "promises", "microtasks", "closures"]
 effect_api = ["Effect.forkChild", "Fiber.join", "Effect.flatMap", "Effect.runPromise"]
 notes = """
@@ -594,7 +614,7 @@ id = "effect/10-tagged-error"
 group = "effect"
 source = "effect/src/10-tagged-error.ts"
 bundle = "effect/bundle/10-tagged-error.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "classes", "class-fields", "closures", "inheritance", "derived-constructors", "error-objects", "error-subclassing", "instanceof", "promises"]
 effect_api = ["Data.TaggedError", "Effect.fail", "Effect.catchTag", "Effect.succeed", "Effect.runSync"]
 notes = """
@@ -613,7 +633,7 @@ id = "effect/11-stream"
 group = "effect"
 source = "effect/src/11-stream.ts"
 bundle = "effect/bundle/11-stream.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "iterator-protocol", "array-from", "well-known-symbols", "generators", "promises", "microtasks", "closures"]
 effect_api = ["Stream.fromIterable", "Stream.map", "Stream.runCollect", "Effect.map", "Effect.runPromise"]
 notes = """
@@ -629,7 +649,7 @@ id = "effect/12-service-layer"
 group = "effect"
 source = "effect/src/12-service-layer.ts"
 bundle = "effect/bundle/12-service-layer.js"
-status = "not-yet-runnable"
+status = "needs-bundle"
 features = ["modules", "module-semantics", "set-prototype-of", "prototype-chain", "function-objects", "static-inheritance", "classes", "inheritance", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "timers", "event-loop", "promises", "microtasks"]
 effect_api = ["Context.Service", "Layer.succeed", "Effect.provide", "Effect.gen", "Effect.forEach", "Effect.sleep", "Effect.runPromise"]
 notes = """

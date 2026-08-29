@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use kiln_conformance::{Outcome, RunMode, Variant, run_case_variants};
-use kiln_proto::{Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestSummary};
+use kiln_conformance::{CaseResult, ConformanceTest, Outcome, ReasonReport, RunMode};
+use kiln_proto::{
+    Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestReasonSummary, TestSummary,
+};
 use kiln_test_selector::{ChangeSet, FailureState, TestId, TestMetadata, TestTier, select};
-use kiln_test262::TestCase;
 
 pub fn run(
     root: &str,
@@ -18,18 +19,19 @@ pub fn run(
 ) -> Result<TestSummary, String> {
     let started = Instant::now();
     let root = Path::new(root);
-    let cases = kiln_test262::discover(root).map_err(|error| error.to_string())?;
+    // Discovery reads whichever convention the corpus declares itself in - Test262 frontmatter or
+    // a manifest beside the files - and hands back one shape, so nothing below here branches on it.
+    let discovered = kiln_conformance::discover(root).map_err(|error| error.to_string())?;
     let run_mode = match mode {
         TestMode::Parse => RunMode::Parse,
         TestMode::Interpreter => RunMode::Interpreter,
     };
 
-    let mut cases_by_id = BTreeMap::new();
-    let mut metadata = Vec::with_capacity(cases.len());
-    for case in cases {
-        let id = relative_id(root, &case);
-        metadata.push(selector_metadata(&id, &case, mode));
-        cases_by_id.insert(id, case);
+    let mut tests_by_id = BTreeMap::new();
+    let mut metadata = Vec::with_capacity(discovered.len());
+    for test in discovered {
+        metadata.push(selector_metadata(&test, mode));
+        tests_by_id.insert(test.id().to_owned(), test);
     }
 
     let changes = changed_paths
@@ -41,20 +43,21 @@ pub fn run(
     let selection = select(metadata, &changes, &failures);
 
     let mut summary = TestSummary {
-        discovered: cases_by_id.len(),
+        discovered: tests_by_id.len(),
         ..TestSummary::default()
     };
+    let mut results = Vec::new();
     for selected in selection.tests {
-        let Some(case) = cases_by_id.get(selected.id.as_str()) else {
+        let Some(test) = tests_by_id.get(selected.id.as_str()) else {
             continue;
         };
-        for variant in run_case_variants(case, run_mode) {
-            let variant_name = variant_name(variant.variant);
+        for variant in test.run(run_mode) {
+            let variant_name = variant.variant.name();
             let id = format!("{}#{variant_name}", selected.id);
             let outcome = wire_outcome(variant.result.outcome);
             count(&mut summary, outcome);
             summary.cases.push(TestCaseSummary {
-                id,
+                id: id.clone(),
                 path: selected.id.to_string(),
                 variant: variant_name.to_owned(),
                 outcome,
@@ -62,39 +65,48 @@ pub fn run(
                 diagnostics: variant
                     .result
                     .diagnostics
-                    .into_iter()
+                    .iter()
                     .map(|diagnostic| Diagnostic {
-                        message: format!("{:?}: {}", diagnostic.phase, diagnostic.message),
+                        message: format!("{}: {}", diagnostic.phase.tag(), diagnostic.message),
                         start: diagnostic.span.map(|span| span.start),
                         end: diagnostic.span.map(|span| span.end),
                     })
                     .collect(),
             });
+            results.push((id, variant.result));
         }
     }
+    summary.reasons = reason_distribution(&results);
     summary.selected = summary.cases.len();
     summary.elapsed_millis = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(summary)
 }
 
-fn relative_id(root: &Path, case: &TestCase) -> String {
-    case.path
-        .strip_prefix(root)
-        .unwrap_or(&case.path)
-        .to_string_lossy()
-        .replace('\\', "/")
+/// Group every non-passing result by reason, so the summary carries the backlog and not only its
+/// size.  The grouping itself lives in `kiln-conformance` beside the runners that produce the
+/// reasons; this only puts it on the wire.
+fn reason_distribution(results: &[(String, CaseResult)]) -> Vec<TestReasonSummary> {
+    ReasonReport::from_results(results.iter().map(|(id, result)| (id.as_str(), result)))
+        .groups()
+        .iter()
+        .map(|group| TestReasonSummary {
+            count: group.count(),
+            outcome: wire_outcome(group.outcome),
+            reason: group.reason.clone(),
+        })
+        .collect()
 }
 
-fn selector_metadata(id: &str, case: &TestCase, mode: TestMode) -> TestMetadata {
+fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
+    let id = test.id();
     let mut metadata = TestMetadata::new(id)
         .with_tier(TestTier::Tier2)
         .compiler_crate("frontend-oxc")
         .compiler_crate("kiln-hir")
         .with_smoke(
             id.split('/').any(|component| component == "smoke")
-                || case
-                    .metadata
-                    .features
+                || test
+                    .features()
                     .iter()
                     .any(|feature| feature == "kiln-smoke"),
         );
@@ -103,7 +115,7 @@ fn selector_metadata(id: &str, case: &TestCase, mode: TestMode) -> TestMetadata 
             metadata.add_compiler_crate(compiler_crate);
         }
     }
-    for feature in &case.metadata.features {
+    for feature in test.features() {
         metadata.add_feature(feature);
         if let Some(module) = feature.strip_prefix("builtin-") {
             metadata.add_builtin_module(module);
@@ -154,14 +166,6 @@ fn change_set(paths: &[String]) -> ChangeSet {
 
 fn file_id(id: &str) -> &str {
     id.rsplit_once('#').map_or(id, |(path, _)| path)
-}
-
-fn variant_name(variant: Variant) -> &'static str {
-    match variant {
-        Variant::Sloppy => "sloppy",
-        Variant::Strict => "strict",
-        Variant::Module => "module",
-    }
 }
 
 fn wire_outcome(outcome: Outcome) -> TestOutcome {
@@ -226,5 +230,85 @@ mod tests {
         assert_eq!(summary.unsupported, 1);
         assert_eq!(summary.skipped, 2, "ordinary execution needs the harness");
         assert_eq!(summary.passed, 2);
+    }
+
+    fn corpus(relative: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+            .to_str()
+            .expect("fixture path is UTF-8")
+            .to_owned()
+    }
+
+    fn run_corpus(relative: &str) -> TestSummary {
+        run(&corpus(relative), TestMode::Interpreter, None, Vec::new())
+            .expect("the corpus is discoverable")
+    }
+
+    #[test]
+    fn the_manifest_corpus_runs_and_every_non_pass_keeps_a_reason() {
+        let summary = run_corpus("conformance/guard");
+
+        assert_eq!(summary.discovered, 20);
+        assert_eq!(
+            summary.selected, 20,
+            "a recorded stdout is one observation, so a manifest test has one variant"
+        );
+        assert_eq!(summary.skipped, 0, "the probes are plain JavaScript");
+        assert_eq!(
+            summary.passed + summary.failed,
+            20,
+            "every probe is either measured as passing or measured as failing"
+        );
+        // Deliberately not asserting the pass count. It is a measurement, and pinning it here
+        // would make an interpreter improvement look like a broken test.
+        for case in summary
+            .cases
+            .iter()
+            .filter(|case| !matches!(case.outcome, TestOutcome::Pass))
+        {
+            assert!(
+                case.diagnostics
+                    .first()
+                    .is_some_and(|diagnostic| { diagnostic.message.contains(':') }),
+                "{} failed without a phase-tagged reason",
+                case.id
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_programs_are_skipped_with_a_reason_rather_than_failed() {
+        let summary = run_corpus("conformance/effect");
+
+        assert_eq!(summary.discovered, 12);
+        assert_eq!(summary.skipped, 12);
+        assert_eq!(summary.failed, 0, "kiln was never asked to run these");
+        assert_eq!(
+            summary.passed, 0,
+            "a skip is not a pass; a corpus that did not run has not passed"
+        );
+        for case in &summary.cases {
+            let reason = &case.diagnostics.first().expect("a skip says why").message;
+            assert!(reason.starts_with("harness: "), "{reason}");
+            assert!(reason.contains("build.sh"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn one_manifest_serves_each_of_its_groups_and_the_whole_corpus() {
+        let whole = run_corpus("conformance");
+        assert_eq!(
+            whole.discovered, 32,
+            "pointing at the corpus root picks up both groups"
+        );
+        assert!(
+            whole
+                .cases
+                .iter()
+                .any(|case| case.path == "guard/g01-spread-symbols"),
+            "manifest ids do not move when a run is pointed at a different directory"
+        );
     }
 }

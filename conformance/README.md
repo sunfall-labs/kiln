@@ -1,9 +1,27 @@
 # JavaScript conformance corpus
 
-**Nothing in this directory runs.** Kiln cannot execute JavaScript yet, so no test here has ever
-produced a result. `./status.sh` says so at length and refuses to report a pass rate. Read this
-directory as a specification of behaviour kiln will have to get right, and as a set of fixtures
-waiting for an interpreter — not as a suite that is currently green.
+**The corpus runs. Nothing in it passes yet.** `kiln test conformance/guard` executes all
+twenty probes and reports `0 pass, 20 fail`, exiting non-zero. That is the intended state: read
+this directory as a specification of behaviour kiln will have to get right, not as a suite that
+is currently green.
+
+The pass count is the least interesting thing it produces. The valuable output is the **reason
+distribution** printed after the results — every probe's blocker, grouped and ranked, which is
+the implementation backlog ordered by how many tests each entry unblocks:
+
+```
+  4  compile: unsupported statement: class declaration
+  3  compile: unsupported expression: object expression
+  3  compile: unsupported statement: function declaration
+  2  compile: only console.log(...) calls are supported
+  2  compile: unsupported expression: new expression
+  2  compile: unsupported expression: unary operator `typeof`
+  1  each: unresolved identifier `Array`, array expression, arrow function expression, `in`
+```
+
+`docs/language-coverage.md` turns that into a ten-step ladder with a predicted pass count per
+step. Worth knowing: `--parse-only` passes all twenty, so the frontend accepts every probe and
+lowering is what refuses them.
 
 ## Where this came from
 
@@ -312,9 +330,11 @@ the most damage, so the script's honesty is worth exactly as much as its reachin
 The cost is a real dependency from `conformance/` on `scripts/`, but it is one-directional and
 covers three tiny helpers.
 
-**`status.sh` will not report a pass rate.** All 32 tests are `not-yet-runnable`. "32 tests, 0
-failures" is true arithmetic and a false claim: it says the corpus passed when the corpus did not
-run. This is the same failure mode `kiln_report_has_measurements` in `scripts/lib.sh` already
+**Neither `status.sh` nor `kiln test` will report a hollow pass.** "32 tests, 0 failures" is
+true arithmetic and a false claim when nothing executed: it says the corpus passed when the
+corpus did not run. `kiln test` enforces the same rule in its exit status — a run that selected
+tests and verified none of them exits non-zero, which is why `kiln test conformance/effect`
+fails rather than reporting success for twelve programs it skipped for want of a bundle step. This is the same failure mode `kiln_report_has_measurements` in `scripts/lib.sh` already
 refuses to allow for an empty benchmark report — "a green tick on an empty measurement is worse
 than no measurement at all" — and it applies with more force to a conformance suite, which is the
 thing people most want to read a green tick off. `status.sh --gate` therefore exits non-zero for
