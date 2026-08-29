@@ -1,0 +1,68 @@
+name: CI
+
+# The fast, blocking loop: formatting, lints, tests. Anything that measures wall-clock time
+# lives in perf.yml, because it needs a different cache policy and a different idea of what
+# "failing" means.
+#
+# design.md ranks iteration speed second only to correctness, and CI is one of the loops that
+# gets iterated on. The three jobs below are independent on purpose so that a formatting slip
+# is reported in well under a minute instead of behind a full workspace build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing useful left to say, and a short queue is the difference
+  # between CI being part of the loop and being something you go and do other work during.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain named by rust-toolchain.toml, with the rustfmt and clippy
+      # components it declares. With no toolchain argument rustup installs the active one, so
+      # the pin lives in exactly one place.
+      - run: rustup toolchain install --no-self-update
+      - run: cargo fmt --all --check
+      # The scripts these workflows call are as much a part of the build as the Rust is.
+      # shellcheck is preinstalled on the runner image.
+      - run: shellcheck scripts/*.sh
+
+  clippy:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      # Third-party, but it prunes stale artifacts out of the cached target directory, which a
+      # hand-rolled actions/cache does not - without that the cache grows without bound and
+      # eventually costs more to restore than the build costs to redo.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+      # Invoked through bash rather than by its executable bit, so a checkout that lost the
+      # mode still runs.
+      - run: bash scripts/ci-test.sh

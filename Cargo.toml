@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bench"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sunfall-labs/kiln"
+
+[workspace.dependencies]
+kiln-db = { path = "crates/kiln-db" }
+kiln-proto = { path = "crates/kiln-proto" }
+kiln-daemon = { path = "crates/kiln-daemon" }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[profile.release]
+debug = 1
+
+# a leaf edit should not drag the workspace with it (see docs/adr/0004)
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true

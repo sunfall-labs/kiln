@@ -1,0 +1,96 @@
+name: Performance
+
+# design.md §13 asks CI to record a list of measurements and says a regression should require
+# explicit justification. This workflow records the ones that exist in v0.
+#
+# Two jobs, with deliberately opposite cache policies:
+#
+#   build-timings  measures cargo itself, so it must NOT restore a target directory - a "clean
+#                  build" against a warm target directory is not a measurement of anything.
+#   bench          measures the compiler daemon at runtime, so a warm target directory makes
+#                  the job faster and changes nothing it reports.
+#
+# Neither job gates on a wall-clock number. A GitHub-hosted runner shares a host with other
+# tenants, and the committed baseline was recorded on a developer's machine of a different
+# architecture; a threshold on those numbers would fail for reasons no one can act on. Both
+# jobs instead gate on the machine-independent half of the same data, which is also the half
+# design.md is actually about: build-timings asserts *which* packages cargo recompiled, and
+# bench asserts the recompute counters from kiln_proto::Stats. The wall-clock figures are
+# recorded next to them and shown in the job summary as a trend.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-timings:
+    name: Build timings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain named by rust-toolchain.toml, with the rustfmt and clippy
+      # components it declares. With no toolchain argument rustup installs the active one, so
+      # the pin lives in exactly one place.
+      - run: rustup toolchain install --no-self-update
+      # Registry only. cache-targets is off so the clean-build measurement is genuinely clean;
+      # keeping the downloaded crate sources merely removes network variance from a number
+      # that is meant to be about compilation.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-timings
+          cache-targets: "false"
+      - run: bash scripts/ci-rebuild-timing.sh
+      # §12 asks for `cargo build --timings` to be inspected regularly, which means it has to
+      # be somewhere you can click on. Uploaded even on failure: a build that just got slow
+      # enough to trip a check is exactly when the report is worth reading.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-${{ github.run_id }}
+          path: |
+            target/cargo-timings/
+            target/rebuild-timings.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+  bench:
+    name: Timing harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - run: bash scripts/ci-perf.sh
+        env:
+          # Handed to `kiln-bench --compare` as its wall-clock regression threshold. Large
+          # enough to switch wall-clock gating off for the reasons in this file's header,
+          # which leaves the recompute-counter comparison as the only thing that can fail the
+          # job. The percentage deltas are still printed. Lower it to the harness's own 15%
+          # once this runs on the fixed reference machine §13 assumes.
+          KILN_PERF_THRESHOLD: "10000"
+          KILN_PERF_BLOCKING: "1"
+      # Runs even when the comparison above failed, so the coverage table is never the thing
+      # that goes missing when something else breaks.
+      - if: always()
+        run: bash scripts/perf-coverage.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report-${{ github.run_id }}
+          path: bench/results/latest.json
+          if-no-files-found: warn
+          retention-days: 30

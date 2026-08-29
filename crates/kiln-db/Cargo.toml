@@ -1,0 +1,10 @@
+[package]
+name = "kiln-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# deliberately zero dependencies: this is the hottest crate on the edit-rebuild path.
+# see docs/adr/0004-rust-workspace-discipline.md
+[dependencies]

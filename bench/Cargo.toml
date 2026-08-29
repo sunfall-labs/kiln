@@ -1,0 +1,17 @@
+[package]
+name = "kiln-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-db = { workspace = true }
+kiln-proto = { workspace = true }
+kiln-daemon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "kiln-bench"
+path = "src/main.rs"

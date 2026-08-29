@@ -1,0 +1,209 @@
+{
+  "schema": 1,
+  "generated_unix_secs": 1788030247,
+  "machine": {
+    "os": "macos",
+    "arch": "aarch64",
+    "cpus": 18,
+    "build_profile": "release"
+  },
+  "warm_pipeline": "set_source(edited) -> parse(edited) -> project()",
+  "workloads": [
+    {
+      "name": "small",
+      "modules": 8,
+      "layers": 3,
+      "import_edges": 11,
+      "source_lines": 262,
+      "edit_target": "src/util/m0001.ts",
+      "edit_target_dependents": 4
+    },
+    {
+      "name": "medium",
+      "modules": 320,
+      "layers": 8,
+      "import_edges": 1100,
+      "source_lines": 16600,
+      "edit_target": "src/codec/m0142.ts",
+      "edit_target_dependents": 10
+    }
+  ],
+  "measurements": [
+    {
+      "id": "small/startup",
+      "workload": "small",
+      "operation": "daemon startup",
+      "goal_ms": null,
+      "warmup_iterations": 3,
+      "iterations": 12,
+      "median_ms": 0.0007705,
+      "min_ms": 0.000583,
+      "p90_ms": 0.00175,
+      "max_ms": 0.002458,
+      "stats": {
+        "revision": 8,
+        "parse_computed": 0,
+        "interface_computed": 0,
+        "project_computed": 0,
+        "validated": 0,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.0,
+      "steady_state": true
+    },
+    {
+      "id": "small/cold",
+      "workload": "small",
+      "operation": "cold full analysis",
+      "goal_ms": null,
+      "warmup_iterations": 2,
+      "iterations": 10,
+      "median_ms": 0.013083500000000001,
+      "min_ms": 0.012292,
+      "p90_ms": 0.014542000000000001,
+      "max_ms": 0.015167,
+      "stats": {
+        "revision": 8,
+        "parse_computed": 8,
+        "interface_computed": 8,
+        "project_computed": 1,
+        "validated": 0,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.0,
+      "steady_state": true
+    },
+    {
+      "id": "small/warm-impl-edit",
+      "workload": "small",
+      "operation": "implementation edit",
+      "goal_ms": 200.0,
+      "warmup_iterations": 5,
+      "iterations": 25,
+      "median_ms": 0.001833,
+      "min_ms": 0.001791,
+      "p90_ms": 0.002916,
+      "max_ms": 0.0029579999999999997,
+      "stats": {
+        "revision": 15,
+        "parse_computed": 1,
+        "interface_computed": 1,
+        "project_computed": 0,
+        "validated": 17,
+        "early_cutoff": 1
+      },
+      "cache_hit_rate": 0.8947368421052632,
+      "steady_state": true
+    },
+    {
+      "id": "small/warm-interface-edit",
+      "workload": "small",
+      "operation": "interface edit",
+      "goal_ms": 200.0,
+      "warmup_iterations": 5,
+      "iterations": 25,
+      "median_ms": 0.002042,
+      "min_ms": 0.002,
+      "p90_ms": 0.0025,
+      "max_ms": 0.0035,
+      "stats": {
+        "revision": 15,
+        "parse_computed": 1,
+        "interface_computed": 1,
+        "project_computed": 1,
+        "validated": 18,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.8571428571428571,
+      "steady_state": true
+    },
+    {
+      "id": "medium/startup",
+      "workload": "medium",
+      "operation": "daemon startup",
+      "goal_ms": null,
+      "warmup_iterations": 3,
+      "iterations": 12,
+      "median_ms": 0.020937499999999998,
+      "min_ms": 0.019583,
+      "p90_ms": 0.023542,
+      "max_ms": 0.036875000000000005,
+      "stats": {
+        "revision": 320,
+        "parse_computed": 0,
+        "interface_computed": 0,
+        "project_computed": 0,
+        "validated": 0,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.0,
+      "steady_state": true
+    },
+    {
+      "id": "medium/cold",
+      "workload": "medium",
+      "operation": "cold full analysis",
+      "goal_ms": null,
+      "warmup_iterations": 2,
+      "iterations": 10,
+      "median_ms": 0.7272500000000001,
+      "min_ms": 0.721333,
+      "p90_ms": 0.730958,
+      "max_ms": 0.768666,
+      "stats": {
+        "revision": 320,
+        "parse_computed": 320,
+        "interface_computed": 320,
+        "project_computed": 1,
+        "validated": 0,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.0,
+      "steady_state": true
+    },
+    {
+      "id": "medium/warm-impl-edit",
+      "workload": "medium",
+      "operation": "implementation edit",
+      "goal_ms": 500.0,
+      "warmup_iterations": 5,
+      "iterations": 25,
+      "median_ms": 0.012584,
+      "min_ms": 0.011041,
+      "p90_ms": 0.015167,
+      "max_ms": 0.019083,
+      "stats": {
+        "revision": 327,
+        "parse_computed": 1,
+        "interface_computed": 1,
+        "project_computed": 0,
+        "validated": 641,
+        "early_cutoff": 1
+      },
+      "cache_hit_rate": 0.9968895800933126,
+      "steady_state": true
+    },
+    {
+      "id": "medium/warm-interface-edit",
+      "workload": "medium",
+      "operation": "interface edit",
+      "goal_ms": 500.0,
+      "warmup_iterations": 5,
+      "iterations": 25,
+      "median_ms": 0.014459,
+      "min_ms": 0.013791999999999999,
+      "p90_ms": 0.015375000000000002,
+      "max_ms": 0.022542,
+      "stats": {
+        "revision": 327,
+        "parse_computed": 1,
+        "interface_computed": 1,
+        "project_computed": 1,
+        "validated": 783,
+        "early_cutoff": 0
+      },
+      "cache_hit_rate": 0.9961832061068703,
+      "steady_state": true
+    }
+  ]
+}
