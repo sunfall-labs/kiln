@@ -59,6 +59,16 @@ pub enum Native {
     /// `String.prototype[Symbol.iterator]`, which walks code points rather than UTF-16 units.
     StringValues,
     StringIteratorNext,
+    StringToUpperCase,
+    StringToLowerCase,
+    StringIncludes,
+    StringIndexOf,
+    StringSlice,
+    StringSplit,
+    StringTrim,
+    StringStartsWith,
+    StringEndsWith,
+    StringRepeat,
     ArrayPush,
     ArrayPop,
     ArrayIndexOf,
@@ -689,7 +699,6 @@ pub fn execute<H: HostOps + ?Sized>(
         locals: vec![Value::Undefined; program.local_count as usize],
         function: None,
         suspended: false,
-        pending_yields: Vec::new(),
         handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
@@ -736,7 +745,6 @@ pub fn execute_module<H: HostOps + ?Sized>(
         locals,
         function: None,
         suspended: false,
-        pending_yields: Vec::new(),
         handlers: Vec::new(),
         arguments: Vec::new(),
         error_prototype: None,
@@ -805,8 +813,6 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     function: Option<Rc<Closure>>,
     /// Set by `Yield`, so the run loop knows it stopped at a suspension rather than a return.
     suspended: bool,
-    /// Values a `yield*` produced ahead of time, handed out one resumption at a time.
-    pending_yields: Vec<Value>,
     /// Active exception handlers, innermost last.
     handlers: Vec<Handler>,
     /// The arguments the running frame received.
@@ -1105,26 +1111,6 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         steps: self.steps,
                     });
                 }
-                Instruction::YieldDelegate => {
-                    // `yield*` is not one suspension but a sequence of them, and the loop cannot
-                    // suspend part-way through a Rust function. Draining first is a real
-                    // deviation: a delegate to an infinite iterable would not terminate, where
-                    // the language would yield forever. Recorded rather than hidden.
-                    let source = self.pop(current)?;
-                    let values = self.drain_iterable(&source, current)?;
-                    self.pending_yields.extend(values.into_iter().rev());
-                    match self.pending_yields.pop() {
-                        Some(value) => {
-                            self.suspended = true;
-                            return Ok(ExecutionResult {
-                                value,
-                                steps: self.steps,
-                            });
-                        }
-                        // An empty delegate yields nothing and evaluates to undefined.
-                        None => self.push_constant_value(Value::Undefined),
-                    }
-                }
                 Instruction::Throw => {
                     let thrown = self.pop(current)?;
                     self.unwind(thrown, current)?;
@@ -1415,10 +1401,6 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(())
     }
 
-    fn push_constant_value(&mut self, value: Value) {
-        self.stack.push(value);
-    }
-
     /// Build the object a generator function call produces.
     fn build_generator(
         &mut self,
@@ -1463,12 +1445,6 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         if generator.borrow().done {
             return Ok((Value::Undefined, true));
         }
-        // A `yield*` was drained ahead of time; hand its values out one resumption at a time so
-        // the caller still sees one value per `next`.
-        if let Some(value) = self.pending_yields.pop() {
-            return Ok((value, false));
-        }
-
         let depth = self.frames.len();
         let stack_base = self.stack.len();
         let (closure, locals, saved_stack, instruction_pointer, this_value, arguments, started) = {
@@ -1900,9 +1876,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::String(text) if name == "length" => {
                 Value::Number(text.encode_utf16().count() as f64)
             }
-            Value::String(_) if name == "values" || name == WellKnown::Iterator.property_key() => {
-                Value::Native(Native::StringValues)
-            }
+            Value::String(_) => string_property(name),
             Value::Array(_) => array_property(name),
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
@@ -2423,6 +2397,78 @@ fn call_native(native: Native, receiver: &Value, arguments: &[Value]) -> Value {
             _ => Value::Undefined,
         },
         Native::IteratorSelf => receiver.clone(),
+        Native::StringToUpperCase
+        | Native::StringToLowerCase
+        | Native::StringTrim
+        | Native::StringIncludes
+        | Native::StringIndexOf
+        | Native::StringSlice
+        | Native::StringSplit
+        | Native::StringStartsWith
+        | Native::StringEndsWith
+        | Native::StringRepeat => {
+            let Value::String(text) = receiver else {
+                return Value::Undefined;
+            };
+            let argument = |index: usize| {
+                arguments
+                    .get(index)
+                    .map_or_else(String::new, Value::to_display_string)
+            };
+            match native {
+                Native::StringToUpperCase => Value::String(text.to_uppercase()),
+                Native::StringToLowerCase => Value::String(text.to_lowercase()),
+                Native::StringTrim => Value::String(text.trim().to_owned()),
+                Native::StringIncludes => Value::Boolean(text.contains(&argument(0))),
+                Native::StringStartsWith => Value::Boolean(text.starts_with(&argument(0))),
+                Native::StringEndsWith => Value::Boolean(text.ends_with(&argument(0))),
+                Native::StringIndexOf => Value::Number(
+                    // Byte offsets are not character offsets; the index has to be counted in
+                    // the same units `length` reports, which is UTF-16.
+                    text.find(&argument(0))
+                        .map_or(-1.0, |byte| text[..byte].encode_utf16().count() as f64),
+                ),
+                Native::StringRepeat => {
+                    let count = arguments.first().map_or(0.0, Value::as_number);
+                    if count < 0.0 || !count.is_finite() {
+                        Value::String(String::new())
+                    } else {
+                        Value::String(text.repeat(count as usize))
+                    }
+                }
+                Native::StringSplit => {
+                    let separator = argument(0);
+                    let parts: Vec<Value> = if arguments.is_empty() {
+                        vec![Value::String(text.clone())]
+                    } else if separator.is_empty() {
+                        // An empty separator splits into characters, not into nothing.
+                        text.chars().map(|c| Value::String(c.to_string())).collect()
+                    } else {
+                        text.split(&separator)
+                            .map(|part| Value::String(part.to_owned()))
+                            .collect()
+                    };
+                    Value::Array(Rc::new(RefCell::new(parts)))
+                }
+                Native::StringSlice => {
+                    let characters: Vec<char> = text.chars().collect();
+                    let resolve = |value: f64| -> usize {
+                        if value < 0.0 {
+                            (characters.len() as f64 + value).max(0.0) as usize
+                        } else {
+                            (value as usize).min(characters.len())
+                        }
+                    };
+                    let start = resolve(arguments.first().map_or(0.0, Value::as_number));
+                    let end = match arguments.get(1) {
+                        None | Some(Value::Undefined) => characters.len(),
+                        Some(value) => resolve(value.as_number()),
+                    };
+                    Value::String(characters[start.min(end)..end].iter().collect())
+                }
+                _ => unreachable!("matched by the arm above"),
+            }
+        }
         Native::StringValues => {
             let Value::String(text) = receiver else {
                 return Value::Undefined;
@@ -2744,6 +2790,29 @@ fn bump_size(receiver: &Value, delta: f64) {
         object
             .borrow_mut()
             .set("size", Value::Number(current + delta));
+    }
+}
+
+/// The methods a string exposes.
+///
+/// Strings are primitives here rather than objects with a prototype, so their methods are looked
+/// up directly. When `String.prototype` becomes a real object -- which subclassing and
+/// monkey-patching both need -- this table is what moves onto it.
+fn string_property(name: &str) -> Value {
+    match name {
+        "values" => Value::Native(Native::StringValues),
+        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::StringValues),
+        "toUpperCase" => Value::Native(Native::StringToUpperCase),
+        "toLowerCase" => Value::Native(Native::StringToLowerCase),
+        "includes" => Value::Native(Native::StringIncludes),
+        "indexOf" => Value::Native(Native::StringIndexOf),
+        "slice" => Value::Native(Native::StringSlice),
+        "split" => Value::Native(Native::StringSplit),
+        "trim" => Value::Native(Native::StringTrim),
+        "startsWith" => Value::Native(Native::StringStartsWith),
+        "endsWith" => Value::Native(Native::StringEndsWith),
+        "repeat" => Value::Native(Native::StringRepeat),
+        _ => Value::Undefined,
     }
 }
 
