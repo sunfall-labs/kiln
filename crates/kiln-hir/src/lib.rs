@@ -135,6 +135,14 @@ pub struct Class {
     pub span: Span,
 }
 
+/// One element of an array literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayElement {
+    Item(Expression),
+    /// `...xs`, which contributes every element of an iterable rather than one value.
+    Spread(Expression),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatchClause {
     /// `None` for the optional-binding form, `catch { }`.
@@ -327,7 +335,11 @@ pub enum ExpressionKind {
     /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept
     /// from `undefined` elements and are refused by the frontend rather than flattened here.
     Array {
-        elements: Vec<Expression>,
+        elements: Vec<ArrayElement>,
+    },
+    /// `a, b, c`: every operand is evaluated, and the last one is the value.
+    Sequence {
+        operands: Vec<Expression>,
     },
     /// `object[property]`, where the key is computed rather than written.
     ComputedMember {

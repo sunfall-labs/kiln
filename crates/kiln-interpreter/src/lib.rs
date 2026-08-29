@@ -961,6 +961,29 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let items = self.stack.split_off(self.stack.len() - count);
                     self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
                 }
+                Instruction::SpreadInto => {
+                    let source = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let Value::Array(items) = &target else {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
+                    };
+                    // Spread consumes any iterable, not only an array, so it goes through the
+                    // protocol for anything else -- the same rule `for-of` follows.
+                    match &source {
+                        Value::Array(source) => {
+                            let appended = source.borrow().clone();
+                            items.borrow_mut().extend(appended);
+                        }
+                        other => {
+                            let collected = self.drain_iterable(other, current)?;
+                            items.borrow_mut().extend(collected);
+                        }
+                    }
+                    self.stack.push(target);
+                }
                 Instruction::GetComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -1091,7 +1114,34 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                                 data.set("@@map", Value::Boolean(true));
                             }
                             data.set("size", Value::Number(0.0));
-                            self.stack.push(Value::Object(Rc::new(RefCell::new(data))));
+                            let collection = Value::Object(Rc::new(RefCell::new(data)));
+                            // `new Set(iterable)` and `new Map(entries)` seed themselves through
+                            // `add`/`set`, so deduplication and size accounting are the same code
+                            // the explicit calls use rather than a second copy of it.
+                            if let Some(source) = arguments.first().cloned()
+                                && !matches!(source, Value::Undefined | Value::Null)
+                            {
+                                for item in self.drain_iterable(&source, current)? {
+                                    let (key, value) = if is_map {
+                                        (
+                                            self.computed(&item, &Value::Number(0.0)),
+                                            self.computed(&item, &Value::Number(1.0)),
+                                        )
+                                    } else {
+                                        (item, Value::Undefined)
+                                    };
+                                    call_native(
+                                        if is_map {
+                                            Native::MapSet
+                                        } else {
+                                            Native::SetAdd
+                                        },
+                                        &collection,
+                                        &[key, value],
+                                    );
+                                }
+                            }
+                            self.stack.push(collection);
                         }
                         Value::Function(closure) => {
                             // `new` creates the instance, runs the body with it as `this`, and
@@ -1279,6 +1329,35 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         self.stack.push(thrown);
         self.instruction = handler.target;
         Ok(())
+    }
+
+    /// Collect every value an iterable yields.
+    ///
+    /// Drives the same protocol `for-of` uses rather than a second one, so anything iterable in
+    /// a loop is iterable in a spread, and a value that is not iterable fails the same way.
+    fn drain_iterable(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let method = self.property(value, WellKnown::Iterator.property_key());
+        let iterator = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
+
+        let mut collected = Vec::new();
+        loop {
+            let next = self.property(&iterator, "next");
+            let step = self.call_value(&next, iterator.clone(), Vec::new(), instruction)?;
+            if self.property(&step, "done").is_truthy() {
+                return Ok(collected);
+            }
+            collected.push(self.property(&step, "value"));
+            if collected.len() > self.limits.max_steps as usize {
+                return Err(ExecutionError::StepLimitExceeded {
+                    steps: collected.len() as u64,
+                    limit: self.limits.max_steps,
+                });
+            }
+        }
     }
 
     /// Run an array method that takes a callback.
