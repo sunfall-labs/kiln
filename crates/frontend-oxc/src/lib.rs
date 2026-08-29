@@ -18,12 +18,14 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
+    ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
+};
+use oxc_ast::ast::{
     ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
     ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, Function,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
     VariableDeclaration, VariableDeclarationKind,
 };
-use oxc_ast::ast::{ForStatementInit, ForStatementLeft, SimpleAssignmentTarget};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
@@ -605,13 +607,25 @@ impl Lowerer {
             Expression::ArrayExpression(expression) => {
                 let mut elements = Vec::with_capacity(expression.elements.len());
                 for element in &expression.elements {
-                    let Some(element) = element.as_expression() else {
+                    match element {
+                        ArrayExpressionElement::SpreadElement(spread) => {
+                            elements.push(kiln_hir::ArrayElement::Spread(
+                                self.expression(&spread.argument),
+                            ));
+                        }
                         // A hole is not an undefined element -- it is absent, which `in` and
                         // iteration can tell apart -- so it cannot be lowered as one.
-                        return self
-                            .unsupported_expression("array hole or spread", expression_span);
-                    };
-                    elements.push(self.expression(element));
+                        ArrayExpressionElement::Elision(_) => {
+                            return self.unsupported_expression("array hole", expression_span);
+                        }
+                        other => {
+                            let Some(value) = other.as_expression() else {
+                                return self
+                                    .unsupported_expression("array element", expression_span);
+                            };
+                            elements.push(kiln_hir::ArrayElement::Item(self.expression(value)));
+                        }
+                    }
                 }
                 HirExpressionKind::Array { elements }
             }
@@ -674,9 +688,13 @@ impl Lowerer {
                 }
             }
             Expression::ThisExpression(_) => HirExpressionKind::This,
-            Expression::SequenceExpression(_) => {
-                return self.unsupported_expression("sequence expression", expression_span);
-            }
+            Expression::SequenceExpression(sequence) => HirExpressionKind::Sequence {
+                operands: sequence
+                    .expressions
+                    .iter()
+                    .map(|operand| self.expression(operand))
+                    .collect(),
+            },
             Expression::BigIntLiteral(_) => {
                 return self.unsupported_expression("bigint literal", expression_span);
             }

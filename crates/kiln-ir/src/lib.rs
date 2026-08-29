@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
-    Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator, Module, ObjectKey,
-    Span, Statement, StatementKind, UnaryOperator, VariableKind,
+    ArrayElement, AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName,
+    ExportOrigin, Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator,
+    Module, ObjectKey, Span, Statement, StatementKind, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -95,6 +95,12 @@ pub enum Instruction {
     NewArray {
         count: u32,
     },
+    /// Append every element of the iterable on top of the stack to the array beneath it.
+    ///
+    /// Spread is a separate instruction rather than a wider `NewArray` because the count it
+    /// contributes is not known until it runs: `[...xs, y]` has one static element and however
+    /// many `xs` yields.
+    SpreadInto,
     /// Read `object[key]`. Stack is object, then key.
     GetComputed,
     /// Call `object.name(...)` with the object as receiver. Stack is object, then arguments.
@@ -1265,17 +1271,18 @@ impl Compiler {
                     self.code.push(Instruction::MakeFunction(index));
                 }
             }
-            ExpressionKind::Array { elements } => {
-                if elements.len() > u32::MAX as usize {
-                    self.error(Some(expression.span), "array literal has too many elements");
+            ExpressionKind::Array { elements } => self.array_literal(elements, expression.span),
+            ExpressionKind::Sequence { operands } => {
+                let Some((last, rest)) = operands.split_last() else {
+                    self.push_constant(Constant::Undefined);
                     return;
+                };
+                // Every operand is evaluated for its effects; only the last one is the value.
+                for operand in rest {
+                    self.expression(operand);
+                    self.code.push(Instruction::Pop);
                 }
-                for element in elements {
-                    self.expression(element);
-                }
-                self.code.push(Instruction::NewArray {
-                    count: elements.len() as u32,
-                });
+                self.expression(last);
             }
             ExpressionKind::ComputedMember { object, property } => {
                 self.expression(object);
@@ -1892,6 +1899,66 @@ impl Compiler {
         self.code.push(store);
     }
 
+    /// An array literal, which may contain spreads.
+    ///
+    /// Without a spread this is one `NewArray` over the elements. With one, the array is built
+    /// incrementally: the run of literal elements before each spread becomes its own `NewArray`
+    /// and the spread appends to it, because a spread's length is not known until it runs.
+    fn array_literal(&mut self, elements: &[ArrayElement], span: Span) {
+        if elements.len() > u32::MAX as usize {
+            self.error(Some(span), "array literal has too many elements");
+            return;
+        }
+
+        if !elements
+            .iter()
+            .any(|element| matches!(element, ArrayElement::Spread(_)))
+        {
+            for element in elements {
+                let ArrayElement::Item(value) = element else {
+                    unreachable!("just checked that there are no spreads");
+                };
+                self.expression(value);
+            }
+            self.code.push(Instruction::NewArray {
+                count: elements.len() as u32,
+            });
+            return;
+        }
+
+        let mut pending = 0u32;
+        let mut started = false;
+        for element in elements {
+            match element {
+                ArrayElement::Item(value) => {
+                    self.expression(value);
+                    pending += 1;
+                }
+                ArrayElement::Spread(value) => {
+                    self.flush_array_run(&mut pending, &mut started);
+                    self.expression(value);
+                    self.code.push(Instruction::SpreadInto);
+                }
+            }
+        }
+        self.flush_array_run(&mut pending, &mut started);
+    }
+
+    /// Turn the pending literal elements into an array, or append them to the one being built.
+    fn flush_array_run(&mut self, pending: &mut u32, started: &mut bool) {
+        if !*started {
+            self.code.push(Instruction::NewArray { count: *pending });
+            *started = true;
+            *pending = 0;
+            return;
+        }
+        if *pending > 0 {
+            self.code.push(Instruction::NewArray { count: *pending });
+            self.code.push(Instruction::SpreadInto);
+            *pending = 0;
+        }
+    }
+
     /// `object[key] = value`, and the compound forms.
     ///
     /// Both the object and the key are evaluated once, in that order, which is the order the
@@ -2389,7 +2456,13 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
         ExpressionKind::Array { elements } => {
             for element in elements {
-                collect_identifiers(element, names, collecting);
+                let (ArrayElement::Item(value) | ArrayElement::Spread(value)) = element;
+                collect_identifiers(value, names, collecting);
+            }
+        }
+        ExpressionKind::Sequence { operands } => {
+            for operand in operands {
+                collect_identifiers(operand, names, collecting);
             }
         }
         ExpressionKind::ComputedMember { object, property } => {
@@ -2450,9 +2523,14 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                     .iter()
                     .any(|argument| expression_references(argument, name))
         }
-        ExpressionKind::Array { elements } => elements
+        ExpressionKind::Array { elements } => elements.iter().any(|element| match element {
+            ArrayElement::Item(value) | ArrayElement::Spread(value) => {
+                expression_references(value, name)
+            }
+        }),
+        ExpressionKind::Sequence { operands } => operands
             .iter()
-            .any(|element| expression_references(element, name)),
+            .any(|operand| expression_references(operand, name)),
         ExpressionKind::ComputedMember { object, property } => {
             expression_references(object, name) || expression_references(property, name)
         }
