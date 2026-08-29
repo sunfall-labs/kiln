@@ -36,7 +36,7 @@ pub fn run(
 
     let changes = changed_paths
         .as_deref()
-        .map(change_set)
+        .map(|paths| change_set_for_tests(paths, tests_by_id.values()))
         .unwrap_or_else(ChangeSet::full_run);
     let failures =
         FailureState::from_failing(previously_failed.iter().map(|id| TestId::new(file_id(id))));
@@ -127,10 +127,17 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
     metadata
 }
 
-fn change_set(paths: &[String]) -> ChangeSet {
+fn change_set_for_tests<'a, I>(paths: &[String], tests: I) -> ChangeSet
+where
+    I: IntoIterator<Item = &'a ConformanceTest>,
+{
     let mut changes = ChangeSet::new();
+    let test_paths = tests
+        .into_iter()
+        .map(|test| (normalize_path(test.path()), TestId::new(test.id())))
+        .collect::<Vec<_>>();
     for path in paths {
-        let normalized = path.replace('\\', "/");
+        let normalized = normalize_path(Path::new(path));
         let components = normalized.split('/').collect::<Vec<_>>();
         if matches!(
             normalized.as_str(),
@@ -160,8 +167,35 @@ fn change_set(paths: &[String]) -> ChangeSet {
         if normalized.contains("host-ops") || normalized.contains("host_ops") {
             changes.add_host_op("console.log");
         }
+        for (test_path, test_id) in &test_paths {
+            if path_matches(&normalized, test_path) {
+                changes.add_changed_test(test_id.clone());
+            }
+        }
     }
     changes
+}
+
+/// Normalize a repository path lexically. Changed paths can come from git on a different host,
+/// so this deliberately does not canonicalize or access the filesystem (a deleted path is still a
+/// valid change). Leading roots are ignored because matching is by repository-relative suffix.
+fn normalize_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    components.join("/")
+}
+
+fn path_matches(changed: &str, test_path: &str) -> bool {
+    !changed.is_empty() && (test_path == changed || test_path.ends_with(&format!("/{changed}")))
 }
 
 fn file_id(id: &str) -> &str {
@@ -196,21 +230,98 @@ mod tests {
 
     #[test]
     fn changed_crates_features_and_global_inputs_map_to_selector_tags() {
-        let changes = change_set(&[
-            "crates/kiln-ir/src/lib.rs".to_owned(),
-            "tests/features/BigInt.js".to_owned(),
-        ]);
+        let changes = change_set_for_tests(
+            &[
+                "crates/kiln-ir/src/lib.rs".to_owned(),
+                "tests/features/BigInt.js".to_owned(),
+            ],
+            std::iter::empty::<&ConformanceTest>(),
+        );
         assert!(changes.compiler_crates.contains("kiln-ir"));
         assert!(changes.features.contains("BigInt"));
         assert!(!changes.full_run);
 
-        assert!(change_set(&["Cargo.toml".to_owned()]).full_run);
+        assert!(
+            change_set_for_tests(
+                &["Cargo.toml".to_owned()],
+                std::iter::empty::<&ConformanceTest>()
+            )
+            .full_run
+        );
     }
 
     #[test]
     fn persisted_variant_failures_select_their_source_file() {
         assert_eq!(file_id("language/a.js#strict"), "language/a.js");
         assert_eq!(file_id("language/a.js"), "language/a.js");
+    }
+
+    #[test]
+    fn changed_conformance_path_selects_one_test_and_not_a_basename_prefix() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let corpus = repo.join("conformance/guard");
+        let discovered = kiln_conformance::discover(&corpus).expect("fixture corpus is valid");
+        let target = discovered
+            .iter()
+            .find(|test| test.id() == "guard/g01-spread-symbols")
+            .expect("fixture target exists");
+        let changed = target
+            .path()
+            .strip_prefix(&repo)
+            .expect("fixture is under repository root")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let changes = change_set_for_tests(&[changed], discovered.iter());
+        assert_eq!(changes.changed_tests.len(), 1);
+        assert!(changes.changed_tests.contains(&TestId::new(target.id())));
+
+        let windows_changed = target
+            .path()
+            .strip_prefix(&repo)
+            .expect("fixture is under repository root")
+            .to_string_lossy()
+            .replace('/', "\\");
+        let windows_changes = change_set_for_tests(&[windows_changed], discovered.iter());
+        assert!(
+            windows_changes
+                .changed_tests
+                .contains(&TestId::new(target.id()))
+        );
+
+        let selection = select(
+            discovered
+                .iter()
+                .map(|test| selector_metadata(test, TestMode::Interpreter)),
+            &changes,
+            &FailureState::new(),
+        );
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].id, TestId::new(target.id()));
+
+        let basename = target
+            .path()
+            .file_name()
+            .expect("fixture target has a basename")
+            .to_string_lossy();
+        let prefixed = target.path().with_file_name(format!("not-{basename}"));
+        assert!(!path_matches(basename.as_ref(), &normalize_path(&prefixed)));
+    }
+
+    #[test]
+    fn changed_manifest_source_runs_only_its_stable_test_id() {
+        let summary = run(
+            &corpus("conformance/guard"),
+            TestMode::Parse,
+            Some(vec!["conformance/guard/g01-spread-symbols.js".to_owned()]),
+            Vec::new(),
+        )
+        .expect("the changed manifest test is runnable");
+
+        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.selected, 1);
+        assert_eq!(summary.cases.len(), 1);
+        assert_eq!(summary.cases[0].path, "guard/g01-spread-symbols");
     }
 
     #[test]
