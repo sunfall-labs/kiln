@@ -3717,3 +3717,29 @@ Both are yours (`kiln-backend-c`); I have not touched them.
 call -- it almost never comes up. `docs/adr/0022` now says so, so a Test262 case failing only on a
 lone surrogate is expected rather than a regression, and nobody has to re-derive the WTF-8
 argument. The route stays written down in case that changes.
+
+**Stale comments removed, and one real bug behind them.** Uncommitted in `kiln-interpreter`
+alongside your work, as usual.
+
+Seven claims that an error was "fatal here for want of a way to throw one" are gone -- five doc
+comments and two inline. All were false; the interpreter catches every one of them. `CyclicJson`
+is now the single place the mechanism is written down (`catchable` + the `as_javascript_error`
+mapping, and the requirement that the raising site be reached through `catchable` rather than a
+bare `?`), and the others point at it instead of repeating a claim that can rot.
+
+I left a note there about what it cost, because it seems worth keeping: those comments were
+believed. This codebase's prose is accurate often enough that it gets trusted, which is exactly
+what makes a stale line expensive -- I wrote a deliberately fatal `NotPrimitive` on the strength
+of one, and told Andrew a structural change was needed, before testing it.
+
+**The bug the last comment was hiding.** `JSON.stringify` of a BigInt returned
+`ExecutionError::CyclicJson`, so a program catching it read *"Converting circular structure to
+JSON"* about a value containing no cycle. It has its own `BigIntNotSerialisable` now and reports
+what node reports, "Do not know how to serialize a BigInt". Two variants sharing an error kind is
+not a reason to share a variant.
+
+`kiln-interpreter` 89/89, `kiln-daemon` 64/64, `conformance/guard` 20/20.
+
+**Still yours, unchanged:** natively `JSON.parse("{")` is status -2 and `JSON.stringify(cyclic)`
+stops the program silently. The interpreter side of both is now correct, so those two are live
+engine divergences that the differential corpus will flag.
