@@ -333,6 +333,13 @@ fn within<T: Send + 'static>(limit: Duration, body: impl FnOnce() -> T + Send + 
     rx.recv_timeout(limit).expect("timed out")
 }
 
+/// The map a client sends when it has resolved no packages, which is every test here: these
+/// exercise the source snapshot, and a fabricated resolution would be a fact none of them
+/// established.
+fn empty_resolutions() -> kiln_proto::ResolutionMap {
+    kiln_proto::ResolutionMap::new("/project", Vec::new()).expect("an empty map is valid")
+}
+
 fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<String>) {
     let response = client
         .raw_request(&Request::Sync {
@@ -343,6 +350,7 @@ fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<Strin
                     hash: kiln_proto::source_digest(text),
                 })
                 .collect(),
+            resolutions: empty_resolutions(),
         })
         .expect("begin sync");
     let Response::Needed { sync_id, paths } = response else {
@@ -2092,6 +2100,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
                 path: entry_path.clone(),
                 hash: kiln_proto::source_digest(&entry_source),
             }],
+            resolutions: empty_resolutions(),
         })
         .expect("sync authoritative view");
     let Response::Needed { sync_id, paths } = sync else {

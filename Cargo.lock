@@ -343,6 +343,8 @@ name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
  "kiln-number-core",
+ "num-bigint 0.4.8",
+ "num-traits",
  "regress",
 ]
 

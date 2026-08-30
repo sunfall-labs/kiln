@@ -7063,7 +7063,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             Value::BigInt(_) => match name {
                 "toString" | "toLocaleString" => Value::Native(Native::BigIntToString),
-                "valueOf" => Value::Native(Native::NumberValueOf),
+                // The receiver, not a number: `NumberValueOf` narrows to a double, which turns
+                // `(5n).valueOf() === 5n` into false and is the one thing this type prevents.
+                "valueOf" => Value::Native(Native::ObjectValueOf),
                 _ => Value::Undefined,
             },
             Value::Date(_) => match name {

@@ -1199,7 +1199,7 @@ mod tests {
             }
             Ok(match request {
                 Request::Stats => Response::Stats(self.stats.clone()),
-                Request::Sync { files } => Response::Needed {
+                Request::Sync { files, .. } => Response::Needed {
                     sync_id: kiln_proto::SyncId(1),
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
@@ -1519,7 +1519,7 @@ mod tests {
             1,
             "the initial watch iteration must establish one authoritative project view"
         );
-        let Request::Sync { files } = &initial[0] else {
+        let Request::Sync { files, .. } = &initial[0] else {
             panic!("the initial watch request must be Sync");
         };
         assert_eq!(files.len(), 65, "the initial sync must seed every source");
