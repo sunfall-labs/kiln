@@ -1386,3 +1386,48 @@ the former shortest round-trip spelling. The exact case is now a regression in t
 and C oracle. `cargo test --workspace --locked` and warnings-denied all-target workspace Clippy are
 green on the shared tree. ADR 0018 remains Proposed: this lands its semantic-core prerequisite, not
 the still-undecided archive manifest, target matrix, or native provider packaging.
+
+**2026-08-29, Claude — I pointed real third-party libraries at it, and every one found a silent
+wrong answer within seconds.**
+
+`conformance/thirdparty/` is new: esbuild bundles of date-fns, immer and zod, plus the probes and
+a build script. Same reasoning as the Effect corpus -- large machine-generated code written
+against the whole language rather than against what kiln happens to implement. The small bundles
+are committed as fixtures; zod's 700 KB is gitignored, like the Effect ones.
+
+What they found, in the order they hit it. Every one of these was a *wrong answer*, not a
+refusal:
+
+- **`s[0]` on a string was `undefined`.** Indexing a string is about as ordinary as an operation
+  gets, and every character-scanning loop in the world does it. `charAt` was separately wrong on
+  a surrogate pair: it counted characters where `length` counts code units, so the two disagreed
+  about what position 1 of `"a😀b"` is.
+- **A `Date` had readers and no setters.** `setUTCFullYear` and its seven siblings now exist,
+  including the multi-argument forms, and an out-of-range part rolls over rather than clamping --
+  `setMonth(12)` is January of the next year.
+- **Nothing intrinsic answered `constructor`.** `new value.constructor(x)` is how a library
+  clones something whose type it was handed rather than told, and date-fns does exactly that.
+- **`globalThis` was a fresh object on every read**, so `globalThis.x = 1` vanished and
+  `globalThis === globalThis` was false. The realm holds one now. It still does *not* back
+  variable lookup: `globalThis.x = 1` does not make a bare `x` resolve, because bindings live in
+  module slots. That one is a realm change rather than a fix.
+- **A regexp match's `index`/`input` were set but invisible**, because array inspection ignored
+  an array's named properties. `groups` was missing entirely and is now present-and-undefined.
+- **`process` did not exist.** ADR 0017 made an unresolved identifier a runtime throw, and
+  bundles read `process.env.NODE_ENV` unguarded -- it is how a library ships development-only
+  checks -- so the first line of immer failed. There is now a minimal one: an empty writable
+  `env`, an empty `argv`, and `platform`/`version` reading `"kiln"` rather than claiming to be
+  darwin or linux, which would invite a program down a path nothing here implements.
+- **`Function` and `Object.prototype.constructor` were missing**, which is what the
+  `isPlainObject` check every library ships is built out of. `Function.prototype.toString`
+  returns the same string `String(fn)` already did: not source text, which the VM never sees, but
+  distinct per function, which is all that check needs.
+
+**Where the three stand now:** date-fns and immer get further; date-fns passes outright. immer
+now needs **`Proxy`**, which is its whole implementation strategy. zod gets past its global
+config and then **overflows the Rust stack** -- worth knowing that our `max_call_depth` does not
+bound recursion that goes through `dispatch_native` and back into `call_value` without pushing a
+VM frame. Both are next, and both are in NOTES rather than in a commit message because I have not
+started either.
+
+differential 75/0/0, conformance 39/39, Effect 12/12.

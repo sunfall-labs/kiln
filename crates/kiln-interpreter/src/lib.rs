@@ -257,6 +257,8 @@ pub enum Native {
     BigIntConstructor,
     BigIntToString,
     ObjectIs,
+    /// A `setX` on a date. Writes through the shared instant, so the object mutates in place.
+    DateSet(DateField),
     ObjectHasOwnProperty,
     ObjectIsPrototypeOf,
     ObjectPropertyIsEnumerable,
@@ -269,6 +271,10 @@ pub enum Native {
     /// method and `call` it onto a receiver of their own.
     PrototypeOf(PrototypeTable),
     StringRaw,
+    /// `Function`, which programs reach for through `Function.prototype`.
+    FunctionConstructor,
+    /// `Function.prototype.toString`.
+    FunctionToString,
     FunctionCall,
     FunctionApply,
     FunctionBind,
@@ -467,6 +473,18 @@ impl Native {
             }
             // A method read off one of these tables is unbound, exactly as reading it off an
             // instance is: `call` and `apply` are what supply the receiver.
+            (Self::FunctionConstructor, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Function)))
+            }
+            // A method table's `constructor` is the built-in it belongs to, which is what
+            // `Object.prototype.constructor` has to answer for a plain-object check to work.
+            (Self::PrototypeOf(table), "constructor") => Some(Value::Native(match table {
+                PrototypeTable::Object => Self::ObjectConstructor,
+                PrototypeTable::Array => Self::ArrayConstructor,
+                PrototypeTable::String => Self::StringConstructor,
+                PrototypeTable::Number => Self::NumberConstructor,
+                PrototypeTable::Function => Self::FunctionConstructor,
+            })),
             (Self::PrototypeOf(table), _) => Some(match table {
                 PrototypeTable::Object => object_property(name),
                 PrototypeTable::Array => array_property(name),
@@ -1571,6 +1589,8 @@ pub fn execute<H: HostOps + ?Sized>(
         this_value: Value::Undefined,
         new_target: Value::Undefined,
         suspended_awaiting: false,
+        global_object: None,
+        process_object: None,
         frames: Vec::new(),
         instruction: 0,
         function_names: program
@@ -1691,6 +1711,8 @@ pub fn execute_module<H: HostOps + ?Sized>(
         this_value: Value::Undefined,
         new_target: Value::Undefined,
         suspended_awaiting: false,
+        global_object: None,
+        process_object: None,
         frames: Vec::new(),
         instruction: 0,
         function_names: module
@@ -1942,6 +1964,22 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
+    /// The realm's global object, built on first use and shared from then on.
+    ///
+    /// One object, because `globalThis === globalThis` has to hold and because a library that
+    /// stashes state on it -- `globalThis.__something ??= {}` is a common singleton idiom -- has
+    /// to find it again. What it does *not* do is back variable lookup: writing
+    /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
+    global_object: Option<Value>,
+    /// `process`, built on first use and shared from then on.
+    ///
+    /// Bundles read `process.env.NODE_ENV` unguarded -- it is the standard way a library ships
+    /// development-only checks -- and ADR 0017 made an unresolved identifier a runtime throw, so
+    /// without this a great deal of ordinary code fails at its first line. What is here is only
+    /// what such code reads: an environment that is empty (so every flag reads as undefined, the
+    /// production answer), and enough identity to log. It is deliberately not node's `process`
+    /// and has no way to exit, spawn, or reach a file system.
+    process_object: Option<Value>,
     /// Whether the suspension that just happened was an `await` rather than a `yield`.
     ///
     /// Written where the body stops and read by whoever resumed it, because the instruction that
@@ -2378,35 +2416,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::String => Native::StringConstructor,
                         kiln_ir::Builtin::Set => Native::SetConstructor,
                         kiln_ir::Builtin::Map => Native::MapConstructor,
-                        // The realm's global object, holding exactly the built-ins that exist.
-                        // A fresh object each time is wrong -- `globalThis === globalThis` should
-                        // hold -- but nothing observes that yet, and pinning it needs the realm
-                        // this is the first piece of.
                         kiln_ir::Builtin::GlobalThis => {
-                            let mut globals = ObjectData::default();
-                            for kind in ErrorKind::ALL {
-                                globals.set(kind.name(), Value::Native(Native::Error(kind)));
-                            }
-                            globals.set("Array", Value::Native(Native::ArrayConstructor));
-                            globals.set("Object", Value::Native(Native::ObjectConstructor));
-                            globals.set("JSON", Value::Native(Native::Json));
-                            globals.set("Symbol", Value::Native(Native::SymbolConstructor));
-                            globals.set("String", Value::Native(Native::StringConstructor));
-                            globals.set("Math", Value::Native(Native::Math));
-                            globals.set("Promise", Value::Native(Native::PromiseConstructor));
-                            globals.set("RegExp", Value::Native(Native::RegExpConstructor));
-                            globals.set("Date", Value::Native(Native::DateConstructor));
-                            globals.set("WeakMap", Value::Native(Native::WeakMapConstructor));
-                            globals.set("WeakSet", Value::Native(Native::WeakSetConstructor));
-                            globals.set("performance", Value::Native(Native::Performance));
-                            globals.set("Reflect", Value::Native(Native::Reflect));
-                            globals.set("BigInt", Value::Native(Native::BigIntConstructor));
-                            globals.set("Number", Value::Native(Native::NumberConstructor));
-                            globals.set("Boolean", Value::Native(Native::BooleanConstructor));
-                            globals.set("NaN", Value::Number(f64::NAN));
-                            globals.set("Infinity", Value::Number(f64::INFINITY));
-                            self.stack
-                                .push(Value::Object(Rc::new(RefCell::new(globals))));
+                            let globals = self.global_object();
+                            self.stack.push(globals);
+                            continue;
+                        }
+                        kiln_ir::Builtin::Process => {
+                            let process = self.process_object();
+                            self.stack.push(process);
                             continue;
                         }
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
@@ -2433,6 +2450,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Performance => Native::Performance,
                         kiln_ir::Builtin::Reflect => Native::Reflect,
                         kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
+                        kiln_ir::Builtin::Function => Native::FunctionConstructor,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -4913,6 +4931,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Array(ArrayData::new(items)))
     }
 
+    /// The realm's global object, created on first use.
+    fn global_object(&mut self) -> Value {
+        if let Some(existing) = &self.global_object {
+            return existing.clone();
+        }
+        let mut globals = ObjectData::default();
+        for kind in ErrorKind::ALL {
+            globals.set(kind.name(), Value::Native(Native::Error(kind)));
+        }
+        globals.set("Array", Value::Native(Native::ArrayConstructor));
+        globals.set("Object", Value::Native(Native::ObjectConstructor));
+        globals.set("JSON", Value::Native(Native::Json));
+        globals.set("Symbol", Value::Native(Native::SymbolConstructor));
+        globals.set("String", Value::Native(Native::StringConstructor));
+        globals.set("Math", Value::Native(Native::Math));
+        globals.set("Promise", Value::Native(Native::PromiseConstructor));
+        globals.set("RegExp", Value::Native(Native::RegExpConstructor));
+        globals.set("Date", Value::Native(Native::DateConstructor));
+        globals.set("WeakMap", Value::Native(Native::WeakMapConstructor));
+        globals.set("WeakSet", Value::Native(Native::WeakSetConstructor));
+        globals.set("Set", Value::Native(Native::SetConstructor));
+        globals.set("Map", Value::Native(Native::MapConstructor));
+        globals.set("performance", Value::Native(Native::Performance));
+        globals.set("Reflect", Value::Native(Native::Reflect));
+        globals.set("BigInt", Value::Native(Native::BigIntConstructor));
+        globals.set("Number", Value::Native(Native::NumberConstructor));
+        globals.set("Boolean", Value::Native(Native::BooleanConstructor));
+        globals.set("Function", Value::Native(Native::FunctionConstructor));
+        globals.set("NaN", Value::Number(f64::NAN));
+        globals.set("Infinity", Value::Number(f64::INFINITY));
+        let value = Value::Object(Rc::new(RefCell::new(globals)));
+        self.global_object = Some(value.clone());
+        value
+    }
+
+    /// The realm's `process`, created on first use.
+    fn process_object(&mut self) -> Value {
+        if let Some(existing) = &self.process_object {
+            return existing.clone();
+        }
+        let mut process = ObjectData::default();
+        // Empty and writable: a program that sets `process.env.X` finds it again, and one that
+        // reads an unset flag gets undefined, which is what a production build wants.
+        process.set(
+            "env",
+            Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+        );
+        process.set("argv", Value::Array(ArrayData::new(Vec::new())));
+        // Not "darwin" or "linux": this realm is not either of them, and claiming to be one
+        // invites a program to take a path nothing here implements.
+        process.set("platform", Value::String("kiln".to_owned()));
+        process.set("version", Value::String("kiln".to_owned()));
+        let value = Value::Object(Rc::new(RefCell::new(process)));
+        self.process_object = Some(value.clone());
+        value
+    }
+
     /// What `arguments` refers to in the running function.
     ///
     /// An arrow has none of its own and sees the enclosing function's, which it captured when it
@@ -5407,6 +5482,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn property(&self, target: &Value, name: &str) -> Value {
+        // Every intrinsic kind answers `constructor` with the built-in that makes it. Handled
+        // here rather than in each table because the answer is the same question for all of
+        // them, and because `new x.constructor(...)` is how a library clones a value whose type
+        // it was handed rather than told.
+        if name == "constructor"
+            && let Some(constructor) = intrinsic_constructor(target)
+        {
+            return constructor;
+        }
         match target {
             // A Set or Map instance is an object whose reserved state marks it. Its methods come
             // from one table shared with `in`, so the two cannot disagree -- and this arm has to
@@ -5527,8 +5611,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::DateField(DateField::Milliseconds))
                 }
                 "getTimezoneOffset" => Value::Native(Native::DateField(DateField::TimezoneOffset)),
+                // The setters mirror the readers, and for the same reason the local ones are the
+                // UTC ones: the realm has one zone (ADR 0015).
+                "setTime" => Value::Native(Native::DateSet(DateField::Time)),
+                "setFullYear" | "setUTCFullYear" => {
+                    Value::Native(Native::DateSet(DateField::FullYear))
+                }
+                "setMonth" | "setUTCMonth" => Value::Native(Native::DateSet(DateField::Month)),
+                "setDate" | "setUTCDate" => Value::Native(Native::DateSet(DateField::Day)),
+                "setHours" | "setUTCHours" => Value::Native(Native::DateSet(DateField::Hours)),
+                "setMinutes" | "setUTCMinutes" => {
+                    Value::Native(Native::DateSet(DateField::Minutes))
+                }
+                "setSeconds" | "setUTCSeconds" => {
+                    Value::Native(Native::DateSet(DateField::Seconds))
+                }
+                "setMilliseconds" | "setUTCMilliseconds" => {
+                    Value::Native(Native::DateSet(DateField::Milliseconds))
+                }
                 "toISOString" | "toJSON" => Value::Native(Native::DateToIso),
-                "toString" => Value::Native(Native::DateToString),
+                "toString" | "toUTCString" | "toLocaleString" | "toLocaleDateString"
+                | "toLocaleTimeString" | "toDateString" | "toTimeString" => {
+                    Value::Native(Native::DateToString)
+                }
                 _ => Value::Undefined,
             },
             Value::RegExp(regexp) => match name {
@@ -5716,6 +5821,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return match items.borrow().get(index) {
                 Some(value) if !Self::is_hole(value) => value.clone(),
                 _ => Value::Undefined,
+            };
+        }
+        // `s[0]` is the character at that index, as a one-character string. Indices are UTF-16
+        // code units, which is the unit `length` counts in, so the two agree on what is in range.
+        if let Value::String(text) = target
+            && let Some(index) = array_index(key)
+        {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            return match units.get(index) {
+                // One unit, not one character: indexing a surrogate pair gives half of it, which
+                // is the language's answer and the reason `for-of` over a string differs.
+                Some(unit) => Value::String(String::from_utf16_lossy(&[*unit])),
+                None => Value::Undefined,
             };
         }
         self.property(target, &key.property_key())
@@ -6454,6 +6572,10 @@ fn call_native(
         // `Object.prototype.valueOf` returns the receiver unchanged, which is the identity that
         // makes `ToPrimitive` fall through to `toString` for a plain object.
         Native::ObjectValueOf => receiver.clone(),
+        Native::FunctionToString => Value::String(receiver.to_display_string()),
+        // `Function` is here for its prototype and its `toString`; building a function from a
+        // string would need the compiler at run time, which is a different kind of realm.
+        Native::FunctionConstructor => Value::Undefined,
         // A method table is not itself callable, and nothing reaches here by calling one.
         Native::PrototypeOf(_) => Value::Undefined,
         // `Object.is` is SameValue: `===` except that NaN equals itself and the two zeroes do
@@ -6771,6 +6893,54 @@ fn call_native(
             _ => Value::Undefined,
         },
         // Every reader takes the same decomposition apart, so they share one arm.
+        // `setFullYear(y, m, d)` and its siblings take the fields after theirs too, which is why
+        // this replaces a *run* of parts rather than one. The date mutates in place and answers
+        // with its new instant, as the specification says.
+        Native::DateSet(field) => {
+            let Value::Date(time) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            if matches!(field, DateField::Time) {
+                let updated = arguments.first().map_or(f64::NAN, Value::as_number);
+                time.set(updated);
+                return Ok(Value::Number(updated));
+            }
+            let Some(parts) = date_parts(time.get()) else {
+                // Every setter but `setTime` on an invalid date leaves it invalid.
+                return Ok(Value::Number(f64::NAN));
+            };
+            // The order the fields appear in, so "this one and the ones after it" is a slice.
+            let mut values = [
+                parts.year as f64,
+                f64::from(parts.month) - 1.0,
+                f64::from(parts.day),
+                f64::from(parts.hour),
+                f64::from(parts.minute),
+                f64::from(parts.second),
+                f64::from(parts.millisecond),
+            ];
+            let first = match field {
+                DateField::FullYear => 0,
+                DateField::Month => 1,
+                DateField::Day => 2,
+                DateField::Hours => 3,
+                DateField::Minutes => 4,
+                DateField::Seconds => 5,
+                DateField::Milliseconds => 6,
+                DateField::Time | DateField::Weekday | DateField::TimezoneOffset => {
+                    return Ok(Value::Number(time.get()));
+                }
+            };
+            for (offset, argument) in arguments.iter().enumerate() {
+                let Some(slot) = values.get_mut(first + offset) else {
+                    break;
+                };
+                *slot = argument.as_number();
+            }
+            let updated = parts_to_instant(values);
+            time.set(updated);
+            Value::Number(updated)
+        }
         Native::DateField(field) => {
             let Value::Date(time) = receiver else {
                 return Ok(Value::Undefined);
@@ -7166,13 +7336,15 @@ fn call_native(
                     }
                 }
                 Native::StringCharAt => {
-                    let characters: Vec<char> = text.chars().collect();
+                    // Code units, not characters: `charAt` counts what `length` counts, so half
+                    // of a surrogate pair is a position and reads as that half.
+                    let units: Vec<u16> = text.encode_utf16().collect();
                     let index = arguments.first().map_or(0.0, Value::as_number);
                     // Out of range is the empty string, not undefined.
-                    if index < 0.0 || index >= characters.len() as f64 {
+                    if index < 0.0 || index >= units.len() as f64 {
                         Value::String(String::new())
                     } else {
-                        Value::String(characters[index as usize].to_string())
+                        Value::String(String::from_utf16_lossy(&units[index as usize..=index as usize]))
                     }
                 }
                 Native::StringCharCodeAt => {
@@ -8347,8 +8519,24 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             if depth > INSPECT_DEPTH {
                 return "[Array]".to_owned();
             }
+            // An array's own named properties are shown after its elements: `index` and `input`
+            // on a match result are the reason this matters, and hiding them made a printed
+            // match look like a plain array of strings.
+            let named: Vec<String> = items
+                .properties
+                .borrow()
+                .entries()
+                .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+                .map(|(key, property)| {
+                    let shown = match property {
+                        Property::Value(value) => inspect_nested(value, depth + 1, guard.seen),
+                        Property::Accessor { .. } => "[Getter/Setter]".to_owned(),
+                    };
+                    format!("{}: {}", inspect_key(key), shown)
+                })
+                .collect();
             let items = items.borrow();
-            if items.is_empty() {
+            if items.is_empty() && named.is_empty() {
                 return "[]".to_owned();
             }
             // A run of holes is reported as a count rather than repeated, which is what node
@@ -8369,6 +8557,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             if holes > 0 {
                 parts.push(empty_items(holes));
             }
+            parts.extend(named);
             format!("[ {} ]", parts.join(", "))
         }
         Value::Object(object) => {
@@ -8601,6 +8790,28 @@ fn date_parts(time: f64) -> Option<DateParts> {
         second: (within / 1000 % 60) as u32,
         millisecond: (within % 1000) as u32,
     })
+}
+
+/// The instant a set of UTC parts names, with every part allowed out of range.
+///
+/// Out-of-range parts roll over rather than clamping: `setMonth(12)` is January of the next year
+/// and `setDate(0)` is the last day of the previous month. That falls out of normalising the
+/// month into a year offset and then counting in whole units, and it is what the specification
+/// says -- clamping would quietly produce a different date than the program asked for.
+fn parts_to_instant(parts: [f64; 7]) -> f64 {
+    let [year, month, day, hour, minute, second, millisecond] = parts;
+    if parts.iter().any(|part| !part.is_finite()) {
+        return f64::NAN;
+    }
+    let months = month.floor();
+    let year = year.trunc() + (months / 12.0).floor();
+    let month = months.rem_euclid(12.0);
+    // Beyond what a civil date can name; the calendar arithmetic below would overflow.
+    if year.abs() > 400_000.0 {
+        return f64::NAN;
+    }
+    let days = days_from_civil(year as i64, month as i64 + 1, 1) as f64 + (day - 1.0);
+    days * 86_400_000.0 + hour * 3_600_000.0 + minute * 60_000.0 + second * 1000.0 + millisecond
 }
 
 /// `toISOString`, or `None` for an instant that has no ISO spelling.
@@ -8881,6 +9092,13 @@ fn match_result(
         "input",
         Value::String(utf16_slice(subject, 0..subject.len())),
     );
+    // Present and undefined rather than absent: a program reads `m.groups?.name`, and node shows
+    // the key. Named groups themselves are not collected yet, which is why it is always
+    // undefined -- the key being there is what stops that from looking like a different shape.
+    result
+        .properties
+        .borrow_mut()
+        .set("groups", Value::Undefined);
     Value::Array(result)
 }
 
@@ -8933,12 +9151,37 @@ fn prototype_object(closure: &Rc<Closure>) -> Value {
     prototype
 }
 
+/// The built-in that constructs values of this kind, for `x.constructor`.
+///
+/// `None` for the kinds that answer through an ordinary prototype chain -- a plain object and a
+/// compiled function both carry `constructor` as a property, and inventing one here would shadow
+/// what the program put there.
+fn intrinsic_constructor(value: &Value) -> Option<Value> {
+    let native = match value {
+        Value::Date(_) => Native::DateConstructor,
+        Value::RegExp(_) => Native::RegExpConstructor,
+        Value::Promise(_) => Native::PromiseConstructor,
+        Value::Array(_) => Native::ArrayConstructor,
+        Value::String(_) => Native::StringConstructor,
+        Value::Number(_) => Native::NumberConstructor,
+        Value::Boolean(_) => Native::BooleanConstructor,
+        Value::BigInt(_) => Native::BigIntConstructor,
+        Value::Symbol(_) => Native::SymbolConstructor,
+        _ => return None,
+    };
+    Some(Value::Native(native))
+}
+
 /// `call`, `apply`, and `bind`, which every callable has and nothing else does.
 ///
 /// Returned unbound, like every other method here: the receiver is the function being called
 /// through, and `CallMethod` supplies it.
 fn function_property(name: &str) -> Value {
     match name {
+        // Not the source text, which the VM never sees -- the same reason an error carries no
+        // `stack`. What it does promise is that two different functions give two different
+        // strings, which is what the `isPlainObject` check every library ships depends on.
+        "toString" => Value::Native(Native::FunctionToString),
         "call" => Value::Native(Native::FunctionCall),
         "apply" => Value::Native(Native::FunctionApply),
         "bind" => Value::Native(Native::FunctionBind),

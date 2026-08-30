@@ -1,0 +1,21 @@
+# Third-party bundles
+
+Real libraries, bundled with esbuild, run as a correctness probe. They are here for the reason
+the Effect corpus is: they are large, machine-generated, and written against the whole language
+rather than against what kiln happens to implement, so they find gaps that a hand-written probe
+never would.
+
+Each of these found something on its first run, and every one was a *silent* wrong answer rather
+than a missing feature:
+
+- **date-fns** found that `s[0]` on a string was `undefined`, that a `Date` had no setters, and
+  that no intrinsic value answered `constructor`.
+- **immer** found that `globalThis` was a fresh object on every read, so anything stored on it
+  vanished and `globalThis === globalThis` was false.
+- **zod** is not yet passing; it is kept here because what it fails on next is the backlog.
+
+Regenerate with `conformance/thirdparty/build.sh`, which needs `npm` and the esbuild in
+`conformance/effect/node_modules`. The small bundles are committed -- a fixed input that does not
+move when a library releases is the point -- and the large ones are not, on the same reasoning
+that keeps the Effect bundles out: 700 KB of machine-generated near-duplicate does not belong in
+a history. `.gitignore` draws the line by name.

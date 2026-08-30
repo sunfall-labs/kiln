@@ -389,6 +389,10 @@ pub enum Builtin {
     Performance,
     Reflect,
     BigInt,
+    /// `process`, in the minimal shape a bundle actually reads.
+    Process,
+    /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
+    Function,
 }
 
 impl Builtin {
@@ -430,6 +434,8 @@ impl Builtin {
             "performance" => Some(Self::Performance),
             "Reflect" => Some(Self::Reflect),
             "BigInt" => Some(Self::BigInt),
+            "process" => Some(Self::Process),
+            "Function" => Some(Self::Function),
             _ => None,
         }
     }
@@ -471,6 +477,8 @@ impl Builtin {
             Self::Performance => "performance",
             Self::Reflect => "Reflect",
             Self::BigInt => "BigInt",
+            Self::Process => "process",
+            Self::Function => "Function",
         }
     }
 }
