@@ -664,3 +664,49 @@ separate later slices. Claude's compiler/language files stay out of scope. The i
 executes the exact source snapshot used for byte-change detection, even if the file changes again
 during project discovery. Five watcher regressions, the snapshot race regression, all 60 CLI tests,
 and warnings-denied CLI clippy pass in an isolated worktree at `c7ac98a`.
+
+**2026-08-29, Claude — working the differential backlog. 36 matched / 10 refused.**
+Commits `596c405`, `ab43199`, `88990bd`, `fc5e6e7`, `658c850`. The harness list went 14 matched /
+24 refused → 36 / 10, and nothing diverges.
+
+Landed: `==`/`!=` (its own algorithm, not `===` plus a coercion — `null == undefined` is true
+while neither converts, and a boolean becomes a *number* first, which is what makes `[] == false`
+true); the bitwise operators with real `ToInt32` wrapping; `Math`, `Number`, `Boolean`, `NaN`,
+`Infinity`, `parseInt`/`parseFloat`/`isNaN`/`isFinite`, `Number.prototype.toString`/`toFixed`;
+`switch` with fall-through and a mid-position `default`; `do-while`; template literals; `delete`;
+spread call arguments; `for-in`; optional chaining; and ~20 array/string methods including a
+stable merge-sort `sort`.
+
+**Two bugs worth knowing about, both found the same way:**
+
+*`break` and `continue` did not work inside a `while` loop at all* — `while_statement` never
+pushed a loop context, so both reported "outside of a loop". Second most common loop in the
+language. It had been that way for as long as `while` has existed here, and no probe covered it.
+
+*`Math.round(-0.5)` must be negative zero* — the floor throws the sign away. Only `Object.is` and
+`1 / x` can see it, and a console shows it. I would never have checked; the differential harness
+did.
+
+**Conventions I have been following, in case you touch these:** new instructions go on the end of
+the C backend's hash table and take the next free tag (now up to 50) — they are persisted cache
+keys, so nothing renumbers. Same for `Builtin`, whose discriminant is hashed: append only.
+
+**Housekeeping, and it is yours as much as mine: the disk hit 100%.** A link failed with
+`ld: write() failed, errno=28`. `mbx gc --max-size 2GiB` freed 3.8 GiB and unblocked it, but the
+volume is 871 GiB used of 926 and most of that is not this repo. Worth telling Andrew rather than
+either of us silently gc-ing every time it bites.
+
+**Still refused, roughly by cost:** labelled `break`/`continue`; the error subclasses
+(`TypeError`, `RangeError`, `ReferenceError`) plus `e.constructor.name`; array holes; function
+declaration hoisting; accessors; `Date`; regular expressions; `Promise`.
+
+**Function hoisting is the one that needs a design decision, so I have not started it.** Today
+`f(); function f(){}` is "unresolved identifier `f`". The naive fix — emit function declarations
+first — is wrong: their bodies would compile before the `const`s below them are in scope, and a
+closure legitimately sees those. It needs the block's names *pre-declared* before any statement
+compiles, which is what the language actually does. That reintroduces the TDZ question: a
+pre-declared `let` read before its initializer would silently be `undefined` where today it is a
+loud diagnostic, and this session has been mostly about not trading loud for silent. The fix is a
+compile-time TDZ flag on the local, checked only for statements compiled directly in the block and
+not inside a nested function body. It is a real change to the scoping model; whoever picks it up
+should do it deliberately rather than as a side effect of something else.
