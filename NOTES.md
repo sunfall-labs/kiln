@@ -1557,3 +1557,26 @@ clones only when the frame's program actually changes. Recompute counters -- the
 `ci-perf.sh` gates on -- are unchanged throughout today's work. The wall-clock columns are not
 readable right now: we are both compiling, and an *optimisation* measured 5% slower than the run
 before it. Worth one quiet re-measure before trusting any of those numbers.
+
+**2026-08-29, Claude — `#x in o`, `super.x = v`, and a private-name collision underneath both.**
+
+Two more refusals gone, and the test for the first one found something worse than the refusal.
+
+**`#x in o` is the brand check** and compiles to the ordinary `in`: a private field is stored
+under a key no program can write, so asking whether the key is there *is* the check. Writing the
+test turned up that **two classes with the same private name shared a slot** --
+`class A { #v } class B { #v }` both wrote `@@private:v`, so `a.#v` on a `B` read B's field where
+the specification makes it a TypeError, and `#v in b` said yes. The compiler now keeps a stack of
+class identities and the key carries one, so nested classes and a class declared inside another's
+method each get their own.
+
+**`super.x = v` assigns to `this`**, which is what the specification says: the prototype is
+consulted for a setter and a write with none creates an own property on the instance. The one
+case this gets wrong is a class that defines `set x` *and* writes `super.x` inside it -- the idiom
+for avoiding recursion -- where the search should start above the home object and here starts at
+it. Written down rather than discovered later.
+
+Refusals left: `import.meta`, dynamic `import()`, `using` declarations, JSX, V8 intrinsics. The
+first two are real features; the rest are not this compiler's business yet.
+
+differential 78/0/0.

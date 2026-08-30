@@ -645,6 +645,25 @@ impl Lowerer {
                             value: Box::new(self.expression(&expression.right)),
                         }
                     }
+                    // `super.x = v` assigns to `this`, not to the parent's prototype: the
+                    // prototype is only consulted for a setter, and a write with none creates an
+                    // own property on the instance. The one case this gets wrong is a class that
+                    // defines `set x` *and* writes `super.x` inside it -- the idiom for avoiding
+                    // recursion -- where the specification starts the search above the home
+                    // object and this starts at it.
+                    AssignmentTarget::StaticMemberExpression(member)
+                        if !member.optional && matches!(member.object, Expression::Super(_)) =>
+                    {
+                        HirExpressionKind::MemberAssignment {
+                            operator,
+                            object: Box::new(HirExpression {
+                                kind: HirExpressionKind::This,
+                                span: expression_span,
+                            }),
+                            property: member.property.name.to_string(),
+                            value: Box::new(self.expression(&expression.right)),
+                        }
+                    }
                     AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                         HirExpressionKind::MemberAssignment {
                             operator,
@@ -953,6 +972,12 @@ impl Lowerer {
             Expression::ImportExpression(_) => {
                 return self.unsupported_expression("dynamic import expression", expression_span);
             }
+            // `#x in o` is the brand check: it asks whether `o` carries this class's private
+            // field, which is exactly what reading one already tests for.
+            Expression::PrivateInExpression(expression) => HirExpressionKind::PrivateIn {
+                name: expression.left.name.to_string(),
+                object: Box::new(self.expression(&expression.right)),
+            },
             Expression::PrivateInExpression(_) => {
                 return self.unsupported_expression("private-in expression", expression_span);
             }
