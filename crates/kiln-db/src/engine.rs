@@ -308,28 +308,43 @@ impl MemoEngine {
         deps.push(QueryKey::FileSet);
         self.force(QueryKey::FileSet);
 
+        // FileId reflects interning order, not project identity. Fold active modules in
+        // deterministic lexical path order so two clients that send the same logical paths in
+        // different orders observe the same project summary. The caller owns path normalization;
+        // the exact logical path remains part of the fold because moving a module changes its
+        // identity even when its exported names do not.
+        let mut active_files: Vec<FileId> = self
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| state.source_set)
+            .map(|(index, _)| FileId(index as u32))
+            .collect();
+        active_files.sort_by(|left, right| self.file(*left).path.cmp(&self.file(*right).path));
+
         // Forcing an interface cannot intern a file, so the length is stable across the loop.
         // Unset interned paths are deliberately absent from the project: interning reserves a
         // reusable FileId, but only a source write makes a file part of the project.
-        for index in 0..self.files.len() {
-            if !self.files[index].source_set {
-                continue;
-            }
-            let dep = QueryKey::Interface(FileId(index as u32));
+        for file in &active_files {
+            let dep = QueryKey::Interface(*file);
             self.force(dep);
             deps.push(dep);
         }
 
         let mut hasher = Fnv1a::new();
         let mut exports = 0;
-        for state in self.files.iter().filter(|state| state.source_set) {
+        for file in &active_files {
+            let state = self.file(*file);
             let interface = &state.interface.as_ref().expect(FORCED).value;
+            // Fixed-width length framing prevents path/interface boundaries from being ambiguous.
+            hasher.write_u64(state.path.len() as u64);
+            hasher.write(state.path.as_bytes());
             hasher.write_u64(interface.interface_hash);
             exports += interface.exports.len();
         }
 
         let project = Project {
-            modules: self.files.iter().filter(|state| state.source_set).count(),
+            modules: active_files.len(),
             exports,
             interface_hash: hasher.finish(),
         };
@@ -713,6 +728,46 @@ mod tests {
                 early_cutoff: 0,
             },
             "already-verified memos should be served straight from cache"
+        );
+    }
+
+    #[test]
+    fn project_rollup_is_independent_of_interning_order() {
+        let (mut forward, _) = engine(&[("a.js", A_V1), ("b.js", B_V1)]);
+        let (mut reverse, _) = engine(&[("b.js", B_V1), ("a.js", A_V1)]);
+
+        assert_eq!(
+            forward.project(),
+            reverse.project(),
+            "FileId assignment must not leak into the observable project summary"
+        );
+    }
+
+    #[test]
+    fn inactive_interned_paths_do_not_affect_project_identity() {
+        let mut with_gap = MemoEngine::new(fixture_frontend);
+        let a = with_gap.intern("a.js");
+        with_gap.set_source(a, A_V1.to_owned());
+        with_gap.intern("reserved.js");
+        let b = with_gap.intern("b.js");
+        with_gap.set_source(b, B_V1.to_owned());
+
+        let (mut without_gap, _) = engine(&[("a.js", A_V1), ("b.js", B_V1)]);
+        assert_eq!(with_gap.project(), without_gap.project());
+    }
+
+    #[test]
+    fn module_path_is_part_of_project_identity() {
+        let (mut original, _) = engine(&[("a.js", A_V1)]);
+        let (mut renamed, _) = engine(&[("nested/renamed.js", A_V1)]);
+        let original = original.project();
+        let renamed = renamed.project();
+
+        assert_eq!(original.modules, renamed.modules);
+        assert_eq!(original.exports, renamed.exports);
+        assert_ne!(
+            original.interface_hash, renamed.interface_hash,
+            "renaming a module must change the project identity"
         );
     }
 
