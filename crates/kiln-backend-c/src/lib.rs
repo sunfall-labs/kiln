@@ -469,6 +469,11 @@ enum kiln_value_tag {
  * can see -- so it is a step rather than something `settle` does on the spot. */
 #define KILN_C99_METHOD_ADOPT_STEP 142
 
+/* `Object.freeze` and `Object.isFrozen`, outside the contiguous `Object` range because it was
+ * already closed. */
+#define KILN_C99_METHOD_OBJECT_FREEZE 143
+#define KILN_C99_METHOD_OBJECT_IS_FROZEN 144
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -558,6 +563,10 @@ typedef struct kiln_object {
      * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
      * nothing was recorded and the other means nothing was wanted. */
     kiln_value prototype;
+    /* `Object.freeze`. A frozen object ignores every write rather than refusing one: modules are
+     * strict and a real engine would throw, but the interpreter is silent here and the two have
+     * to agree before either can change. */
+    int frozen;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -886,6 +895,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->count = 0;
     object->capacity = 0;
     object->prototype = kiln_c99_undefined();
+    object->frozen = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -983,6 +993,10 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
+    if (object->frozen) {
+        /* Silently, which is what the interpreter does and therefore what this has to do. */
+        return KILN_C99_OK;
+    }
     /* A setter found anywhere on the chain takes the write; only when there is none does the
      * assignment create an own data property. That asymmetry is what makes `obj.x = 1` on a
      * class with `set x()` run the setter rather than shadow it. */
@@ -1305,6 +1319,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_FINALLY_RESTORE: return "@@finallyRestore";
     case KILN_C99_METHOD_FINALLY_RERAISE: return "@@finallyReraise";
     case KILN_C99_METHOD_ADOPT_STEP: return "@@adopt";
+    case KILN_C99_METHOD_OBJECT_FREEZE: return "freeze";
+    case KILN_C99_METHOD_OBJECT_IS_FROZEN: return "isFrozen";
     default: return NULL;
     }
 }
@@ -1673,6 +1689,12 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_OBJECT:
         if (kiln_c99_same_name(key, key_len, "create")) {
             return KILN_C99_METHOD_OBJECT_CREATE;
+        }
+        if (kiln_c99_same_name(key, key_len, "freeze")) {
+            return KILN_C99_METHOD_OBJECT_FREEZE;
+        }
+        if (kiln_c99_same_name(key, key_len, "isFrozen")) {
+            return KILN_C99_METHOD_OBJECT_IS_FROZEN;
         }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_OBJECT_KEYS,
                                       KILN_C99_METHOD_HAS_OWN);
@@ -4972,6 +4994,24 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = parsed;
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_OBJECT_FREEZE:
+        case KILN_C99_METHOD_OBJECT_IS_FROZEN: {
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (subject.tag != KILN_VALUE_OBJECT) {
+                /* A primitive has nothing to freeze and is already as frozen as it gets. */
+                *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject : kiln_c99_boolean(1);
+                return KILN_C99_OK;
+            }
+            if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
+                kiln_c99_object_of(subject)->frozen = 1;
+                /* The object itself, so `Object.freeze(o) === o` and a freeze can be inlined into
+                 * the expression that built it. */
+                *result = subject;
+            } else {
+                *result = kiln_c99_boolean(kiln_c99_object_of(subject)->frozen);
+            }
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_OBJECT_CREATE: {
             kiln_value built;
             /* The descriptor argument can carry accessors, which are functions, so it is
@@ -7612,6 +7652,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
+        | Instruction::ThrowReference(_)
         | Instruction::New { .. }
         | Instruction::SetPrototype
         | Instruction::LoadGlobal(_)
@@ -7707,7 +7748,6 @@ fn stack_effect(
         Instruction::Dup2
         | Instruction::GetPrivate(_)
         | Instruction::NewRegExp { .. }
-        | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::CallComputed { .. }
@@ -7895,6 +7935,9 @@ fn stack_effect(
                 Ok((height, false))
             }
         }
+        // The name is a constant rather than a stack value, and control leaves for a handler
+        // exactly as a `throw` does.
+        Instruction::ThrowReference(_) => Ok((height, true)),
         // A throw consumes the value and does not fall through: control leaves for a handler.
         Instruction::Throw => {
             if height < 1 {
@@ -8592,13 +8635,27 @@ fn emit_instruction(
         Instruction::Dup2
         | Instruction::GetPrivate(_)
         | Instruction::NewRegExp { .. }
-        | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         => {
             unreachable!("verification rejects these instructions before emission")
+        }
+        Instruction::ThrowReference(name) => {
+            // A name that is not there. Emitted rather than refused, because a reference in a
+            // branch that never runs is not an error in JavaScript and real bundles are full of
+            // them -- feature detection mentions globals the host may not have.
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string reference name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ static const char kiln_missing_{index}[] = {}; int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }}",
+                c_string(&format!("{text} is not defined")),
+                unwind_or_return(handlers, site)
+            )
+            .unwrap();
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
