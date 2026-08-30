@@ -1,22 +1,29 @@
 //! The daemon's bounded cache of immutable, entry-rooted module graph snapshots.
 //!
 //! A graph is prepared from one authoritative source view and then consumed after the daemon
-//! state lock has been released.  Keeping this cache separate from the query database is
-//! intentional: a query can memoize one module's IR, while a graph additionally captures the
-//! entry, resolution policy, traversal order, and link-time export origins.
+//! state lock has been released. Each entry retains the revisions of only the sources it reached,
+//! so unrelated edits do not destroy a warm graph. Keeping this cache separate from the query
+//! database is intentional: a query can memoize one module's IR, while a graph additionally
+//! captures the entry, resolution policy, traversal order, and link-time export origins.
 
+use kiln_db::{FileId, Revision};
 use kiln_digest::Digest;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::ResolutionMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Bump when the in-memory graph snapshot contract changes.  The cache is process-local, but the
 /// version keeps key construction explicit and prevents accidental reuse if this ever changes to
 /// a longer-lived backing store.
-pub(crate) const GRAPH_CACHE_FORMAT: u16 = 1;
+pub(crate) const GRAPH_CACHE_FORMAT: u16 = 2;
 
-/// The exact content and linking context that produced one graph.
+/// Keep several editor/watch entries warm without retaining an unbounded number of snapshots.
+pub(crate) const DEFAULT_GRAPH_CACHE_CAPACITY: usize = 8;
+
+/// The stable lookup context for one graph. Reachable content identity lives on the cache entry as
+/// exact source revisions, because it differs for every graph under the same global engine state.
 ///
 /// `SourceView` deliberately does not participate. It is a compare-and-swap authority token
 /// validated while the daemon lock is held, not content identity; a byte-identical authoritative
@@ -25,7 +32,6 @@ pub(crate) const GRAPH_CACHE_FORMAT: u16 = 1;
 pub(crate) struct GraphCacheKey {
     pub(crate) project_root: PathBuf,
     pub(crate) entry: PathBuf,
-    pub(crate) revision: u64,
     /// `None` means no pinned resolution snapshot was supplied.  It is deliberately distinct from
     /// the identity of an empty [`ResolutionMap`].
     pub(crate) resolution_identity: Option<Digest>,
@@ -36,13 +42,11 @@ impl GraphCacheKey {
     pub(crate) fn new(
         project_root: PathBuf,
         entry: PathBuf,
-        revision: u64,
         resolutions: Option<&ResolutionMap>,
     ) -> Self {
         Self {
             project_root,
             entry,
-            revision,
             resolution_identity: resolutions.map(ResolutionMap::identity),
             format: GRAPH_CACHE_FORMAT,
         }
@@ -60,52 +64,101 @@ pub(crate) struct GraphCacheStats {
 #[derive(Debug)]
 struct Entry {
     key: GraphCacheKey,
+    sources: Vec<GraphSourceRevision>,
     graph: Arc<ModuleGraph>,
 }
 
-/// A deliberately one-entry cache.  The daemon normally serves one project and one active entry;
-/// a small LRU can be added after measuring alternating-entry workloads without making this first
-/// correctness slice retain several arbitrarily large graphs.
-#[derive(Debug, Default)]
+/// One reachable source version captured by a graph snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GraphSourceRevision {
+    pub(crate) file: FileId,
+    pub(crate) revision: Revision,
+}
+
+/// A bounded least-recently-used cache. Entries carry the revisions of exactly the sources they
+/// reached, so a global engine revision change does not discard an unrelated graph.
+#[derive(Debug)]
 pub(crate) struct GraphCache {
-    entry: Option<Entry>,
+    capacity: usize,
+    entries: VecDeque<Entry>,
     stats: GraphCacheStats,
 }
 
+impl Default for GraphCache {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_GRAPH_CACHE_CAPACITY)
+    }
+}
+
 impl GraphCache {
-    pub(crate) fn get_or_build<E>(
+    fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0, "graph cache capacity must be positive");
+        Self {
+            capacity,
+            entries: VecDeque::with_capacity(capacity),
+            stats: GraphCacheStats::default(),
+        }
+    }
+
+    /// Return and promote a graph only when every reachable source still has the captured
+    /// revision. A key match with a changed reachable source is a miss, but the old entry remains
+    /// transactional until a replacement graph has built successfully.
+    pub(crate) fn get(
         &mut self,
-        key: GraphCacheKey,
-        build: impl FnOnce() -> Result<ModuleGraph, E>,
-    ) -> Result<Arc<ModuleGraph>, E> {
-        if let Some(entry) = self.entry.as_ref()
-            && entry.key == key
-        {
+        key: &GraphCacheKey,
+        mut current_revision: impl FnMut(FileId) -> Option<Revision>,
+    ) -> Option<Arc<ModuleGraph>> {
+        let hit = self.entries.iter().position(|entry| {
+            entry.key == *key
+                && entry
+                    .sources
+                    .iter()
+                    .all(|source| current_revision(source.file) == Some(source.revision))
+        });
+        if let Some(index) = hit {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("the located graph cache entry exists");
+            let graph = Arc::clone(&entry.graph);
+            self.entries.push_back(entry);
             self.stats.hits += 1;
-            return Ok(Arc::clone(&entry.graph));
+            return Some(graph);
         }
 
         self.stats.misses += 1;
-        let graph = Arc::new(build()?);
-        if self
-            .entry
-            .replace(Entry {
-                key,
-                graph: Arc::clone(&graph),
-            })
-            .is_some()
-        {
-            self.stats.evictions += 1;
-        }
-        Ok(graph)
+        None
     }
 
-    /// Drop a retained graph after a content mutation or a failed mutation whose effects are
-    /// uncertain. Key checks remain the safety net for any future mutation path that forgets to
-    /// call this method.
+    /// Publish a completely built immutable snapshot and return its shared handle.
+    pub(crate) fn insert(
+        &mut self,
+        key: GraphCacheKey,
+        sources: Vec<GraphSourceRevision>,
+        graph: ModuleGraph,
+    ) -> Arc<ModuleGraph> {
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            self.entries.remove(index);
+            self.stats.evictions += 1;
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+            self.stats.evictions += 1;
+        }
+        let graph = Arc::new(graph);
+        self.entries.push_back(Entry {
+            key,
+            sources,
+            graph: Arc::clone(&graph),
+        });
+        graph
+    }
+
+    /// Drop every retained graph after a failed mutation whose effects are uncertain. Ordinary
+    /// source edits are validated selectively through each entry's reachable-source revisions.
     pub(crate) fn invalidate(&mut self) {
         self.stats.invalidations += 1;
-        self.entry = None;
+        self.entries.clear();
     }
 
     pub(crate) fn reset_stats(&mut self) {
@@ -117,13 +170,14 @@ impl GraphCache {
     }
 
     pub(crate) fn entries(&self) -> u64 {
-        u64::from(self.entry.is_some())
+        self.entries.len() as u64
     }
 
     pub(crate) fn cached_modules(&self) -> u64 {
-        self.entry
-            .as_ref()
-            .map_or(0, |entry| entry.graph.module_count() as u64)
+        self.entries
+            .iter()
+            .map(|entry| entry.graph.module_count() as u64)
+            .sum()
     }
 }
 
@@ -161,15 +215,26 @@ mod tests {
     fn key(
         root: &std::path::Path,
         entry: &std::path::Path,
-        revision: u64,
         resolutions: Option<&ResolutionMap>,
     ) -> GraphCacheKey {
-        GraphCacheKey::new(
-            root.to_path_buf(),
-            entry.to_path_buf(),
-            revision,
-            resolutions,
-        )
+        GraphCacheKey::new(root.to_path_buf(), entry.to_path_buf(), resolutions)
+    }
+
+    fn sources() -> Vec<GraphSourceRevision> {
+        vec![GraphSourceRevision {
+            file: FileId(0),
+            revision: Revision(1),
+        }]
+    }
+
+    fn get_or_insert(
+        cache: &mut GraphCache,
+        key: GraphCacheKey,
+        graph: ModuleGraph,
+    ) -> Arc<ModuleGraph> {
+        cache
+            .get(&key, |_| Some(Revision(1)))
+            .unwrap_or_else(|| cache.insert(key, sources(), graph))
     }
 
     #[test]
@@ -186,83 +251,108 @@ mod tests {
             }],
         )
         .expect("valid resolution map");
-        let base = key(&root, &first, 1, None);
+        let base = key(&root, &first, None);
         let mut cache = GraphCache::default();
 
         assert_eq!(
-            cache
-                .get_or_build(base.clone(), || Ok::<_, ()>(graph.clone()))
-                .unwrap()
-                .entry(),
+            get_or_insert(&mut cache, base.clone(), graph.clone()).entry(),
             first
         );
         assert_eq!(
-            cache
-                .get_or_build(base, || Ok::<_, ()>(graph.clone()))
-                .unwrap()
-                .entry(),
+            get_or_insert(&mut cache, base, graph.clone()).entry(),
             first
         );
         assert_eq!(cache.stats().hits, 1);
 
         for changed in [
-            key(&root, &first, 2, None),
-            key(&root, &first, 2, Some(&package)),
-            key(&root, &second, 2, Some(&package)),
+            key(&root, &first, Some(&package)),
+            key(&root, &second, Some(&package)),
         ] {
-            cache
-                .get_or_build(changed, || Ok::<_, ()>(graph.clone()))
-                .expect("changed authority builds a graph");
+            get_or_insert(&mut cache, changed, graph.clone());
         }
-        assert_eq!(cache.stats().misses, 4);
-        assert_eq!(cache.stats().evictions, 3);
-        assert_eq!(cache.entries(), 1);
+        assert_eq!(cache.stats().misses, 3);
+        assert_eq!(cache.stats().evictions, 0);
+        assert_eq!(cache.entries(), 3);
     }
 
     #[test]
-    fn failed_builds_are_not_cached() {
+    fn a_miss_does_not_publish_an_entry_without_insert() {
         let (root, first, _second, graph) = graph_fixture();
-        let cache_key = key(&root, &first, 1, None);
+        let cache_key = key(&root, &first, None);
         let mut cache = GraphCache::default();
-        assert_eq!(
-            cache.get_or_build(cache_key.clone(), || Err::<ModuleGraph, _>(
-                "compile failure"
-            )),
-            Err("compile failure")
-        );
-        cache
-            .get_or_build(cache_key, || Ok::<_, &str>(graph))
-            .expect("a failed build must not poison the key");
+        assert!(cache.get(&cache_key, |_| Some(Revision(1))).is_none());
+        assert_eq!(cache.entries(), 0);
+        assert!(cache.get(&cache_key, |_| Some(Revision(1))).is_none());
+        cache.insert(cache_key, sources(), graph);
         assert_eq!(cache.stats().misses, 2);
         assert_eq!(cache.stats().evictions, 0);
         assert_eq!(cache.entries(), 1);
     }
 
     #[test]
-    fn one_entry_eviction_does_not_invalidate_an_in_flight_snapshot() {
+    fn bounded_lru_eviction_does_not_invalidate_an_in_flight_snapshot() {
         let (root, first, second, graph) = graph_fixture();
-        let first_key = key(&root, &first, 1, None);
-        let second_key = key(&root, &second, 1, None);
-        let mut cache = GraphCache::default();
-        let in_flight = cache
-            .get_or_build(first_key, || Ok::<_, ()>(graph.clone()))
-            .expect("first graph");
-        cache
-            .get_or_build(second_key, || Ok::<_, ()>(graph))
-            .expect("second graph");
+        let first_key = key(&root, &first, None);
+        let second_key = key(&root, &second, None);
+        let mut cache = GraphCache::with_capacity(1);
+        let in_flight = cache.insert(first_key, sources(), graph.clone());
+        cache.insert(second_key, sources(), graph);
         assert_eq!(in_flight.entry(), first);
         assert_eq!(cache.stats().evictions, 1);
         assert_eq!(cache.entries(), 1);
     }
 
     #[test]
+    fn a_hit_promotes_the_entry_before_capacity_eviction() {
+        let (root, first, second, graph) = graph_fixture();
+        let package = ResolutionMap::new(root.to_string_lossy(), Vec::new())
+            .expect("valid empty resolution map");
+        let first_key = key(&root, &first, None);
+        let second_key = key(&root, &second, None);
+        let third_key = key(&root, &first, Some(&package));
+        let mut cache = GraphCache::with_capacity(2);
+        cache.insert(first_key.clone(), sources(), graph.clone());
+        cache.insert(second_key.clone(), sources(), graph.clone());
+
+        assert!(cache.get(&first_key, |_| Some(Revision(1))).is_some());
+        cache.insert(third_key, sources(), graph);
+
+        assert!(cache.get(&second_key, |_| Some(Revision(1))).is_none());
+        assert!(cache.get(&first_key, |_| Some(Revision(1))).is_some());
+        assert_eq!(cache.entries(), 2);
+        assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
+    fn reachable_source_revisions_validate_without_the_global_revision() {
+        let (root, first, _second, graph) = graph_fixture();
+        let cache_key = key(&root, &first, None);
+        let mut cache = GraphCache::default();
+        cache.insert(cache_key.clone(), sources(), graph.clone());
+
+        assert!(cache.get(&cache_key, |_| Some(Revision(1))).is_some());
+        assert!(cache.get(&cache_key, |_| None).is_none());
+        assert!(cache.get(&cache_key, |_| Some(Revision(2))).is_none());
+        cache.insert(
+            cache_key.clone(),
+            vec![GraphSourceRevision {
+                file: FileId(0),
+                revision: Revision(2),
+            }],
+            graph,
+        );
+        assert!(cache.get(&cache_key, |_| Some(Revision(2))).is_some());
+        assert_eq!(cache.stats().hits, 2);
+        assert_eq!(cache.stats().misses, 2);
+        assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
     fn reset_stats_retains_the_snapshot() {
         let (root, first, _second, graph) = graph_fixture();
-        let cache_key = key(&root, &first, 1, None);
+        let cache_key = key(&root, &first, None);
         let mut cache = GraphCache::default();
-        cache
-            .get_or_build(cache_key, || Ok::<_, ()>(graph))
-            .expect("graph");
+        cache.insert(cache_key, sources(), graph);
         cache.reset_stats();
         assert_eq!(cache.stats(), GraphCacheStats::default());
         assert_eq!(cache.entries(), 1);
