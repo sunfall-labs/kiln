@@ -76,6 +76,18 @@ Kiln compiles C11 directly and does not interpret those conventions. Changing ap
 search policy therefore misses object and link artifacts instead of reusing an artifact built
 against a different inherited environment.
 
+On macOS, a Zig-selected build uses the selected Zig driver for C compilation but uses the host
+Apple clang/ld64 driver for every shared-library final link (scalar embedding libraries, graph
+embedding libraries, and the dynamically loaded CLI runtime). Zig 0.16 accepts but does not
+enforce the Mach-O `exported_symbols_list` policy when a reachable archive contributes symbols;
+silently retaining Zig for the final link would therefore leak private Rust/provider symbols.
+The actual link-driver identity is included in loader and linked-artifact identities and is the
+tool reported for shared-library builds. Compile-object identities remain keyed by the selected
+compiler, including the macOS Zig `NativeDev` suppression of Zig's implicit UBSan instrumentation
+when those objects are finalized by clang; `NativeCheck` retains its explicit sanitizer flags. The
+graph CLI runtime has a distinct export set and cache identity because it also
+exports the private scheduler entry points needed by graph launchers.
+
 The cache coordinator treats generated module C, application object, runtime object, launcher
 object, and linked executable as separate artifacts. Cache records are containers rather than
 direct linker inputs, so validated payloads are materialized into process-owned work paths. A cached
