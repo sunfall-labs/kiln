@@ -35,3 +35,17 @@ console.log(order);
 // A tag can ignore its strings entirely, which is how most DSL tags start.
 const first = (strings, ...values) => values[0];
 console.log(first`ignored ${"kept"} ignored`);
+
+// Both halves of the template object are frozen: a tag that changed the object it was handed
+// would be changing something its caller may hold.
+function shape(strings) {
+  return [Object.isFrozen(strings), Object.isFrozen(strings.raw)];
+}
+console.log(shape`a${1}b`.join(","));
+
+// Two *different* call sites produce different objects, which is what the specification says.
+function twice() {
+  return [((s) => s)`x`, ((s) => s)`x`];
+}
+const [siteA, siteB] = twice();
+console.log(siteA === siteB, siteA[0] === siteB[0]);

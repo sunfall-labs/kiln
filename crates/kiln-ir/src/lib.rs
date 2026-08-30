@@ -2714,6 +2714,12 @@ impl Compiler {
                     self.error(Some(expression.span), "template has too many segments");
                     return;
                 }
+                // Both halves are frozen, which the specification requires: a tag that changed
+                // the object it was handed would be changing something its caller may hold. The
+                // `Object` doing the freezing is pushed first, under everything else, because
+                // `CallMethod` wants its receiver beneath the argument and there is no swap.
+                let freeze = self.constant_index(Constant::String("freeze".to_owned()));
+                self.code.push(Instruction::LoadBuiltin(Builtin::Object));
                 for segment in cooked {
                     match segment {
                         Some(text) => self.push_constant(Constant::String(text.clone())),
@@ -2726,15 +2732,24 @@ impl Compiler {
                 // `SetProperty` leaves the value, not the target, so the object is duplicated
                 // first and the leftover raw array popped after.
                 self.code.push(Instruction::Dup);
+                self.code.push(Instruction::LoadBuiltin(Builtin::Object));
                 for segment in raw {
                     self.push_constant(Constant::String(segment.clone()));
                 }
                 self.code.push(Instruction::NewArray {
                     count: raw.len() as u32,
                 });
+                self.code.push(Instruction::CallMethod {
+                    name: freeze,
+                    argc: 1,
+                });
                 let name = self.constant_index(Constant::String("raw".to_owned()));
                 self.code.push(Instruction::SetProperty(name));
                 self.code.push(Instruction::Pop);
+                self.code.push(Instruction::CallMethod {
+                    name: freeze,
+                    argc: 1,
+                });
             }
             ExpressionKind::RegExp { pattern, flags } => {
                 let pattern = self.constant_index(Constant::String(pattern.clone()));
