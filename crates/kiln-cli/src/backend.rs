@@ -6,8 +6,8 @@
 
 use kiln_proto::{
     ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, NativeSharedLibrarySummary,
-    ProjectSummary, Request, Response, RunSummary, SourceHash, SourceView, Stats, SyncId, TestMode,
-    TestSummary,
+    ProjectSummary, Request, ResolutionMap, Response, RunSummary, SourceHash, SourceView, Stats,
+    SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -71,8 +71,12 @@ pub trait Backend: Send {
     }
 
     /// Name every file, and learn which ones actually have to be sent.
-    fn begin_sync(&mut self, files: Vec<SourceHash>) -> Result<SyncPlan> {
-        match self.request(Request::Sync { files })? {
+    fn begin_sync(
+        &mut self,
+        files: Vec<SourceHash>,
+        resolutions: ResolutionMap,
+    ) -> Result<SyncPlan> {
+        match self.request(Request::Sync { files, resolutions })? {
             Response::Needed { sync_id, paths } => Ok(SyncPlan { sync_id, paths }),
             other => Err(mismatch("Sync", &other)),
         }

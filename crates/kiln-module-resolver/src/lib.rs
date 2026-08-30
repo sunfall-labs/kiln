@@ -5,6 +5,7 @@
 //! `index` file, and verifies the canonical target remains inside the canonical project root.
 //! [`NodePackageResolver`] is a separate package-policy adapter behind [`ResolutionPolicy`].
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -117,6 +118,10 @@ pub enum ResolveError {
         role: PathRole,
         path: PathBuf,
     },
+    NonCanonicalPath {
+        role: PathRole,
+        path: PathBuf,
+    },
     Io {
         role: PathRole,
         path: PathBuf,
@@ -162,6 +167,10 @@ pub enum ResolveError {
         package: String,
         target: String,
     },
+    UnpinnedPackageResolution {
+        importer: PathBuf,
+        specifier: String,
+    },
 }
 
 impl fmt::Display for ResolveError {
@@ -184,6 +193,12 @@ impl fmt::Display for ResolveError {
             Self::NonUtf8Path { role, path } => write!(
                 formatter,
                 "{} contains a non-UTF-8 path: {}",
+                role.as_str(),
+                display_path(path)
+            ),
+            Self::NonCanonicalPath { role, path } => write!(
+                formatter,
+                "{} is not a canonical absolute path: {}",
                 role.as_str(),
                 display_path(path)
             ),
@@ -244,6 +259,14 @@ impl fmt::Display for ResolveError {
             Self::InvalidPackageTarget { package, target } => write!(
                 formatter,
                 "package `{package}` has invalid export target `{target}`"
+            ),
+            Self::UnpinnedPackageResolution {
+                importer,
+                specifier,
+            } => write!(
+                formatter,
+                "package resolution `{specifier}` from {} is not pinned",
+                display_path(importer)
             ),
         }
     }
@@ -325,6 +348,20 @@ pub struct NodePackageResolver {
     explicit: ModuleResolver,
 }
 
+/// The exact package manifest read that selected a package target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageManifestSnapshot {
+    pub path: PathBuf,
+    pub source: String,
+}
+
+/// A resolution plus the package metadata that influenced it, when any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionSnapshot {
+    pub module: ResolvedModule,
+    pub package_manifest: Option<PackageManifestSnapshot>,
+}
+
 impl NodePackageResolver {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
         Ok(Self {
@@ -341,6 +378,16 @@ impl NodePackageResolver {
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
+        self.resolve_with_metadata(specifier, importer)
+            .map(|snapshot| snapshot.module)
+    }
+
+    /// Resolve and retain the exact package metadata that selected the target.
+    pub fn resolve_with_metadata(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+    ) -> Result<ResolutionSnapshot, ResolveError> {
         let importer = importer.as_ref();
         if !matches!(
             classify_specifier(specifier),
@@ -349,7 +396,13 @@ impl NodePackageResolver {
                 ..
             })
         ) {
-            return self.explicit.resolve(specifier, importer);
+            return self
+                .explicit
+                .resolve(specifier, importer)
+                .map(|module| ResolutionSnapshot {
+                    module,
+                    package_manifest: None,
+                });
         }
 
         let canonical_importer = canonical_importer(importer, self.project_root())?;
@@ -383,7 +436,14 @@ impl NodePackageResolver {
             }
             None => subpath.clone(),
         };
-        self.resolve_package_target(&package, &package_dir, &target)
+        let module = self.resolve_package_target(&package, &package_dir, &target)?;
+        Ok(ResolutionSnapshot {
+            module,
+            package_manifest: Some(PackageManifestSnapshot {
+                path: manifest_path,
+                source: manifest_text,
+            }),
+        })
     }
 
     fn find_package(&self, package: &str, importer: &Path) -> Result<PathBuf, ResolveError> {
@@ -465,6 +525,103 @@ impl NodePackageResolver {
             ResolutionKind::Package,
         ))
     }
+}
+
+/// A package policy backed only by a source-view-pinned canonical resolution table.
+///
+/// Explicit filesystem requests retain [`ModuleResolver`] semantics. Bare package requests never
+/// inspect `package.json` or `node_modules`; absence is a structured error rather than permission
+/// to fall back to live filesystem metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedResolutionPolicy {
+    explicit: ModuleResolver,
+    packages: BTreeMap<(PathBuf, String), PathBuf>,
+}
+
+impl PinnedResolutionPolicy {
+    pub fn new(
+        project_root: impl AsRef<Path>,
+        entries: impl IntoIterator<Item = (PathBuf, String, PathBuf)>,
+    ) -> Result<Self, ResolveError> {
+        let explicit = ModuleResolver::new(project_root)?;
+        let mut packages = BTreeMap::new();
+        for (importer, specifier, target) in entries {
+            validate_pinned_path(&importer, PathRole::Importer, explicit.project_root())?;
+            validate_pinned_path(&target, PathRole::Target, explicit.project_root())?;
+            if !has_supported_extension(&target) {
+                return Err(ResolveError::UnsupportedExtension { path: target });
+            }
+            packages.insert((importer, specifier), target);
+        }
+        Ok(Self { explicit, packages })
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.explicit.project_root()
+    }
+}
+
+impl ResolutionPolicy for PinnedResolutionPolicy {
+    fn project_root(&self) -> &Path {
+        self.project_root()
+    }
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
+        if !matches!(
+            classify_specifier(specifier),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::BarePackage,
+                ..
+            })
+        ) {
+            return self.explicit.resolve(specifier, importer);
+        }
+        validate_pinned_path(importer, PathRole::Importer, self.project_root())?;
+        let target = self
+            .packages
+            .get(&(importer.to_path_buf(), specifier.to_owned()))
+            .ok_or_else(|| ResolveError::UnpinnedPackageResolution {
+                importer: importer.to_path_buf(),
+                specifier: specifier.to_owned(),
+            })?;
+        Ok(ResolvedModule::new(target.clone(), ResolutionKind::Package))
+    }
+}
+
+fn validate_pinned_path(
+    path: &Path,
+    role: PathRole,
+    project_root: &Path,
+) -> Result<(), ResolveError> {
+    if !path.is_absolute() {
+        return Err(ResolveError::NonAbsolutePath {
+            role,
+            path: path.to_path_buf(),
+        });
+    }
+    ensure_utf8(path, role)?;
+    let components = path.components().collect::<Vec<_>>();
+    let normalized = components.iter().copied().collect::<PathBuf>();
+    if normalized.as_os_str() != path.as_os_str()
+        || components.iter().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(ResolveError::NonCanonicalPath {
+            role,
+            path: path.to_path_buf(),
+        });
+    }
+    if !path.starts_with(project_root) {
+        return Err(ResolveError::OutsideProject {
+            path: path.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 impl ResolutionPolicy for NodePackageResolver {
@@ -957,6 +1114,63 @@ mod tests {
             .resolve("@scope/name", &importer)
             .expect("resolve scoped package root");
         assert_eq!(resolved.path, fs::canonicalize(scoped_entry).unwrap());
+    }
+
+    #[test]
+    fn resolution_snapshot_keeps_the_exact_manifest_that_selected_the_target() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let entry = project.write("node_modules/pkg/index.js", "");
+        let manifest = r#"{"exports":"./index.js","note":"identity input"}"#;
+        write_package(&project, "pkg", manifest);
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        let snapshot = resolver
+            .resolve_with_metadata("pkg", &importer)
+            .expect("resolve with metadata");
+
+        assert_eq!(snapshot.module.path, fs::canonicalize(entry).unwrap());
+        let metadata = snapshot.package_manifest.expect("package metadata");
+        assert_eq!(metadata.source, manifest);
+        assert_eq!(
+            metadata.path,
+            fs::canonicalize(project.root.join("node_modules/pkg/package.json")).unwrap()
+        );
+    }
+
+    #[test]
+    fn pinned_policy_never_rereads_a_changed_package_manifest() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let canonical_importer = fs::canonicalize(&importer).unwrap();
+        let first = project.write("node_modules/pkg/first.js", "");
+        let canonical_first = fs::canonicalize(&first).unwrap();
+        project.write("node_modules/pkg/second.js", "");
+        write_package(&project, "pkg", r#"{"exports":"./first.js"}"#);
+        let live = NodePackageResolver::new(&project.root).expect("live resolver");
+        let snapshot = live
+            .resolve_with_metadata("pkg", &importer)
+            .expect("initial resolution");
+        let pinned = PinnedResolutionPolicy::new(
+            &project.root,
+            [(
+                canonical_importer.clone(),
+                "pkg".to_owned(),
+                snapshot.module.path,
+            )],
+        )
+        .expect("pinned resolver");
+        write_package(&project, "pkg", r#"{"exports":"./second.js"}"#);
+        fs::remove_file(first).expect("remove pinned target after snapshot");
+
+        assert_eq!(
+            pinned.resolve("pkg", &canonical_importer).unwrap().path,
+            canonical_first
+        );
+        assert!(matches!(
+            pinned.resolve("other", &canonical_importer),
+            Err(ResolveError::UnpinnedPackageResolution { .. })
+        ));
     }
 
     #[test]

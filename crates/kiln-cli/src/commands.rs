@@ -15,8 +15,8 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome, TestSummary,
-    source_digest,
+    NativeProfile, ResolutionMap, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome,
+    TestSummary, source_digest,
 };
 use serde_json::json;
 
@@ -65,7 +65,7 @@ pub(crate) fn run_source(
     text: String,
 ) -> Result<Output> {
     run_source_with_manifest(backend, path, project_root, canonical, text)
-        .map(|(output, _, _, _)| output)
+        .map(|(output, _, _, _, _)| output)
 }
 
 pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
@@ -79,9 +79,15 @@ pub(crate) fn run_source_with_manifest(
     project_root: &Path,
     canonical: &str,
     text: String,
-) -> Result<(Output, SourceManifest, bool, SourceView)> {
-    let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
-        sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
+) -> Result<(Output, SourceManifest, ResolutionMap, bool, SourceView)> {
+    let (
+        mut project_notes,
+        synced_paths,
+        mut manifest,
+        mut resolutions,
+        mut truncated,
+        mut source_view,
+    ) = sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
     // were already uploaded by the sync handshake when the daemon requested them.
@@ -105,6 +111,7 @@ pub(crate) fn run_source_with_manifest(
             project_notes.extend(snapshot.notes);
             let _ = snapshot.synced_paths;
             manifest = snapshot.manifest;
+            resolutions = snapshot.resolutions;
             truncated = snapshot.truncated;
             source_view = snapshot.source_view;
             match backend.run_at_view(
@@ -120,7 +127,7 @@ pub(crate) fn run_source_with_manifest(
         }
     };
     output.source_view = Some(source_view);
-    Ok((output, manifest, truncated, source_view))
+    Ok((output, manifest, resolutions, truncated, source_view))
 }
 
 /// Execute a new snapshot of the single file owned by an already-initialized watch.
@@ -184,7 +191,7 @@ fn set_external_source_with_one_resync(
     match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), source_view)? {
         SourceUpdate::Updated(view) => Ok(view),
         SourceUpdate::Stale(_) => {
-            let (_, _, _, _, view) =
+            let (_, _, _, _, _, view) =
                 sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
             match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), view)? {
                 SourceUpdate::Updated(view) => Ok(view),
@@ -201,6 +208,7 @@ struct Snapshot {
     notes: Vec<String>,
     synced_paths: HashSet<String>,
     manifest: SourceManifest,
+    resolutions: ResolutionMap,
     truncated: bool,
     source_view: SourceView,
 }
@@ -211,7 +219,7 @@ fn establish_snapshot(
     canonical: &str,
     text: &str,
 ) -> Result<Snapshot> {
-    let (notes, paths, manifest, truncated, view) =
+    let (notes, paths, manifest, resolutions, truncated, view) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
     let source_view = if paths.contains(canonical) {
         view
@@ -222,6 +230,7 @@ fn establish_snapshot(
         notes,
         synced_paths: paths,
         manifest,
+        resolutions,
         truncated,
         source_view,
     })
@@ -268,7 +277,7 @@ pub fn build(
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (mut project_notes, synced_paths, _, _, mut source_view) =
+    let (mut project_notes, synced_paths, _, _, _, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
@@ -375,7 +384,7 @@ pub fn native_run(
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (mut project_notes, synced_paths, _, _, mut source_view) =
+    let (mut project_notes, synced_paths, _, _, _, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
@@ -458,7 +467,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let text = read_source(path)?;
     let before = backend.stats()?;
     let started = Instant::now();
-    let (mut notes, synced_paths, _, _, mut source_view) =
+    let (mut notes, synced_paths, _, _, _, mut source_view) =
         sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         source_view =
@@ -468,7 +477,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let summary = match backend.check_at_view(canonical.clone(), root_text.clone(), source_view)? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let (retry_notes, retry_paths, _, _, view) =
+            let (retry_notes, retry_paths, _, _, _, view) =
                 sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
             notes.extend(retry_notes);
             source_view = view;
@@ -576,11 +585,11 @@ pub fn check_source(
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    let (mut notes, _, _, _, mut source_view) = sync_project_sources(backend, root)?;
+    let (mut notes, _, _, _, _, mut source_view) = sync_project_sources(backend, root)?;
     let summary = match backend.project_at_view(source_view)? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let (retry_notes, _, _, _, view) = sync_project_sources(backend, root)?;
+            let (retry_notes, _, _, _, _, view) = sync_project_sources(backend, root)?;
             source_view = view;
             // Preserve diagnostics from both walks; the second is normally empty.
             notes.extend(retry_notes);
@@ -647,9 +656,11 @@ fn sync_project_sources_with_override(
         };
         texts.push((path, text));
     }
-    if let Some((entry, _)) = source_override {
-        sources::include_reachable_dependencies(root, entry, &mut texts)?;
-    }
+    let resolutions = match source_override {
+        Some((entry, _)) => sources::include_reachable_dependencies(root, entry, &mut texts)?,
+        None => ResolutionMap::new(canonical_path(root)?, Vec::new())
+            .map_err(|error| Error::Protocol(error.to_string()))?,
+    };
     let manifest = texts
         .iter()
         .map(|(path, text)| (path.clone(), source_digest(text)))
@@ -669,7 +680,7 @@ fn sync_project_sources_with_override(
     // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
     // never re-walk the filesystem or mix snapshots.
     for attempt in 0..=1 {
-        let plan = backend.begin_sync(files.clone())?;
+        let plan = backend.begin_sync(files.clone(), resolutions.clone())?;
         let needed = plan.paths.into_iter().collect::<HashSet<_>>();
         for (path, text) in &texts {
             if needed.contains(path) {
@@ -678,7 +689,14 @@ fn sync_project_sources_with_override(
         }
         match backend.commit_sync(plan.sync_id)? {
             SyncCommit::Synced(source_view) => {
-                return Ok((notes, synced_paths, manifest, walk.truncated, source_view));
+                return Ok((
+                    notes,
+                    synced_paths,
+                    manifest,
+                    resolutions,
+                    walk.truncated,
+                    source_view,
+                ));
             }
             SyncCommit::Stale(_) if attempt == 0 => continue,
             SyncCommit::Stale(current) => {
@@ -696,6 +714,7 @@ type SyncResult = Result<(
     Vec<String>,
     HashSet<String>,
     SourceManifest,
+    ResolutionMap,
     bool,
     SourceView,
 )>;
@@ -1147,7 +1166,7 @@ mod tests {
                 // A cold daemon: it holds nothing, so everything named is needed. That keeps
                 // these tests asserting the push path rather than the skip path; the skip path
                 // is covered end to end in the daemon's own tests.
-                Request::Sync { files } => Response::Needed {
+                Request::Sync { files, .. } => Response::Needed {
                     sync_id: kiln_proto::SyncId(1),
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
@@ -1587,7 +1606,7 @@ mod tests {
             backend.inner.names(),
             ["Sync", "StageSource", "CommitSync", "NativeBuild"]
         );
-        let Request::Sync { files } = &backend.inner.seen[0] else {
+        let Request::Sync { files, .. } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
@@ -1628,7 +1647,7 @@ mod tests {
             backend.inner.names(),
             ["Sync", "StageSource", "CommitSync", "NativeRun"]
         );
-        let Request::Sync { files } = &backend.inner.seen[0] else {
+        let Request::Sync { files, .. } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
@@ -1959,7 +1978,7 @@ mod tests {
             ],
             "the two sources are named once, then pushed because the fake holds nothing"
         );
-        let Request::Sync { files } = &fake.seen[1] else {
+        let Request::Sync { files, .. } = &fake.seen[1] else {
             panic!("second request must be the sync handshake");
         };
         assert_eq!(
@@ -2086,7 +2105,7 @@ mod tests {
 
         let mut fake = Fake::new();
         sync_project_sources(&mut fake, &dir).expect("initial sync");
-        let Request::Sync { files } = &fake.seen[0] else {
+        let Request::Sync { files, .. } = &fake.seen[0] else {
             panic!("first request must be the sync handshake");
         };
         let first_paths: BTreeSet<_> = files.iter().map(|file| file.path.as_str()).collect();
@@ -2098,7 +2117,7 @@ mod tests {
         let second_start = fake.seen.len();
         sync_project_sources(&mut fake, &dir).expect("sync after deletion");
         let second_requests = &fake.seen[second_start..];
-        let Request::Sync { files } = &second_requests[0] else {
+        let Request::Sync { files, .. } = &second_requests[0] else {
             panic!("first request after deletion must be the sync handshake");
         };
         assert_eq!(files.len(), 1);
@@ -2134,7 +2153,7 @@ mod tests {
         run_source(&mut fake, &path, &dir, &canonical, captured.to_owned())
             .expect("captured snapshot runs");
 
-        let Request::Sync { files } = &fake.seen[0] else {
+        let Request::Sync { files, .. } = &fake.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
