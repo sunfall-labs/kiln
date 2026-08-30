@@ -448,6 +448,27 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_CLEAR_TIMEOUT 133
 #define KILN_C99_METHOD_CLEAR_INTERVAL 134
 
+/* The two combinators that do not fail on the first rejection. Named outside the contiguous
+ * `Promise` range because that range is how a namespace's methods are found, and it was already
+ * closed. `@@rejectStep` is the rejection-side twin of `@@allStep`: `all` and `race` settle their
+ * promise on any rejection and need no handler of their own, and these two do. */
+#define KILN_C99_METHOD_PROMISE_ALL_SETTLED 135
+#define KILN_C99_METHOD_PROMISE_ANY 136
+#define KILN_C99_METHOD_REJECT_STEP 137
+
+/* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
+ * they were passing through, which is the whole difference from `then(f, f)`. */
+#define KILN_C99_METHOD_FINALLY_PASS 138
+#define KILN_C99_METHOD_FINALLY_RAISE 139
+/* ...and the two that put the outcome back once the handler's own result has settled. Bound to
+ * the outcome, so the pair needs no state object either. */
+#define KILN_C99_METHOD_FINALLY_RESTORE 140
+#define KILN_C99_METHOD_FINALLY_RERAISE 141
+
+/* Resolving a promise *with* a promise. The attach is a job of its own, which is a turn a program
+ * can see -- so it is a step rather than something `settle` does on the spot. */
+#define KILN_C99_METHOD_ADOPT_STEP 142
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -788,6 +809,7 @@ static kiln_collection *kiln_c99_collection_of(kiln_value value);
 static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
+static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);
@@ -800,6 +822,7 @@ static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
 static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
+static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
@@ -1273,7 +1296,15 @@ static const char *kiln_c99_method_name(uint64_t code) {
      * waiting on, and nothing looks them up. */
     case KILN_C99_METHOD_ASYNC_RESUME: return "@@resume";
     case KILN_C99_METHOD_ASYNC_THROW: return "@@throw";
+    case KILN_C99_METHOD_PROMISE_ALL_SETTLED: return "allSettled";
+    case KILN_C99_METHOD_PROMISE_ANY: return "any";
     case KILN_C99_METHOD_ALL_STEP: return "@@allStep";
+    case KILN_C99_METHOD_REJECT_STEP: return "@@rejectStep";
+    case KILN_C99_METHOD_FINALLY_PASS: return "@@finallyPass";
+    case KILN_C99_METHOD_FINALLY_RAISE: return "@@finallyRaise";
+    case KILN_C99_METHOD_FINALLY_RESTORE: return "@@finallyRestore";
+    case KILN_C99_METHOD_FINALLY_RERAISE: return "@@finallyReraise";
+    case KILN_C99_METHOD_ADOPT_STEP: return "@@adopt";
     default: return NULL;
     }
 }
@@ -1655,6 +1686,12 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATE_NOW,
                                       KILN_C99_METHOD_DATE_PARSE);
     case KILN_C99_BUILTIN_PROMISE:
+        if (kiln_c99_same_name(key, key_len, "allSettled")) {
+            return KILN_C99_METHOD_PROMISE_ALL_SETTLED;
+        }
+        if (kiln_c99_same_name(key, key_len, "any")) {
+            return KILN_C99_METHOD_PROMISE_ANY;
+        }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_PROMISE_RESOLVE,
                                       KILN_C99_METHOD_PROMISE_RACE);
     default:
@@ -4278,11 +4315,21 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (code == KILN_C99_METHOD_CATCH) {
                 on_rejected = argc > 0 ? args[0] : kiln_c99_undefined();
             } else {
-                /* `finally` runs on both sides. The value is *not* replaced by what the handler
-                 * returns, which is the difference from `then(f, f)`; passing it as both halves
-                 * gets the running-on-both-paths half right and is what the corpus exercises. */
-                on_fulfilled = argc > 0 ? args[0] : kiln_c99_undefined();
-                on_rejected = on_fulfilled;
+                /* `finally` runs on both sides and passes the outcome through untouched, which is
+                 * what separates it from `then(f, f)`. Each side is the handler wrapped in a step
+                 * that restores what it was given -- bound to the handler itself, so the pair
+                 * needs no state object of its own. */
+                kiln_value handler = argc > 0 ? args[0] : kiln_c99_undefined();
+                status = kiln_c99_bind(&on_fulfilled,
+                                       kiln_c99_method(KILN_C99_METHOD_FINALLY_PASS), handler);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_bind(&on_rejected,
+                                           kiln_c99_method(KILN_C99_METHOD_FINALLY_RAISE),
+                                           handler);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
             return kiln_c99_then(receiver, on_fulfilled, on_rejected, result);
         }
@@ -4302,11 +4349,19 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return kiln_c99_settle(*result, value, code == KILN_C99_METHOD_PROMISE_REJECT);
         }
         case KILN_C99_METHOD_PROMISE_ALL:
-        case KILN_C99_METHOD_PROMISE_RACE: {
+        case KILN_C99_METHOD_PROMISE_RACE:
+        case KILN_C99_METHOD_PROMISE_ALL_SETTLED:
+        case KILN_C99_METHOD_PROMISE_ANY: {
             kiln_value gathered;
             kiln_value derived;
             kiln_array *given;
-            int racing = code == KILN_C99_METHOD_PROMISE_RACE;
+            /* All four are one machine differing in what each arrival does, which is why the mode
+             * travels in the shared state rather than in four copies of the wiring below. */
+            double mode = code == KILN_C99_METHOD_PROMISE_RACE          ? 1.0
+                          : code == KILN_C99_METHOD_PROMISE_ALL_SETTLED ? 2.0
+                          : code == KILN_C99_METHOD_PROMISE_ANY         ? 3.0
+                                                                        : 0.0;
+            int racing = mode == 1.0;
             status = kiln_c99_new_array(&gathered);
             if (status != KILN_C99_OK) {
                 return status;
@@ -4322,8 +4377,17 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             given = kiln_c99_array_of(gathered);
             if (!racing && given->count == 0) {
-                /* Nothing to wait for, so it is already done -- with an empty list. */
-                status = kiln_c99_settle(derived, gathered, 0);
+                /* Nothing to wait for, so it is already done. `any` is the exception: with no
+                 * promise to succeed, every one of them has failed. */
+                if (mode == 3.0) {
+                    kiln_value aggregate;
+                    status = kiln_c99_aggregate_error(&aggregate, gathered);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_settle(derived, aggregate, 1);
+                    }
+                } else {
+                    status = kiln_c99_settle(derived, gathered, 0);
+                }
                 *result = derived;
                 return status;
             }
@@ -4352,7 +4416,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     status = kiln_c99_put(NULL, state, "@@derived", 9, derived, 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, state, "@@racing", 8, kiln_c99_boolean(racing), 0,
+                    status = kiln_c99_put(NULL, state, "@@mode", 6, kiln_c99_number(mode), 0,
                                           NULL);
                 }
                 for (index = 0; index < given->count && status == KILN_C99_OK; ++index) {
@@ -4386,8 +4450,14 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                                                slot);
                     }
                     if (status == KILN_C99_OK) {
-                        /* A rejection settles the whole thing, whichever element it came from. */
-                        status = kiln_c99_new_settler(&rejecter, derived, 1);
+                        /* For `all` and `race` a rejection settles the whole thing, whichever
+                         * element it came from, and a settler is exactly that. The other two have
+                         * something to record instead, so they get a step of their own. */
+                        status = mode == 2.0 || mode == 3.0
+                                     ? kiln_c99_bind(&rejecter,
+                                                     kiln_c99_method(KILN_C99_METHOD_REJECT_STEP),
+                                                     slot)
+                                     : kiln_c99_new_settler(&rejecter, derived, 1);
                     }
                     if (status == KILN_C99_OK) {
                         status = kiln_c99_then(element, step, rejecter, &ignored);
@@ -4400,13 +4470,94 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = derived;
             return KILN_C99_OK;
         }
-        case KILN_C99_METHOD_ALL_STEP: {
+        case KILN_C99_METHOD_FINALLY_PASS:
+        case KILN_C99_METHOD_FINALLY_RAISE: {
+            kiln_value passed = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value ignored;
+            if (kiln_c99_is_callable(receiver)) {
+                /* The handler's own failure wins: a `finally` that throws replaces the outcome
+                 * it was passing through, which is the one thing that can change it. */
+                status = kiln_c99_call(host, &ignored, receiver, kiln_c99_undefined(), NULL, 0,
+                                       depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            {
+                /* `Promise.resolve(f()).then(() => v)`, which is the specification's own spelling
+                 * and the reason it matters: a handler that returns a promise is *waited for*, and
+                 * the extra turn that costs is visible in the order things print. Settling here
+                 * would put the outcome a turn early. */
+                kiln_value awaited;
+                kiln_value restore;
+                status = kiln_c99_new_promise(&awaited);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_settle(awaited, ignored, 0);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_bind(
+                        &restore,
+                        kiln_c99_method(code == KILN_C99_METHOD_FINALLY_RAISE
+                                            ? KILN_C99_METHOD_FINALLY_RERAISE
+                                            : KILN_C99_METHOD_FINALLY_RESTORE),
+                        passed);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                return kiln_c99_then(awaited, restore, kiln_c99_undefined(), result);
+            }
+        }
+        case KILN_C99_METHOD_ADOPT_STEP: {
+            /* Two settlers bound to the outer promise: whichever the inner one reaches, the outer
+             * one follows. */
+            kiln_promise *inner;
+            kiln_reaction adopt;
+            if (receiver.tag != KILN_VALUE_PROMISE || argc == 0 ||
+                args[0].tag != KILN_VALUE_PROMISE) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            inner = kiln_c99_promise_of(args[0]);
+            status = kiln_c99_new_settler(&adopt.on_fulfilled, receiver, 0);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_new_settler(&adopt.on_rejected, receiver, 1);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            adopt.derived = kiln_c99_undefined();
+            *result = kiln_c99_undefined();
+            if (inner->state != KILN_C99_PENDING) {
+                return kiln_c99_schedule(inner, &adopt);
+            }
+            status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity,
+                                      inner->count + 1, sizeof *inner->reactions);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            inner->reactions[inner->count] = adopt;
+            inner->count += 1;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_FINALLY_RESTORE:
+            /* The outcome travelled here as the receiver, because a reaction is handed the value
+             * it is reacting to and that is the handler's result rather than the original. */
+            *result = receiver;
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_FINALLY_RERAISE:
+            /* A rejection travels on, which a reaction says by throwing. */
+            *thrown = receiver;
+            return KILN_C99_THROWN;
+        case KILN_C99_METHOD_ALL_STEP:
+        case KILN_C99_METHOD_REJECT_STEP: {
             kiln_value state;
             kiln_value at;
             kiln_value results;
             kiln_value remaining;
             kiln_value derived;
-            kiln_value racing;
+            kiln_value mode;
+            kiln_value arrived = argc > 0 ? args[0] : kiln_c99_undefined();
+            int rejected = code == KILN_C99_METHOD_REJECT_STEP;
             if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -4424,22 +4575,44 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 status = kiln_c99_get(host, state, "@@derived", 9, &derived, depth, thrown);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@racing", 8, &racing, depth, thrown);
+                status = kiln_c99_get(host, state, "@@mode", 6, &mode, depth, thrown);
             }
             if (status != KILN_C99_OK) {
                 return status;
             }
             *result = kiln_c99_undefined();
-            if (kiln_c99_truthy(racing)) {
-                /* The first to arrive wins and the rest are ignored, which `settle` already
-                 * does by refusing a second settlement. */
-                return kiln_c99_settle(derived, argc > 0 ? args[0] : kiln_c99_undefined(), 0);
+            if (!rejected && (kiln_c99_as_number(mode) == 1.0 || kiln_c99_as_number(mode) == 3.0)) {
+                /* `race` and `any` are both settled by the first arrival that counts, and the
+                 * rest are ignored -- which `settle` already does by refusing a second
+                 * settlement. For `any` only a fulfilment counts, which is what puts this on the
+                 * fulfilment side alone. */
+                return kiln_c99_settle(derived, arrived, 0);
             }
             if (results.tag == KILN_VALUE_ARRAY) {
                 kiln_array *array = kiln_c99_array_of(results);
                 size_t slot = (size_t)kiln_c99_as_number(at);
+                kiln_value recorded = arrived;
+                if (kiln_c99_as_number(mode) == 2.0) {
+                    /* `allSettled` reports the outcome as well as the value, so every element
+                     * gets a record rather than a bare result. */
+                    status = kiln_c99_new_object(&recorded);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_put(host, recorded, "status", 6,
+                                              kiln_c99_copy_text(rejected ? "rejected"
+                                                                          : "fulfilled",
+                                                                 rejected ? 8 : 9),
+                                              depth, thrown);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_put(host, recorded, rejected ? "reason" : "value",
+                                              rejected ? 6 : 5, arrived, depth, thrown);
+                    }
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
                 if (slot < array->count) {
-                    array->elements[slot] = argc > 0 ? args[0] : kiln_c99_undefined();
+                    array->elements[slot] = recorded;
                 }
             }
             {
@@ -4450,6 +4623,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     return status;
                 }
                 if (left <= 0.0) {
+                    if (kiln_c99_as_number(mode) == 3.0) {
+                        /* Every one of them failed, and the reasons are what the caller gets. */
+                        kiln_value aggregate;
+                        status = kiln_c99_aggregate_error(&aggregate, results);
+                        if (status != KILN_C99_OK) {
+                            return status;
+                        }
+                        return kiln_c99_settle(derived, aggregate, 1);
+                    }
                     return kiln_c99_settle(derived, results, 0);
                 }
             }
@@ -6314,6 +6496,33 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     return KILN_C99_OK;
 }
 
+/* What `Promise.any` rejects with when nothing succeeded: the reasons, and a sentence saying so.
+ *
+ * A plain `Error` rather than an `AggregateError`, which is the kind the interpreter builds and
+ * therefore the kind this has to build -- node names it `AggregateError` and both engines are
+ * behind on that together. `errors` is not enumerated, for the same reason an error's `message`
+ * is not: it is the error saying what happened, not a property of an object. */
+static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
+    kiln_value aggregate;
+    int status = kiln_c99_new_error(&aggregate, KILN_C99_BUILTIN_ERROR,
+                                    kiln_c99_copy_text("All promises were rejected", 26));
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(NULL, aggregate, "errors", 6, reasons, 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(aggregate);
+        if (object->count != 0) {
+            object->properties[object->count - 1].enumerable = 0;
+        }
+    }
+    *out = aggregate;
+    return KILN_C99_OK;
+}
+
 /* Raise a language-level error: build it, hand it to the caller as the thrown value, and report
  * that something was thrown rather than that something could not be done.
  *
@@ -6422,29 +6631,16 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
         return KILN_C99_OK;
     }
     if (!rejected && value.tag == KILN_VALUE_PROMISE) {
-        kiln_promise *inner = kiln_c99_promise_of(value);
-        kiln_reaction adopt;
-        /* Two settlers bound to this promise: whichever the inner one reaches, this one
-         * follows. */
-        status = kiln_c99_new_settler(&adopt.on_fulfilled, promise, 0);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_new_settler(&adopt.on_rejected, promise, 1);
-        }
+        /* Resolving with a promise does not settle this one: it *follows* the other. Attaching to
+         * it is a job in its own right, so a chain that returns a promise from a handler takes one
+         * more turn than one that returns a plain value -- which is a difference a program sees in
+         * what order things print, and therefore one both engines have to make. */
+        kiln_value step;
+        status = kiln_c99_bind(&step, kiln_c99_method(KILN_C99_METHOD_ADOPT_STEP), promise);
         if (status != KILN_C99_OK) {
             return status;
         }
-        adopt.derived = kiln_c99_undefined();
-        if (inner->state != KILN_C99_PENDING) {
-            return kiln_c99_schedule(inner, &adopt);
-        }
-        status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity, inner->count + 1,
-                                  sizeof *inner->reactions);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        inner->reactions[inner->count] = adopt;
-        inner->count += 1;
-        return KILN_C99_OK;
+        return kiln_c99_enqueue(step, value, kiln_c99_undefined(), 0);
     }
     state->state = rejected ? KILN_C99_REJECTED : KILN_C99_FULFILLED;
     state->value = value;

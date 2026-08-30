@@ -48,3 +48,23 @@ Promise.all([Promise.resolve(1), 2, Promise.resolve(3)]).then((vs: number[]) => 
 Promise.all([]).then((vs: number[]) => console.log("all empty", vs));
 Promise.race([Promise.resolve("first"), Promise.resolve("second")]).then((v: string) => console.log("race", v));
 Promise.all([Promise.resolve(1), Promise.reject("bad")]).catch((e: any) => console.log("all rejected", e));
+
+// The four combinators, and the two of them that do not fail on the first rejection.
+Promise.all([1, Promise.resolve(2), 3]).then((v) => console.log("all", v.join(",")));
+Promise.all([]).then((v) => console.log("all empty", v.length));
+Promise.race([new Promise(() => {}), Promise.resolve("won")]).then((v) => console.log("race", v));
+Promise.allSettled([Promise.resolve(1), Promise.reject("why"), 3]).then((r) =>
+  console.log("allSettled", JSON.stringify(r)),
+);
+Promise.allSettled([]).then((r) => console.log("allSettled empty", r.length));
+Promise.any([Promise.reject("a"), Promise.resolve("b")]).then((v) => console.log("any", v));
+// Every one failed, so the reasons are what the caller gets -- and they keep input order.
+Promise.any([Promise.reject("a"), Promise.reject("b")]).catch((e: any) =>
+  console.log("any rejected", e.message, Array.isArray(e.errors), e.errors.join(","), Object.keys(e).length),
+);
+Promise.any([]).catch((e: any) => console.log("any empty", e.message, e.errors.length));
+// Results keep input order rather than completion order, however late an early element is.
+Promise.all([
+  new Promise((resolve) => setTimeout(() => resolve("slow"), 20)),
+  Promise.resolve("fast"),
+]).then((v) => console.log("ordered", v.join(",")));

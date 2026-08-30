@@ -5611,10 +5611,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.settle(&result, &Settled::Fulfilled(empty));
                 }
                 Native::PromiseAny => {
-                    let error = self.construct_error(
-                        ErrorKind::Error,
-                        &[Value::String("All promises were rejected".to_owned())],
-                    );
+                    let error = self.aggregate_error(Vec::new());
                     self.settle(&result, &Settled::Rejected(error));
                 }
                 _ => {}
@@ -5711,18 +5708,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             // Every input rejected, and `any` reports them together rather than picking one.
             Native::PromiseAny => {
-                let error = self.construct_error(
-                    ErrorKind::Error,
-                    &[Value::String("All promises were rejected".to_owned())],
-                );
-                if let Value::Object(object) = &error {
-                    object.borrow_mut().set("errors", gathered);
-                }
+                let error = self.aggregate_error(state.slots.borrow().clone());
                 self.settle(&state.result, &Settled::Rejected(error));
             }
             _ => self.settle(&state.result, &Settled::Fulfilled(gathered)),
         }
         Ok(())
+    }
+
+    /// What `Promise.any` rejects with when nothing succeeded: the reasons, and a sentence.
+    ///
+    /// `errors` is not enumerated, for the same reason an error's `message` is not -- it is the
+    /// error saying what happened rather than a property of an object -- and an empty `any`
+    /// carries an empty one rather than none, so a handler can read `error.errors.length`
+    /// without knowing how the list it was given was empty.
+    fn aggregate_error(&mut self, reasons: Vec<Value>) -> Value {
+        let error = self.construct_error(
+            ErrorKind::Error,
+            &[Value::String("All promises were rejected".to_owned())],
+        );
+        if let Value::Object(object) = &error {
+            object
+                .borrow_mut()
+                .set_non_enumerable("errors", Value::Array(ArrayData::new(reasons)));
+        }
+        error
     }
 
     /// Run every queued job, moving the virtual clock forward to reach each timer.
