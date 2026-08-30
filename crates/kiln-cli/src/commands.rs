@@ -236,11 +236,14 @@ fn finish_run_summary(
     let notes = summary
         .diagnostics
         .iter()
-        .map(|diagnostic| match (diagnostic.start, diagnostic.end) {
-            (Some(start), Some(end)) => {
-                format!("{display}:{start}..{end}: {}", diagnostic.message)
+        .map(|diagnostic| {
+            let diagnostic_path = diagnostic.path.as_deref().unwrap_or(&display);
+            match (diagnostic.start, diagnostic.end) {
+                (Some(start), Some(end)) => {
+                    format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
+                }
+                _ => format!("{diagnostic_path}: {}", diagnostic.message),
             }
-            _ => format!("{display}: {}", diagnostic.message),
         })
         .chain(project_notes)
         .collect();
@@ -1962,6 +1965,36 @@ mod tests {
         assert_eq!(
             out.notes,
             ["/tmp/dep.js: could not resolve ./missing.js".to_owned()]
+        );
+    }
+
+    #[test]
+    fn run_diagnostics_retain_the_dependency_path() {
+        let out = finish_run_summary(
+            Path::new("main.js"),
+            RunSummary {
+                revision: 1,
+                path: "/tmp/main.js".to_owned(),
+                file: FileId(1),
+                succeeded: false,
+                stdout: String::new(),
+                value: None,
+                scalar_value: None,
+                instructions: 0,
+                diagnostics: vec![Diagnostic {
+                    path: Some("/tmp/dep.js".to_owned()),
+                    message: "expected an identifier".to_owned(),
+                    start: Some(7),
+                    end: Some(8),
+                }],
+            },
+            Vec::new(),
+        );
+
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(
+            out.notes,
+            ["/tmp/dep.js:7..8: expected an identifier".to_owned()]
         );
     }
 
