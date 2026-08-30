@@ -7,3 +7,7 @@
 
 # agent worktrees and session state
 .claude/
+
+# Large third-party probe bundles; the small ones are committed as fixtures.
+/conformance/thirdparty/zod.bundle.js
+/conformance/thirdparty/.scratch/
