@@ -358,7 +358,13 @@ pub struct ModuleSummary {
     pub implementation_hash: u64,
     /// Changes only when externally relevant semantics change (design.md §3).
     pub interface_hash: u64,
+    /// Runtime export names declared directly by this module.
     pub exports: Vec<String>,
+    /// Entry-rooted, graph-resolved runtime export names when the request supplied enough
+    /// project context to link the module. Star-forwarded names appear here; ambiguous names do
+    /// not. `None` preserves the distinction between an unresolved graph and an empty surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_exports: Option<Vec<String>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -483,5 +489,32 @@ mod tests {
         });
         let summary: RunSummary = serde_json::from_value(encoded).expect("decode old summary");
         assert_eq!(summary.scalar_value, None);
+    }
+
+    #[test]
+    fn module_summary_distinguishes_declared_exports_from_an_optional_resolved_surface() {
+        let old = serde_json::json!({
+            "path": "barrel.js",
+            "file": 1,
+            "implementation_hash": 2,
+            "interface_hash": 3,
+            "exports": [],
+            "diagnostics": []
+        });
+        let decoded: ModuleSummary =
+            serde_json::from_value(old).expect("older additive summary still decodes");
+        assert_eq!(decoded.resolved_exports, None);
+
+        let summary = ModuleSummary {
+            path: "barrel.js".to_owned(),
+            file: FileId(1),
+            implementation_hash: 2,
+            interface_hash: 3,
+            exports: Vec::new(),
+            resolved_exports: Some(vec!["answer".to_owned()]),
+            diagnostics: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&summary).expect("resolved summary serializes");
+        assert_eq!(encoded["resolved_exports"], serde_json::json!(["answer"]));
     }
 }

@@ -1373,6 +1373,77 @@ fn the_default_daemon_serves_the_real_query_engine() {
 }
 
 #[test]
+fn production_check_reports_the_graph_resolved_star_surface() {
+    let fixture = Fixture::empty();
+    let left = fixture.dir.join("left.js");
+    let right = fixture.dir.join("right.js");
+    let barrel = fixture.dir.join("barrel.js");
+    std::fs::write(&left, "export const answer = 42;\n").expect("write left origin");
+    std::fs::write(&right, "export const answer = 42;\n").expect("write right origin");
+    std::fs::write(&barrel, "export * from './left.js';\n").expect("write barrel");
+    let left = std::fs::canonicalize(left).expect("canonical left origin");
+    let right = std::fs::canonicalize(right).expect("canonical right origin");
+    let barrel = std::fs::canonicalize(barrel).expect("canonical barrel");
+    let project_root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    for (path, text) in [
+        (&left, "export const answer = 42;\n"),
+        (&right, "export const answer = 42;\n"),
+        (&barrel, "export * from './left.js';\n"),
+    ] {
+        client
+            .request(&Request::SetSource {
+                path: path.to_string_lossy().into_owned(),
+                text: text.to_owned(),
+            })
+            .expect("synchronize graph source");
+    }
+
+    let Response::Checked(summary) = client
+        .request(&Request::Check {
+            path: barrel.to_string_lossy().into_owned(),
+            project_root: project_root.to_string_lossy().into_owned(),
+        })
+        .expect("check barrel")
+    else {
+        panic!("expected checked response");
+    };
+    assert!(
+        summary.exports.is_empty(),
+        "stars are not local declarations"
+    );
+    assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
+    assert_eq!(summary.resolved_exports, Some(vec!["answer".to_owned()]));
+
+    let Response::Project(before) = client.request(&Request::Project).expect("project before")
+    else {
+        panic!("expected project summary");
+    };
+    client
+        .request(&Request::SetSource {
+            path: barrel.to_string_lossy().into_owned(),
+            text: "export * from './right.js';\n".to_owned(),
+        })
+        .expect("switch star target");
+    let Response::Project(after) = client.request(&Request::Project).expect("project after") else {
+        panic!("expected project summary");
+    };
+    assert_eq!(
+        (after.modules, after.exports),
+        (before.modules, before.exports)
+    );
+    assert_ne!(after.interface_hash, before.interface_hash);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
 fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() {
     let fixture = Fixture::empty();
     let disk_module = fixture.dir.join("production-disk.ts");

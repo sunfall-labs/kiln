@@ -239,8 +239,9 @@ fn sync<E: QueryEngine>(engine: &mut E, files: Vec<kiln_proto::SourceHash>) -> R
 /// `SetSource` authoritative: once a client has pushed unsaved buffer contents, later `Check`s
 /// must see the buffer, not the stale bytes on disk.
 fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
-    let source = match resolve_source_path(&path, &project_root) {
-        Some(entry) => ensure_canonical_source(engine, &path, &entry, &project_root),
+    let entry = resolve_source_path(&path, &project_root);
+    let source = match entry.as_deref() {
+        Some(entry) => ensure_canonical_source(engine, &path, entry, &project_root),
         None => ensure_source(engine, &path),
     };
     let file = match source {
@@ -249,9 +250,31 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
     };
 
     let parsed = engine.parse(file);
-    // The interface, not `parsed.exports`, is the externally visible surface, and it is what a
-    // dependent would be recompiled against - so it is what the summary reports.
+    // The normalized interface is the per-file declared surface and incremental cutoff. Graph
+    // resolution below remains separate because stars acquire names only in an entry/root context.
     let interface = engine.interface(file);
+
+    let mut diagnostics = parsed
+        .module
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| Diagnostic {
+            message: diagnostic.message,
+            start: diagnostic.span.map(|span| span.start),
+            end: diagnostic.span.map(|span| span.end),
+        })
+        .collect::<Vec<_>>();
+    let resolved_exports = if diagnostics.is_empty() {
+        entry.and_then(|entry| match build_graph(engine, &entry, &project_root) {
+            Ok(graph) => graph.resolved_export_names(&entry),
+            Err(error) => {
+                diagnostics.extend(module_graph_diagnostics(error));
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     Response::Checked(ModuleSummary {
         path,
@@ -259,16 +282,8 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
         implementation_hash: parsed.implementation_hash,
         interface_hash: interface.interface_hash,
         exports: interface.exports,
-        diagnostics: parsed
-            .module
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message,
-                start: diagnostic.span.map(|span| span.start),
-                end: diagnostic.span.map(|span| span.end),
-            })
-            .collect(),
+        resolved_exports,
+        diagnostics,
     })
 }
 

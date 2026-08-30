@@ -96,7 +96,14 @@ pub fn check(
         "implementation",
         &hash(summary.implementation_hash),
     );
-    row(&mut out, "exports", &exports(&summary.exports));
+    if let Some(resolved) = &summary.resolved_exports {
+        if resolved != &summary.exports {
+            row(&mut out, "declared", &exports(&summary.exports));
+        }
+        row(&mut out, "exports", &exports(resolved));
+    } else {
+        row(&mut out, "exports", &exports(&summary.exports));
+    }
     if !summary.diagnostics.is_empty() {
         row(
             &mut out,
@@ -302,6 +309,7 @@ mod tests {
             implementation_hash: 0x1122_3344_5566_7788,
             interface_hash: 0x9f3c_1d2e_4a5b_6c7d,
             exports: vec!["greet".to_string(), "main".to_string()],
+            resolved_exports: None,
             diagnostics: Vec::new(),
         }
     }
@@ -378,6 +386,29 @@ mod tests {
         };
         let out = check("a.js", &summary(), &work, 2, Duration::ZERO);
         assert!(out.contains("recomputed      nothing\n"), "{out}");
+    }
+
+    #[test]
+    fn check_distinguishes_a_declared_surface_from_star_resolved_exports() {
+        let mut summary = summary();
+        summary.exports.clear();
+        summary.resolved_exports = Some(vec!["answer".to_owned()]);
+        let out = check(
+            "barrel.js",
+            &summary,
+            &Work {
+                parse: 0,
+                ir: 0,
+                interface: 0,
+                project: 0,
+                validated: 0,
+                early_cutoff: 0,
+            },
+            1,
+            Duration::ZERO,
+        );
+        assert!(out.contains("declared        0\n"), "{out}");
+        assert!(out.contains("exports         1  answer\n"), "{out}");
     }
 
     #[test]
