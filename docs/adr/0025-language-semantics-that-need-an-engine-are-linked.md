@@ -8,8 +8,8 @@ than a change to this decision.
 
 ## Context
 
-The native backend refuses `NewRegExp`. Five differential probes stop there, and it is the largest
-single entry left in the refusal tally.
+When this decision was proposed, the native backend refused `NewRegExp`. Five differential probes
+stopped there, and it was the largest single entry left in the refusal tally.
 
 A regular expression is not a small function. The interpreter uses `regress`, which targets
 ECMAScript semantics specifically rather than the linear-time subset: backreferences, lookahead
