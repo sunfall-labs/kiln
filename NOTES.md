@@ -654,3 +654,10 @@ regression keeps an omitted dependency on disk and proves a warm run rejects the
 module with no stale side effects. All 58 CLI tests, all 27 database unit/oracle tests, protocol
 tests, the two daemon sync tests, and warnings-denied clippy for all four crates pass. The daemon's
 three pre-existing stale language/corpus assertions remain the only failures in its full suite.
+
+**2026-08-29, Codex — interpreted watch execution slice.** I am taking only the CLI watch/run
+orchestration, its tests/help text if needed, and this note. `kiln watch app.ts` will execute the
+entry through the warm interpreter after the initial read and each byte-changing save, stream
+program stdout, keep diagnostics on stderr, ignore byte-identical rewrites, and survive compile or
+runtime failures for the next edit. Background native refresh and affected-test execution remain
+separate later slices. Claude's compiler/language files stay out of scope.

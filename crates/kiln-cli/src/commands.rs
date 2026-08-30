@@ -38,17 +38,31 @@ impl Output {
 /// Compile and execute one file. Program stdout stays byte-for-byte on stdout; compiler and
 /// runtime diagnostics go to stderr and make the command unsuccessful.
 pub fn run(backend: &mut dyn Backend, path: &Path, project_root: &Path) -> Result<Output> {
-    let display = path.display().to_string();
-    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
+    run_source(backend, path, project_root, &canonical, text)
+}
+
+/// Compile and execute a source snapshot that the caller has already read. This is used by
+/// `watch`: its byte comparison and the execution must refer to the same save, even if an
+/// editor replaces the file again while project synchronization is walking the tree.
+pub(crate) fn run_source(
+    backend: &mut dyn Backend,
+    path: &Path,
+    project_root: &Path,
+    canonical: &str,
+    text: String,
+) -> Result<Output> {
+    let display = path.display().to_string();
+    let (project_notes, synced_paths) =
+        sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
     // were already uploaded by the sync handshake when the daemon requested them.
-    if !synced_paths.contains(&canonical) {
-        backend.set_source(canonical.clone(), text)?;
+    if !synced_paths.contains(canonical) {
+        backend.set_source(canonical.to_owned(), text)?;
     }
-    let summary = backend.run(canonical, project_root_string(project_root)?)?;
+    let summary = backend.run(canonical.to_owned(), project_root_string(project_root)?)?;
     let notes = summary
         .diagnostics
         .iter()
@@ -254,6 +268,18 @@ fn sync_project_sources(
     backend: &mut dyn Backend,
     root: &Path,
 ) -> Result<(Vec<String>, HashSet<String>)> {
+    sync_project_sources_with_override(backend, root, None)
+}
+
+/// Synchronize project sources, optionally substituting one already-read snapshot.
+///
+/// The override feeds both the advertised hash and any requested upload, so a save landing while
+/// discovery runs cannot make watch execute bytes other than the ones it observed.
+fn sync_project_sources_with_override(
+    backend: &mut dyn Backend,
+    root: &Path,
+    source_override: Option<(&str, &str)>,
+) -> Result<(Vec<String>, HashSet<String>)> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -271,7 +297,14 @@ fn sync_project_sources(
 
     let mut texts = Vec::with_capacity(walk.files.len());
     for file in &walk.files {
-        texts.push((canonical_path(file)?, read_source(file)?));
+        let path = canonical_path(file)?;
+        let text = match source_override {
+            Some((override_path, override_text)) if path == override_path => {
+                override_text.to_owned()
+            }
+            _ => read_source(file)?,
+        };
+        texts.push((path, text));
     }
     let needed: HashSet<String> = backend
         .sync(
@@ -1309,6 +1342,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![&survivor_path]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_source_syncs_and_executes_the_already_read_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "kiln-cli-run-source-snapshot-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create snapshot fixture");
+        let path = dir.join("entry.js");
+        std::fs::write(&path, "newer bytes on disk\n").expect("write disk source");
+        let canonical = canonical_path(&path).expect("canonical entry");
+        let captured = "bytes captured by watch\n";
+
+        let mut fake = Fake::new();
+        run_source(&mut fake, &path, &dir, &canonical, captured.to_owned())
+            .expect("captured snapshot runs");
+
+        let Request::Sync { files } = &fake.seen[0] else {
+            panic!("first request must advertise the captured snapshot");
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, canonical);
+        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        let Request::SetSource { path, text } = &fake.seen[1] else {
+            panic!("second request must upload the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+        assert_eq!(text, captured);
+        let Request::Run { path, project_root } = &fake.seen[2] else {
+            panic!("third request must execute the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+        assert_eq!(project_root, &dir.to_string_lossy());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

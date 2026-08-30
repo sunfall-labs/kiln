@@ -170,7 +170,14 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             let mut backend = open(one_shot, &socket)?;
             let mut out = std::io::stdout().lock();
             let mut notes = std::io::stderr().lock();
-            watch::run(backend.as_mut(), &path, interval, &mut out, &mut notes)?;
+            watch::run(
+                backend.as_mut(),
+                &path,
+                &root,
+                interval,
+                &mut out,
+                &mut notes,
+            )?;
             Ok(0)
         }
         Command::Daemon(DaemonAction::Start) => report(lifecycle::start(&socket)?),
