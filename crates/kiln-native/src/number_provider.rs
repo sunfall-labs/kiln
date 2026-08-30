@@ -14,6 +14,7 @@ use serde::Deserialize;
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
 pub(crate) const PROVIDER_ABI_VERSION: u32 = 1;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
+const PROVIDER_RUSTFLAGS: &str = "-C panic=abort -C relocation-model=pic -C target-cpu=generic";
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 const REQUIRED_EXPORTS: [&str; 2] = ["kiln_number_to_js_string", "kiln_string_to_number"];
@@ -255,6 +256,8 @@ fn validate_manifest(
         Some("the first provider ABI requires `linkage` to be `static`".to_owned())
     } else if !manifest.pic {
         Some("the provider archive must be position-independent".to_owned())
+    } else if manifest.cpu_features != "generic" {
+        Some("the first provider package must use the `generic` CPU policy".to_owned())
     } else if manifest.profile != "release" {
         Some("the provider archive must use the `release` profile".to_owned())
     } else if manifest.exports
@@ -264,6 +267,8 @@ fn validate_manifest(
             .collect::<Vec<_>>()
     {
         Some("the provider export list does not exactly match its private ABI".to_owned())
+    } else if !is_sha256_identity(&manifest.rustc_identity) {
+        Some("`rustc_identity` must be `sha256:` followed by 64 lowercase hex digits".to_owned())
     } else if Digest::from_hex(&manifest.source_sha256).is_err() {
         Some("`source_sha256` is not a SHA-256 digest".to_owned())
     } else {
@@ -294,6 +299,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
     let cargo = cargo_program().ok_or(NumberProviderError::ToolUnavailable { tool: "cargo" })?;
     let rustc = rustc_program().ok_or(NumberProviderError::ToolUnavailable { tool: "rustc" })?;
     let rustc_output = command_output(&rustc, &[OsString::from("-vV")], "rustc probe", None)?;
+    let rustc_digest_identity = sha256_identity(&rustc_output.stdout);
     let rustc_identity = String::from_utf8_lossy(&rustc_output.stdout).into_owned();
     let rust_target = rustc_identity
         .lines()
@@ -317,11 +323,6 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         source,
     })?;
 
-    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
-    }
-    rustflags.push_str("-C panic=abort -C relocation-model=pic");
     let arguments = [
         OsString::from("rustc"),
         OsString::from("--locked"),
@@ -338,7 +339,20 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         .args(arguments)
         .current_dir(&source_root)
         .env("CARGO_TARGET_DIR", &build_root)
-        .env("RUSTFLAGS", rustflags);
+        // The manifest promises a portable generic CPU. Setting RUSTFLAGS also outranks Cargo
+        // config rustflags; removing its higher-precedence encoded form prevents the caller from
+        // silently injecting host-only instructions into an artifact advertised as generic.
+        // Empty wrapper variables explicitly override wrappers from either the environment or
+        // Cargo config, so the rustc identity names the compiler that actually builds the archive.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env("CARGO_BUILD_RUSTC_WRAPPER", "")
+        .env("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "")
+        .env("RUSTC", &rustc)
+        .env("CARGO_BUILD_RUSTC", &rustc)
+        .env("RUSTFLAGS", PROVIDER_RUSTFLAGS);
     let output = command
         .output()
         .map_err(|source| NumberProviderError::Read {
@@ -362,9 +376,9 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
     let archive_digest = Digest::hash(&archive);
     let identity = format!(
         "schema={PROVIDER_SCHEMA_VERSION};provider={PROVIDER_NAME};abi={PROVIDER_ABI_VERSION};format={NUMBER_FORMAT_VERSION};parse={NUMBER_PARSE_VERSION};target={rust_target};rustc={};source={source_digest};archive={archive_digest};linkage=static;pic=true;profile=release;cpu=generic;deployment={};libc={};exports={}",
-        Digest::hash(rustc_identity.as_bytes()),
+        rustc_digest_identity,
         env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
-        "",
+        env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
         REQUIRED_EXPORTS.join(","),
     );
     Ok(NumberProvider {
@@ -386,12 +400,26 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
     let mut identity = Vec::new();
     for relative in paths {
         let bytes = read(&root.join(relative), "read number-provider source")?;
-        identity.extend_from_slice(&(relative.len() as u64).to_le_bytes());
         identity.extend_from_slice(relative.as_bytes());
-        identity.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        identity.push(0);
+        identity.extend_from_slice(bytes.len().to_string().as_bytes());
+        identity.push(0);
         identity.extend_from_slice(&bytes);
     }
     Ok(Digest::hash(&identity))
+}
+
+fn sha256_identity(bytes: &[u8]) -> String {
+    format!("sha256:{}", Digest::hash(bytes))
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn manifest_identity(manifest: &ArchiveManifest) -> String {
@@ -575,6 +603,51 @@ mod tests {
     }
 
     #[test]
+    fn source_identity_uses_the_packager_canonical_framing() {
+        let root = TestDirectory::new();
+        for (relative, bytes) in [
+            ("Cargo.lock", b"lock\n".as_slice()),
+            ("crates/kiln-number-core/Cargo.toml", b"[package]\n"),
+            (
+                "crates/kiln-number-core/src/lib.rs",
+                b"core\0bytes\n".as_slice(),
+            ),
+            ("crates/kiln-native-number-ffi/Cargo.toml", b"[lib]\n"),
+            (
+                "crates/kiln-native-number-ffi/src/lib.rs",
+                b"ffi\n".as_slice(),
+            ),
+        ] {
+            let path = root.0.join(relative);
+            fs::create_dir_all(path.parent().expect("fixture path has parent"))
+                .expect("create source identity fixture directory");
+            fs::write(path, bytes).expect("write source identity fixture");
+        }
+
+        assert_eq!(
+            source_digest(&root.0).expect("hash source identity fixture"),
+            Digest::from_hex("c2e718c392784bcd2cb366769fc9ec4312141a5cebaeade4116f4910b385d238")
+                .expect("fixture digest")
+        );
+    }
+
+    #[test]
+    fn rustc_identity_uses_the_packager_sha256_spelling() {
+        let rustc_probe = b"rustc 1.97.1 (000000000 2026-01-01)\nhost: aarch64-apple-darwin\n";
+        assert_eq!(
+            sha256_identity(rustc_probe),
+            "sha256:018d6710ad546f6f891b0b19382992394bd029bc8b4991c06a3d18dc583a2c98"
+        );
+        assert!(is_sha256_identity(&sha256_identity(rustc_probe)));
+        assert!(!is_sha256_identity(
+            "018d6710ad546f6f891b0b19382992394bd029bc8b4991c06a3d18dc583a2c98"
+        ));
+        assert!(!is_sha256_identity(
+            "sha256:018D6710AD546F6F891B0B19382992394BD029BC8B4991C06A3D18DC583A2C98"
+        ));
+    }
+
+    #[test]
     fn target_compatibility_normalizes_compiler_spelling_and_version() {
         require_compatible_target("arm64-apple-darwin25.6.0", "aarch64-apple-darwin")
             .expect("compatible Apple targets");
@@ -666,7 +739,7 @@ mod tests {
             "format_version": NUMBER_FORMAT_VERSION,
             "parse_version": NUMBER_PARSE_VERSION,
             "rust_target": "aarch64-apple-darwin",
-            "rustc_identity": "rustc fixture",
+            "rustc_identity": sha256_identity(b"rustc fixture"),
             "source_sha256": Digest::hash(b"source fixture").to_hex(),
             "archive_sha256": Digest::hash(archive).to_hex(),
             "archive": "provider.a",
@@ -697,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_unknown_fields_and_archive_path_traversal() {
+    fn manifest_rejects_nonportable_cpu_unknown_fields_and_archive_path_traversal() {
         let root = TestDirectory::new();
         let archive = b"archive";
         fs::write(root.0.join("provider.a"), archive).expect("write provider fixture");
@@ -708,7 +781,7 @@ mod tests {
             "format_version": NUMBER_FORMAT_VERSION,
             "parse_version": NUMBER_PARSE_VERSION,
             "rust_target": "aarch64-apple-darwin",
-            "rustc_identity": "rustc fixture",
+            "rustc_identity": sha256_identity(b"rustc fixture"),
             "source_sha256": Digest::hash(b"source fixture").to_hex(),
             "archive_sha256": Digest::hash(archive).to_hex(),
             "archive": "../provider.a",
@@ -734,6 +807,34 @@ mod tests {
         );
 
         manifest["archive"] = serde_json::Value::String("provider.a".to_owned());
+        manifest["cpu_features"] = serde_json::Value::String("native".to_owned());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize native CPU fixture"),
+        )
+        .expect("write native CPU fixture");
+        assert!(
+            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"))
+                .expect_err("host-specific provider CPU policy is rejected")
+                .to_string()
+                .contains("`generic` CPU policy")
+        );
+
+        manifest["cpu_features"] = serde_json::Value::String("generic".to_owned());
+        manifest["rustc_identity"] = serde_json::Value::String("rustc fixture".to_owned());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize noncanonical rustc fixture"),
+        )
+        .expect("write noncanonical rustc fixture");
+        assert!(
+            load_manifest(&manifest_path, &identity("aarch64-apple-darwin"))
+                .expect_err("noncanonical rustc identity is rejected")
+                .to_string()
+                .contains("`rustc_identity`")
+        );
+
+        manifest["rustc_identity"] = serde_json::Value::String(sha256_identity(b"rustc fixture"));
         manifest["unexpected"] = serde_json::Value::Bool(true);
         fs::write(
             &manifest_path,
