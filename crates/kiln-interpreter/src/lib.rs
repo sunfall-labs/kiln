@@ -14328,6 +14328,15 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                 ),
             });
         }
+        AsyncHostValue::ResourceState(state) => {
+            return Err(ExecutionError::Host {
+                instruction: 0,
+                message: format!(
+                    "Node resource state for {} must be consumed by its typed adapter",
+                    state.info.id.get()
+                ),
+            });
+        }
     })
 }
 

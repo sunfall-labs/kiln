@@ -125,6 +125,8 @@ pub enum AsyncHostOp {
         resource: ResourceId,
         referenced: bool,
     },
+    /// Inspect lifecycle state without exposing the host's resource-table representation.
+    ResourceState { resource: ResourceId },
     /// Bind a TCP listener. Port zero asks the host to select an ephemeral port.
     TcpListen { host: String, port: u16 },
     /// Wait for one connection and return its stream resource.
@@ -158,6 +160,20 @@ pub struct ResourceInfo {
     pub port: Option<u16>,
 }
 
+/// Observable lifecycle state of a realm-owned resource.
+///
+/// Node adapters use this snapshot to implement `ref`, `unref`, `hasRef`, half-close, and
+/// diagnostics without learning which executor or operating-system handle backs the resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceState {
+    pub info: ResourceInfo,
+    pub referenced: bool,
+    /// True once the read half has observed EOF. Listeners do not have a read half.
+    pub read_closed: bool,
+    /// True once the write half has been shut down. Listeners do not have a write half.
+    pub write_closed: bool,
+}
+
 /// Result of accepting a TCP connection, including both local and peer endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedTcpStream {
@@ -188,6 +204,8 @@ pub enum AsyncHostValue {
     FileStat(FileStat),
     /// A persistent resource inserted into the realm's resource table.
     Resource(ResourceInfo),
+    /// Current lifecycle state of a persistent resource.
+    ResourceState(ResourceState),
     /// A newly accepted TCP stream.
     AcceptedTcpStream(AcceptedTcpStream),
 }
