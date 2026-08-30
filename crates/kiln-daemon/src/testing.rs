@@ -29,6 +29,7 @@ pub fn run(
     let run_mode = match mode {
         TestMode::Parse => RunMode::Parse,
         TestMode::Interpreter => RunMode::Interpreter,
+        TestMode::Node => RunMode::Node,
     };
 
     let mut tests_by_id = BTreeMap::new();
@@ -153,7 +154,7 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
                     .iter()
                     .any(|feature| feature == "kiln-smoke"),
         );
-    if matches!(mode, TestMode::Interpreter) {
+    if matches!(mode, TestMode::Interpreter | TestMode::Node) {
         for compiler_crate in ["kiln-ir", "kiln-interpreter", "kiln-runtime"] {
             metadata.add_compiler_crate(compiler_crate);
         }

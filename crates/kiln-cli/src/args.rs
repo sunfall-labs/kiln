@@ -67,6 +67,7 @@ pub enum Command {
         path: PathBuf,
         changed: bool,
         parse_only: bool,
+        node: bool,
         output: Option<PathBuf>,
     },
     Project,
@@ -107,6 +108,7 @@ where
     let mut interval: Option<Duration> = None;
     let mut changed = false;
     let mut parse_only = false;
+    let mut node = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
     let mut test_output: Option<PathBuf> = None;
@@ -147,6 +149,10 @@ where
             "--parse-only" => {
                 reject_inline_value(&flag, &inline)?;
                 parse_only = true;
+            }
+            "--node" => {
+                reject_inline_value(&flag, &inline)?;
+                node = true;
             }
             "--native" => {
                 reject_inline_value(&flag, &inline)?;
@@ -206,6 +212,14 @@ where
             "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
         ));
     }
+    if node && name != "test" {
+        return Err(Error::usage("--node only applies to `kiln test`"));
+    }
+    if node && parse_only {
+        return Err(Error::usage(
+            "--node cannot be combined with `kiln test --parse-only`",
+        ));
+    }
     if profile.is_some() && name != "build" && !native {
         return Err(Error::usage(
             "--profile only applies to native `kiln run` or `kiln build`",
@@ -231,6 +245,7 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             changed,
             parse_only,
+            node,
             output: test_output,
         },
         "project" => {
@@ -398,6 +413,7 @@ options:
                        it is not a polling cadence.
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
+    --node             with `test`, install the Tokio-owned Node compatibility Adapter
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
@@ -531,6 +547,7 @@ mod tests {
                 path: PathBuf::from("test262"),
                 changed: true,
                 parse_only: true,
+                node: false,
                 output: None,
             }
         );
@@ -540,11 +557,17 @@ mod tests {
                 path: PathBuf::from("test262"),
                 changed: false,
                 parse_only: false,
+                node: false,
                 output: Some(PathBuf::from("target/results.json")),
             }
         );
         assert!(usage_error(&["check", "a.js", "--changed"]).contains("only applies"));
         assert!(usage_error(&["run", "a.js", "--parse-only"]).contains("only applies"));
+        assert!(usage_error(&["run", "a.js", "--node"]).contains("only applies"));
+        assert!(
+            usage_error(&["test", "test262", "--node", "--parse-only"])
+                .contains("cannot be combined")
+        );
         assert!(usage_error(&["check", "a.js", "--out", "result.json"]).contains("only applies"));
         assert!(
             usage_error(&["test", "test262", "--changed", "--out", "result.json"])

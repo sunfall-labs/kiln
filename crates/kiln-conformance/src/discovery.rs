@@ -113,9 +113,17 @@ impl ConformanceTest {
             Declaration::ExpectedStdout {
                 expected,
                 unavailable_reason: None,
-            } => vec![program::run_against_expected_stdout(
-                &self.path, expected, mode,
-            )],
+            } => {
+                if matches!(mode, RunMode::Node) {
+                    vec![program::run_node_against_expected_stdout(
+                        &self.path, expected, mode,
+                    )]
+                } else {
+                    vec![program::run_against_expected_stdout(
+                        &self.path, expected, mode,
+                    )]
+                }
+            }
         }
     }
 
