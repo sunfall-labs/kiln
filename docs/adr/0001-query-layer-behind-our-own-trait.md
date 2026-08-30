@@ -46,6 +46,9 @@ value changed; recomputing a query to an equal value does not invalidate its dep
 reads at a fixed revision are pure. `Stats` exists so those guarantees are observable from
 outside the engine. Recompute counts are a first-class output, not debug logging, because a
 claim about invalidation that nothing asserts on is a claim that quietly stops being true.
+The input side also exposes each active source's last mutation revision. That is ordering
+metadata, not another invalidation mechanism: daemon adapters use it to collapse relative and
+canonical spellings without letting an older disk or editor value win by accident.
 
 `kiln-db` has no parser, procedural-macro, or generic query-framework dependency, and v0 ships
 `MemoEngine`, a hand-written implementation. Its dependencies are the compiler-owned HIR/IR

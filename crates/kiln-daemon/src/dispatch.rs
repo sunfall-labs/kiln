@@ -11,7 +11,7 @@ use kiln_proto::{
     ScalarValueSummary, Stats,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// What the connection loop should do once the response has been written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,13 +272,9 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     path: String,
     project_root: String,
 ) -> Result<PreparedRun, String> {
-    let file = ensure_source(engine, &path)?;
-    let entry = std::fs::canonicalize(&path).or_else(|_| {
-        let candidate = Path::new(&project_root).join(&path);
-        std::fs::canonicalize(candidate)
-    });
-    let prepared = if let Ok(entry) = entry {
-        alias_source(engine, file, &entry);
+    let entry = resolve_source_path(&path, &project_root);
+    let prepared = if let Some(entry) = entry {
+        let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
             graph: build_graph(engine, &entry, &project_root),
             path,
@@ -286,6 +282,7 @@ pub(crate) fn prepare_run<E: QueryEngine>(
             revision: engine.revision().0,
         }
     } else {
+        let file = ensure_source(engine, &path)?;
         PreparedRun::Program {
             program: engine.ir(file),
             path,
@@ -524,13 +521,11 @@ pub(crate) fn native_graph<E: QueryEngine>(
     path: &str,
     project_root: &str,
 ) -> Result<Option<ModuleGraph>, String> {
-    let file = ensure_source(engine, path)?;
-    let entry = std::fs::canonicalize(path)
-        .or_else(|_| std::fs::canonicalize(Path::new(project_root).join(path)));
-    let Ok(entry) = entry else {
+    let Some(entry) = resolve_source_path(path, project_root) else {
+        ensure_source(engine, path)?;
         return Ok(None);
     };
-    alias_source(engine, file, &entry);
+    ensure_canonical_source(engine, path, &entry, project_root)?;
     build_graph(engine, &entry, project_root)
         .map(Some)
         .map_err(|error| error.to_string())
@@ -986,20 +981,91 @@ fn ensure_source<E: QueryEngine>(engine: &mut E, path: &str) -> Result<kiln_db::
     Ok(file)
 }
 
-/// Keep a canonical graph key synchronized with a legacy relative-path overlay. Editors may
-/// resend the relative spelling after every edit, so only filling a missing canonical slot would
-/// leave the graph executing stale bytecode.
-fn alias_source<E: QueryEngine>(engine: &mut E, file: kiln_db::FileId, entry: &Path) {
+fn resolve_source_path(path: &str, project_root: &str) -> Option<PathBuf> {
+    let path = Path::new(path);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(project_root).join(path)
+    };
+    std::fs::canonicalize(&candidate)
+        .or_else(|_| std::fs::canonicalize(lexically_normalize(&candidate)))
+        .ok()
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+/// Collapse every currently resolvable active spelling of one graph entry onto its canonical
+/// [`FileId`]. Protocol clients should send canonical paths; this compatibility path preserves
+/// relative editor overlays, including lexical `.`/`..` spellings whose intermediate component
+/// no longer exists.
+///
+/// The newest active source wins, so a relative unsaved overlay remains authoritative even when
+/// the subsequent run request uses the canonical spelling. Preparation holds the engine lock,
+/// making the source snapshot and the following graph build one atomic observation. Activating
+/// the canonical input and removing an alias remain two visible source mutations by the
+/// [`QueryEngine`] revision contract; subsequent preparations are mutation-free.
+fn ensure_canonical_source<E: QueryEngine>(
+    engine: &mut E,
+    requested_path: &str,
+    entry: &Path,
+    project_root: &str,
+) -> Result<kiln_db::FileId, String> {
     let Some(entry_string) = entry.to_str() else {
-        return;
+        return ensure_source(engine, requested_path);
     };
     let canonical_file = engine.intern(entry_string);
-    let Some(source) = engine.source(file).map(str::to_owned) else {
-        return;
-    };
+
+    let mut aliases = Vec::new();
+    for (file, path) in engine.source_files() {
+        if resolve_source_path(&path, project_root).as_deref() != Some(entry) {
+            continue;
+        }
+        let source = engine
+            .source(file)
+            .ok_or_else(|| format!("query engine listed {path} as active without source bytes"))?;
+        let revision = engine.source_revision(file).ok_or_else(|| {
+            format!("query engine listed {path} as active without a source revision")
+        })?;
+        aliases.push((revision, path, file, source.to_owned()));
+    }
+
+    if aliases.is_empty() {
+        return ensure_source(engine, entry_string);
+    }
+    aliases.sort_by(
+        |(left_revision, left_path, ..), (right_revision, right_path, ..)| {
+            left_revision
+                .cmp(right_revision)
+                .then_with(|| left_path.cmp(right_path))
+        },
+    );
+    let source = aliases.last().expect("aliases is not empty").3.clone();
     if engine.source(canonical_file) != Some(source.as_str()) {
         engine.set_source(canonical_file, source);
     }
+    for (_, _, file, _) in aliases {
+        if file != canonical_file {
+            engine.remove_source(file);
+        }
+    }
+    Ok(canonical_file)
 }
 
 fn stats<E: QueryEngine>(engine: &E) -> Stats {

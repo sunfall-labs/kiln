@@ -86,6 +86,7 @@ struct FileState {
     source: String,
     source_set: bool,
     source_changed_at: Epoch,
+    source_revision: Revision,
     parse: Option<Memo<Parsed>>,
     ir: Option<Memo<Compiled>>,
     module_ir: Option<Memo<CompiledModule>>,
@@ -523,6 +524,7 @@ impl QueryEngine for MemoEngine {
             source: String::new(),
             source_set: false,
             source_changed_at: self.epoch,
+            source_revision: self.revision,
             parse: None,
             ir: None,
             module_ir: None,
@@ -546,10 +548,12 @@ impl QueryEngine for MemoEngine {
         self.epoch = self.epoch.next();
         self.revision = Revision(self.revision.0 + 1);
         let epoch = self.epoch;
+        let revision = self.revision;
         let state = self.file_mut(file);
         state.source = text;
         state.source_set = true;
         state.source_changed_at = epoch;
+        state.source_revision = revision;
         // Activating an interned-but-unset path changes the file set just as removal does. Body
         // edits leave this input alone so they can still cut off at the interface query.
         if !was_set {
@@ -588,6 +592,12 @@ impl QueryEngine for MemoEngine {
         self.files
             .get(file.0 as usize)
             .and_then(|state| state.source_set.then_some(state.source.as_str()))
+    }
+
+    fn source_revision(&self, file: FileId) -> Option<Revision> {
+        self.files
+            .get(file.0 as usize)
+            .and_then(|state| state.source_set.then_some(state.source_revision))
     }
 
     fn parse(&mut self, file: FileId) -> Parsed {
@@ -940,8 +950,7 @@ mod tests {
         );
     }
 
-    /// A write is a write even when the bytes are the same, so parse reruns - and then the
-    /// equal-value check stops it there, one level earlier than a body edit does.
+    /// Re-sending identical bytes is not an edit and must not move any input clock.
     #[test]
     fn rewriting_identical_text_is_not_an_edit() {
         let (mut db, files) = cold_project();
@@ -962,6 +971,24 @@ mod tests {
             },
             "re-ingesting unchanged text must cost nothing, not one parse per file"
         );
+    }
+
+    #[test]
+    fn source_revision_tracks_each_files_last_real_change() {
+        let (mut db, files) = engine(&[("a.js", A_V1), ("b.js", B_V1)]);
+        assert_eq!(db.source_revision(files[0]), Some(Revision(1)));
+        assert_eq!(db.source_revision(files[1]), Some(Revision(2)));
+
+        db.set_source(files[0], A_BODY_EDIT.to_owned());
+        assert_eq!(db.source_revision(files[0]), Some(Revision(3)));
+        assert_eq!(db.source_revision(files[1]), Some(Revision(2)));
+        db.set_source(files[0], A_BODY_EDIT.to_owned());
+        assert_eq!(db.source_revision(files[0]), Some(Revision(3)));
+
+        db.remove_source(files[0]);
+        assert_eq!(db.source_revision(files[0]), None);
+        db.set_source(files[0], A_V1.to_owned());
+        assert_eq!(db.source_revision(files[0]), Some(Revision(5)));
     }
 
     /// The interface is a *set* of names, so reordering declarations must not disturb the

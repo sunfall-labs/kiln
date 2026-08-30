@@ -196,6 +196,11 @@ pub trait QueryEngine {
     fn remove_source(&mut self, file: FileId);
 
     fn source(&self, file: FileId) -> Option<&str>;
+    /// Revision at which this active source's bytes last changed.
+    ///
+    /// Returns `None` for an unknown or inactive file. This lets source adapters reconcile two
+    /// logical spellings without guessing which editor upload is newer.
+    fn source_revision(&self, file: FileId) -> Option<Revision>;
 
     fn parse(&mut self, file: FileId) -> Parsed;
     fn ir(&mut self, file: FileId) -> Compiled;

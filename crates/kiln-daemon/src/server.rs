@@ -525,14 +525,9 @@ fn handle_native_build_at_revision<E: QueryEngine>(
 ) -> (Response, Next) {
     let (revision, prepared) = {
         let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-        let revision = guard.revision().0;
-        if revision != expected_revision {
-            return (
-                Response::Stale {
-                    current_revision: revision,
-                },
-                Next::Continue,
-            );
+        let current_revision = guard.revision().0;
+        if current_revision != expected_revision {
+            return (Response::Stale { current_revision }, Next::Continue);
         }
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
             let graph = native_graph(&mut *guard, &path, &project_root)?;
@@ -547,7 +542,10 @@ fn handle_native_build_at_revision<E: QueryEngine>(
                 return (internal_error(&*payload), Next::Continue);
             }
         };
-        (revision, prepared)
+        // Canonicalizing a legacy relative overlay is itself an input reconciliation and may
+        // advance the revision while the lock is held. Pin publication to the reconciled
+        // snapshot, while the check above still rejects a genuinely stale caller revision.
+        (guard.revision().0, prepared)
     };
 
     let final_output = native_build_output(&project_root, &path, output);
