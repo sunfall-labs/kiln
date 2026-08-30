@@ -3,13 +3,13 @@
 //! Deliberately free of I/O on the socket and of any knowledge of threads. Query preparation runs
 //! while the engine lock is held; owned interpreter/native work can then execute without it.
 
-use crate::graph_cache::{GraphCache, GraphCacheKey};
+use crate::graph_cache::{GraphCache, GraphCacheKey, GraphSourceRevision};
 use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, SourceView, Stats,
+    RunSummary, ScalarValueSummary, Stats,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -612,16 +612,33 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             kind: error.kind(),
         }
     })?;
-    let key = GraphCacheKey::new(
-        canonical_root,
-        canonical_entry.clone(),
-        engine.revision().0,
-        resolutions,
-    );
-    let mut build = || build_graph(engine, resolutions, &canonical_entry, project_root);
+    let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions);
     match cache {
-        Some(cache) => cache.get_or_build(key, build),
-        None => build().map(Arc::new),
+        Some(cache) => {
+            if let Some(graph) = cache.get(&key, |file| engine.source_revision(file)) {
+                return Ok(graph);
+            }
+            let graph = build_graph(engine, resolutions, &canonical_entry, project_root)?;
+            let sources = graph
+                .module_order()
+                .iter()
+                .map(|path| {
+                    let path = path.to_str()?;
+                    let file = engine.intern(path);
+                    Some(GraphSourceRevision {
+                        file,
+                        revision: engine.source_revision(file)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            Ok(match sources {
+                Some(sources) => cache.insert(key, sources, graph),
+                // Graph construction rejects non-UTF-8 and unsynchronized modules, so this is a
+                // defensive fallback for an external QueryEngine that violates that contract.
+                None => Arc::new(graph),
+            })
+        }
+        None => build_graph(engine, resolutions, &canonical_entry, project_root).map(Arc::new),
     }
 }
 
