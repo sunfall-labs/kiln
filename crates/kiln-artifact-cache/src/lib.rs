@@ -7,8 +7,9 @@
 //! with a different artifact.
 //!
 //! Writes use a uniquely named temporary file in the destination directory, flush it to disk, and
-//! atomically rename it into place.  The API intentionally offers removal for one exact key only;
-//! cache maintenance must not accidentally turn into a broad recursive deletion.
+//! atomically install it without replacing an existing content address.  The API intentionally
+//! offers removal for one exact key only; cache maintenance must not accidentally turn into a broad
+//! recursive deletion.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -472,6 +473,9 @@ impl ArtifactCache {
     }
 
     /// Atomically store an artifact in the first writable layer.
+    ///
+    /// An existing record for the same key is accepted only when its payload is identical. A
+    /// different payload is reported as corruption instead of replacing the record.
     pub fn put(&self, key: &ArtifactKey, payload: &[u8]) -> Result<StoreResult, CacheError> {
         let layer_index = self
             .layers
@@ -482,6 +486,8 @@ impl ArtifactCache {
     }
 
     /// Atomically store an artifact in an explicitly selected writable layer.
+    ///
+    /// An existing record for the same key is accepted only when its payload is identical.
     pub fn put_in_layer(
         &self,
         layer_index: usize,
@@ -596,19 +602,23 @@ fn write_atomic(
     file.sync_all()
         .map_err(|source| io_error("sync temporary cache artifact", temp_path, source))?;
     drop(file);
-    match fs::rename(temp_path, destination) {
-        Ok(()) => Ok(()),
-        Err(rename_error) => {
-            // Windows does not replace an existing destination with `rename`. A concurrent
-            // writer of the same content-addressed key may already have won; accept that record
-            // only after fully validating that it is byte-identical to our intended payload.
+    // Both names are in one directory, so a hard link installs the complete, synced inode
+    // atomically and, unlike POSIX rename, never replaces an existing content address. Replacing
+    // would hide nondeterministic artifact production: one key is a claim that exactly one payload
+    // can exist.
+    match fs::hard_link(temp_path, destination) {
+        Ok(()) => fs::remove_file(temp_path)
+            .map_err(|source| io_error("remove installed cache temporary", temp_path, source)),
+        Err(install_error) if install_error.kind() == io::ErrorKind::AlreadyExists => {
+            // A concurrent writer of the same key may already have won. Accept that record only
+            // after fully validating that it is byte-identical to our intended payload.
             let existing = match fs::read(destination) {
                 Ok(existing) => existing,
                 Err(_) => {
                     return Err(io_error(
                         "install cache artifact",
                         destination,
-                        rename_error,
+                        install_error,
                     ));
                 }
             };
@@ -623,6 +633,7 @@ fn write_atomic(
             fs::remove_file(temp_path)
                 .map_err(|source| io_error("remove redundant cache artifact", temp_path, source))
         }
+        Err(source) => Err(io_error("install cache artifact", destination, source)),
     }
 }
 
@@ -895,6 +906,14 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
+    fn temporary_file_count(parent: &Path) -> usize {
+        fs::read_dir(parent)
+            .expect("artifact parent exists")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count()
+    }
+
     #[test]
     fn sha256_matches_reference_vectors() {
         assert_eq!(
@@ -956,18 +975,17 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_puts_leave_one_complete_record_and_no_temporary_files() {
-        let root = scratch("atomic");
+    fn concurrent_identical_puts_share_one_record_and_clean_temporary_files() {
+        let root = scratch("atomic-identical");
         let cache = ArtifactCache::new(&root);
-        let artifact_key = key("atomic");
+        let artifact_key = key("atomic-identical");
         let mut handles = Vec::new();
-        for index in 0..8 {
+        for _ in 0..8 {
             let cache = cache.clone();
             let artifact_key = artifact_key.clone();
             handles.push(std::thread::spawn(move || {
-                let payload = format!("payload-{index}");
                 cache
-                    .put(&artifact_key, payload.as_bytes())
+                    .put(&artifact_key, b"identical payload")
                     .expect("atomic store succeeds");
             }));
         }
@@ -978,17 +996,80 @@ mod tests {
         let Lookup::Hit(hit) = cache.lookup(&artifact_key).expect("lookup succeeds") else {
             panic!("concurrent stores should leave a hit");
         };
-        assert!(hit.bytes.starts_with(b"payload-"));
+        assert_eq!(hit.bytes, b"identical payload");
         let parent = hit.path.parent().expect("artifact path has parent");
-        let temporary_files = fs::read_dir(parent)
-            .expect("artifact parent exists")
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
-            .count();
         assert_eq!(
-            temporary_files, 0,
+            temporary_file_count(parent),
+            0,
             "atomic store should clean temporary files"
         );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn concurrent_conflicting_puts_choose_one_payload_without_replacement() {
+        let root = scratch("atomic-conflict");
+        let cache = ArtifactCache::new(&root);
+        let artifact_key = key("atomic-conflict");
+        let mut handles = Vec::new();
+        for index in 0..8 {
+            let cache = cache.clone();
+            let artifact_key = artifact_key.clone();
+            handles.push(std::thread::spawn(move || {
+                let payload = format!("payload-{index}").into_bytes();
+                let result = cache.put(&artifact_key, &payload);
+                (payload, result)
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut conflicts = 0;
+        for handle in handles {
+            let (payload, result) = handle.join().expect("store thread succeeds");
+            match result {
+                Ok(_) => winners.push(payload),
+                Err(CacheError::Corrupt { reason, .. }) if reason.contains("different payload") => {
+                    conflicts += 1;
+                }
+                Err(error) => panic!("unexpected concurrent store error: {error}"),
+            }
+        }
+        assert_eq!(winners.len(), 1, "exactly one payload installs the key");
+        assert_eq!(conflicts, 7, "every other payload reports a conflict");
+
+        let Lookup::Hit(hit) = cache.lookup(&artifact_key).expect("lookup succeeds") else {
+            panic!("winning concurrent store should leave a hit");
+        };
+        assert_eq!(hit.bytes, winners.pop().expect("one winner"));
+        let parent = hit.path.parent().expect("artifact path has parent");
+        assert_eq!(
+            temporary_file_count(parent),
+            0,
+            "conflicting stores should clean temporary files"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn an_existing_key_cannot_be_replaced_by_a_different_payload() {
+        let root = scratch("conflicting-payload");
+        let cache = ArtifactCache::new(&root);
+        let artifact_key = key("conflicting-payload");
+        cache
+            .put(&artifact_key, b"first payload")
+            .expect("first store succeeds");
+
+        let error = cache
+            .put(&artifact_key, b"different payload")
+            .expect_err("one content-addressed key must have one payload");
+        assert!(
+            matches!(error, CacheError::Corrupt { ref reason, .. } if reason.contains("different payload")),
+            "{error}"
+        );
+        let Lookup::Hit(hit) = cache.lookup(&artifact_key).expect("lookup succeeds") else {
+            panic!("original artifact remains present");
+        };
+        assert_eq!(hit.bytes, b"first payload");
         cleanup(&root);
     }
 
@@ -1014,6 +1095,7 @@ mod tests {
             .expect_err("key mismatch must be visible");
         assert!(matches!(error, CacheError::Corrupt { .. }));
 
+        assert!(cache.remove(&original).expect("remove corrupt record"));
         cache.put(&original, b"payload").expect("restore record");
         let path = cache.path_for(&original).expect("path succeeds");
         let mut record = fs::read(&path).expect("read record");
