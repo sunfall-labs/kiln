@@ -1,0 +1,29 @@
+---
+source: crates/kiln-backend-c/tests/emitted_c.rs
+expression: body(&unit)
+---
+/* Program hash: 18bec6f28e9d4862; bytecode version: 1. */
+int kiln_module_18bec6f28e9d48628d81470bbec5b849(kiln_host *host, kiln_value *result) {
+    size_t sp = 0;
+    kiln_value stack[2];
+    kiln_value locals[1];
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+kiln_label_0:;
+    stack[sp++] = kiln_c99_null();
+kiln_label_1:;
+    stack[sp] = stack[sp - 1]; ++sp;
+kiln_label_2:;
+    if (kiln_c99_truthy(stack[--sp])) goto kiln_label_5;
+kiln_label_3:;
+    stack[sp] = stack[sp - 1]; ++sp;
+kiln_label_4:;
+    { kiln_value value = stack[--sp]; if (value.tag != KILN_VALUE_UNDEFINED && value.tag != KILN_VALUE_NULL) goto kiln_label_5; }
+kiln_label_5:;
+    --sp;
+kiln_label_6:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
+kiln_label_7:;
+    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
+    *result = kiln_c99_undefined();
+    return KILN_C99_CONTROL_ERROR;
+}

@@ -1,0 +1,40 @@
+---
+source: crates/kiln-backend-c/tests/emitted_c.rs
+expression: report
+---
+empty program
+  invalid bytecode program: program has no instructions
+unsupported bytecode version
+  unsupported native emission: bytecode version 2 (backend supports 1)
+constant index out of bounds
+  invalid bytecode program: instruction 0: constant 0 is out of bounds
+local slot out of bounds
+  invalid bytecode program: instruction 0: local 4 is out of bounds
+jump target out of bounds
+  invalid bytecode program: instruction 0: jump target 9 is out of bounds
+property name is not a string
+  invalid bytecode program: instruction 1: property name constant 0 is not a string
+stack underflow
+  invalid bytecode program: instruction 0: stack needs 2 value(s), but has 0
+inconsistent stack height at a merge
+  invalid bytecode program: instruction 3: inconsistent stack height: reached with 1 and 0
+control falls off the end
+  invalid bytecode program: instruction 0: control falls off the end of the program
+builtin the backend does not implement
+  unsupported native emission: the `WeakMap` builtin in the native backend
+function captures a slot its creator lacks
+  invalid bytecode program: instruction 0: function 0 captures ParentLocal(7), which this frame does not have
+function with more parameters than slots
+  invalid bytecode program: function takes 3 parameter(s) but has only 1 local slot(s)
+logical path ""
+  invalid bytecode program: invalid logical module path: path is empty
+logical path "/abs/main.js"
+  invalid bytecode program: invalid logical module path: path is not project-relative slash-separated input
+logical path "C:/checkout/main.js"
+  invalid bytecode program: invalid logical module path: path is not project-relative slash-separated input
+logical path "src\\app\\main.js"
+  invalid bytecode program: invalid logical module path: path is not project-relative slash-separated input
+logical path "src/../main.js"
+  invalid bytecode program: invalid logical module path: path contains an empty, `.` or `..` component
+logical path "src//main.js"
+  invalid bytecode program: invalid logical module path: path contains an empty, `.` or `..` component

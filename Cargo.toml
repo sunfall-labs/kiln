@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "bench"]
+# `fuzz` carries its own lockfile and its own dependency tree (libfuzzer, bolero). Excluding it
+# keeps that tree off every ordinary `cargo check --workspace`, which is the compiler developer's
+# loop (docs/design.md §12, ADR 0004).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -64,6 +68,10 @@ notify-debouncer-full = { version = "0.7", default-features = false }
 # FxHashMap, for process-local tables where SipHash's DoS resistance and cross-release
 # stability are both irrelevant. Never for a hash that is persisted or sent on the wire.
 rustc-hash = { version = "2.1", default-features = false, features = ["std"] }
+# Snapshot assertions for the C backend's emitted translation units, a dev-dependency only.
+# `colors` (its default) is dropped: the diff is read in CI logs and in a plain terminal, and
+# pulling `console` into the workspace graph to tint it is not worth the edge.
+insta = { version = "1.48", default-features = false }
 
 [profile.release]
 debug = 1

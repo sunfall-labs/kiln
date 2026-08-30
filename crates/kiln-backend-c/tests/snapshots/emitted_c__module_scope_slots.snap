@@ -1,0 +1,59 @@
+---
+source: crates/kiln-backend-c/tests/emitted_c.rs
+expression: body(&unit)
+---
+/* Program hash: 437d55201f794aaa; bytecode version: 1. */
+static kiln_value kiln_module_437d55201f794aaa2a581ac367c292a1_globals[2];
+static int kiln_module_437d55201f794aaa2a581ac367c292a1_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);
+static const char kiln_module_437d55201f794aaa2a581ac367c292a1_name_0[] = "read";
+/* function 0: read */
+static int kiln_module_437d55201f794aaa2a581ac367c292a1_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {
+    size_t sp = 0;
+    size_t slot;
+    kiln_value stack[1];
+    kiln_value locals[1];
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    (void)thrown; (void)frame;
+    (void)host; (void)upvalues; (void)depth; (void)receiver;
+    for (slot = 0; slot < (size_t)1; ++slot) locals[slot] = kiln_c99_undefined();
+    (void)args; (void)argc;
+kiln_label_0:;
+    stack[sp++] = kiln_module_437d55201f794aaa2a581ac367c292a1_globals[0];
+kiln_label_1:;
+    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
+    *result = kiln_c99_undefined();
+    return KILN_C99_CONTROL_ERROR;
+}
+int kiln_module_437d55201f794aaa2a581ac367c292a1(kiln_host *host, kiln_value *result) {
+    size_t sp = 0;
+    int depth = 0;
+    kiln_value thrown_value = kiln_c99_undefined();
+    kiln_value *thrown = &thrown_value;
+    kiln_value stack[1];
+    kiln_value *locals = kiln_module_437d55201f794aaa2a581ac367c292a1_globals;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    locals[0] = kiln_c99_undefined();
+    locals[1] = kiln_c99_undefined();
+kiln_label_0:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4613937818241073152));
+kiln_label_1:;
+    kiln_module_437d55201f794aaa2a581ac367c292a1_globals[0] = stack[--sp];
+kiln_label_2:;
+    {
+        int status;
+        status = kiln_c99_make_closure(&stack[sp], kiln_module_437d55201f794aaa2a581ac367c292a1_fn_0, kiln_module_437d55201f794aaa2a581ac367c292a1_name_0, 4, UINT32_C(0), 0, 0, 0, 0, UINT32_C(1), UINT32_C(1), UINT32_C(2), NULL, 0);
+        if (status != KILN_C99_OK) return status;
+        ++sp;
+    }
+kiln_label_3:;
+    locals[1] = stack[--sp];
+kiln_label_4:;
+    stack[sp++] = locals[1];
+kiln_label_5:;
+    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
+    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }
+    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
+    return KILN_C99_OK;
+    *result = kiln_c99_undefined();
+    return KILN_C99_CONTROL_ERROR;
+}
