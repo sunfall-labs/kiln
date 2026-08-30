@@ -19,6 +19,7 @@ kiln-interpreter = { path = "crates/kiln-interpreter" }
 kiln-module-graph = { path = "crates/kiln-module-graph" }
 kiln-module-resolver = { path = "crates/kiln-module-resolver" }
 kiln-native = { path = "crates/kiln-native" }
+kiln-native-number = { path = "crates/kiln-native-number" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-runtime = { path = "crates/kiln-runtime" }
 kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
@@ -35,6 +36,7 @@ oxc_span = { version = "0.147.0", default-features = false }
 oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+dragonbox_ecma = { version = "0.1.12", default-features = false, features = ["ecma"] }
 
 # Declared centrally so no crate-level change has to edit this file. NOTE: these were dropped
 # once by a concurrent rewrite of this section; if a build fails with "was not found in

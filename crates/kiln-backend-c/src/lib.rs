@@ -9,9 +9,12 @@ use std::{collections::HashSet, fmt::Write as _};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
+use kiln_native_number::NUMBER_FORMAT_VERSION;
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
+
+const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 
 /// A generated C99 translation unit and its deterministic exported entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,11 +174,11 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* C ABI version 1; HostOps ABI version 1. */
+#define KILN_NUMBER_FORMAT_VERSION 1
 #define KILN_C99_OK 0
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_CONTROL_ERROR (-2)
@@ -207,6 +210,10 @@ typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
 } kiln_host;
+
+/* Internal link-time runtime contract. The final executable/shared library supplies this symbol
+ * from kiln-native-number; it is not part of the public embedding ABI. */
+int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -257,31 +264,6 @@ static double kiln_c99_strtod_c(const char *text, char **end) {
     return value;
 #else
     return strtod(text, end);
-#endif
-}
-
-static int kiln_c99_snprintf_number_c(char *buffer, size_t capacity, double number) {
-#if defined(__APPLE__) || defined(__linux__)
-    locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
-    locale_t previous;
-    int length;
-    if (c_locale == (locale_t)0) {
-        return -1;
-    }
-    previous = uselocale(c_locale);
-    if (previous == (locale_t)0) {
-        freelocale(c_locale);
-        return -1;
-    }
-    length = snprintf(buffer, capacity, "%.17g", number);
-    if (uselocale(previous) == (locale_t)0) {
-        /* The C locale may still be installed on this thread, so do not free it here. */
-        return -1;
-    }
-    freelocale(c_locale);
-    return length;
-#else
-    return snprintf(buffer, capacity, "%.17g", number);
 #endif
 }
 
@@ -377,7 +359,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_NUMBER: {
         char buffer[64];
         double number = kiln_c99_as_number(value);
-        int len = kiln_c99_snprintf_number_c(buffer, sizeof(buffer), number);
+        int len = kiln_number_to_js_string(number, buffer, sizeof(buffer));
         if (len < 0 || (size_t)len >= sizeof(buffer)) {
             return kiln_c99_undefined();
         }
@@ -1430,6 +1412,15 @@ mod tests {
         }
     }
 
+    fn linked_source(module_source: &str, wrapper: &str) -> String {
+        format!(
+            "{}\n{}\n{}",
+            kiln_native_number::source(),
+            module_source,
+            wrapper
+        )
+    }
+
     #[test]
     fn emits_stable_source_and_path_independent_symbol() {
         let program = program(
@@ -1646,7 +1637,7 @@ mod tests {
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(format!("{}{}", generated.source, wrapper).as_bytes())
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
             .expect("source is accepted by cc stdin");
         let output_path =
             std::env::temp_dir().join(format!("kiln-backend-c-module-{}", std::process::id()));
@@ -1729,8 +1720,13 @@ mod tests {
         );
         let generated = emit(&program).expect("locale probe emits");
         assert!(generated.source.contains("strtod_l(text, end, c_locale)"));
-        assert!(generated.source.contains("previous = uselocale(c_locale)"));
-        assert!(generated.source.contains("uselocale(previous)"));
+        assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
+        assert!(
+            generated
+                .source
+                .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
+        );
+        assert!(!generated.source.contains("snprintf("));
         assert!(!generated.source.contains("setlocale("));
         let wrapper = format!(
             r#"
@@ -1801,7 +1797,7 @@ int main(void) {{
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(format!("{}{}", generated.source, wrapper).as_bytes())
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
             .expect("locale source is accepted by cc stdin");
         let compile = child.wait_with_output().expect("cc exits");
         assert!(
@@ -1963,7 +1959,7 @@ int main(void) {{
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(format!("{}{}", generated.source, wrapper).as_bytes())
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
             .expect("source is accepted by cc stdin");
         let compile = child.wait_with_output().expect("cc exits");
         assert!(

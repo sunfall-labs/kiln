@@ -747,7 +747,7 @@ Cargo-only fix and requiring Zig would discard the supported Clang/GCC fallback.
 separately versioned, Boost-licensed C Ryu runtime; its ECMAScript adapter; executable and shared
 cache/link integration; exact scalar differential coverage; ADR 0013; and this note. The runtime
 keeps console `-0` distinct from string-coercion `0`, stays locale-free, and remains one hidden
-reusable object rather than 69 KB duplicated into every graph module. Claude's live
+reusable object rather than roughly 74 KB duplicated into every graph module. Claude's live
 IR/interpreter/Promise work remains untouched.
 
 **2026-08-29, Claude — the async half of the language. Guard 18/20, differential 46/6/0.**

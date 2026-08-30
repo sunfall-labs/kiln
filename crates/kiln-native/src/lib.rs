@@ -22,6 +22,7 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
+use kiln_native_number::{NUMBER_FORMAT_VERSION, source as native_number_source};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
     RuntimeSourceError, launcher_source, runtime_source,
@@ -604,6 +605,10 @@ impl NativeBuilder {
         );
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
+        let number_source = native_number_source();
+        let number_source_key = native_number_source_key(&target);
+        let (number_source, number_source_digest, number_generated_c_hit) =
+            self.cached_payload(&number_source_key, number_source.as_bytes())?;
         let object_options = Digest::hash(
             format!(
                 "shared-library\0pic\0c11\0{}\0{}",
@@ -622,23 +627,52 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
+        let number_object_key = native_number_object_key(
+            &compiler,
+            &target,
+            profile,
+            identity.kind,
+            number_source_digest,
+        );
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
+        let number_compile_options = native_number_compile_options(profile);
         let compile_started = Instant::now();
-        let (object, object_digest, object_hit, object_elapsed) = self.object(
-            &object_key,
-            &module_source,
-            &paths.module_c,
-            &paths.module_o,
-            &compile_options,
-        )?;
-        let compile_elapsed = if object_hit {
+        let (object_result, number_result) = std::thread::scope(|scope| {
+            let object = scope.spawn(|| {
+                self.object(
+                    &object_key,
+                    &module_source,
+                    &paths.module_c,
+                    &paths.module_o,
+                    &compile_options,
+                )
+            });
+            let number = scope.spawn(|| {
+                self.object(
+                    &number_object_key,
+                    &number_source,
+                    &paths.number_c,
+                    &paths.number_o,
+                    &number_compile_options,
+                )
+            });
+            (
+                join_worker(object.join(), "shared module compile"),
+                join_worker(number.join(), "number formatter compile"),
+            )
+        });
+        let (object, object_digest, object_hit, object_elapsed) = object_result??;
+        let (number_object, number_digest, number_hit, number_elapsed) = number_result??;
+        let compile_elapsed = if object_hit && number_hit {
             Duration::ZERO
         } else {
-            object_elapsed.max(compile_started.elapsed())
+            object_elapsed
+                .max(number_elapsed)
+                .max(compile_started.elapsed())
         };
 
         let link_options_digest = Digest::hash(
@@ -659,12 +693,13 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [object_digest],
+            [object_digest, number_digest],
         );
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
                 materialize(&paths.module_o, &object, false)?;
+                materialize(&paths.number_o, &number_object, false)?;
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
                     ..LinkOptions::default()
@@ -673,11 +708,10 @@ impl NativeBuilder {
                     link_options.libraries.push("m".to_owned());
                 }
                 configure_shared_library_link(&mut link_options, &options.output);
-                let report = self.toolchain.link_shared_library(
-                    std::slice::from_ref(&paths.module_o),
-                    &paths.library,
-                    &link_options,
-                )?;
+                let objects = [paths.module_o.clone(), paths.number_o.clone()];
+                let report =
+                    self.toolchain
+                        .link_shared_library(&objects, &paths.library, &link_options)?;
                 let bytes = read(&paths.library, "read linked shared library")?;
                 self.cache.put(&library_key, &bytes)?;
                 (bytes, false, report.elapsed)
@@ -695,13 +729,13 @@ impl NativeBuilder {
             module_symbol: module.symbol,
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
-                generated_c: generated_c_hit,
-                object: object_hit,
+                generated_c: generated_c_hit && number_generated_c_hit,
+                object: object_hit && number_hit,
                 library: library_hit,
             },
             sizes: NativeSharedLibrarySizes {
-                generated_c: module_source.len() as u64,
-                object: object.len() as u64,
+                generated_c: module_source.len() as u64 + number_source.len() as u64,
+                object: object.len() as u64 + number_object.len() as u64,
                 library: library.len() as u64,
             },
             timings: BuildTimings {
@@ -790,6 +824,10 @@ impl NativeBuilder {
             );
             module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
         }
+        let number_source = native_number_source();
+        let number_source_key = native_number_source_key(&target);
+        let (number_source, number_source_digest, number_generated_c_hit) =
+            self.cached_payload(&number_source_key, number_source.as_bytes())?;
         let wrapper_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}"),
@@ -836,6 +874,14 @@ impl NativeBuilder {
             position_independent: true,
             ..CompileOptions::default()
         };
+        let number_compile_options = native_number_compile_options(profile);
+        let number_object_key = native_number_object_key(
+            &compiler,
+            &target,
+            profile,
+            identity.kind,
+            number_source_digest,
+        );
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, _) in modules.iter().enumerate() {
             let (_, source_digest, _) = &module_sources[index];
@@ -861,7 +907,7 @@ impl NativeBuilder {
             [wrapper_source_digest, topology],
         );
         let compile_started = Instant::now();
-        let (module_objects, wrapper_object) = std::thread::scope(|scope| {
+        let (module_objects, wrapper_object, number_object) = std::thread::scope(|scope| {
             let worker_count = std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
                 .min(modules.len().max(1));
@@ -880,6 +926,10 @@ impl NativeBuilder {
             let module_compile_options_ref = &module_compile_options;
             let wrapper_compile_options_ref = &wrapper_compile_options;
             let wrapper_bytes_ref = &wrapper_bytes;
+            let number_compile_options_ref = &number_compile_options;
+            let number_source_ref = &number_source;
+            let number_c_ref = &paths.number_c;
+            let number_o_ref = &paths.number_o;
             let module_handles = index_chunks
                 .into_iter()
                 .map(|chunk| {
@@ -914,6 +964,15 @@ impl NativeBuilder {
                     wrapper_compile_options_ref,
                 )
             });
+            let number = scope.spawn(move || {
+                self.object(
+                    &number_object_key,
+                    number_source_ref,
+                    number_c_ref,
+                    number_o_ref,
+                    number_compile_options_ref,
+                )
+            });
             let modules = (|| {
                 let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
                 for handle in module_handles {
@@ -932,13 +991,16 @@ impl NativeBuilder {
             })();
             let module_objects = modules?;
             let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
-            Ok::<_, NativeError>((module_objects, wrapper_object))
+            let number_object = join_worker(number.join(), "number formatter compile")??;
+            Ok::<_, NativeError>((module_objects, wrapper_object, number_object))
         })?;
-        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 {
-            Duration::ZERO
-        } else {
-            compile_started.elapsed()
-        };
+        let compile_elapsed =
+            if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 && number_object.2
+            {
+                Duration::ZERO
+            } else {
+                compile_started.elapsed()
+            };
 
         let link_options_digest = Digest::hash(
             format!(
@@ -954,6 +1016,7 @@ impl NativeBuilder {
             .iter()
             .map(|(_, digest, _)| *digest)
             .collect::<Vec<_>>();
+        link_inputs.push(number_object.1);
         link_inputs.push(wrapper_object.1);
         let library_key = key(
             ArtifactKind::LinkedArtifact,
@@ -968,12 +1031,14 @@ impl NativeBuilder {
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 1);
+                let mut objects = Vec::with_capacity(modules.len() + 2);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
                 }
+                materialize(&paths.number_o, &number_object.0, false)?;
                 materialize(&paths.wrapper_o, &wrapper_object.0, false)?;
+                objects.push(paths.number_o.clone());
                 objects.push(paths.wrapper_o.clone());
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
@@ -1001,8 +1066,11 @@ impl NativeBuilder {
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
+                    && number_generated_c_hit
                     && wrapper_generated_c_hit,
-                object: module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2,
+                object: module_objects.iter().all(|(_, _, hit)| *hit)
+                    && number_object.2
+                    && wrapper_object.2,
                 library: library_hit,
             },
             sizes: NativeSharedLibrarySizes {
@@ -1010,11 +1078,13 @@ impl NativeBuilder {
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum::<u64>()
+                    + number_source.len() as u64
                     + wrapper_bytes.len() as u64,
                 object: module_objects
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum::<u64>()
+                    + number_object.0.len() as u64
                     + wrapper_object.0.len() as u64,
                 library: library.len() as u64,
             },
@@ -1482,6 +1552,61 @@ fn module_abi_identity() -> String {
 
 fn runtime_abi_identity() -> String {
     format!("{};runtime-{NATIVE_RUNTIME_VERSION}", module_abi_identity())
+}
+
+fn native_number_abi_identity() -> String {
+    format!("kiln-native-number-{NUMBER_FORMAT_VERSION}")
+}
+
+fn native_number_source_key(target: &str) -> ArtifactKey {
+    let abi = native_number_abi_identity();
+    key(
+        ArtifactKind::GeneratedC,
+        format!("kiln-native-number-{NUMBER_FORMAT_VERSION}"),
+        Backend::Custom("native-number-source".to_owned()),
+        &abi,
+        target,
+        CacheProfile::Debug,
+        Digest::hash(b"deterministic-c11-native-number"),
+        [Digest::hash(native_number_source().as_bytes())],
+    )
+}
+
+fn native_number_object_key(
+    compiler: &str,
+    target: &str,
+    profile: NativeProfile,
+    compiler_kind: impl fmt::Display,
+    source_digest: Digest,
+) -> ArtifactKey {
+    let abi = native_number_abi_identity();
+    key(
+        ArtifactKind::NativeObject,
+        compiler,
+        Backend::Custom("native-number".to_owned()),
+        &abi,
+        target,
+        profile.cache(),
+        Digest::hash(
+            format!(
+                "shared-number\0pic\0c11\0visibility-hidden\0{}\0{}",
+                compiler_kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        ),
+        [source_digest],
+    )
+}
+
+fn native_number_compile_options(profile: NativeProfile) -> CompileOptions {
+    let mut options = CompileOptions {
+        profile: profile.toolchain(),
+        position_independent: true,
+        ..CompileOptions::default()
+    };
+    options.extra_args.push("-fvisibility=hidden".into());
+    options
 }
 
 fn target_identity(identity: &ToolIdentity) -> String {
@@ -2141,12 +2266,16 @@ struct BuildPaths {
 struct SharedLibraryPaths {
     module_c: PathBuf,
     module_o: PathBuf,
+    number_c: PathBuf,
+    number_o: PathBuf,
     library: PathBuf,
 }
 
 struct SharedGraphLibraryPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
+    number_c: PathBuf,
+    number_o: PathBuf,
     wrapper_c: PathBuf,
     wrapper_o: PathBuf,
     library: PathBuf,
@@ -2209,6 +2338,8 @@ impl SharedLibraryPaths {
         Self {
             module_c: root.join("module.c"),
             module_o: root.join("module.o"),
+            number_c: root.join("number.c"),
+            number_o: root.join("number.o"),
             library: root.join(shared_library_name()),
         }
     }
@@ -2225,6 +2356,8 @@ impl SharedGraphLibraryPaths {
         Self {
             module_c,
             module_o,
+            number_c: root.join("number.c"),
+            number_o: root.join("number.o"),
             wrapper_c: root.join("wrapper.c"),
             wrapper_o: root.join("wrapper.o"),
             library: root.join(shared_library_name()),
@@ -2442,7 +2575,25 @@ mod tests {
                     "so"
                 });
         let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain.clone());
-        let program = stdout_program("embedded\0tail");
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("embedded\0tail=".to_owned()),
+                Constant::Number(0.1_f64.to_bits()),
+            ],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::Binary(kiln_ir::BinaryOp::Add),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
         let colliding_output = root.path.join("embedded-header.H");
         let collision = builder
             .build_shared_library(
@@ -2609,7 +2760,7 @@ int main(void) {
             "embedding host failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, b"embedded\0tail\n");
+        assert_eq!(output.stdout, b"embedded\0tail=0.1\n");
         assert!(output.stderr.is_empty());
     }
 
@@ -3421,7 +3572,9 @@ int main(int argc, char **argv) {{
     if (first == NULL) return 2;
     second = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
     if (second == NULL) return 3;
-    if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL)
+    if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL ||
+        dlsym(first, "kiln_number_to_js_string") != NULL ||
+        dlsym(second, "kiln_number_to_js_string") != NULL)
         return 4;
     first_entry = load_entry(first, "{first_symbol}");
     second_entry = load_entry(second, "{second_symbol}");
@@ -3547,6 +3700,92 @@ int main(int argc, char **argv) {{
                         Instruction::HostCall {
                             op: HostOp::WriteStdout,
                             argc: 1,
+                        },
+                        Instruction::Return,
+                    ],
+                    local_count: 0,
+                    functions: Vec::new(),
+                },
+            ),
+            (
+                "number-formatting",
+                Program {
+                    version: BYTECODE_VERSION,
+                    constants: vec![
+                        Constant::String("v=".to_owned()),
+                        Constant::Number(0.1_f64.to_bits()),
+                        Constant::Number((1.0_f64 / 3.0).to_bits()),
+                        Constant::Number((-0.0_f64).to_bits()),
+                        Constant::Number(1e20_f64.to_bits()),
+                        Constant::Number(1e21_f64.to_bits()),
+                        Constant::Number(1e-6_f64.to_bits()),
+                        Constant::Number(1e-7_f64.to_bits()),
+                        Constant::Number(1.2345e-7_f64.to_bits()),
+                        Constant::Number(f64::from_bits(1).to_bits()),
+                        Constant::Number(f64::NAN.to_bits()),
+                        Constant::Number(f64::INFINITY.to_bits()),
+                        Constant::Number(f64::NEG_INFINITY.to_bits()),
+                    ],
+                    code: vec![
+                        // Keep the direct-number call separate from the concatenated call: the
+                        // former exercises console formatting (including negative zero), while
+                        // the latter exercises Number-to-string conversion in the C backend.
+                        Instruction::Const(1),
+                        Instruction::Const(2),
+                        Instruction::Const(3),
+                        Instruction::Const(4),
+                        Instruction::Const(5),
+                        Instruction::Const(6),
+                        Instruction::Const(7),
+                        Instruction::Const(8),
+                        Instruction::Const(9),
+                        Instruction::Const(10),
+                        Instruction::Const(11),
+                        Instruction::Const(12),
+                        Instruction::HostCall {
+                            op: HostOp::WriteStdout,
+                            argc: 12,
+                        },
+                        Instruction::Pop,
+                        Instruction::Const(0),
+                        Instruction::Const(1),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(2),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(3),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(4),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(5),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(6),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(7),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(8),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(9),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(10),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(11),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::Const(0),
+                        Instruction::Const(12),
+                        Instruction::Binary(kiln_ir::BinaryOp::Add),
+                        Instruction::HostCall {
+                            op: HostOp::WriteStdout,
+                            argc: 12,
                         },
                         Instruction::Return,
                     ],

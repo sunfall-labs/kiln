@@ -8,8 +8,13 @@
 
 use std::sync::OnceLock;
 
+use kiln_native_number::{NUMBER_FORMAT_VERSION, source as native_number_source};
+
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 1;
+pub const NATIVE_RUNTIME_VERSION: u32 = 2;
+
+// Changing the formatter changes the runtime source and requires an intentional identity bump.
+const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 
 /// C entry-point ABI version declared by [`embedding_header`].
 pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
@@ -87,10 +92,14 @@ pub fn runtime_source() -> &'static str {
     RUNTIME_SOURCE
         .get_or_init(|| {
             let mut source = String::with_capacity(
-                RUNTIME_PREFIX.len() + embedding_header().len() + RUNTIME_BODY.len(),
+                RUNTIME_PREFIX.len()
+                    + embedding_header().len()
+                    + native_number_source().len()
+                    + RUNTIME_BODY.len(),
             );
             source.push_str(RUNTIME_PREFIX);
             source.push_str(embedding_header());
+            source.push_str(native_number_source());
             source.push_str(RUNTIME_BODY);
             source
         })
@@ -152,7 +161,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 1
+#define KILN_NATIVE_RUNTIME_VERSION 2
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -286,8 +295,7 @@ static int kiln_cli_write_value(kiln_value value) {
                 ? kiln_cli_write_bytes("-0", 2)
                 : kiln_cli_write_bytes("0", 1);
         }
-        /* %.17g is intentionally the temporary native scalar formatting contract. */
-        length = snprintf(buffer, sizeof(buffer), "%.17g", number);
+        length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
         if (length < 0 || (size_t)length >= sizeof(buffer)) {
             return KILN_C99_HOST_ERROR;
         }
@@ -382,7 +390,22 @@ mod tests {
     fn runtime_is_deterministic_and_does_not_name_a_module() {
         assert_eq!(runtime_source(), runtime_source());
         assert!(runtime_source().contains("int kiln_cli_host_call"));
+        assert!(runtime_source().contains("kiln_number_to_js_string"));
+        assert!(
+            runtime_source().contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
+        );
+        assert!(runtime_source().contains(native_number_source()));
+        assert!(!runtime_source().contains("%.17g"));
         assert!(!runtime_source().contains("kiln_module_"));
+    }
+
+    #[test]
+    fn runtime_identity_includes_native_number_formatter_version() {
+        assert_eq!(NUMBER_FORMAT_VERSION, 1);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 2);
+        assert!(embedding_header().contains(&format!(
+            "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
+        )));
     }
 
     #[test]
@@ -594,7 +617,15 @@ int main(void) {
         std::fs::write(&header, embedding_header()).expect("write header");
         std::fs::write(&stub, STUB_SOURCE).expect("write stub");
         let compile = Command::new(cc)
-            .args(["-std=c11", "-pedantic", "-Wall", "-Wextra", "-Werror"])
+            .args([
+                "-std=c11",
+                "-pedantic",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                // Ryu's portable amalgamation retains target-specific static inline helpers.
+                "-Wno-unused-function",
+            ])
             .args([runtime.as_os_str(), launcher.as_os_str(), stub.as_os_str()])
             .arg("-o")
             .arg(&executable)
@@ -611,7 +642,7 @@ int main(void) {
         assert!(run.status.success());
         assert_eq!(
             String::from_utf8(run.stdout).expect("UTF-8 stdout"),
-            "undefined null true false -0 NaN Infinity -Infinity hello\n"
+            "undefined null true false -0 NaN Infinity -Infinity 100000000000000000000 1e+21 1e-7 hello\n"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -654,11 +685,14 @@ int main(void) {
 
 int kiln_module_test(kiln_host *host, kiln_value *result) {
     static const char text[] = "hello";
-    kiln_value arguments[9];
-    double zero = -0.0;
+    kiln_value arguments[12];
+    double negative_zero = -0.0;
     double nan = 0.0 / 0.0;
     double infinity = 1.0 / 0.0;
     double negative_infinity = -1.0 / 0.0;
+    double decimal_threshold = 1e20;
+    double exponent_threshold = 1e21;
+    double tiny = 1e-7;
     memset(arguments, 0, sizeof(arguments));
     arguments[0].tag = KILN_VALUE_UNDEFINED;
     arguments[1].tag = KILN_VALUE_NULL;
@@ -666,17 +700,23 @@ int kiln_module_test(kiln_host *host, kiln_value *result) {
     arguments[2].bits = 1;
     arguments[3].tag = KILN_VALUE_BOOLEAN;
     arguments[4].tag = KILN_VALUE_NUMBER;
-    memcpy(&arguments[4].bits, &zero, sizeof(zero));
+    memcpy(&arguments[4].bits, &negative_zero, sizeof(negative_zero));
     arguments[5].tag = KILN_VALUE_NUMBER;
     memcpy(&arguments[5].bits, &nan, sizeof(nan));
     arguments[6].tag = KILN_VALUE_NUMBER;
     memcpy(&arguments[6].bits, &infinity, sizeof(infinity));
     arguments[7].tag = KILN_VALUE_NUMBER;
     memcpy(&arguments[7].bits, &negative_infinity, sizeof(negative_infinity));
-    arguments[8].tag = KILN_VALUE_STRING;
-    arguments[8].ptr = text;
-    arguments[8].len = sizeof(text) - 1;
-    return host->call(host->context, 1, 9, arguments, result);
+    arguments[8].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[8].bits, &decimal_threshold, sizeof(decimal_threshold));
+    arguments[9].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[9].bits, &exponent_threshold, sizeof(exponent_threshold));
+    arguments[10].tag = KILN_VALUE_NUMBER;
+    memcpy(&arguments[10].bits, &tiny, sizeof(tiny));
+    arguments[11].tag = KILN_VALUE_STRING;
+    arguments[11].ptr = text;
+    arguments[11].len = sizeof(text) - 1;
+    return host->call(host->context, 1, 12, arguments, result);
 }
 "#;
 }

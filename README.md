@@ -30,6 +30,7 @@ What exists today:
 | `crates/kiln-module-resolver` / `crates/kiln-module-graph` | Project-confined exact-path resolution, deterministic graph construction, link validation, and acyclic execution order. |
 | `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
+| `crates/kiln-native-number` | Versioned, locale-free Ryu runtime for ECMAScript-exact native number formatting. |
 | `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
 | `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
 | `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
@@ -47,9 +48,9 @@ conditionals, `console.log`, side-effect imports, and named/default scalar impor
 acyclic graphs. Unsupported valid syntax is rejected with a source range during IR compilation.
 Live bindings and cycles, namespace imports, re-exports, functions, objects, exceptions, async
 behavior, built-ins, the full Test262 harness, realms, and broad language coverage remain to be
-implemented. The initial native runtime's number-to-string edge cases and process-lifetime string
-allocations are also explicit equivalence/ownership work; they are not treated as conformance
-successes.
+implemented. Native number-to-string conversion now uses shortest ECMAScript spelling;
+process-lifetime string allocations remain explicit ownership work rather than conformance
+success.
 
 The useful thing that does work is the invalidation behavior. Editing a file's contents
 reparses that file; if the edit does not change what the module exports, the project-level query
