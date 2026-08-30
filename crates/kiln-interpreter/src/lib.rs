@@ -268,6 +268,7 @@ pub enum Native {
     /// §5). A marker is enough for what programs actually do with them, which is reach for one
     /// method and `call` it onto a receiver of their own.
     PrototypeOf(PrototypeTable),
+    StringRaw,
     FunctionCall,
     FunctionApply,
     FunctionBind,
@@ -436,6 +437,7 @@ impl Native {
                 Some(Value::Native(Self::ObjectFromEntries))
             }
             (Self::ArrayConstructor, "of") => Some(Value::Native(Self::ArrayOf)),
+            (Self::StringConstructor, "raw") => Some(Value::Native(Self::StringRaw)),
             (Self::StringConstructor, "fromCharCode") => {
                 Some(Value::Native(Self::StringFromCharCode))
             }
@@ -1201,6 +1203,13 @@ impl From<Constant> for Value {
             Constant::Boolean(value) => Self::Boolean(value),
             Constant::Number(bits) => Self::from_number_bits(bits),
             Constant::String(value) => Self::String(value),
+            // Parsed once per push rather than held pre-parsed on the program, which would put
+            // a heap value in a table the cache hashes by bytes.
+            Constant::BigInt(digits) => {
+                Self::BigInt(Rc::new(digits.parse().expect(
+                    "a BigInt constant holds digits the frontend already parsed",
+                )))
+            }
         }
     }
 }
@@ -3258,6 +3267,48 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     data.set(&key.property_key(), value);
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
+            }
+            // `String.raw` is the one built-in written to be used as a template tag: it reads
+            // the `raw` half of the template object, which is the text before escapes were
+            // interpreted.
+            Native::StringRaw => {
+                let strings = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let raw = self.read_property(&strings, "raw", instruction)?;
+                // An array's elements are not named properties, so an index read has to go
+                // through the array itself; anything else is treated as array-like.
+                let segments = match &raw {
+                    Value::Array(items) => dense_items(&items.borrow()),
+                    other => {
+                        let length = self
+                            .read_property(other, "length", instruction)?
+                            .as_number();
+                        let length = if length.is_finite() {
+                            length.max(0.0) as usize
+                        } else {
+                            0
+                        };
+                        let mut segments = Vec::with_capacity(length);
+                        for index in 0..length {
+                            segments.push(self.read_property(
+                                other,
+                                &index.to_string(),
+                                instruction,
+                            )?);
+                        }
+                        segments
+                    }
+                };
+                let mut out = String::new();
+                for (index, segment) in segments.iter().enumerate() {
+                    out.push_str(&segment.to_display_string());
+                    // One substitution between each pair of segments, and none after the last.
+                    if index + 1 < segments.len()
+                        && let Some(value) = arguments.get(index + 1)
+                    {
+                        out.push_str(&value.to_display_string());
+                    }
+                }
+                Ok(Value::String(out))
             }
             Native::FunctionCall | Native::FunctionApply => {
                 let this_value = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -5722,6 +5773,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 }
 
 fn unary(operator: UnaryOp, value: Value) -> Value {
+    // A BigInt stays one under negation and bitwise-not; `+x` is the exception, and is a
+    // TypeError in the specification precisely so that `+` cannot silently narrow one.
+    if let Value::BigInt(value) = &value {
+        match operator {
+            UnaryOp::Negate => return Value::BigInt(Rc::new(-value.as_ref().clone())),
+            UnaryOp::BitwiseNot => return Value::BigInt(Rc::new(!value.as_ref().clone())),
+            _ => {}
+        }
+    }
     match operator {
         UnaryOp::Plus => Value::Number(value.as_number()),
         UnaryOp::Negate => Value::Number(-value.as_number()),
@@ -6424,6 +6484,7 @@ fn call_native(
         | Native::ObjectValues
         | Native::ObjectDefineProperty
         | Native::ObjectDefineProperties
+        | Native::StringRaw
         | Native::FunctionCall
         | Native::FunctionApply
         | Native::FunctionBind
@@ -8896,6 +8957,21 @@ fn loose_equal(left: &Value, right: &Value) -> bool {
         (other, Value::Boolean(value)) => loose_equal(other, &Value::Number(f64::from(*value))),
         // A symbol converts to nothing, so it is equal only to itself and that case is above.
         (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
+        // `==` is the one place the two numeric types meet: it compares mathematical values, so
+        // `1n == 1` is true where `1n === 1` is false. A non-integral number can never equal a
+        // BigInt, and neither can a string that is not an integer.
+        (Value::BigInt(big), Value::Number(number))
+        | (Value::Number(number), Value::BigInt(big)) => {
+            number.is_finite()
+                && number.fract() == 0.0
+                && num_bigint::BigInt::parse_bytes(format!("{number:.0}").as_bytes(), 10)
+                    .is_some_and(|other| other == **big)
+        }
+        (Value::BigInt(big), Value::String(text)) | (Value::String(text), Value::BigInt(big)) => {
+            text.trim()
+                .parse::<num_bigint::BigInt>()
+                .is_ok_and(|other| other == **big)
+        }
         (Value::Number(number), Value::String(text))
         | (Value::String(text), Value::Number(number)) => {
             Value::String(text.clone()).as_number() == *number
@@ -10535,7 +10611,12 @@ mod tests {
             }
         }
         let mut host = Recorder { lines: Vec::new() };
-        execute(Rc::new(program.clone()), &mut host, ExecutionLimits::default()).expect("runs");
+        execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .expect("runs");
         host.lines.join(",")
     }
 

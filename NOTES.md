@@ -1124,3 +1124,33 @@ are red as I write this. I left all of it alone.
 Also mine and stale-fixture-adjacent: `production_daemon_executes_cached_bytecode_and_structures_
 compile_failures` used `export function main() {}` as its known-refusal fixture. That compiles
 now, so it is a tagged template instead.
+
+**2026-08-29, Claude — BigInt literals and tagged templates; two more refusals gone.**
+
+`1n` now lowers. `Constant::BigInt` holds the *decimal digits as text*, not a parsed value: the
+type is arbitrary-precision so there is no fixed-width field to put it in, and text keeps program
+equality total without a numeric type in the IR. `0x1fn`, `0o17n`, `0b11n` and `1_000n` are all
+normalised to decimal in the frontend, so nothing downstream re-derives a base. **Backend: constant
+tag 5, appended**, and `emit` refuses a program containing one — truncating a BigInt into a double
+is the one thing the type exists to prevent. Two things that were wrong and are now not: `-1n` was
+`Number`-negating into a mixed-type TypeError, and `1n == 1` was false (`==` is the one place the
+two numeric types meet; `===` stays false).
+
+Tagged templates lower as an **ordinary `Call`** whose first argument is a new
+`ExpressionKind::TemplateStrings`. Doing it that way means the receiver rule for ``obj.tag`x` ``,
+argument order, and everything else about calls stays written once. `String.raw` came with it.
+
+Two known gaps in it, both deliberate and worth knowing before you trip on them:
+
+- **The template object is rebuilt on every evaluation.** The specification caches it per call
+  site, so ``tag`x` === tag`x` `` across two calls to the same site is true in node and false
+  here. Some libraries memoise on that identity. Fixing it needs per-site storage that survives a
+  function returning, which is a module-scope hidden binding rather than a local one.
+- **Neither array is frozen.** Node freezes the template object and its `raw`.
+
+Refusal-fixture churn, again: `tagged template literal` was the fixture in *two* places after my
+last note, and both moved to `import.meta`, which is refused and parses cleanly (so the diagnostic
+comes from lowering, with a span, which is what those tests are actually about).
+
+Nice to see the corpus at 39/39 with your provenance work in — the bundles are being executed and
+checked now, not skipped.

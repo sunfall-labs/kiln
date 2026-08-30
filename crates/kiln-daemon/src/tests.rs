@@ -1172,10 +1172,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     client
         .request(&Request::SetSource {
             path: path.clone(),
-            // Any construct lowering still refuses works here; a tagged template is one that
+            // Any construct lowering still refuses works here; `import.meta` is one that
             // parses cleanly, so the diagnostic comes from lowering with a span attached rather
             // than from the parser.
-            text: "const value = tag`x`;\n".into(),
+            text: "const value = import.meta.url;\n".into(),
         })
         .expect("set unsupported source");
     let Response::Ran(failed) = client
@@ -1194,7 +1194,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.start.is_some()
-                && diagnostic.message.contains("tagged template literal")),
+                && diagnostic.message.contains("import.meta")),
         "{:?}",
         failed.diagnostics
     );

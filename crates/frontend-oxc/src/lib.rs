@@ -174,6 +174,25 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
     }
 }
 
+/// A BigInt literal's value as plain decimal digits.
+///
+/// `0x1fn`, `1_000n` and `10n` all reach the IR as decimal text, so the interpreter and the
+/// program-hash never have to re-derive a base. Returns `None` for anything that does not parse,
+/// which leaves the refusal in place rather than inventing a number.
+fn bigint_digits(raw: &str) -> Option<String> {
+    let text = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
+    let (digits, radix) = match text.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("0x") => (&text[2..], 16),
+        Some("0o") => (&text[2..], 8),
+        Some("0b") => (&text[2..], 2),
+        _ => (text.as_str(), 10),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    Some(num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)?.to_string())
+}
+
 /// The local name a module record gives an anonymous `export default` declaration.
 ///
 /// It carries characters an identifier cannot, so nothing a program writes can collide with it.
@@ -770,8 +789,43 @@ impl Lowerer {
             },
             // A tag receives the raw strings alongside the cooked ones and decides what to build
             // from them, which is a different node and not a template that happens to be called.
-            Expression::TaggedTemplateExpression(_) => {
-                return self.unsupported_expression("tagged template literal", expression_span);
+            Expression::TaggedTemplateExpression(tagged) => {
+                // A tagged template *is* a call: the tag is evaluated as a callee, with the
+                // receiver an `obj.tag` form implies, and the arguments are the template object
+                // followed by each substitution. Building it as a `Call` here means none of that
+                // has to be reimplemented in lowering.
+                let mut arguments = Vec::with_capacity(tagged.quasi.expressions.len() + 1);
+                arguments.push(ListElement::Item(HirExpression {
+                    kind: HirExpressionKind::TemplateStrings {
+                        cooked: tagged
+                            .quasi
+                            .quasis
+                            .iter()
+                            .map(|quasi| {
+                                quasi
+                                    .value
+                                    .cooked
+                                    .as_ref()
+                                    .map(std::string::ToString::to_string)
+                            })
+                            .collect(),
+                        raw: tagged
+                            .quasi
+                            .quasis
+                            .iter()
+                            .map(|quasi| quasi.value.raw.to_string())
+                            .collect(),
+                    },
+                    span: expression_span,
+                }));
+                for substitution in &tagged.quasi.expressions {
+                    arguments.push(ListElement::Item(self.expression(substitution)));
+                }
+                HirExpressionKind::Call {
+                    callee: Box::new(self.expression(&tagged.tag)),
+                    arguments,
+                    optional: false,
+                }
             }
             Expression::AwaitExpression(expression) => {
                 HirExpressionKind::Await(Box::new(self.expression(&expression.argument)))
@@ -834,8 +888,18 @@ impl Lowerer {
                     .map(|operand| self.expression(operand))
                     .collect(),
             },
-            Expression::BigIntLiteral(_) => {
-                return self.unsupported_expression("bigint literal", expression_span);
+            Expression::BigIntLiteral(literal) => {
+                // The raw text carries the base prefix and the `n` suffix, and may carry numeric
+                // separators. Normalising to plain decimal digits here means nothing downstream
+                // has to know how the source spelled it.
+                match literal
+                    .raw
+                    .as_ref()
+                    .and_then(|raw| bigint_digits(raw.as_str()))
+                {
+                    Some(digits) => HirExpressionKind::Literal(HirLiteral::BigInt(digits)),
+                    None => return self.unsupported_expression("bigint literal", expression_span),
+                }
             }
             Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
                 // The source text, not a compiled program: `re.source` hands the pattern back to
@@ -1711,7 +1775,7 @@ mod tests {
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
-            ("const value = tag`x`;", "tagged template literal"),
+            ("const value = import.meta;", "import.meta expression"),
             (
                 "const value = import(\"./x.js\");",
                 "dynamic import expression",

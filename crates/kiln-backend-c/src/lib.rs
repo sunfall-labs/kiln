@@ -619,6 +619,17 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
             message: "program has no instructions".into(),
         });
     }
+    // The native value representation has no arbitrary-precision integer, and truncating one
+    // into a double is the one thing a BigInt exists to prevent.
+    if program
+        .constants
+        .iter()
+        .any(|constant| matches!(constant, Constant::BigInt(_)))
+    {
+        return Err(EmitError::Unsupported {
+            feature: "BigInt literals in the native backend".to_string(),
+        });
+    }
     for (index, instruction) in program.code.iter().enumerate() {
         validate_supported_instruction(instruction)?;
         match instruction {
@@ -1082,6 +1093,9 @@ fn emit_instruction(
             Constant::String(value) => {
                 writeln!(output, "    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant}, {});", value.len()).unwrap()
             }
+            Constant::BigInt(_) => {
+                unreachable!("verification rejects a BigInt constant before emission")
+            }
         },
         Instruction::LoadLocal(local) => writeln!(output, "    stack[sp++] = locals[{local}];").unwrap(),
         Instruction::StoreLocal(local) => writeln!(output, "    locals[{local}] = stack[--sp];").unwrap(),
@@ -1235,6 +1249,14 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, value.len() as u64);
                 for value in value.bytes() {
                     byte(&mut hash, value);
+                }
+            }
+            // Tag 5, appended: a persisted key never renumbers.
+            Constant::BigInt(digits) => {
+                byte(&mut hash, 5);
+                word(&mut hash, digits.len() as u64);
+                for digit in digits.bytes() {
+                    byte(&mut hash, digit);
                 }
             }
         }

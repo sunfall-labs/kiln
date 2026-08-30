@@ -553,6 +553,20 @@ pub enum ExpressionKind {
         quasis: Vec<String>,
         expressions: Vec<Expression>,
     },
+    /// The template object a tagged template hands its tag as the first argument.
+    ///
+    /// An array of the cooked strings carrying a `raw` array of the same length. `cooked` is
+    /// `None` for a segment whose escape is not valid -- a syntax error in an untagged template
+    /// and `undefined` here, because the whole point of a tag is to see text the language would
+    /// have rejected.
+    ///
+    /// Separate from [`ExpressionKind::Call`] rather than folded into it, so a tagged template
+    /// is an ordinary call whose first argument happens to be built this way, and every rule
+    /// about how a callee is evaluated stays written once.
+    TemplateStrings {
+        cooked: Vec<Option<String>>,
+        raw: Vec<String>,
+    },
     /// `await value`, which suspends until the value settles.
     ///
     /// Not lowered to `yield` in the frontend even though that is what it becomes: `await` and
@@ -616,6 +630,11 @@ pub enum Literal {
     Boolean(bool),
     Number(u64),
     String(String),
+    /// `123n`, kept as the digits the source wrote.
+    ///
+    /// Not parsed here: a BigInt is arbitrary-precision, so there is no fixed-width field to put
+    /// it in, and the decimal text is both exact and the shortest thing that is.
+    BigInt(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
