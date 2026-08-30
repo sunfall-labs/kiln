@@ -859,6 +859,13 @@ struct Compiler {
     /// `finally` blocks enclosing the code being compiled, innermost last. A non-local exit has
     /// to run each of them on its way out, so it needs their bodies rather than their addresses.
     finalizers: Vec<Cleanup>,
+    /// The class whose private names are in scope, innermost last.
+    ///
+    /// A stack because a class can be declared inside another's method, and each has its own
+    /// private names.
+    private_scopes: Vec<u32>,
+    /// The next unused class identity for `private_scopes`.
+    next_private_scope: u32,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
     /// A label written immediately before the statement now being compiled, waiting for that
@@ -908,6 +915,8 @@ impl Compiler {
             captured: names_captured_by_nested_functions(&module.body),
             loops: Vec::new(),
             hidden_bindings: 0,
+            private_scopes: Vec::new(),
+            next_private_scope: 0,
             finalizers: Vec::new(),
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
@@ -996,6 +1005,16 @@ impl Compiler {
             self.code.push(Instruction::NewCell(slot));
             self.code.push(Instruction::StoreCell(slot));
         }
+    }
+
+    /// The reserved key a private field is stored under, in the class being compiled.
+    ///
+    /// Scoped to the class rather than to the name: `class A { #v } class B { #v }` declare two
+    /// different fields, and `a.#v` on a `B` is a TypeError rather than a read of B's. One key
+    /// per name would have made those the same slot, which is a wrong answer -- and the one
+    /// `#v in b` would have reported as a match.
+    fn private_key(&self, name: &str) -> String {
+        private_key(self.private_scopes.last().copied().unwrap_or(0), name)
     }
 
     fn resolve_module_local(&self, name: &str) -> Option<u32> {
@@ -2491,6 +2510,13 @@ impl Compiler {
                     argc: arguments.len() as u16,
                 });
             }
+            // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
+            // program can write, so asking whether the key is there *is* the brand check.
+            ExpressionKind::PrivateIn { name, object } => {
+                self.push_constant(Constant::String(self.private_key(name)));
+                self.expression(object);
+                self.code.push(Instruction::Binary(BinaryOp::In));
+            }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the parent's prototype, not on `this`.
                 self.load_super();
@@ -2676,7 +2702,7 @@ impl Compiler {
             }
             ExpressionKind::PrivateMember { object, name } => {
                 self.expression(object);
-                let name = self.constant_index(Constant::String(private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
             ExpressionKind::Delete { object, property } => {
@@ -3005,6 +3031,10 @@ impl Compiler {
             self.error(Some(class.span), "a class declaration requires a name");
             return;
         };
+        // Everything compiled from here to the end of this function -- fields, methods, and any
+        // class nested inside one -- names its private fields in this class's own scope.
+        self.private_scopes.push(self.next_private_scope);
+        self.next_private_scope += 1;
         // A derived class evaluates its parent once, into a binding its members capture.
         //
         // The name carries a character an identifier cannot contain, so it can never collide
@@ -3119,7 +3149,7 @@ impl Compiler {
             self.load_local_or_cell(local);
             match &field.key {
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(private_key(name)));
+                    let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
                     self.code.push(Instruction::SetProperty(name));
                 }
@@ -3156,7 +3186,7 @@ impl Compiler {
                     continue;
                 }
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(private_key(name)));
+                    let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::SetProperty(name));
                 }
@@ -3191,6 +3221,9 @@ impl Compiler {
         if class.superclass.is_some() {
             self.super_bindings.pop();
         }
+        self.private_scopes
+            .pop()
+            .expect("this class pushed its own private scope");
     }
 
     /// Push the parent constructor of the class currently being compiled.
@@ -3402,7 +3435,7 @@ impl Compiler {
             self.code.push(Instruction::LoadThis);
             match &field.key {
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(private_key(name)));
+                    let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
                     self.code.push(Instruction::SetProperty(name));
                 }
@@ -3782,7 +3815,7 @@ impl Compiler {
         name: &str,
         value: &Expression,
     ) {
-        let name = self.constant_index(Constant::String(private_key(name)));
+        let name = self.constant_index(Constant::String(self.private_key(name)));
         self.expression(object);
         if operator != AssignmentOperator::Assign {
             self.code.push(Instruction::Dup);
@@ -3983,7 +4016,7 @@ impl Compiler {
             // instruction, because the shape `Apply` already takes -- receiver, callee,
             // arguments -- is exactly this one.
             ExpressionKind::PrivateMember { object, name } => {
-                let name = self.constant_index(Constant::String(private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
                 self.code.push(Instruction::Dup);
                 self.code.push(Instruction::GetPrivate(name));
@@ -4454,8 +4487,8 @@ fn short_circuit_jump(operator: AssignmentOperator) -> Instruction {
 ///
 /// Reserved rather than ordinary, so nothing that enumerates own string properties can see it and
 /// no computed access can spell it -- `obj["#x"]` names a different property, as it should.
-fn private_key(name: &str) -> String {
-    format!("@@private:{name}")
+fn private_key(scope: u32, name: &str) -> String {
+    format!("@@private:{scope}:{name}")
 }
 
 /// The names a pattern binds, in source order.
@@ -4533,6 +4566,9 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             if collecting {
                 names.insert(target.clone());
             }
+        }
+        ExpressionKind::PrivateIn { object, .. } => {
+            collect_identifiers(object, names, collecting);
         }
         ExpressionKind::Literal(_)
         | ExpressionKind::This
@@ -4792,6 +4828,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Update { target, .. } => target == name,
+        ExpressionKind::PrivateIn { object, .. } => expression_references(object, name),
         ExpressionKind::Literal(_)
         | ExpressionKind::TemplateStrings { .. }
         | ExpressionKind::NewTarget => false,

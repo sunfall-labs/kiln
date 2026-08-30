@@ -520,6 +520,14 @@ pub enum ExpressionKind {
         /// `?.[`, with the same whole-chain short circuit as [`ExpressionKind::StaticMember`].
         optional: bool,
     },
+    /// `#x in object`: does this object carry the class's private field?
+    ///
+    /// A separate node from [`ExpressionKind::PrivateMember`], because reading a private field
+    /// the object does not have is a TypeError while asking about one is the whole point.
+    PrivateIn {
+        name: String,
+        object: Box<Expression>,
+    },
     /// `new.target`: the constructor a `new` call named, or `undefined` outside one.
     ///
     /// Not an identifier -- `new` is a keyword and `target` is not a property of it -- so it
