@@ -649,9 +649,14 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
         if run.get(&base.id).is_none() {
             let _ = writeln!(
                 out,
-                "  {:<34} in baseline but not measured this run",
+                "  {:<34} in baseline but not measured this run   REGRESSION",
                 base.id
             );
+            regressions.push(Regression {
+                id: base.id.clone(),
+                detail: "measurement is present in the baseline but missing from the current run"
+                    .to_string(),
+            });
         }
     }
     out.push('\n');
@@ -758,13 +763,31 @@ mod tests {
     }
 
     #[test]
-    fn measurements_missing_from_either_side_are_reported_but_do_not_fail() {
+    fn a_new_measurement_is_reported_without_failing_an_existing_baseline() {
         let mut run = report(1.0, 1);
-        run.measurements[0].id = "small/new-thing".to_string();
+        run.measurements
+            .push(measurement("small/new-thing", 1.0, 1));
+
         let (text, regressions) = compare(&run, &report(1.0, 1), 0.15);
+
         assert!(regressions.is_empty());
         assert!(text.contains("new, not in baseline"), "{text}");
+    }
+
+    #[test]
+    fn a_baseline_measurement_missing_from_the_run_is_a_regression() {
+        let run = Report::new("test");
+
+        let (text, regressions) = compare(&run, &report(1.0, 1), 0.15);
+
+        assert_eq!(regressions.len(), 1, "{regressions:?}");
+        assert_eq!(regressions[0].id, "small/warm-impl-edit");
+        assert!(
+            regressions[0].detail.contains("missing from the current run"),
+            "{regressions:?}"
+        );
         assert!(text.contains("in baseline but not measured"), "{text}");
+        assert!(text.contains("REGRESSION"), "{text}");
     }
 
     #[test]
