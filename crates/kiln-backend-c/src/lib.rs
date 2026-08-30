@@ -234,6 +234,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_NUMBER 3
 #define KILN_C99_BUILTIN_OBJECT 4
 #define KILN_C99_BUILTIN_ARRAY 5
+#define KILN_C99_BUILTIN_JSON 6
 
 /* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
  * tags, none of these reaches a cache key. */
@@ -311,6 +312,8 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_IS_ARRAY 66
 #define KILN_C99_METHOD_ARRAY_OF 67
 #define KILN_C99_METHOD_OBJECT_CREATE 68
+#define KILN_C99_METHOD_JSON_STRINGIFY 69
+#define KILN_C99_METHOD_JSON_PARSE 70
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -405,6 +408,14 @@ typedef struct kiln_array {
     size_t capacity;
 } kiln_array;
 
+/* A cursor over JSON source, moved forward as text is consumed. */
+typedef struct kiln_json_reader {
+    const char *bytes;
+    size_t len;
+    size_t at;
+    int depth;
+} kiln_json_reader;
+
 /* A growable byte buffer, for the operations that build a string rather than slice one. */
 typedef struct kiln_text {
     char *bytes;
@@ -463,6 +474,12 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
+static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
+                               const char *indent, size_t indent_len, const char *current,
+                               size_t current_len, int *serialised, int depth,
+                               kiln_value *thrown);
+static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
+static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);
@@ -753,6 +770,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_IS_ARRAY: return "isArray";
     case KILN_C99_METHOD_ARRAY_OF: return "of";
     case KILN_C99_METHOD_OBJECT_CREATE: return "create";
+    case KILN_C99_METHOD_JSON_STRINGIFY: return "stringify";
+    case KILN_C99_METHOD_JSON_PARSE: return "parse";
     default: return NULL;
     }
 }
@@ -805,6 +824,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_ARRAY:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_ARRAY,
                                       KILN_C99_METHOD_ARRAY_OF);
+    case KILN_C99_BUILTIN_JSON:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_JSON_STRINGIFY,
+                                      KILN_C99_METHOD_JSON_PARSE);
     default:
         return 0;
     }
@@ -2447,6 +2469,81 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = target;
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_JSON_STRINGIFY: {
+            kiln_text text = {NULL, 0, 0};
+            kiln_text indent = {NULL, 0, 0};
+            int wrote;
+            /* A replacer is a function or an array of keys, and honouring half of it would give
+             * a document missing exactly what the program asked to control. */
+            if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED &&
+                args[1].tag != KILN_VALUE_NULL) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (argc > 2) {
+                if (args[2].tag == KILN_VALUE_NUMBER) {
+                    /* A number is that many spaces, capped at ten, which is what the
+                     * specification says and what stops a silly argument from allocating. */
+                    double count = kiln_c99_as_number(args[2]);
+                    size_t spaces = !(count > 0.0) ? 0 : count > 10.0 ? 10 : (size_t)count;
+                    while (spaces-- > 0) {
+                        if (kiln_c99_text_append_c(&indent, " ") != KILN_C99_OK) {
+                            free(indent.bytes);
+                            return KILN_C99_OUT_OF_MEMORY;
+                        }
+                    }
+                } else if (args[2].tag == KILN_VALUE_STRING) {
+                    size_t len = args[2].len > 10 ? 10 : args[2].len;
+                    if (kiln_c99_text_append(&indent, args[2].ptr, len) != KILN_C99_OK) {
+                        free(indent.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                }
+            }
+            status = kiln_c99_json_value(host, &text, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                         indent.bytes, indent.len, "", 0, &wrote, depth, thrown);
+            free(indent.bytes);
+            if (status != KILN_C99_OK) {
+                free(text.bytes);
+                return status;
+            }
+            /* `JSON.stringify(undefined)` is `undefined`, not the string. */
+            if (wrote) {
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+            } else {
+                free(text.bytes);
+                *result = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_JSON_PARSE: {
+            kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
+            kiln_json_reader reader;
+            kiln_value parsed;
+            if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+                /* A reviver rewrites the tree bottom-up; ignoring it would hand back a document
+                 * the program never asked for. */
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (source.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            reader.bytes = source.ptr;
+            reader.len = source.len;
+            reader.at = 0;
+            reader.depth = 0;
+            status = kiln_c99_json_read(&reader, &parsed);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* Trailing text is a syntax error, not something to ignore: `JSON.parse("1 2")` has
+             * no answer. */
+            kiln_c99_json_space(&reader);
+            if (reader.at != reader.len) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *result = parsed;
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_OBJECT_CREATE: {
             kiln_value built;
             /* The descriptor argument can carry accessors, which are functions, so it is
@@ -2802,6 +2899,558 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     return KILN_C99_CONTROL_ERROR;
 }
 
+/* JSON.
+ *
+ * Serialising can *call*: `toJSON` runs before anything else is decided about a value, and a
+ * property may be an accessor. So this takes a host and a depth like every other read does. */
+static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
+    static const char digits[] = "0123456789abcdef";
+    size_t index;
+    if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = 0; index < len; ++index) {
+        char byte = bytes[index];
+        const char *escape = NULL;
+        char pair[2];
+        char hex[6];
+        switch (byte) {
+        case '"': escape = "\\\""; break;
+        case '\\': escape = "\\\\"; break;
+        case '\n': escape = "\\n"; break;
+        case '\r': escape = "\\r"; break;
+        case '\t': escape = "\\t"; break;
+        case '\b': escape = "\\b"; break;
+        case '\f': escape = "\\f"; break;
+        default: break;
+        }
+        if (escape != NULL) {
+            if (kiln_c99_text_append_c(text, escape) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            continue;
+        }
+        /* Only the C0 controls are escaped as \u; everything else is emitted as its own UTF-8,
+         * which is what JSON permits and what node produces. */
+        if ((unsigned char)byte < 0x20) {
+            hex[0] = '\\';
+            hex[1] = 'u';
+            hex[2] = '0';
+            hex[3] = '0';
+            hex[4] = digits[((unsigned char)byte >> 4) & 0xF];
+            hex[5] = digits[(unsigned char)byte & 0xF];
+            if (kiln_c99_text_append(text, hex, 6) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            continue;
+        }
+        pair[0] = byte;
+        if (kiln_c99_text_append(text, pair, 1) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    return kiln_c99_text_append(text, "\"", 1);
+}
+
+/* `serialised` is 0 when the value has no JSON spelling at all -- undefined, a function -- which
+ * drops it from an object and turns it into null in an array. */
+static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
+                               const char *indent, size_t indent_len, const char *current,
+                               size_t current_len, int *serialised, int depth,
+                               kiln_value *thrown) {
+    kiln_text nested = {NULL, 0, 0};
+    kiln_value replaced;
+    size_t index;
+    int status;
+    *serialised = 1;
+
+    /* The `toJSON` step, before anything else is decided about the value.
+     *
+     * Only an object is asked. An array's named properties are not stored here at all, so there
+     * is nowhere for one to have been put -- and asking would reach the array method table,
+     * which reports an unknown name as an error rather than as absence. */
+    if (value.tag == KILN_VALUE_OBJECT) {
+        kiln_value method;
+        status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (kiln_c99_is_callable(method)) {
+            status = kiln_c99_call(host, &replaced, method, value, NULL, 0, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            value = replaced;
+        }
+    }
+
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_METHOD:
+        *serialised = 0;
+        return KILN_C99_OK;
+    case KILN_VALUE_NULL:
+        return kiln_c99_text_append_c(text, "null");
+    case KILN_VALUE_BOOLEAN:
+        return kiln_c99_text_append_c(text, value.bits ? "true" : "false");
+    case KILN_VALUE_NUMBER: {
+        /* NaN and both infinities have no JSON spelling, so they serialise as null. */
+        double number = kiln_c99_as_number(value);
+        kiln_value shown;
+        if (!isfinite(number)) {
+            return kiln_c99_text_append_c(text, "null");
+        }
+        shown = kiln_c99_text(value);
+        if (shown.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_text_append(text, shown.ptr, shown.len);
+    }
+    case KILN_VALUE_STRING:
+        return kiln_c99_json_quote(text, value.ptr, value.len);
+    default:
+        break;
+    }
+    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY) {
+        *serialised = 0;
+        return KILN_C99_OK;
+    }
+
+    /* With no indent every separator is empty, which collapses the pretty form to the compact
+     * one and lets both share one code path. */
+    if (indent_len != 0 &&
+        (kiln_c99_text_append(&nested, current, current_len) != KILN_C99_OK ||
+         kiln_c99_text_append(&nested, indent, indent_len) != KILN_C99_OK)) {
+        free(nested.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+
+#define KILN_JSON_OPEN(bracket)                                                                   \
+    do {                                                                                          \
+        if (kiln_c99_text_append_c(text, bracket) != KILN_C99_OK) {                                \
+            free(nested.bytes);                                                                    \
+            return KILN_C99_OUT_OF_MEMORY;                                                          \
+        }                                                                                          \
+    } while (0)
+#define KILN_JSON_BREAK(first)                                                                    \
+    do {                                                                                          \
+        if (!(first) && kiln_c99_text_append_c(text, ",") != KILN_C99_OK) {                        \
+            free(nested.bytes);                                                                    \
+            return KILN_C99_OUT_OF_MEMORY;                                                          \
+        }                                                                                          \
+        if (indent_len != 0 &&                                                                     \
+            (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||                                  \
+             kiln_c99_text_append(text, nested.bytes, nested.len) != KILN_C99_OK)) {                \
+            free(nested.bytes);                                                                    \
+            return KILN_C99_OUT_OF_MEMORY;                                                          \
+        }                                                                                          \
+    } while (0)
+
+    if (value.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(value);
+        KILN_JSON_OPEN("[");
+        for (index = 0; index < array->count; ++index) {
+            int wrote;
+            KILN_JSON_BREAK(index == 0);
+            status = kiln_c99_json_value(host, text, array->elements[index], indent, indent_len,
+                                         nested.bytes, nested.len, &wrote, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            /* An element with no JSON spelling becomes null rather than disappearing: an array's
+             * positions are part of its meaning. */
+            if (!wrote && kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
+                free(nested.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        if (indent_len != 0 && array->count != 0 &&
+            (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
+             kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
+            free(nested.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        free(nested.bytes);
+        return kiln_c99_text_append_c(text, "]");
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(value);
+        size_t written = 0;
+        size_t length = object->count;
+        KILN_JSON_OPEN("{");
+        for (index = 0; index < length && index < object->count; ++index) {
+            kiln_value member;
+            kiln_text member_text = {NULL, 0, 0};
+            int wrote;
+            if (object->properties[index].accessor) {
+                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    continue;
+                }
+                status = kiln_c99_call(host, &member, object->properties[index].getter, value,
+                                       NULL, 0, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    free(nested.bytes);
+                    return status;
+                }
+            } else {
+                member = object->properties[index].value;
+            }
+            /* Serialised into a buffer of its own first: a member with no JSON spelling is
+             * *dropped*, so its separator must not have been written yet. */
+            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
+                                         nested.bytes, nested.len, &wrote, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                free(member_text.bytes);
+                return status;
+            }
+            if (!wrote) {
+                free(member_text.bytes);
+                continue;
+            }
+            KILN_JSON_BREAK(written == 0);
+            if (kiln_c99_json_quote(text, object->properties[index].key,
+                                    object->properties[index].key_len) != KILN_C99_OK ||
+                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
+                kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
+                free(nested.bytes);
+                free(member_text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            free(member_text.bytes);
+            written += 1;
+        }
+        if (indent_len != 0 && written != 0 &&
+            (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
+             kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
+            free(nested.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        free(nested.bytes);
+        return kiln_c99_text_append_c(text, "}");
+    }
+#undef KILN_JSON_OPEN
+#undef KILN_JSON_BREAK
+}
+
+/* A recursive-descent JSON parser over the source bytes.
+ *
+ * `at` is the cursor, moved forward as text is consumed. A malformed document is a control error
+ * rather than a partial value: JSON.parse either produces the whole thing or nothing. */
+
+static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
+
+static void kiln_c99_json_space(kiln_json_reader *reader) {
+    while (reader->at < reader->len) {
+        char byte = reader->bytes[reader->at];
+        if (byte != ' ' && byte != '\t' && byte != '\n' && byte != '\r') {
+            return;
+        }
+        reader->at += 1;
+    }
+}
+
+static int kiln_c99_json_literal(kiln_json_reader *reader, const char *word) {
+    size_t len = strlen(word);
+    if (reader->len - reader->at < len || memcmp(reader->bytes + reader->at, word, len) != 0) {
+        return 0;
+    }
+    reader->at += len;
+    return 1;
+}
+
+static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
+    kiln_text text = {NULL, 0, 0};
+    uint16_t pending_high = 0;
+    reader->at += 1;
+    while (reader->at < reader->len) {
+        char byte = reader->bytes[reader->at];
+        if (byte == '"') {
+            reader->at += 1;
+            /* A high surrogate left unpaired at the end is written as the replacement
+             * character, for the same reason as everywhere else: this string cannot hold one. */
+            if (pending_high != 0 &&
+                kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
+                free(text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+            return KILN_C99_OK;
+        }
+        if (byte != '\\') {
+            if (pending_high != 0) {
+                if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
+                    free(text.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                pending_high = 0;
+            }
+            if (kiln_c99_text_append(&text, &byte, 1) != KILN_C99_OK) {
+                free(text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            reader->at += 1;
+            continue;
+        }
+        reader->at += 1;
+        if (reader->at >= reader->len) {
+            break;
+        }
+        {
+            char escaped = reader->bytes[reader->at];
+            const char *literal = NULL;
+            reader->at += 1;
+            switch (escaped) {
+            case '"': literal = "\""; break;
+            case '\\': literal = "\\"; break;
+            case '/': literal = "/"; break;
+            case 'n': literal = "\n"; break;
+            case 't': literal = "\t"; break;
+            case 'r': literal = "\r"; break;
+            case 'b': literal = "\b"; break;
+            case 'f': literal = "\f"; break;
+            case 'u': {
+                uint16_t unit = 0;
+                uint16_t pair[2];
+                size_t digit;
+                if (reader->len - reader->at < 4) {
+                    free(text.bytes);
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                for (digit = 0; digit < 4; ++digit) {
+                    char hex = reader->bytes[reader->at + digit];
+                    unit = (uint16_t)(unit << 4);
+                    if (hex >= '0' && hex <= '9') {
+                        unit = (uint16_t)(unit | (uint16_t)(hex - '0'));
+                    } else if (hex >= 'a' && hex <= 'f') {
+                        unit = (uint16_t)(unit | (uint16_t)(hex - 'a' + 10));
+                    } else if (hex >= 'A' && hex <= 'F') {
+                        unit = (uint16_t)(unit | (uint16_t)(hex - 'A' + 10));
+                    } else {
+                        free(text.bytes);
+                        return KILN_C99_CONTROL_ERROR;
+                    }
+                }
+                reader->at += 4;
+                /* A surrogate pair is two escapes and one character, so the high half is held
+                 * until the low half arrives. */
+                if (unit >= 0xD800 && unit <= 0xDBFF) {
+                    pair[0] = unit;
+                    if (pending_high != 0) {
+                        kiln_value lone = kiln_c99_from_units(&pending_high, 1);
+                        if (kiln_c99_text_append(&text, lone.ptr, lone.len) != KILN_C99_OK) {
+                            free(text.bytes);
+                            return KILN_C99_OUT_OF_MEMORY;
+                        }
+                    }
+                    pending_high = pair[0];
+                    continue;
+                }
+                if (pending_high != 0) {
+                    pair[0] = pending_high;
+                    pair[1] = unit;
+                    pending_high = 0;
+                    {
+                        kiln_value combined = kiln_c99_from_units(pair, 2);
+                        if (kiln_c99_text_append(&text, combined.ptr, combined.len) !=
+                            KILN_C99_OK) {
+                            free(text.bytes);
+                            return KILN_C99_OUT_OF_MEMORY;
+                        }
+                    }
+                    continue;
+                }
+                {
+                    kiln_value single = kiln_c99_from_units(&unit, 1);
+                    if (kiln_c99_text_append(&text, single.ptr, single.len) != KILN_C99_OK) {
+                        free(text.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                }
+                continue;
+            }
+            default:
+                free(text.bytes);
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (pending_high != 0) {
+                if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
+                    free(text.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                pending_high = 0;
+            }
+            if (kiln_c99_text_append_c(&text, literal) != KILN_C99_OK) {
+                free(text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+    }
+    free(text.bytes);
+    return KILN_C99_CONTROL_ERROR;
+}
+
+static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
+    int status;
+    if (reader->depth >= KILN_C99_MAX_CALL_DEPTH) {
+        return KILN_C99_CALL_DEPTH_ERROR;
+    }
+    kiln_c99_json_space(reader);
+    if (reader->at >= reader->len) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    switch (reader->bytes[reader->at]) {
+    case 'n':
+        if (!kiln_c99_json_literal(reader, "null")) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *out = kiln_c99_null();
+        return KILN_C99_OK;
+    case 't':
+        if (!kiln_c99_json_literal(reader, "true")) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *out = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    case 'f':
+        if (!kiln_c99_json_literal(reader, "false")) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *out = kiln_c99_boolean(0);
+        return KILN_C99_OK;
+    case '"':
+        return kiln_c99_json_string(reader, out);
+    case '[': {
+        kiln_value built;
+        reader->at += 1;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        kiln_c99_json_space(reader);
+        if (reader->at < reader->len && reader->bytes[reader->at] == ']') {
+            reader->at += 1;
+            *out = built;
+            return KILN_C99_OK;
+        }
+        for (;;) {
+            kiln_value element;
+            reader->depth += 1;
+            status = kiln_c99_json_read(reader, &element);
+            reader->depth -= 1;
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_array_push(built, element);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            kiln_c99_json_space(reader);
+            if (reader->at >= reader->len) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (reader->bytes[reader->at] == ',') {
+                reader->at += 1;
+                continue;
+            }
+            if (reader->bytes[reader->at] == ']') {
+                reader->at += 1;
+                *out = built;
+                return KILN_C99_OK;
+            }
+            return KILN_C99_CONTROL_ERROR;
+        }
+    }
+    case '{': {
+        kiln_value built;
+        reader->at += 1;
+        status = kiln_c99_new_object(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        kiln_c99_json_space(reader);
+        if (reader->at < reader->len && reader->bytes[reader->at] == '}') {
+            reader->at += 1;
+            *out = built;
+            return KILN_C99_OK;
+        }
+        for (;;) {
+            kiln_value key;
+            kiln_value member;
+            kiln_c99_json_space(reader);
+            if (reader->at >= reader->len || reader->bytes[reader->at] != '"') {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_json_string(reader, &key);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            kiln_c99_json_space(reader);
+            if (reader->at >= reader->len || reader->bytes[reader->at] != ':') {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            reader->at += 1;
+            reader->depth += 1;
+            status = kiln_c99_json_read(reader, &member);
+            reader->depth -= 1;
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_put(NULL, built, key.ptr, key.len, member, 0, NULL);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            kiln_c99_json_space(reader);
+            if (reader->at >= reader->len) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (reader->bytes[reader->at] == ',') {
+                reader->at += 1;
+                continue;
+            }
+            if (reader->bytes[reader->at] == '}') {
+                reader->at += 1;
+                *out = built;
+                return KILN_C99_OK;
+            }
+            return KILN_C99_CONTROL_ERROR;
+        }
+    }
+    default: {
+        /* A number. JSON's grammar is narrower than the language's, so the extent is measured
+         * here and the digits themselves are handed to the shared parser -- one place that knows
+         * how a decimal becomes a double. */
+        size_t start = reader->at;
+        if (reader->bytes[reader->at] == '-') {
+            reader->at += 1;
+        }
+        while (reader->at < reader->len) {
+            char byte = reader->bytes[reader->at];
+            if ((byte >= '0' && byte <= '9') || byte == '.' || byte == 'e' || byte == 'E' ||
+                byte == '+' || byte == '-') {
+                reader->at += 1;
+                continue;
+            }
+            break;
+        }
+        if (reader->at == start) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        {
+            double number = kiln_string_to_number(reader->bytes + start, reader->at - start);
+            if (isnan(number)) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *out = kiln_c99_number(number);
+            return KILN_C99_OK;
+        }
+    }
+    }
+}
+
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
  * unless the body returned an object, which wins. That override is what makes a factory
  * constructor work. */
@@ -2881,7 +3530,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_BUILTIN:
         /* A namespace is an object holding functions and cannot be called; a constructor is a
          * function. `typeof Math === "object"` is what a library feature-detects on. */
-        if (value.bits == KILN_C99_BUILTIN_MATH) {
+        if (value.bits == KILN_C99_BUILTIN_MATH || value.bits == KILN_C99_BUILTIN_JSON) {
             return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
         }
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
@@ -3277,6 +3926,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Number
             | kiln_ir::Builtin::Object
             | kiln_ir::Builtin::Array
+            | kiln_ir::Builtin::Json
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity,
         ) => Ok(()),
@@ -4438,6 +5088,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::Number => "kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER)",
                 kiln_ir::Builtin::Object => "kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT)",
                 kiln_ir::Builtin::Array => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)",
+                kiln_ir::Builtin::Json => "kiln_c99_builtin(KILN_C99_BUILTIN_JSON)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
