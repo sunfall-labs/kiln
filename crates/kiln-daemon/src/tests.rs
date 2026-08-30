@@ -1168,6 +1168,57 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn native_shared_relative_alias_converges_after_one_stale_retry() {
+    let fixture = Fixture::empty();
+    let source = fixture.dir.join("relative-native-shared.js");
+    std::fs::write(&source, "console.log('disk');\n").expect("write source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical root");
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: "relative-native-shared.js".into(),
+            text: "console.log('overlay');\n".into(),
+        })
+        .expect("set relative overlay");
+    let request = Request::NativeSharedBuild {
+        source_view: SourceView(0),
+        path: "relative-native-shared.js".into(),
+        project_root: root.to_string_lossy().into_owned(),
+        output: Some(
+            root.join("relative-native-shared.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        profile: NativeProfile::Dev,
+    };
+
+    let mut response = client.raw_request(&request).expect("first shared build");
+    if matches!(response, Response::StaleSourceView { .. }) {
+        response = client.raw_request(&request).expect("retry shared build");
+    }
+    match response {
+        Response::NativeSharedBuilt(_) => {}
+        Response::Error { ref message } if message.contains("no supported C compiler") => {}
+        Response::StaleSourceView { current } => {
+            panic!(
+                "relative native shared build remained stale at view {}",
+                current.0
+            )
+        }
+        other => panic!("unexpected shared build response: {other:?}"),
+    }
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
 #[test]
 fn native_shared_build_rejects_header_source_and_output_collisions() {
     let fixture = Fixture::started();
