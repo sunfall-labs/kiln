@@ -18,6 +18,9 @@ use crate::toml_lite::{self, Entry, Table};
 /// The file name a corpus directory (or an ancestor of one) declares its tests in.
 pub const MANIFEST_FILE_NAME: &str = "manifest.toml";
 
+/// Versioned framing for the exact inputs that authorized a generated bundle.
+const BUNDLE_PROVENANCE_HEADER: &[u8] = b"kiln-bundle-provenance-v2\n";
+
 /// One `[[test]]` entry.
 ///
 /// Fields the runner does not read — `catches`, `notes`, `effect_api` — are prose or
@@ -36,6 +39,11 @@ pub struct ManifestTest {
     /// believing it. The bundles are not committed, so a checkout without them skips these tests
     /// exactly as before and one that has run `conformance/effect/build.sh` runs them.
     pub bundle: Option<PathBuf>,
+    /// Additional files whose exact bytes participate in the generated bundle.
+    ///
+    /// The bundle bytes and `source` precede these frames and must not be repeated here. A bundle
+    /// is runnable only when its adjacent provenance record matches every frame in manifest order.
+    pub bundle_inputs: Vec<PathBuf>,
     /// JavaScript semantics the test would stop passing without; the changed-test selector's key.
     pub features: Vec<String>,
     /// What the corpus records about the test's runnability.  The runner does not read this: an
@@ -94,18 +102,61 @@ impl Manifest {
         self.directory.join(&test.source)
     }
 
-    /// What to actually run: the built bundle when the working tree has one, else the source.
-    pub fn program_path(&self, test: &ManifestTest) -> PathBuf {
-        match &test.bundle {
-            Some(bundle) => {
-                let built = self.directory.join(bundle);
-                if built.is_file() {
-                    return built;
-                }
-                self.source_path(test)
-            }
-            None => self.source_path(test),
+    /// Every additional file whose change invalidates and selects this generated test.
+    pub(crate) fn bundle_input_paths(&self, test: &ManifestTest) -> Vec<PathBuf> {
+        test.bundle_inputs
+            .iter()
+            .map(|path| self.directory.join(path))
+            .collect()
+    }
+
+    /// Resolve the executable and fail closed when a generated bundle cannot prove its inputs.
+    pub(crate) fn resolve_program(&self, test: &ManifestTest) -> ProgramResolution {
+        let source = self.source_path(test);
+        let Some(bundle) = &test.bundle else {
+            return ProgramResolution::ready(source);
+        };
+        let source_bytes = match fs::read(&source) {
+            Ok(bytes) => bytes,
+            // The authored program is a required corpus file. Let normal execution report its
+            // read failure rather than disguising a broken manifest entry as a missing build.
+            Err(_) => return ProgramResolution::ready(source),
+        };
+        let bundle = self.directory.join(bundle);
+        let provenance = bundle_provenance_path(&bundle);
+        let bundle_bytes = fs::read(&bundle);
+        let recorded = fs::read(&provenance);
+        if let (Ok(bundle_bytes), Ok(recorded)) = (bundle_bytes, recorded)
+            && self
+                .expected_bundle_provenance(test, &bundle_bytes, &source_bytes)
+                .is_ok_and(|expected| expected == recorded)
+        {
+            return ProgramResolution::ready(bundle);
         }
+        ProgramResolution {
+            path: source,
+            unavailable_reason: Some(
+                "generated bundle is missing, stale, or unverified; rebuild it with \
+                 conformance/effect/build.sh"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    fn expected_bundle_provenance(
+        &self,
+        test: &ManifestTest,
+        bundle: &[u8],
+        source: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let mut framed = BUNDLE_PROVENANCE_HEADER.to_vec();
+        push_frame(&mut framed, bundle);
+        push_frame(&mut framed, source);
+        for path in &test.bundle_inputs {
+            let bytes = fs::read(self.directory.join(path))?;
+            push_frame(&mut framed, &bytes);
+        }
+        Ok(framed)
     }
 
     /// The tests whose program lives at or below `root`.
@@ -124,10 +175,41 @@ fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
         id: required_string(table, "id")?.to_owned(),
         source: PathBuf::from(required_string(table, "source")?),
         bundle: optional_string(table, "bundle")?.map(PathBuf::from),
+        bundle_inputs: optional_strings(table, "bundle_inputs")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         features: optional_strings(table, "features")?,
         status: optional_string(table, "status")?.map(str::to_owned),
         expected_stdout: required_string(table, "expected_stdout")?.to_owned(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProgramResolution {
+    pub(crate) path: PathBuf,
+    pub(crate) unavailable_reason: Option<String>,
+}
+
+impl ProgramResolution {
+    fn ready(path: PathBuf) -> Self {
+        Self {
+            path,
+            unavailable_reason: None,
+        }
+    }
+}
+
+fn bundle_provenance_path(bundle: &Path) -> PathBuf {
+    let mut path = bundle.as_os_str().to_os_string();
+    path.push(".kiln-inputs");
+    PathBuf::from(path)
+}
+
+fn push_frame(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(bytes.len().to_string().as_bytes());
+    output.push(b'\n');
+    output.extend_from_slice(bytes);
 }
 
 fn reject_duplicate_ids(tests: &[ManifestTest]) -> Result<(), UnlocatedError> {
@@ -266,6 +348,31 @@ impl Error for ManifestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TemporaryManifest {
+        directory: PathBuf,
+    }
+
+    impl TemporaryManifest {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "kiln-bundle-provenance-test-{}-{}",
+                std::process::id(),
+                TEMP_MANIFEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&directory).expect("create temporary manifest directory");
+            Self { directory }
+        }
+    }
+
+    impl Drop for TemporaryManifest {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
 
     fn manifest(text: &str) -> Result<Manifest, ManifestError> {
         Manifest::from_text(text, PathBuf::from("/corpus"))
@@ -294,10 +401,62 @@ ok
         assert_eq!(test.expected_stdout, "ok\n");
         assert_eq!(test.features, ["iteration"]);
         assert_eq!(test.status.as_deref(), Some("runnable"));
+        assert!(test.bundle_inputs.is_empty());
         assert_eq!(
             manifest.source_path(test),
             Path::new("/corpus/guard/probe.js")
         );
+    }
+
+    #[test]
+    fn a_bundle_runs_only_with_exact_provenance_for_every_declared_input() {
+        let root = TemporaryManifest::new();
+        let source = b"console.log('source');\n";
+        let bundle = b"console.log('bundle');\n";
+        let lock = b"pinned build input\n";
+        fs::write(root.directory.join("source.js"), source).expect("write source");
+        fs::write(root.directory.join("build.lock"), lock).expect("write build input");
+        fs::write(root.directory.join("bundle.js"), bundle).expect("write bundle");
+        let manifest = Manifest::from_text(
+            r#"[[test]]
+id = "bundle"
+source = "source.js"
+bundle = "bundle.js"
+bundle_inputs = ["build.lock"]
+expected_stdout = "bundle\n"
+"#,
+            root.directory.clone(),
+        )
+        .unwrap_or_else(|_| panic!("manifest parses"));
+        let test = &manifest.tests()[0];
+
+        let missing = manifest.resolve_program(test);
+        assert!(missing.unavailable_reason.is_some());
+        assert_eq!(missing.path, root.directory.join("source.js"));
+
+        let expected = manifest
+            .expected_bundle_provenance(test, bundle, source)
+            .expect("frame bundle inputs");
+        fs::write(root.directory.join("bundle.js.kiln-inputs"), expected)
+            .expect("write provenance");
+        let ready = manifest.resolve_program(test);
+        assert_eq!(ready.path, root.directory.join("bundle.js"));
+        assert!(ready.unavailable_reason.is_none());
+
+        fs::write(root.directory.join("bundle.js"), "replaced output\n")
+            .expect("replace generated bundle");
+        let replaced = manifest.resolve_program(test);
+        assert!(
+            replaced.unavailable_reason.is_some(),
+            "the provenance record authorizes exact output bytes, not just a path"
+        );
+        fs::write(root.directory.join("bundle.js"), bundle).expect("restore generated bundle");
+
+        fs::write(root.directory.join("build.lock"), "changed build input\n")
+            .expect("change declared input");
+        let stale = manifest.resolve_program(test);
+        assert_eq!(stale.path, root.directory.join("source.js"));
+        assert!(stale.unavailable_reason.is_some());
     }
 
     #[test]

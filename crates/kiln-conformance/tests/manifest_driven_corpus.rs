@@ -121,6 +121,65 @@ fn a_manifest_entry_whose_file_is_missing_fails_and_names_it() {
 }
 
 #[test]
+fn a_bundled_entry_whose_authored_source_is_missing_still_fails() {
+    let root = corpus(
+        "missing-bundled-source",
+        r#"[[test]]
+id = "gone"
+source = "gone.js"
+bundle = "bundle.js"
+expected_stdout = "anything\n"
+"#,
+        &[("bundle.js", "console.log('anything');")],
+    );
+
+    let result = &run_all(&root)[0].1;
+    assert_eq!(
+        result.outcome,
+        Outcome::Fail,
+        "bundle freshness must not turn a broken corpus entry into an unavailable build"
+    );
+    let message = &result
+        .primary_diagnostic()
+        .expect("a missing authored source records why")
+        .message;
+    assert!(message.contains("gone.js"), "{message}");
+}
+
+#[test]
+fn a_stale_javascript_bundle_skips_instead_of_falling_back_to_its_source() {
+    let root = corpus(
+        "stale-javascript-bundle",
+        r#"[[test]]
+id = "stale"
+source = "source.js"
+bundle = "bundle.js"
+expected_stdout = "source\n"
+"#,
+        &[
+            ("source.js", "console.log('source');"),
+            ("bundle.js", "console.log('bundle');"),
+        ],
+    );
+
+    let result = &run_all(&root)[0].1;
+    assert_eq!(
+        result.outcome,
+        Outcome::Skipped,
+        "a runnable source extension must not turn an unverified generated artifact into fallback permission"
+    );
+    let diagnostic = result
+        .primary_diagnostic()
+        .expect("the rejected bundle records why");
+    assert_eq!(diagnostic.phase, DiagnosticPhase::Harness);
+    assert!(
+        diagnostic.message.contains("stale"),
+        "{}",
+        diagnostic.message
+    );
+}
+
+#[test]
 fn a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason() {
     // The construct here only has to be one the compiler still refuses. It has moved four times
     // as coverage grew; `with` should be the last, being forbidden in strict mode and so never
