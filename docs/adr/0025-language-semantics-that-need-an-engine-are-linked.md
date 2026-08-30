@@ -90,6 +90,13 @@ a `#[global_allocator]` over `malloc`/`free`. The crate can no longer describe i
 allocation-free; the number core it wraps still is, and that distinction is worth keeping in the
 doc comment rather than losing.
 
+**Native Dev carries two private provider copies.** The CLI runtime DSO needs the provider's
+number-formatting entry points, but deliberately exports only its three stable CLI symbols.
+Generated application objects need the full provider ABI, including RegExp, so the same archive
+is also linked into the executable. This modest duplication keeps the provider private instead of
+turning it into another shipped dynamic ABI. Stateful provider APIs must remain on the application
+side unless their cross-copy ownership and identity are designed explicitly.
+
 **The vendored C in `kiln-native-number` is a test fixture, not a fallback.** It defines
 `kiln_number_to_js_string` and `kiln_string_to_number` and is linked only by unit tests in
 `kiln-backend-c` and `kiln-native-runtime`. If the emitted runtime references the regex symbols
