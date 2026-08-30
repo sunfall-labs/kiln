@@ -319,4 +319,122 @@ mod tests {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         );
     }
+
+    /// The two-block NIST vectors, which are the first tests a correct compression loop can pass
+    /// but a single-block-only one cannot.
+    ///
+    /// The short vectors above never leave the first block, so they exercise the round function and
+    /// nothing else: the block loop runs once, the chaining variables are never fed forward, and the
+    /// message schedule is only ever built from a block that already contains the padding. A
+    /// mistake in carrying `state` between blocks — or in extending the schedule from the previous
+    /// block's words — is invisible until the input spans two blocks. The 56-byte vector spans two
+    /// blocks because its padding does not fit; the 112-byte one spans three for the same reason.
+    #[test]
+    fn sha256_matches_multi_block_reference_vectors() {
+        assert_eq!(
+            Digest::hash(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq").to_hex(),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(
+            Digest::hash(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+                  ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+            )
+            .to_hex(),
+            "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"
+        );
+    }
+
+    /// Lengths that straddle every point where the padding block does or does not fit.
+    ///
+    /// FIPS 180-4 appends a single `0x80` byte, then zeroes, then a 64-bit big-endian bit count, and
+    /// the result must land on a 64-byte boundary. That leaves only 55 usable bytes in a block that
+    /// still has room for its own length field. At 56 the length field no longer fits and an entire
+    /// extra block appears; at 64 the message fills a block exactly and the padding block is
+    /// all-padding; at 65 the overflow block begins again. Each of these is a distinct arm of the
+    /// `padded_len` arithmetic, and an off-by-one there is the single most common defect in a
+    /// hand-written SHA-256 — it produces a plausible-looking digest for most inputs and a wrong one
+    /// for a narrow band of lengths, which is precisely the shape of failure that would let the
+    /// artifact cache silently hand back the wrong build.
+    ///
+    /// Every expected value here was computed with `shasum -a 256` rather than transcribed.
+    #[test]
+    fn sha256_covers_the_message_length_padding_boundary() {
+        let repeated = |count: usize| Digest::hash(&vec![b'a'; count]).to_hex();
+
+        // 55 bytes: the largest message whose padding still fits in its own block.
+        assert_eq!(
+            repeated(55),
+            "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"
+        );
+        // 56 bytes: one byte past the boundary, so the length field is pushed into a second block.
+        assert_eq!(
+            repeated(56),
+            "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"
+        );
+        // 63 bytes: one byte short of a full block, so only the `0x80` terminator fits.
+        assert_eq!(
+            repeated(63),
+            "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"
+        );
+        // 64 bytes: an exact block, followed by a block that is nothing but padding.
+        assert_eq!(
+            repeated(64),
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+        );
+        // 65 bytes: the cycle restarts, with one message byte in the second block.
+        assert_eq!(
+            repeated(65),
+            "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"
+        );
+    }
+
+    /// The one-million-'a' vector, which is the only cheap check on the 64-bit length field.
+    ///
+    /// Eight million bits does not fit in 32, so an implementation that narrowed the bit count
+    /// anywhere — or that accumulated it in a type that wraps sooner than `u64` — passes every
+    /// vector above and fails this one. It runs unconditionally rather than behind `#[ignore]`:
+    /// 15,625 blocks costs well under a tenth of a second even in a debug build, which is far too
+    /// cheap to trade for the one check that the length field is genuinely 64 bits wide.
+    #[test]
+    fn sha256_matches_the_million_character_vector() {
+        assert_eq!(
+            Digest::hash(&vec![b'a'; 1_000_000]).to_hex(),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    /// The textual spellings must survive a multi-block digest, not just a short one.
+    ///
+    /// The existing round trips all run on digests of single-block inputs, which is an accident of
+    /// convenience rather than coverage: `to_hex`, `from_hex`, and `to_base64_url` only ever see the
+    /// 32-byte output, so what matters is that a digest whose bytes came from a longer message still
+    /// survives the trip unchanged. Pinning the Base64 spelling against a value derived from
+    /// `shasum` output keeps the compact form honest — it is a re-encoding of all 256 bits, not a
+    /// truncation that would quietly weaken content addressing.
+    #[test]
+    fn textual_spellings_round_trip_multi_block_digests() {
+        let digest = Digest::hash(
+            b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+              ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+        );
+        assert_eq!(
+            Digest::from_hex(&digest.to_hex()).expect("round trip"),
+            digest
+        );
+        assert_eq!(
+            Digest::from_hex(&digest.to_hex().to_uppercase()).expect("round trip"),
+            digest
+        );
+        assert_eq!(
+            digest.to_base64_url(),
+            "z1sWp3ivg4ADbOWeewSSNwskmxHo8HpRr6xFA3r-6dE"
+        );
+        assert_eq!(digest.to_base64_url().len(), 43);
+
+        let long = Digest::hash(&vec![b'a'; 1_000]);
+        assert_eq!(Digest::from_hex(&long.to_hex()).expect("round trip"), long);
+        assert_eq!(long.to_base64_url().len(), 43);
+        assert_ne!(long.to_base64_url(), digest.to_base64_url());
+    }
 }
