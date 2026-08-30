@@ -2459,7 +2459,6 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         count = modules.len(),
     )
     .unwrap();
-    output.push_str("    proxy.failure_status = KILN_C99_OK;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if !node.program.imports.is_empty() {
             writeln!(
