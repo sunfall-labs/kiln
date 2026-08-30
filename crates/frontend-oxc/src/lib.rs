@@ -1141,10 +1141,15 @@ fn lower_unary_operator(operator: UnaryOperator) -> Option<HirUnaryOperator> {
         UnaryOperator::UnaryNegation => Some(HirUnaryOperator::Negate),
         UnaryOperator::LogicalNot => Some(HirUnaryOperator::Not),
         UnaryOperator::Typeof => Some(HirUnaryOperator::TypeOf),
+        UnaryOperator::BitwiseNot => Some(HirUnaryOperator::BitwiseNot),
+        UnaryOperator::Void => Some(HirUnaryOperator::Void),
         _ => None,
     }
 }
 
+/// Every binary operator oxc can produce now has an HIR counterpart, so there is no catch-all
+/// here. It keeps returning `Option` to match its unary sibling -- and losing the catch-all means
+/// the compiler, rather than a user, reports the day oxc grows another.
 fn lower_binary_operator(operator: BinaryOperator) -> Option<HirBinaryOperator> {
     match operator {
         BinaryOperator::Addition => Some(HirBinaryOperator::Add),
@@ -1157,11 +1162,18 @@ fn lower_binary_operator(operator: BinaryOperator) -> Option<HirBinaryOperator> 
         BinaryOperator::In => Some(HirBinaryOperator::In),
         BinaryOperator::Instanceof => Some(HirBinaryOperator::InstanceOf),
         BinaryOperator::StrictInequality => Some(HirBinaryOperator::StrictNotEqual),
+        BinaryOperator::Equality => Some(HirBinaryOperator::LooseEqual),
+        BinaryOperator::Inequality => Some(HirBinaryOperator::LooseNotEqual),
+        BinaryOperator::BitwiseAnd => Some(HirBinaryOperator::BitwiseAnd),
+        BinaryOperator::BitwiseOR => Some(HirBinaryOperator::BitwiseOr),
+        BinaryOperator::BitwiseXOR => Some(HirBinaryOperator::BitwiseXor),
+        BinaryOperator::ShiftLeft => Some(HirBinaryOperator::ShiftLeft),
+        BinaryOperator::ShiftRight => Some(HirBinaryOperator::ShiftRight),
+        BinaryOperator::ShiftRightZeroFill => Some(HirBinaryOperator::UnsignedShiftRight),
         BinaryOperator::LessThan => Some(HirBinaryOperator::LessThan),
         BinaryOperator::LessEqualThan => Some(HirBinaryOperator::LessThanOrEqual),
         BinaryOperator::GreaterThan => Some(HirBinaryOperator::GreaterThan),
         BinaryOperator::GreaterEqualThan => Some(HirBinaryOperator::GreaterThanOrEqual),
-        _ => None,
     }
 }
 

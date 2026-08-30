@@ -465,6 +465,10 @@ pub enum UnaryOperator {
     /// `typeof`. Note that `typeof undeclaredName` is legal and yields "undefined" rather than
     /// throwing, which is why it cannot be lowered as an ordinary operand evaluation.
     TypeOf,
+    /// `~x`, which is `-(ToInt32(x) + 1)` and so is a numeric operator despite looking logical.
+    BitwiseNot,
+    /// `void x`: evaluate the operand for its effects, then discard it.
+    Void,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +486,19 @@ pub enum BinaryOperator {
     Exponentiate,
     StrictEqual,
     StrictNotEqual,
+    /// `==`, which compares across types after converting. Not `StrictEqual` with a coercion
+    /// bolted on: the conversion rules are their own algorithm and `null == undefined` is true
+    /// while neither converts to the other.
+    LooseEqual,
+    LooseNotEqual,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    /// `<<`, `>>` and `>>>`. All three truncate their operands to 32 bits first, which is why
+    /// `1 << 31` is negative and `x >>> 0` is the idiom for reading a number as unsigned.
+    ShiftLeft,
+    ShiftRight,
+    UnsignedShiftRight,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
