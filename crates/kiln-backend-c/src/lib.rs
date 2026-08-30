@@ -13627,12 +13627,10 @@ int main(void) {{
 
     #[test]
     fn typed_key_instructions_are_refused_by_the_native_backend() {
-        let cases = [
-            (
-                vec![Instruction::Const(0), Instruction::GetPrivate(0)],
-                "private fields",
-            ),
-        ];
+        let cases = [(
+            vec![Instruction::Const(0), Instruction::GetPrivate(0)],
+            "private fields",
+        )];
         for (code, feature) in cases {
             let result = emit(&program(
                 vec![Constant::String("@@private:0:x".into())],
@@ -13711,7 +13709,10 @@ int main(void) {{
             symbol = generated.symbol
         );
         let run = run_with_main(&generated, &wrapper, "well-known-symbols");
-        assert!(run.status.success(), "well-known symbols lost identity or string separation");
+        assert!(
+            run.status.success(),
+            "well-known symbols lost identity or string separation"
+        );
     }
 
     #[test]
@@ -14027,7 +14028,10 @@ int main(void) {{
         for (method, index, expected, label) in probes {
             let mut code = vec![Instruction::LoadBuiltin(kiln_ir::Builtin::Object)];
             array(&mut code);
-            code.push(Instruction::CallMethod { name: method, argc: 1 });
+            code.push(Instruction::CallMethod {
+                name: method,
+                argc: 1,
+            });
             code.push(Instruction::Const(index));
             code.push(Instruction::GetComputed);
             if method == 8 {
@@ -14037,15 +14041,21 @@ int main(void) {{
             } else {
                 code.push(Instruction::Const(expected));
             }
-            code.extend([Instruction::Binary(BinaryOp::StrictEqual), Instruction::Return]);
-            let generated = emit(&program(constants.clone(), code, 0))
-                .expect("array enumeration probe emits");
+            code.extend([
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ]);
+            let generated =
+                emit(&program(constants.clone(), code, 0)).expect("array enumeration probe emits");
             let wrapper = format!(
                 "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
                 generated.symbol
             );
             let run = run_with_main(&generated, &wrapper, label);
-            assert!(run.status.success(), "array {label} omitted named string properties");
+            assert!(
+                run.status.success(),
+                "array {label} omitted named string properties"
+            );
         }
 
         let mut code = Vec::new();
@@ -14054,14 +14064,20 @@ int main(void) {{
         code.push(Instruction::Const(2));
         code.push(Instruction::GetComputed);
         code.push(Instruction::Const(4));
-        code.extend([Instruction::Binary(BinaryOp::StrictEqual), Instruction::Return]);
+        code.extend([
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::Return,
+        ]);
         let generated = emit(&program(constants, code, 0)).expect("for-in probe emits");
         let wrapper = format!(
             "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
             generated.symbol
         );
         let run = run_with_main(&generated, &wrapper, "array-for-in");
-        assert!(run.status.success(), "for-in omitted named string properties");
+        assert!(
+            run.status.success(),
+            "for-in omitted named string properties"
+        );
     }
 
     #[test]

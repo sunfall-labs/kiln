@@ -1082,7 +1082,9 @@ impl ObjectData {
             None if matches!(key, PropertyKey::String(_)) => self
                 .properties
                 .iter()
-                .position(|(name, _)| matches!(name, PropertyKey::Symbol(_) | PropertyKey::Internal(_)))
+                .position(|(name, _)| {
+                    matches!(name, PropertyKey::Symbol(_) | PropertyKey::Internal(_))
+                })
                 .unwrap_or(self.properties.len()),
             None => self.properties.len(),
         };
@@ -1152,7 +1154,9 @@ impl ObjectData {
 
     /// All own property slots, including non-enumerable properties.
     pub fn all_entries(&self) -> impl Iterator<Item = (&PropertyKey, &Property)> {
-        self.properties.iter().map(|(key, property)| (key, property))
+        self.properties
+            .iter()
+            .map(|(key, property)| (key, property))
     }
 
     /// Change only the enumerable attribute of an existing property.
@@ -4562,12 +4566,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )))
             }
             Native::ObjectPropertyIsEnumerable if matches!(receiver, Value::Proxy(_)) => {
-                let key = arguments
-                    .first()
-                    .map_or_else(|| PropertyKey::String(String::new()), Value::to_property_key);
-                Ok(Value::Boolean(
-                    self.proxy_property_is_enumerable(receiver, &key, instruction)?,
-                ))
+                let key = arguments.first().map_or_else(
+                    || PropertyKey::String(String::new()),
+                    Value::to_property_key,
+                );
+                Ok(Value::Boolean(self.proxy_property_is_enumerable(
+                    receiver,
+                    &key,
+                    instruction,
+                )?))
             }
             // Describing and defining a property are trapped operations of their own. A library
             // that copies a proxy into a plain object -- which is what a copy-on-write layer
@@ -4746,10 +4753,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let had_own_property = own_property_exists(&target, &key_value(&key));
-                let enumerable_present = has_property(
-                    &descriptor,
-                    &Value::String("enumerable".to_owned()),
-                );
+                let enumerable_present =
+                    has_property(&descriptor, &Value::String("enumerable".to_owned()));
                 let enumerable = self
                     .read_property(&descriptor, "enumerable", instruction)?
                     .is_truthy();
@@ -7922,7 +7927,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if descriptor.is_nullish() {
             return Ok(false);
         }
-        Ok(self.read_property(&descriptor, "enumerable", instruction)?.is_truthy())
+        Ok(self
+            .read_property(&descriptor, "enumerable", instruction)?
+            .is_truthy())
     }
 
     fn enumerable_own_properties(
@@ -11112,7 +11119,10 @@ fn delete_property(target: &Value, key: &Value) -> bool {
             true
         }
         Value::Function(closure) => {
-            closure.properties.borrow_mut().remove(key.to_property_key());
+            closure
+                .properties
+                .borrow_mut()
+                .remove(key.to_property_key());
             true
         }
         // Removing an element leaves a *hole* rather than shortening the array: the slot reads
@@ -12686,7 +12696,10 @@ fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
             data.set("set", set.unwrap_or(Value::Undefined));
         }
     }
-    data.set("enumerable", Value::Boolean(own_enumerable(target, &key_value(key))));
+    data.set(
+        "enumerable",
+        Value::Boolean(own_enumerable(target, &key_value(key))),
+    );
     data.set("configurable", Value::Boolean(!frozen));
     Some(Value::Object(Rc::new(RefCell::new(data))))
 }

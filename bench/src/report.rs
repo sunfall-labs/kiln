@@ -784,7 +784,9 @@ mod tests {
         assert_eq!(regressions.len(), 1, "{regressions:?}");
         assert_eq!(regressions[0].id, "small/warm-impl-edit");
         assert!(
-            regressions[0].detail.contains("missing from the current run"),
+            regressions[0]
+                .detail
+                .contains("missing from the current run"),
             "{regressions:?}"
         );
         assert!(text.contains("in baseline but not measured"), "{text}");
