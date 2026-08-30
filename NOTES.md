@@ -1835,3 +1835,102 @@ function". That is a deliberate divergence from node and is *not* in a different
 that reason.
 
 differential 87/0/0, thirdparty 10/10, conformance 39/39, Effect 12/12.
+
+**2026-08-30, Claude — kiln can now read Test262, and here are the first numbers it has ever
+produced.** I took `crates/kiln-test262` to do it; say the word and I will hand it back. Six
+changes, all defects rather than missing features, plus three tests. `cargo test -p kiln-test262`
+is green.
+
+**The discovery layer rejected 100% of the suite.** `parse_frontmatter` required the `/*---` block
+to be the first non-whitespace construct in the file, and every one of the 53,580 upstream tests
+opens with a copyright header, so `kiln test <tree>` aborted on the first file it touched. The rule
+is now that the marker must *begin a line*: all 53,580 blocks do, none appears anywhere else, and
+that admits the twenty hashbang negative tests whose deliberately invalid source legitimately
+precedes their metadata. It is also how the suite's own runners locate the block. The other five:
+`info: |` block scalars (83% of files) were met as stray indentation; 27 tests use a bare carriage
+return, which `str::lines` does not split on; `<!--`, `-->` and `#!` are comment forms; one file
+indents its whole block by a space, so indentation is now measured relative to the block as YAML
+does.
+
+**One of the six was a wrong answer, not a limitation.** `parse_description` treated a *trailing*
+`>` as a block-scalar indicator, so `description: If there are no named captures, don't replace
+$<>` parsed as an empty block. A block scalar is the entire value, never a suffix.
+
+**Parse-only, whole suite: 99,406 of 102,690 variants pass (96.8%), 14.5s.** The 3,184 failures are
+one class -- 3,177 are `expected a parser diagnostic for a parse-negative case`, meaning the parser
+accepts source that should be a SyntaxError. Missing early errors: `with` in strict mode, `await` as
+an identifier in a module, and relatives. That is a coherent backlog rather than diffuse breakage,
+and it is yours if you want it.
+
+**Interpreted, whole suite: 21 pass, 0 fail, 11 unsupported, 102,658 skipped -- and the skips are
+the runner's fault, not the interpreter's.** 67,219 for "default assert.js/sta.js harness is not
+loaded by this runner", 24,557 for per-test `includes`, 10,882 for the `async` flag needing an
+event-loop driver. `collect_js_paths` deliberately excludes `harness/`, and nothing else loads it,
+so almost every test asks for `assert.sameValue` and finds nothing. The four-outcome discipline is
+working exactly as ADR 0008 intends here: the runner reports 21 rather than inventing a rate.
+
+**The interesting part: the harness itself already runs.** Concatenating `assert.js`, `sta.js`,
+`compareArray.js` and `propertyHelper.js` and executing them under `kiln run` works, and
+`assert()`, `assert.sameValue`, `assert.throws` and `assert.compareArray` all behave. Only
+`verifyProperty` from `propertyHelper.js` throws. So loading the default harness is the single
+change that would convert roughly 67,000 skips into real pass/fail data, and the language work
+needed to support it has evidently already been done.
+
+**Two smaller things I noticed and did not fix.** An uncaught `Test262Error` prints as
+`uncaught [object Object]`, which will make every harness failure look identical until a thrown
+non-Error object stringifies better. And `kiln run` on a file in a large directory prints
+`stopped after 10000 files; kiln project is meant for a project directory` after a successful run,
+which is noise on the success path.
+
+The checkout I used is a shallow clone in this session's scratchpad, not committed anywhere. ADR
+0008 keeps Test262 external and explicit, so nothing here changes that; it does mean the numbers
+above are reproducible only by cloning the suite.
+
+## Reducing an object to a primitive, and the writes that never reached a setter
+
+dayjs is the entry that forced this. `b.diff(a, "day")` was `NaN`, because `diff` is written as
+`this - that` and **`-` never reduced its operands**. Every coercing operator lived in `binary`,
+a pure function of two values -- and reducing an object is a *call*, which a pure function has no
+machine to make. So `object - object` reached `toString`'s fallback and produced `NaN` silently.
+Every date and decimal library is used exactly this way.
+
+Reduction now happens in the interpreter, before `binary` sees the operands, for arithmetic,
+bitwise, shift and ordering. Three things are deliberately *not* in that set:
+
+- **`!x` does not coerce.** An object is always truthy, so the question never needs an answer
+  from the program. Coercing there broke 10 of the 12 Effect bundles and put one into a stack
+  overflow -- a class whose `valueOf` touches the instance is perfectly ordinary, and `!self` is
+  everywhere.
+- **`x == null` does not coerce.** The specification answers a nullish comparison without
+  converting anything. `value != null` is the commonest guard in JavaScript; running a wrapper's
+  accessor to evaluate it is both wrong and, for a wrapper that assumes it is being used
+  properly, fatal. It took lodash down with `object.value is not a function`.
+- **A template is not `"" + x`.** `${x}` is ToString, which asks `toString` first; `+` uses the
+  default hint, which asks `valueOf` first. An object with both answers the two differently, so
+  the lowering emits a `String(x)` call rather than desugaring to concatenation.
+
+Falling out of it: `toString`/`toLocaleString`/`valueOf` are now inherited by ordinary objects
+(they used to be left out, back when ToPrimitive was pure), and **primitives answer them too** --
+`"ab".toString()`, `true.toString()`. Library code reaches those constantly on values it has
+already coerced, and chalk died on the first one.
+
+**Then chalk found the bigger bug: a write never consulted the prototype chain for a setter.**
+Only plain objects did. A function or an array assigned an own data property instead, which
+*shadows* the accessor -- the write appears to work, the read appears to work, and the object
+behind the accessor never hears about it. chalk builds a callable and links it to a prototype
+carrying every style as an accessor; `chalk.level = 3` became an ordinary property on the
+function and the generator behind it stayed at level 0, so every string came back unstyled with
+no error anywhere. One `inherited_setter` helper now serves objects, functions and arrays.
+
+Two smaller ones alongside it: **`Object.create(proto, descriptors)` ignored its second
+argument** entirely (the descriptors can carry accessors, so it cannot be handled where the
+prototype is), and **`Object.setPrototypeOf` did nothing to an array**, though `prototype_of`
+had been reading an array's recorded prototype all along -- so the two disagreed.
+
+**Corpus.** dayjs, chalk and ms are in `conformance/thirdparty` now, 13 libraries. `build.sh`
+had two latent breakages: `npm init -y` refuses a directory name starting with a dot, and esbuild
+resolves `node_modules` from the *importing file*, so a probe has to be bundled from inside the
+scratch directory to see what npm installed there. `--main-fields=module,main` is new too: the
+neutral platform configures none, so a CommonJS-only package resolves to nothing.
+
+differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12.

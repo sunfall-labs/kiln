@@ -264,6 +264,8 @@ pub enum Native {
     ObjectPropertyIsEnumerable,
     ObjectToStringTag,
     ObjectValueOf,
+    /// `ToString` of the receiver, which is what a primitive's `toString` returns.
+    PrimitiveToString,
     /// `Object.prototype`, `Array.prototype` and the rest, as method tables.
     ///
     /// Not real prototype objects: the realm has no chain to hang built-ins on yet (design.md
@@ -2535,6 +2537,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
+                    // Only the numeric operators coerce. `typeof` reports a type, `void`
+                    // discards, and `!` asks whether the value is truthy -- an object always is,
+                    // whatever its `valueOf` would have said, so reducing it would both be wrong
+                    // and run the program's code for no reason.
+                    let value = if matches!(
+                        operator,
+                        UnaryOp::Negate | UnaryOp::Plus | UnaryOp::BitwiseNot
+                    ) {
+                        self.as_primitive(&value, false, current)?
+                    } else {
+                        value
+                    };
                     self.stack.push(unary(*operator, value));
                 }
                 // `in` consults a proxy's `has` trap, so it cannot go through the pure operator
@@ -2569,17 +2583,54 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::Binary(operator) => {
                     let right = self.pop(current)?;
                     let left = self.pop(current)?;
-                    // `+` and the ordering comparisons reduce an object to a primitive first,
-                    // which is a *call* -- so it cannot happen inside `binary`, which has no
-                    // machine to call with. Everything else works on the values as they are.
-                    let (left, right) = if matches!(
-                        operator,
-                        BinaryOp::Add
-                            | BinaryOp::LessThan
-                            | BinaryOp::LessThanOrEqual
-                            | BinaryOp::GreaterThan
-                            | BinaryOp::GreaterThanOrEqual
-                    ) {
+                    // Every operator that coerces its operands reduces an object to a primitive
+                    // first, which is a *call* -- so it cannot happen inside `binary`, which has
+                    // no machine to call with. That is all of the arithmetic and the ordering
+                    // comparisons: `a - b` where both are wrappers around a number is how every
+                    // date and decimal library is used, and it was reaching `toString` and
+                    // producing NaN. The equality operators are excluded because they compare by
+                    // identity when both sides are objects, and `in`/`instanceof` because their
+                    // right side is a container rather than a value.
+                    // Every operator that coerces its operands reduces an object to a primitive
+                    // first, which is a *call* -- so it cannot happen inside `binary`, which has
+                    // no machine to call with. `a - b` where both sides wrap a number is how
+                    // every date and decimal library is used, and it was reaching `toString` and
+                    // producing NaN.
+                    //
+                    // `==` is the awkward one: it compares two objects by identity and reduces
+                    // only when the other side is a primitive. `===` never reduces, and
+                    // `in`/`instanceof` take a container on the right rather than a value.
+                    // `x == null` compares against nullish, which the specification answers
+                    // without any conversion -- so reducing there would run the program's
+                    // `valueOf` for a question that never needed it. `value != null` is the
+                    // commonest guard in JavaScript, and calling into a wrapper's accessor to
+                    // evaluate it is both wrong and, for a wrapper that assumes it is being used
+                    // properly, fatal.
+                    let mixed = is_object_like(&left) != is_object_like(&right)
+                        && !left.is_nullish()
+                        && !right.is_nullish();
+                    let reduces =
+                        matches!(
+                            operator,
+                            BinaryOp::Add
+                                | BinaryOp::Subtract
+                                | BinaryOp::Multiply
+                                | BinaryOp::Divide
+                                | BinaryOp::Remainder
+                                | BinaryOp::Exponentiate
+                                | BinaryOp::LessThan
+                                | BinaryOp::LessThanOrEqual
+                                | BinaryOp::GreaterThan
+                                | BinaryOp::GreaterThanOrEqual
+                                | BinaryOp::BitwiseAnd
+                                | BinaryOp::BitwiseOr
+                                | BinaryOp::BitwiseXor
+                                | BinaryOp::ShiftLeft
+                                | BinaryOp::ShiftRight
+                                | BinaryOp::UnsignedShiftRight
+                        ) || (matches!(operator, BinaryOp::LooseEqual | BinaryOp::LooseNotEqual)
+                            && mixed);
+                    let (left, right) = if reduces {
                         (
                             self.as_primitive(&left, false, current)?,
                             self.as_primitive(&right, false, current)?,
@@ -4143,6 +4194,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 this_value: arguments.first().cloned().unwrap_or(Value::Undefined),
                 arguments: arguments.get(1..).unwrap_or_default().to_vec(),
             }))),
+            // `Object.create(proto, descriptors)` is `Object.create(proto)` followed by
+            // `Object.defineProperties`. The descriptors may carry accessors, and an accessor
+            // is a function -- so the second argument cannot be handled beside the first one,
+            // which needs no machine at all.
+            Native::ObjectCreate if matches!(arguments.get(1), Some(value) if !value.is_nullish()) =>
+            {
+                let object = call_native(Native::ObjectCreate, receiver, &arguments[..1])?;
+                self.dispatch_native(
+                    Native::ObjectDefineProperties,
+                    &Value::Undefined,
+                    &[object.clone(), arguments[1].clone()],
+                    instruction,
+                )?;
+                Ok(object)
+            }
             Native::ObjectDefineProperties => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let source = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -6454,6 +6520,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Function(closure) if name != "prototype" => {
                 closure.properties.borrow().lookup(name)
             }
+            // An array's non-element properties live in an ordinary store with an ordinary
+            // chain, so a subclass's accessor is reachable the same way.
+            Value::Array(items) => items.properties.borrow().lookup(name),
             _ => None,
         };
         match accessor {
@@ -6464,6 +6533,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             _ => Ok(self.property(target, name)),
         }
+    }
+
+    /// Route a write through a setter found anywhere on the prototype chain, answering whether
+    /// the write was consumed.
+    ///
+    /// A setter takes the write ahead of creating an own data property, and a getter-only
+    /// accessor swallows it. A store that skips this check silently *shadows* the accessor
+    /// instead -- which is how `chalk.level = 3` became an ordinary property on the chalk
+    /// function and never reached the generator sitting behind the accessor.
+    fn inherited_setter(
+        &mut self,
+        store: &RefCell<ObjectData>,
+        target: &Value,
+        name: &str,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        // Bound out of the `if let`: the borrow would otherwise still be alive at the setter
+        // call, which is ordinary code that may touch this very object.
+        let existing = store.borrow().lookup(name);
+        let Some(Property::Accessor { set, .. }) = existing else {
+            return Ok(false);
+        };
+        let Some(setter) = set else {
+            // Getter-only: the write is discarded in sloppy mode and a TypeError in strict.
+            // Modules are strict, but a script is not, and this is shared.
+            return Ok(true);
+        };
+        self.call_value(&setter, target.clone(), vec![value.clone()], instruction)?;
+        Ok(true)
     }
 
     fn property(&self, target: &Value, name: &str) -> Value {
@@ -6579,6 +6678,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             // A regexp's own properties. `lastIndex` is the mutable one, and the reason two
             // evaluations of one literal must not share an object.
+            Value::Boolean(_) => match name {
+                "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString),
+                "valueOf" => Value::Native(Native::ObjectValueOf),
+                _ => Value::Undefined,
+            },
             Value::BigInt(_) => match name {
                 "toString" | "toLocaleString" => Value::Native(Native::BigIntToString),
                 "valueOf" => Value::Native(Native::NumberValueOf),
@@ -7088,10 +7192,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // Not an index, so it is an ordinary named property of the array.
                 None => {
-                    items
-                        .properties
-                        .borrow_mut()
-                        .set(&key.property_key(), value);
+                    let name = key.property_key();
+                    if self.inherited_setter(
+                        &items.properties,
+                        target,
+                        &name,
+                        &value,
+                        instruction,
+                    )? {
+                        return Ok(());
+                    }
+                    items.properties.borrow_mut().set(&name, value);
                     Ok(())
                 }
             },
@@ -7110,20 +7221,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Object(object) => {
                 let name = key.property_key();
-                // A setter found anywhere on the chain takes the write; only when there is none
-                // does the assignment create an own data property. That asymmetry is what makes
-                // `obj.x = 1` on a class with `set x()` run the setter rather than shadow it.
-                // Bound out of the `if let`: the borrow would otherwise still be alive at the
-                // `borrow_mut` below, and at the setter call, which is ordinary code that may
-                // touch this very object.
-                let existing = object.borrow().lookup(&name);
-                if let Some(Property::Accessor { set, .. }) = existing {
-                    let Some(setter) = set else {
-                        // Getter-only: the write is discarded in sloppy mode and a TypeError in
-                        // strict. Modules are strict, but a script is not, and this is shared.
-                        return Ok(());
-                    };
-                    self.call_value(&setter, target.clone(), vec![value], instruction)?;
+                if self.inherited_setter(object, target, &name, &value, instruction)? {
                     return Ok(());
                 }
                 object.borrow_mut().set(&name, value);
@@ -7137,6 +7235,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // ignored by `new`.
                 if name == "prototype" {
                     *closure.prototype.borrow_mut() = Some(value);
+                    return Ok(());
+                }
+                if self.inherited_setter(&closure.properties, target, &name, &value, instruction)? {
                     return Ok(());
                 }
                 closure.properties.borrow_mut().set(&name, value);
@@ -7862,6 +7963,7 @@ fn call_native(
         // `Object.prototype.valueOf` returns the receiver unchanged, which is the identity that
         // makes `ToPrimitive` fall through to `toString` for a plain object.
         Native::ObjectValueOf => receiver.clone(),
+        Native::PrimitiveToString => Value::String(receiver.to_display_string()),
         Native::FunctionToString => Value::String(receiver.to_display_string()),
         // `Function` is here for its prototype and its `toString`. Building a function from a
         // string needs the compiler at run time, which is a different kind of realm from the one
@@ -8297,6 +8399,11 @@ fn call_native(
                     // A function is an object, and setting its prototype is how a program gives
                     // a constructor inherited statics without `extends`.
                     Value::Function(closure) => closure
+                        .properties
+                        .borrow_mut()
+                        .set_prototype(prototype.clone()),
+                    // Where `prototype_of` already looks for it, so the two agree.
+                    Value::Array(items) => items
                         .properties
                         .borrow_mut()
                         .set_prototype(prototype.clone()),
@@ -9609,6 +9716,10 @@ fn string_property(name: &str) -> Value {
         "trimStart" => Value::Native(Native::StringTrimStart),
         "trimEnd" => Value::Native(Native::StringTrimEnd),
         "concat" => Value::Native(Native::StringConcat),
+        // A string's `toString` and `valueOf` both hand back the string itself. They are
+        // rarely written by hand and constantly reached by library code that calls `toString`
+        // on something it has already coerced.
+        "toString" | "toLocaleString" | "valueOf" => Value::Native(Native::ObjectValueOf),
         "match" => Value::Native(Native::StringMatch),
         "matchAll" => Value::Native(Native::StringMatchAll),
         "search" => Value::Native(Native::StringSearch),
@@ -10888,10 +10999,21 @@ fn object_property(name: &str) -> Value {
     }
 }
 
-/// The three `Object.prototype` methods an ordinary object inherits, and nothing more.
+/// What an ordinary object inherits from `Object.prototype`.
+///
+/// `toString` and `valueOf` are here now that `ToPrimitive` runs on the machine and tries them in
+/// the specification's order: `String({})` finds `toString` and answers "[object Object]", and
+/// `{} - 1` finds `valueOf`, gets the object back, and moves on to `toString`. While the
+/// reduction was a pure function these two could not be here, because it would have found them
+/// and had no way to call them.
 fn inherited_object_property(name: &str) -> Value {
     match name {
-        "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" => object_property(name),
+        "hasOwnProperty"
+        | "isPrototypeOf"
+        | "propertyIsEnumerable"
+        | "toString"
+        | "toLocaleString"
+        | "valueOf" => object_property(name),
         _ => Value::Undefined,
     }
 }
@@ -11013,6 +11135,14 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Value {
             }))
         }
     }
+}
+
+/// Whether this value reduces to a primitive by calling one of its own methods.
+fn is_object_like(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Object(_) | Value::Function(_) | Value::Array(_)
+    )
 }
 
 /// What a proxy ultimately wraps, following a chain of them.

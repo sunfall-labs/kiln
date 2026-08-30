@@ -2702,7 +2702,22 @@ impl Compiler {
                 let mut quasis = quasis.iter();
                 self.push_constant(Constant::String(quasis.next().cloned().unwrap_or_default()));
                 for (expression, quasi) in expressions.iter().zip(quasis) {
-                    self.expression(expression);
+                    // `${x}` is ToString(x), which reduces an object with the *string* hint --
+                    // `toString` before `valueOf`. Concatenation reduces with the default hint,
+                    // the other way round, so a template is not `"" + x`: for an object with a
+                    // `valueOf` and no own `toString` the two genuinely disagree, and desugaring
+                    // to `+` silently produced the wrong one.
+                    //
+                    // A literal is already a primitive and converts to itself, so it keeps the
+                    // plain concatenation -- which is also what leaves a template of constants
+                    // compilable by a backend that has no calls.
+                    if matches!(expression.kind, ExpressionKind::Literal(_)) {
+                        self.expression(expression);
+                    } else {
+                        self.code.push(Instruction::LoadBuiltin(Builtin::String));
+                        self.expression(expression);
+                        self.code.push(Instruction::Call { argc: 1 });
+                    }
                     self.code.push(Instruction::Binary(BinaryOp::Add));
                     // A run of text between two holes is skipped when it is empty, which is the
                     // common shape: `${a}${b}` has two empty quasis in the middle and the end.

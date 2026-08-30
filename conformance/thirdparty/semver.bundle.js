@@ -2018,7 +2018,7 @@ var require_semver2 = __commonJS({
   }
 });
 
-// semver.mjs
+// semver.entry.mjs
 var import_semver = __toESM(require_semver2(), 1);
 console.log(import_semver.default.valid("1.2.3"), import_semver.default.gt("2.0.0", "1.9.9"));
 console.log(import_semver.default.satisfies("1.2.3", "^1.0.0"), import_semver.default.coerce("v3.1").version);

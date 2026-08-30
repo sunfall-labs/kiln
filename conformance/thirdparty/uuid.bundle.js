@@ -158,7 +158,7 @@ function version(uuid) {
 }
 var version_default = version;
 
-// uuidp.mjs
+// uuid.entry.mjs
 var id = v5_default("kiln", v5_default.DNS);
 console.log(id, validate_default(id), version_default(id));
 console.log(stringify_default(parse_default("6ba7b810-9dad-11d1-80b4-00c04fd430c8")));
