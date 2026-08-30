@@ -454,6 +454,7 @@ typedef struct kiln_closure {
     /* What a generator's frame has to be big enough for, known when the body is emitted. */
     uint32_t local_count;
     uint32_t stack_size;
+    uint32_t handler_depth;
     /* The object `new f()` links instances to, and the store `f.x = 1` writes into. Both are
      * created on first use: an ordinary function that is never used as a constructor and never
      * carries a property allocates neither. */
@@ -541,8 +542,18 @@ typedef struct kiln_generator {
     /* Which `Yield` to come back to. Zero before the first `next`, when the body starts at its
      * beginning rather than resuming. */
     size_t resume;
+    /* The handler stack, which is part of the state a suspension has to survive: a `try` that
+     * stopped catching across a `yield` would surface three frames away. Owned here rather than
+     * being automatic, for exactly the reason the operand stack is. */
+    size_t *handlers;
+    size_t *handler_stack;
+    size_t handler_top;
     /* What `next(v)` passed in, which becomes the result of the `yield` that suspended. */
     kiln_value sent;
+    /* Whether `sent` is a value to resume with or a rejection to raise at the suspension point.
+     * A rejected `await` throws *into* the body, so a `try` around it catches -- which is the
+     * whole reason the handler stack above has to survive a suspension. */
+    int raising;
     int started;
     int done;
 } kiln_generator;
@@ -972,12 +983,23 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     }
     frame->locals = (kiln_value *)malloc(locals * sizeof *frame->locals);
     frame->stack = (kiln_value *)malloc(depth * sizeof *frame->stack);
-    if (frame->locals == NULL || frame->stack == NULL) {
+    /* One handler slot per instruction is the bound the emitter uses for an automatic frame, and
+     * it is the same bound here: a body cannot register more handlers than it has instructions. */
+    frame->handlers = (size_t *)malloc((closure->handler_depth == 0 ? 1 : closure->handler_depth) *
+                                       sizeof *frame->handlers);
+    frame->handler_stack =
+        (size_t *)malloc((closure->handler_depth == 0 ? 1 : closure->handler_depth) *
+                         sizeof *frame->handler_stack);
+    if (frame->locals == NULL || frame->stack == NULL || frame->handlers == NULL ||
+        frame->handler_stack == NULL) {
         free(frame->locals);
         free(frame->stack);
+        free(frame->handlers);
+        free(frame->handler_stack);
         free(frame);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    frame->handler_top = 0;
     for (index = 0; index < locals; ++index) {
         frame->locals[index] = kiln_c99_undefined();
     }
@@ -989,6 +1011,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->sp = 0;
     frame->resume = 0;
     frame->sent = kiln_c99_undefined();
+    frame->raising = 0;
     frame->promise = kiln_c99_undefined();
     frame->is_async = 0;
     frame->started = 0;
@@ -1323,7 +1346,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
                                  size_t name_len, uint32_t proto, int generator, int asynchronous,
                                  uint32_t local_count, uint32_t stack_size,
-                                 const kiln_value *captured, uint32_t count) {
+                                 uint32_t handler_depth, const kiln_value *captured,
+                                 uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
@@ -1345,6 +1369,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->asynchronous = asynchronous;
     closure->local_count = local_count;
     closure->stack_size = stack_size;
+    closure->handler_depth = handler_depth;
     closure->prototype = kiln_c99_undefined();
     closure->properties = kiln_c99_undefined();
     closure->name = name;
@@ -5603,14 +5628,14 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     if (frame->done) {
         return KILN_C99_OK;
     }
-    if (rejected) {
-        /* A rejected await with no `try` around it rejects the function's own promise. A `try`
-         * inside a generator body is refused by verification, so there is nowhere else for it to
-         * go -- and that refusal is what makes this correct rather than approximate. */
+    if (rejected && !frame->started) {
+        /* Nothing has run yet, so there is no suspension point to raise at and the only place the
+         * rejection can go is the function's own promise. */
         frame->done = 1;
         return kiln_c99_settle(frame->promise, sent, 1);
     }
     frame->sent = sent;
+    frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
     status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
                            thrown, frame);
@@ -6140,20 +6165,7 @@ fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
                 feature: "async generators in the native backend".to_string(),
             });
         }
-        // A generator's state survives its own suspension, and a handler stack is part of that
-        // state. Refused rather than half-supported: a `try` that silently stopped catching
-        // across a `yield` is the kind of thing that shows up three frames away.
-        if (proto.generator || proto.asynchronous)
-            && proto
-                .code
-                .iter()
-                .any(|instruction| matches!(instruction, Instruction::PushHandler(_)))
-        {
-            return Err(EmitError::Unsupported {
-                feature: "a `try` inside a generator or async function in the native backend"
-                    .to_string(),
-            });
-        }
+
         if proto.parameter_count > proto.local_count {
             return Err(EmitError::InvalidProgram {
                 message: format!(
@@ -6936,8 +6948,18 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
 }
 
 /// Declare the handler stack a body needs, or nothing when it catches nothing.
-fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize) {
+fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize, suspends: bool) {
     if handlers.is_empty() {
+        return;
+    }
+    if suspends {
+        // A generator's handler stack is in its frame rather than automatic, for exactly the
+        // reason its operand stack is: a `try` has to still be catching after the `yield` inside
+        // it returns. The macro is how the shared emission below reaches it without every site
+        // learning which kind of body it is in.
+        output.push_str("    size_t *kiln_handlers = frame->handlers;\n");
+        output.push_str("    size_t *kiln_handler_stack = frame->handler_stack;\n");
+        output.push_str("#define kiln_handler_top frame->handler_top\n");
         return;
     }
     writeln!(output, "    size_t kiln_handlers[{depth}];").unwrap();
@@ -6950,7 +6972,7 @@ fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize) 
 ///
 /// A body whose handler stack is empty has nothing to catch with, so the throw keeps travelling
 /// -- which is the same path a body with no handlers at all takes.
-fn render_unwind(output: &mut String, handlers: &[u32]) {
+fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool) {
     if handlers.is_empty() {
         return;
     }
@@ -6964,6 +6986,11 @@ fn render_unwind(output: &mut String, handlers: &[u32]) {
         writeln!(output, "    case {target}: goto kiln_label_{target};").unwrap();
     }
     output.push_str("    default: return KILN_C99_CONTROL_ERROR;\n    }\n");
+    if suspends {
+        // The macro stood in for a local that a suspending body does not have; it ends with the
+        // body rather than leaking into the next one.
+        output.push_str("#undef kiln_handler_top\n");
+    }
 }
 
 fn render_function(
@@ -6993,6 +7020,9 @@ fn render_function(
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
     let handlers = handler_targets(&proto.code);
+    // A generator and an async function both suspend, and every part of their state has to
+    // outlive the call that stopped in the middle of them.
+    let suspends = proto.generator || proto.asynchronous;
     let yields: Vec<usize> = proto
         .code
         .iter()
@@ -7005,7 +7035,7 @@ fn render_function(
         // generator, and every `locals[i]` and `stack[sp]` below reads through them unchanged.
         output.push_str("    kiln_value *stack = frame->stack;\n");
         output.push_str("    kiln_value *locals = frame->locals;\n");
-        render_handler_prologue(output, &handlers, proto.code.len());
+        render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
@@ -7014,9 +7044,19 @@ fn render_function(
         // has jumps back to just after the `Yield` that suspended it, with the operand stack
         // restored to the height it had there.
         if !yields.is_empty() {
-            output.push_str(
-                "    if (frame->started) {\n        sp = frame->sp;\n        switch (frame->resume) {\n",
-            );
+            output.push_str("    if (frame->started) {\n        sp = frame->sp;\n");
+            // A rejected `await` arrives as a throw at the suspension point rather than as a
+            // value, so it goes to the handler stack instead of to the resume label.
+            if handlers.is_empty() {
+                output.push_str(
+                    "        if (frame->raising) { *thrown = frame->sent; return KILN_C99_THROWN; }\n",
+                );
+            } else {
+                output.push_str(
+                    "        if (frame->raising) { *thrown = frame->sent; goto kiln_unwind; }\n",
+                );
+            }
+            output.push_str("        switch (frame->resume) {\n");
             for position in &yields {
                 writeln!(
                     output,
@@ -7029,7 +7069,7 @@ fn render_function(
     } else {
         writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
         writeln!(output, "    kiln_value locals[{locals}];").unwrap();
-        render_handler_prologue(output, &handlers, proto.code.len());
+        render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
@@ -7065,7 +7105,7 @@ fn render_function(
         writeln!(output, "kiln_label_{position}:;").unwrap();
         emit_instruction(output, &proto.code[position], position, &emitter);
     }
-    render_unwind(output, &emitter.handlers);
+    render_unwind(output, &emitter.handlers, suspends);
     // A body whose control reaches the end without a `Return` is a compiler bug, not a program
     // error: the lowering always ends a body with one.
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
@@ -7134,6 +7174,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         &mut output,
         &handler_targets(&program.code),
         program.code.len(),
+        false,
     );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     for local in 0..program.local_count {
@@ -7153,7 +7194,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
-    render_unwind(&mut output, &emitter.handlers);
+    render_unwind(&mut output, &emitter.handlers, false);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -7224,6 +7265,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         &mut output,
         &handler_targets(&program.code),
         program.code.len(),
+        false,
     );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     writeln!(
@@ -7273,7 +7315,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
-    render_unwind(&mut output, &emitter.handlers);
+    render_unwind(&mut output, &emitter.handlers, false);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -7409,11 +7451,14 @@ fn emit_instruction(
             let asynchronous = i32::from(target.asynchronous);
             let frame_locals = target.local_count.max(1);
             let frame_stack = frame_stacks[*proto as usize].max(1);
+            // One handler slot per instruction: a body cannot register more handlers than it has
+            // instructions, which is the same bound an automatic frame uses.
+            let frame_handlers = target.code.len().max(1);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -7433,7 +7478,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();

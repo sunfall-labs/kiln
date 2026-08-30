@@ -2504,3 +2504,41 @@ non-function -- is still `KILN_C99_CONTROL_ERROR` and is *not* catchable nativel
 interpreter throws a real Error object a program can catch. Making those throw needs `Error`
 objects, which needs `New`. Until then a native `catch` takes what the program threw and nothing
 else, and a probe that catches a TypeError will diverge visibly rather than quietly.
+
+### `try` inside a generator, and a rejected `await` that has somewhere to go
+
+**2026-08-30, Claude — `kiln-backend-c`, `conformance/native/generators.ts`.**
+
+The native backend refused a `try` inside a generator or an async function. The refusal was
+honest about why: a generator's state survives its own suspension, and the handler stack was
+automatic storage in the body, so a `try` around a `yield` would have stopped catching the
+moment the body returned to its caller.
+
+The fix is the same one the operand stack already got — the handler stack moves into
+`kiln_generator`, sized by a `handler_depth` the emitter now records on the closure. The shared
+emission reaches it through a `#define kiln_handler_top frame->handler_top` that a suspending
+body opens and `#undef`s at its unwind label, so no instruction site has to learn which kind of
+body it is in. A body that does not suspend emits exactly the bytes it did before.
+
+**Then the interesting half.** `await` on a rejected promise inside a `try` was still not caught:
+`kiln_c99_async_step` saw the rejection and settled the function's own promise with it, because
+under the old refusal there was provably nowhere else for it to go. Now there is. The frame
+carries `int raising` beside `sent`, and the generator resume prologue reads it:
+
+```c
+if (frame->started) {
+    sp = frame->sp;
+    if (frame->raising) { *thrown = frame->sent; goto kiln_unwind; }
+    switch (frame->resume) { ... }
+```
+
+so the rejection is *raised at the suspension point* rather than around it, and an enclosing
+`catch` takes it exactly as `throw` would. `!frame->started` keeps the old path for the case it
+was actually right about: nothing has run yet, so there is no suspension point to raise at.
+
+`conformance/native/generators.ts` now covers `try`/`catch`/`finally` with a `yield` in each arm,
+a handler registered before a suspension and used after one with a nested generator between, and
+the async form — all three engines agree.
+
+Native emission is 20/20 on `conformance/native` and the differential corpus is 97/97 against
+node with 0 refusals; `--native` runs 69 of the 97 differential probes.
