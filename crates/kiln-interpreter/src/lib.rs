@@ -5029,11 +5029,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectGet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let key = arguments.get(1).map_or_else(
-                    || PropertyKey::String(String::new()),
-                    Value::to_property_key,
-                );
-                self.read_property(&target, &key, instruction)
+                if !is_reflect_target(&target) {
+                    return Err(ExecutionError::NotAnObject {
+                        instruction,
+                        value: target.type_name(),
+                    });
+                }
+                let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let receiver = arguments.get(2).cloned().unwrap_or_else(|| target.clone());
+                self.read_computed_with_receiver(&target, &key, &receiver, instruction)
             }
             Native::ReflectSet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -8204,8 +8208,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        self.read_computed_with_receiver(target, key, target, instruction)
+    }
+
+    /// The `[[Get]]` operation with an explicit receiver. Ordinary bracket access uses the target
+    /// itself; `Reflect.get` can provide a different value for accessors and proxy traps.
+    fn read_computed_with_receiver(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get(target, key, instruction);
+            return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
         let property_key = key.to_property_key();
         let accessor = match target {
@@ -8220,7 +8236,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         match accessor {
             Some(Property::Accessor { get, .. }) => match get {
-                Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
+                Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
                 None => Ok(Value::Undefined),
             },
             _ => Ok(self.computed(target, key)),
@@ -8234,18 +8250,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        self.proxy_get_with_receiver(target, key, target, instruction)
+    }
+
+    fn proxy_get_with_receiver(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return self.read_computed(target, key, instruction);
+            return self.read_computed_with_receiver(target, key, receiver, instruction);
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
         match self.proxy_trap(&proxy, "get", instruction)? {
             Some(trap) => {
                 let handler = proxy.handler.clone();
-                let arguments = vec![inner, Self::trap_key(key), target.clone()];
+                let arguments = vec![inner, Self::trap_key(key), receiver.clone()];
                 self.call_value(&trap, handler, arguments, instruction)
             }
-            None => self.read_computed(&inner, key, instruction),
+            None => self.read_computed_with_receiver(&inner, key, receiver, instruction),
         }
     }
 
@@ -12868,6 +12894,22 @@ fn is_object_like(value: &Value) -> bool {
     )
 }
 
+/// `Reflect.get` does not box primitive targets. Every other public `Value` variant represents an
+/// object or callable object; `Cell` is internal and must never escape as a target.
+fn is_reflect_target(value: &Value) -> bool {
+    !matches!(
+        value,
+        Value::Undefined
+            | Value::Null
+            | Value::Boolean(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::BigInt(_)
+            | Value::Symbol(_)
+            | Value::Cell(_)
+    )
+}
+
 /// What a proxy ultimately wraps, following a chain of them.
 ///
 /// For the operations that are defined on the *shape* of a value rather than on its properties
@@ -15156,6 +15198,58 @@ mod tests {
             .read_computed(&value, &Value::Symbol(symbol), 0)
             .expect("symbol accessor read");
         assert!(matches!(read, Value::Object(_)), "getter must be invoked");
+    }
+
+    #[test]
+    fn reflect_get_uses_indexed_reads_and_rejects_primitive_targets() {
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        let array = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
+        let typed = construct_typed_array(
+            TypedKind::Uint8,
+            &[Value::Array(ArrayData::new(vec![
+                Value::Number(7.0),
+                Value::Number(8.0),
+            ]))],
+        );
+
+        assert_eq!(
+            vm.dispatch_native(
+                Native::ReflectGet,
+                &Value::Undefined,
+                &[array, Value::String("0".into())],
+                0,
+            ),
+            Ok(Value::Number(1.0))
+        );
+        assert_eq!(
+            vm.dispatch_native(
+                Native::ReflectGet,
+                &Value::Undefined,
+                &[typed, Value::Number(1.0)],
+                0,
+            ),
+            Ok(Value::Number(8.0))
+        );
+        assert!(matches!(
+            vm.dispatch_native(
+                Native::ReflectGet,
+                &Value::Undefined,
+                &[Value::Number(1.0), Value::String("value".into())],
+                0,
+            ),
+            Err(ExecutionError::NotAnObject {
+                value: "number",
+                ..
+            })
+        ));
     }
 
     #[test]
