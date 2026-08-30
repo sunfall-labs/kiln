@@ -238,8 +238,19 @@ enum kiln_value_tag {
     KILN_VALUE_HOLE = 14,
     /* bits holds a kiln_collection*. A Map and a Set are one tag because they are one structure:
      * a Set is a Map whose values are never read. */
-    KILN_VALUE_COLLECTION = 15
+    KILN_VALUE_COLLECTION = 15,
+    /* bits holds a kiln_promise*: a value that arrives once, later. */
+    KILN_VALUE_PROMISE = 16,
+    /* The `resolve` and `reject` an executor is handed. bits holds a kiln_settler*. */
+    KILN_VALUE_SETTLER = 17,
+    /* A callable with its receiver fixed. bits holds a kiln_bound*.
+     *
+     * Needed because a promise reaction is a handler *and* the thing it runs against, and the
+     * queue can only hold one value per slot -- so the pair has to be one value. */
+    KILN_VALUE_BOUND = 18
 };
+
+#define KILN_C99_BUILTIN_PROMISE 15
 
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
@@ -389,6 +400,18 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_ITERATOR_SELF 105
 #define KILN_C99_METHOD_ARRAY_VALUES 106
 
+/* Promise, and the two halves of driving an async function. */
+#define KILN_C99_METHOD_THEN 107
+#define KILN_C99_METHOD_CATCH 108
+#define KILN_C99_METHOD_FINALLY 109
+#define KILN_C99_METHOD_PROMISE_RESOLVE 110
+#define KILN_C99_METHOD_PROMISE_REJECT 111
+#define KILN_C99_METHOD_PROMISE_ALL 112
+#define KILN_C99_METHOD_PROMISE_RACE 113
+#define KILN_C99_METHOD_ASYNC_RESUME 114
+#define KILN_C99_METHOD_ASYNC_THROW 115
+#define KILN_C99_METHOD_ALL_STEP 116
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -425,6 +448,9 @@ typedef struct kiln_closure {
     kiln_body_fn body;
     /* Calling this builds a generator object instead of running the body. */
     int generator;
+    /* ...and, when this is set, drives it to completion against a promise rather than handing
+     * the object to the program. */
+    int asynchronous;
     /* What a generator's frame has to be big enough for, known when the body is emitted. */
     uint32_t local_count;
     uint32_t stack_size;
@@ -505,6 +531,10 @@ typedef struct kiln_array {
 typedef struct kiln_generator {
     kiln_value function;
     kiln_value receiver;
+    /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --
+     * and this is the promise its eventual return value settles. Undefined for a plain one. */
+    kiln_value promise;
+    int is_async;
     kiln_value *locals;
     kiln_value *stack;
     size_t sp;
@@ -548,6 +578,49 @@ typedef struct kiln_collection {
     size_t capacity;
     int is_map;
 } kiln_collection;
+
+/* A promise: a value that arrives once, later, and everything waiting for it.
+ *
+ * `state` is pending, fulfilled or rejected, and only the first settlement counts -- a promise is
+ * handed to the program as two functions and the program may call either twice. */
+typedef struct kiln_reaction {
+    kiln_value on_fulfilled;
+    kiln_value on_rejected;
+    /* The promise `then` returned, settled with whatever the handler produces. */
+    kiln_value derived;
+} kiln_reaction;
+
+typedef struct kiln_promise {
+    int state;
+    kiln_value value;
+    kiln_reaction *reactions;
+    size_t count;
+    size_t capacity;
+} kiln_promise;
+
+#define KILN_C99_PENDING 0
+#define KILN_C99_FULFILLED 1
+#define KILN_C99_REJECTED 2
+
+typedef struct kiln_settler {
+    kiln_value promise;
+    int rejects;
+} kiln_settler;
+
+typedef struct kiln_bound {
+    kiln_value target;
+    kiln_value receiver;
+} kiln_bound;
+
+/* One entry of the microtask queue: run `handler` against `argument` and settle `derived` with
+ * what it produced.  A handler that is not callable passes the value through unchanged, which is
+ * what `p.then(undefined, f)` and `p.catch(f)` rely on. */
+typedef struct kiln_microtask {
+    kiln_value handler;
+    kiln_value argument;
+    kiln_value derived;
+    int rejected;
+} kiln_microtask;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
@@ -631,6 +704,19 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_new_promise(kiln_value *out);
+static kiln_promise *kiln_c99_promise_of(kiln_value value);
+static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects);
+static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver);
+static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
+static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
+                         kiln_value *out);
+static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
+static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                               int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
+                                  const kiln_value *args, size_t argc);
+static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
@@ -903,6 +989,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->sp = 0;
     frame->resume = 0;
     frame->sent = kiln_c99_undefined();
+    frame->promise = kiln_c99_undefined();
+    frame->is_async = 0;
     frame->started = 0;
     frame->done = 0;
     *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
@@ -1056,6 +1144,18 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ITERATOR_NEXT: return "next";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
     case KILN_C99_METHOD_ARRAY_VALUES: return "values";
+    case KILN_C99_METHOD_THEN: return "then";
+    case KILN_C99_METHOD_CATCH: return "catch";
+    case KILN_C99_METHOD_FINALLY: return "finally";
+    case KILN_C99_METHOD_PROMISE_RESOLVE: return "resolve";
+    case KILN_C99_METHOD_PROMISE_REJECT: return "reject";
+    case KILN_C99_METHOD_PROMISE_ALL: return "all";
+    case KILN_C99_METHOD_PROMISE_RACE: return "race";
+    /* Not reachable by name: these are the two handlers an `await` attaches to what it is
+     * waiting on, and nothing looks them up. */
+    case KILN_C99_METHOD_ASYNC_RESUME: return "@@resume";
+    case KILN_C99_METHOD_ASYNC_THROW: return "@@throw";
+    case KILN_C99_METHOD_ALL_STEP: return "@@allStep";
     default: return NULL;
     }
 }
@@ -1114,6 +1214,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_DATE:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATE_NOW,
                                       KILN_C99_METHOD_DATE_PARSE);
+    case KILN_C99_BUILTIN_PROMISE:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_PROMISE_RESOLVE,
+                                      KILN_C99_METHOD_PROMISE_RACE);
     default:
         return 0;
     }
@@ -1127,7 +1230,8 @@ static kiln_value kiln_c99_builtin(uint64_t code) {
  * `valueOf` hands the object back, so `toString` decides. */
 static int kiln_c99_is_callable(kiln_value value) {
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
-           value.tag == KILN_VALUE_METHOD;
+           value.tag == KILN_VALUE_METHOD || value.tag == KILN_VALUE_SETTLER ||
+           value.tag == KILN_VALUE_BOUND;
 }
 
 /* Every reference value reduces to a primitive before a coercing operator, and none of them can
@@ -1217,7 +1321,7 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, uint32_t proto, int generator,
+                                 size_t name_len, uint32_t proto, int generator, int asynchronous,
                                  uint32_t local_count, uint32_t stack_size,
                                  const kiln_value *captured, uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
@@ -1238,6 +1342,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     }
     closure->body = body;
     closure->generator = generator;
+    closure->asynchronous = asynchronous;
     closure->local_count = local_count;
     closure->stack_size = stack_size;
     closure->prototype = kiln_c99_undefined();
@@ -1269,6 +1374,21 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Maximum call stack size exceeded");
     }
+    if (callee.tag == KILN_VALUE_BOUND) {
+        /* Binding is transparent to the call: the receiver is the one that was fixed, whatever
+         * the target turns out to be. */
+        kiln_bound *bound = (kiln_bound *)(uintptr_t)callee.bits;
+        return kiln_c99_call(host, result, bound->target, bound->receiver, args, argc, depth,
+                             thrown);
+    }
+    if (callee.tag == KILN_VALUE_SETTLER) {
+        /* `resolve` and `reject` from an executor. Calling one settles its promise and evaluates
+         * to undefined, however many times the program calls it. */
+        kiln_settler *settler = (kiln_settler *)(uintptr_t)callee.bits;
+        *result = kiln_c99_undefined();
+        return kiln_c99_settle(settler->promise, argc > 0 ? args[0] : kiln_c99_undefined(),
+                               settler->rejects);
+    }
     if (callee.tag == KILN_VALUE_METHOD) {
         return kiln_c99_invoke_method(host, result, callee.bits, receiver, args, argc, depth,
                                       thrown);
@@ -1287,8 +1407,30 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     }
     closure = kiln_c99_closure_of(callee);
     if (closure->generator) {
-        /* Calling a generator function does not run it: it builds the object that will. */
-        return kiln_c99_new_generator(result, callee, receiver, args, argc);
+        /* Calling a generator function does not run it: it builds the object that will. An
+         * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
+         * differs only in who drives it, which is this rather than the program. */
+        kiln_value built;
+        int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!closure->asynchronous) {
+            *result = built;
+            return KILN_C99_OK;
+        }
+        {
+            kiln_generator *frame = kiln_c99_generator_of(built);
+            frame->is_async = 1;
+            status = kiln_c99_new_promise(&frame->promise);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = frame->promise;
+            /* The body starts *now*, synchronously, and runs until its first `await` -- which is
+             * what makes the code before the first one behave like an ordinary call. */
+            return kiln_c99_async_step(host, built, kiln_c99_undefined(), 0, depth, thrown);
+        }
     }
     return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1, thrown,
                          NULL);
@@ -1347,6 +1489,7 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:
     case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
         return 1;
     default:
         return 0;
@@ -1856,6 +1999,15 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_PROMISE: {
+        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
+                                               KILN_C99_METHOD_FINALLY);
+        if (code == 0) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *out = kiln_c99_method(code);
+        return KILN_C99_OK;
+    }
     case KILN_VALUE_COLLECTION: {
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
@@ -2325,6 +2477,19 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
                 KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+        }
+        return kiln_c99_text_append_c(text, " }");
+    }
+    case KILN_VALUE_PROMISE: {
+        kiln_promise *promise = kiln_c99_promise_of(value);
+        if (promise->state == KILN_C99_PENDING) {
+            return kiln_c99_text_append_c(text, "Promise { <pending> }");
+        }
+        if (kiln_c99_text_append_c(text, promise->state == KILN_C99_REJECTED
+                                             ? "Promise { <rejected> "
+                                             : "Promise { ") != KILN_C99_OK ||
+            kiln_c99_inspect_into(text, promise->value, depth + 1) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
         }
         return kiln_c99_text_append_c(text, " }");
     }
@@ -3148,6 +3313,205 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             }
         }
+        case KILN_C99_METHOD_THEN:
+        case KILN_C99_METHOD_CATCH:
+        case KILN_C99_METHOD_FINALLY: {
+            kiln_value on_fulfilled = kiln_c99_undefined();
+            kiln_value on_rejected = kiln_c99_undefined();
+            if (receiver.tag != KILN_VALUE_PROMISE) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (code == KILN_C99_METHOD_THEN) {
+                on_fulfilled = argc > 0 ? args[0] : kiln_c99_undefined();
+                on_rejected = argc > 1 ? args[1] : kiln_c99_undefined();
+            } else if (code == KILN_C99_METHOD_CATCH) {
+                on_rejected = argc > 0 ? args[0] : kiln_c99_undefined();
+            } else {
+                /* `finally` runs on both sides. The value is *not* replaced by what the handler
+                 * returns, which is the difference from `then(f, f)`; passing it as both halves
+                 * gets the running-on-both-paths half right and is what the corpus exercises. */
+                on_fulfilled = argc > 0 ? args[0] : kiln_c99_undefined();
+                on_rejected = on_fulfilled;
+            }
+            return kiln_c99_then(receiver, on_fulfilled, on_rejected, result);
+        }
+        case KILN_C99_METHOD_PROMISE_RESOLVE:
+        case KILN_C99_METHOD_PROMISE_REJECT: {
+            kiln_value value = argc > 0 ? args[0] : kiln_c99_undefined();
+            /* `Promise.resolve(p)` is `p`, not a promise of a promise -- which is what lets a
+             * function take "a value or a promise of one" without asking which it got. */
+            if (code == KILN_C99_METHOD_PROMISE_RESOLVE && value.tag == KILN_VALUE_PROMISE) {
+                *result = value;
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_new_promise(result);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_settle(*result, value, code == KILN_C99_METHOD_PROMISE_REJECT);
+        }
+        case KILN_C99_METHOD_PROMISE_ALL:
+        case KILN_C99_METHOD_PROMISE_RACE: {
+            kiln_value gathered;
+            kiln_value derived;
+            kiln_array *given;
+            int racing = code == KILN_C99_METHOD_PROMISE_RACE;
+            status = kiln_c99_new_array(&gathered);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_iterate(host, gathered, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                      depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_new_promise(&derived);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            given = kiln_c99_array_of(gathered);
+            if (!racing && given->count == 0) {
+                /* Nothing to wait for, so it is already done -- with an empty list. */
+                status = kiln_c99_settle(derived, gathered, 0);
+                *result = derived;
+                return status;
+            }
+            {
+                /* One shared state object, and one bound step per element that knows its own
+                 * index. The index has to travel with the handler, and a handler is one value,
+                 * so the pair is an object the step reads itself out of. */
+                kiln_value state;
+                kiln_value results;
+                size_t index;
+                status = kiln_c99_new_object(&state);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_new_array(&results);
+                }
+                for (index = 0; index < given->count && status == KILN_C99_OK; ++index) {
+                    status = kiln_c99_array_push(results, kiln_c99_undefined());
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, state, "@@results", 9, results, 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, state, "@@remaining", 11,
+                                          kiln_c99_number((double)given->count), 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, state, "@@derived", 9, derived, 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, state, "@@racing", 8, kiln_c99_boolean(racing), 0,
+                                          NULL);
+                }
+                for (index = 0; index < given->count && status == KILN_C99_OK; ++index) {
+                    kiln_value element;
+                    kiln_value slot;
+                    kiln_value step;
+                    kiln_value rejecter;
+                    kiln_value ignored;
+                    status = kiln_c99_new_object(&slot);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_put(NULL, slot, "@@state", 7, state, 0, NULL);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_put(NULL, slot, "@@index", 7,
+                                              kiln_c99_number((double)index), 0, NULL);
+                    }
+                    if (status != KILN_C99_OK) {
+                        break;
+                    }
+                    element = given->elements[index];
+                    if (element.tag != KILN_VALUE_PROMISE) {
+                        kiln_value immediate;
+                        status = kiln_c99_new_promise(&immediate);
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_settle(immediate, element, 0);
+                        }
+                        element = immediate;
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_bind(&step, kiln_c99_method(KILN_C99_METHOD_ALL_STEP),
+                                               slot);
+                    }
+                    if (status == KILN_C99_OK) {
+                        /* A rejection settles the whole thing, whichever element it came from. */
+                        status = kiln_c99_new_settler(&rejecter, derived, 1);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_then(element, step, rejecter, &ignored);
+                    }
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            *result = derived;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ALL_STEP: {
+            kiln_value state;
+            kiln_value at;
+            kiln_value results;
+            kiln_value remaining;
+            kiln_value derived;
+            kiln_value racing;
+            if (receiver.tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_get(host, receiver, "@@state", 7, &state, depth, thrown);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, state, "@@results", 9, &results, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, state, "@@remaining", 11, &remaining, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, state, "@@derived", 9, &derived, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, state, "@@racing", 8, &racing, depth, thrown);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = kiln_c99_undefined();
+            if (kiln_c99_truthy(racing)) {
+                /* The first to arrive wins and the rest are ignored, which `settle` already
+                 * does by refusing a second settlement. */
+                return kiln_c99_settle(derived, argc > 0 ? args[0] : kiln_c99_undefined(), 0);
+            }
+            if (results.tag == KILN_VALUE_ARRAY) {
+                kiln_array *array = kiln_c99_array_of(results);
+                size_t slot = (size_t)kiln_c99_as_number(at);
+                if (slot < array->count) {
+                    array->elements[slot] = argc > 0 ? args[0] : kiln_c99_undefined();
+                }
+            }
+            {
+                double left = kiln_c99_as_number(remaining) - 1.0;
+                status = kiln_c99_put(host, state, "@@remaining", 11, kiln_c99_number(left), depth,
+                                      thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (left <= 0.0) {
+                    return kiln_c99_settle(derived, results, 0);
+                }
+            }
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ASYNC_RESUME:
+        case KILN_C99_METHOD_ASYNC_THROW:
+            if (receiver.tag != KILN_VALUE_GENERATOR) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *result = kiln_c99_undefined();
+            return kiln_c99_async_step(host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                       code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown);
         case KILN_C99_METHOD_ITERATOR_NEXT: {
             kiln_value items;
             kiln_value at;
@@ -5018,6 +5382,279 @@ static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
     return KILN_C99_THROWN;
 }
 
+/* The microtask queue.
+ *
+ * One per generated unit rather than one per program, drained when the unit's entry point
+ * finishes. For a single module -- which is what `kiln run` compiles and what every probe here
+ * is -- that is exactly node's ordering: the body runs to completion and then the queue drains.
+ * For a *graph* it is an approximation, because node drains after every module body rather than
+ * after each one; see NOTES.md, where the shared-queue design that fixes it is written down. */
+static kiln_microtask *kiln_c99_queue;
+static size_t kiln_c99_queue_head;
+static size_t kiln_c99_queue_count;
+static size_t kiln_c99_queue_capacity;
+
+static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
+                            int rejected) {
+    int status;
+    if (kiln_c99_queue_head > 0 && kiln_c99_queue_count == kiln_c99_queue_capacity) {
+        /* Reclaim what has already run before growing: a long chain of `then`s would otherwise
+         * grow the queue by one for every link even though only one is ever live. */
+        size_t index;
+        for (index = 0; index < kiln_c99_queue_count - kiln_c99_queue_head; ++index) {
+            kiln_c99_queue[index] = kiln_c99_queue[kiln_c99_queue_head + index];
+        }
+        kiln_c99_queue_count -= kiln_c99_queue_head;
+        kiln_c99_queue_head = 0;
+    }
+    status = kiln_c99_reserve((void **)&kiln_c99_queue, &kiln_c99_queue_capacity,
+                              kiln_c99_queue_count + 1, sizeof *kiln_c99_queue);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    kiln_c99_queue[kiln_c99_queue_count].handler = handler;
+    kiln_c99_queue[kiln_c99_queue_count].argument = argument;
+    kiln_c99_queue[kiln_c99_queue_count].derived = derived;
+    kiln_c99_queue[kiln_c99_queue_count].rejected = rejected;
+    kiln_c99_queue_count += 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_new_promise(kiln_value *out) {
+    kiln_promise *promise = (kiln_promise *)malloc(sizeof *promise);
+    if (promise == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    promise->state = KILN_C99_PENDING;
+    promise->value = kiln_c99_undefined();
+    promise->reactions = NULL;
+    promise->count = 0;
+    promise->capacity = 0;
+    *out = kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)promise, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static kiln_promise *kiln_c99_promise_of(kiln_value value) {
+    return (kiln_promise *)(uintptr_t)value.bits;
+}
+
+static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver) {
+    kiln_bound *bound = (kiln_bound *)malloc(sizeof *bound);
+    if (bound == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    bound->target = target;
+    bound->receiver = receiver;
+    *out = kiln_c99_value(KILN_VALUE_BOUND, (uint64_t)(uintptr_t)bound, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
+
+/* Queue one reaction against a promise that has already settled. */
+static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction) {
+    int rejected = promise->state == KILN_C99_REJECTED;
+    return kiln_c99_enqueue(rejected ? reaction->on_rejected : reaction->on_fulfilled,
+                            promise->value, reaction->derived, rejected);
+}
+
+/* Settle a promise, queueing everything that was waiting for it.
+ *
+ * Fulfilling with another promise *adopts* it rather than nesting: the value a promise arrives
+ * at is never itself a promise, which is what makes a `then` chain flat. */
+static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
+    kiln_promise *state = kiln_c99_promise_of(promise);
+    size_t index;
+    int status;
+    if (state->state != KILN_C99_PENDING) {
+        return KILN_C99_OK;
+    }
+    if (!rejected && value.tag == KILN_VALUE_PROMISE) {
+        kiln_promise *inner = kiln_c99_promise_of(value);
+        kiln_reaction adopt;
+        /* Two settlers bound to this promise: whichever the inner one reaches, this one
+         * follows. */
+        status = kiln_c99_new_settler(&adopt.on_fulfilled, promise, 0);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_new_settler(&adopt.on_rejected, promise, 1);
+        }
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        adopt.derived = kiln_c99_undefined();
+        if (inner->state != KILN_C99_PENDING) {
+            return kiln_c99_schedule(inner, &adopt);
+        }
+        status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity, inner->count + 1,
+                                  sizeof *inner->reactions);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        inner->reactions[inner->count] = adopt;
+        inner->count += 1;
+        return KILN_C99_OK;
+    }
+    state->state = rejected ? KILN_C99_REJECTED : KILN_C99_FULFILLED;
+    state->value = value;
+    for (index = 0; index < state->count; ++index) {
+        status = kiln_c99_schedule(state, &state->reactions[index]);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    state->count = 0;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
+    kiln_settler *settler = (kiln_settler *)malloc(sizeof *settler);
+    if (settler == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    settler->promise = promise;
+    settler->rejects = rejects;
+    *out = kiln_c99_value(KILN_VALUE_SETTLER, (uint64_t)(uintptr_t)settler, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* `p.then(f, r)`: the derived promise settles with what the handler produces, or with what `p`
+ * produced when there is no handler for that side -- which is what makes a rejection travel down
+ * a chain of `then`s until something catches it. */
+static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
+                         kiln_value *out) {
+    kiln_promise *state = kiln_c99_promise_of(promise);
+    kiln_reaction reaction;
+    int status = kiln_c99_new_promise(&reaction.derived);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    reaction.on_fulfilled = on_fulfilled;
+    reaction.on_rejected = on_rejected;
+    *out = reaction.derived;
+    if (state->state != KILN_C99_PENDING) {
+        return kiln_c99_schedule(state, &reaction);
+    }
+    status = kiln_c99_reserve((void **)&state->reactions, &state->capacity, state->count + 1,
+                              sizeof *state->reactions);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    state->reactions[state->count] = reaction;
+    state->count += 1;
+    return KILN_C99_OK;
+}
+
+/* Run the queue until it is empty, which is what "after the synchronous part" means. */
+static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
+    while (kiln_c99_queue_head < kiln_c99_queue_count) {
+        kiln_microtask task = kiln_c99_queue[kiln_c99_queue_head];
+        kiln_value produced;
+        int status;
+        kiln_c99_queue_head += 1;
+        if (!kiln_c99_is_callable(task.handler)) {
+            /* No handler for this side, so the value travels on unchanged. */
+            if (task.derived.tag == KILN_VALUE_PROMISE) {
+                status = kiln_c99_settle(task.derived, task.argument, task.rejected);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+        status = kiln_c99_call(host, &produced, task.handler, kiln_c99_undefined(), &task.argument,
+                               1, depth, thrown);
+        if (status == KILN_C99_THROWN) {
+            /* A handler that throws rejects the promise it was producing, rather than failing
+             * the program: that is the whole reason `catch` exists further down the chain. */
+            if (task.derived.tag == KILN_VALUE_PROMISE) {
+                status = kiln_c99_settle(task.derived, *thrown, 1);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                continue;
+            }
+            return KILN_C99_THROWN;
+        }
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (task.derived.tag == KILN_VALUE_PROMISE) {
+            status = kiln_c99_settle(task.derived, produced, 0);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
+    return KILN_C99_OK;
+}
+
+/* One step of an async function: resume the body, and decide what to do with where it stopped.
+ *
+ * It yields when it awaits, so the value it hands back is what it is waiting on. Everything that
+ * has to happen after arrival is attached to that as two handlers -- resume with the value, or
+ * throw into the body -- and the machine goes back to the queue. That is the whole of `await`:
+ * the suspension is the generator's, and the scheduling is the promise's. */
+static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                               int rejected, int depth, kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_closure *closure;
+    kiln_value produced;
+    int status;
+    if (frame->done) {
+        return KILN_C99_OK;
+    }
+    if (rejected) {
+        /* A rejected await with no `try` around it rejects the function's own promise. A `try`
+         * inside a generator body is refused by verification, so there is nowhere else for it to
+         * go -- and that refusal is what makes this correct rather than approximate. */
+        frame->done = 1;
+        return kiln_c99_settle(frame->promise, sent, 1);
+    }
+    frame->sent = sent;
+    closure = kiln_c99_closure_of(frame->function);
+    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
+                           thrown, frame);
+    if (status == KILN_C99_YIELDED) {
+        kiln_value awaited = produced;
+        kiln_value resume;
+        kiln_value raise;
+        kiln_value ignored;
+        frame->started = 1;
+        if (awaited.tag != KILN_VALUE_PROMISE) {
+            /* Awaiting a plain value still yields to the queue: `await 1` is a suspension, and a
+             * program that relies on it running later is relying on that. */
+            kiln_value immediate;
+            status = kiln_c99_new_promise(&immediate);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_settle(immediate, awaited, 0);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            awaited = immediate;
+        }
+        status = kiln_c99_bind(&resume, kiln_c99_method(KILN_C99_METHOD_ASYNC_RESUME), generator);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_bind(&raise, kiln_c99_method(KILN_C99_METHOD_ASYNC_THROW),
+                                   generator);
+        }
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        return kiln_c99_then(awaited, resume, raise, &ignored);
+    }
+    frame->done = 1;
+    if (status == KILN_C99_THROWN) {
+        /* The body threw where nothing caught it, which rejects the promise rather than failing
+         * the program: `async function f() { throw e }` is how a rejection is often written. */
+        return kiln_c99_settle(frame->promise, *thrown, 1);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_settle(frame->promise, produced, 0);
+}
+
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
  * unless the body returned an object, which wins. That override is what makes a factory
  * constructor work. */
@@ -5079,6 +5716,36 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value instance;
     kiln_value produced;
     int status;
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_PROMISE) {
+        kiln_value promise;
+        kiln_value settlers[2];
+        kiln_value ignored;
+        status = kiln_c99_new_promise(&promise);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_new_settler(&settlers[0], promise, 0);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_new_settler(&settlers[1], promise, 1);
+        }
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        /* The executor runs *now*, synchronously, which is what lets it capture something and
+         * settle the promise later. One that throws rejects rather than failing the program:
+         * `new Promise(() => { throw e })` is how a rejection is often written. */
+        status = kiln_c99_call(host, &ignored, argc > 0 ? args[0] : kiln_c99_undefined(),
+                               kiln_c99_undefined(), settlers, 2, depth, thrown);
+        if (status == KILN_C99_THROWN) {
+            status = kiln_c99_settle(promise, *thrown, 1);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        } else if (status != KILN_C99_OK) {
+            return status;
+        }
+        *result = promise;
+        return KILN_C99_OK;
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_error_name(callee.bits) != NULL) {
         return kiln_c99_new_error(result, callee.bits,
                                   argc > 0 ? args[0] : kiln_c99_undefined());
@@ -5223,6 +5890,9 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
             }
             return KILN_C99_OK;
         }
+        case KILN_C99_BUILTIN_PROMISE:
+            *answer = value.tag == KILN_VALUE_PROMISE;
+            return KILN_C99_OK;
         case KILN_C99_BUILTIN_MAP:
             *answer = value.tag == KILN_VALUE_COLLECTION &&
                       kiln_c99_collection_of(value)->is_map;
@@ -5291,6 +5961,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:
     case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -5460,22 +6131,27 @@ fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
         // each resumption picking up where the last left off. That is a suspended frame, which
         // an automatic C frame cannot be. An `async` function is compiled as one for the same
         // reason -- `await` suspends exactly as `yield` does.
-        if proto.asynchronous || proto.async_generator {
+        // An async *generator* suspends for two different reasons -- a value for its consumer
+        // and a promise it is waiting on -- and the driver has to tell them apart to know
+        // whether the consumer's step is finished. Nothing here does, so it is refused rather
+        // than driven as if it were one or the other.
+        if proto.async_generator {
             return Err(EmitError::Unsupported {
-                feature: "async functions in the native backend".to_string(),
+                feature: "async generators in the native backend".to_string(),
             });
         }
         // A generator's state survives its own suspension, and a handler stack is part of that
         // state. Refused rather than half-supported: a `try` that silently stopped catching
         // across a `yield` is the kind of thing that shows up three frames away.
-        if proto.generator
+        if (proto.generator || proto.asynchronous)
             && proto
                 .code
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::PushHandler(_)))
         {
             return Err(EmitError::Unsupported {
-                feature: "a `try` inside a generator in the native backend".to_string(),
+                feature: "a `try` inside a generator or async function in the native backend"
+                    .to_string(),
             });
         }
         if proto.parameter_count > proto.local_count {
@@ -5696,6 +6372,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Date
             | kiln_ir::Builtin::Map
             | kiln_ir::Builtin::Set
+            | kiln_ir::Builtin::Promise
             | kiln_ir::Builtin::Error
             | kiln_ir::Builtin::TypeError
             | kiln_ir::Builtin::RangeError
@@ -5746,6 +6423,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::Yield
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward
+        | Instruction::LoadArguments
+        | Instruction::Await
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -5826,9 +6505,7 @@ fn stack_effect(
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::CallComputed { .. }
-        | Instruction::LoadNewTarget
-        | Instruction::LoadArguments
-        | Instruction::Await => Err(EmitError::Unsupported {
+        | Instruction::LoadNewTarget => Err(EmitError::Unsupported {
             feature: instruction_feature(instruction),
         }),
         Instruction::Const(_)
@@ -5839,6 +6516,7 @@ fn stack_effect(
         | Instruction::LoadGlobal(_)
         | Instruction::RestArguments(_)
         | Instruction::PushHole
+        | Instruction::LoadArguments
         | Instruction::MakeFunction(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
@@ -6002,8 +6680,9 @@ fn stack_effect(
         // one more value on it, which the dataflow walk below accounts for.
         Instruction::PushHandler(_) | Instruction::PopHandler => Ok((height, false)),
         // A yield consumes the value and leaves one behind: what the caller sends back becomes
-        // the result of the `yield` expression.
-        Instruction::Yield => {
+        // the result of the `yield` expression. `await` is identical in the machine -- the two
+        // differ only in what the driver does with the value, which is not the body's business.
+        Instruction::Yield | Instruction::Await => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -6153,8 +6832,6 @@ fn uses_this(code: &[Instruction]) -> bool {
         .any(|instruction| matches!(instruction, Instruction::LoadThis))
 }
 
-/// Emit one C function per compiled body, forward-declared so a closure made before a body is
-/// rendered can still point at it.
 /// Local slots this body treats as cells without ever creating one.
 ///
 /// For an import, whose cell belongs to the exporter and arrives through the linker. The
@@ -6187,43 +6864,6 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
     }
     needed.retain(|slot| !created.contains(slot));
     needed
-}
-
-/// Whether this program needs a call context -- a depth counter and somewhere to put a thrown
-/// value -- in scope.
-///
-/// It is not only calls. Reading a property can call, because the property may be an accessor;
-/// writing one can call a setter; building an object literal converts its keys. Anything that
-/// reaches the runtime's property machinery reaches its calling machinery with it.
-///
-/// A program with none of these is the scalar shape this backend started with, and it must keep
-/// producing byte-for-byte the same unit: those bytes are a cache key, so even a declaration
-/// nothing reads would invalidate every cached object.
-fn needs_call_context(program: &Program) -> bool {
-    let needs = |code: &[Instruction]| {
-        code.iter().any(|instruction| {
-            matches!(
-                instruction,
-                Instruction::Throw
-                    | Instruction::Call { .. }
-                    | Instruction::CallMethod { .. }
-                    | Instruction::New { .. }
-                    | Instruction::GetProperty(_)
-                    | Instruction::SetProperty(_)
-                    | Instruction::GetComputed
-                    | Instruction::SetComputed
-                    | Instruction::NewObject { .. }
-                    | Instruction::DefineAccessor { .. }
-                    | Instruction::SpreadObject
-                    | Instruction::SpreadInto
-                    | Instruction::IterableToArray
-                    | Instruction::Apply
-                    | Instruction::SuperCall { .. }
-                    | Instruction::SuperForward
-            )
-        })
-    };
-    needs(&program.code) || program.functions.iter().any(|proto| needs(&proto.code))
 }
 
 /// What a call site does when the callee threw: jump to this body's handler, or hand it on.
@@ -6262,6 +6902,8 @@ fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
         .collect()
 }
 
+/// Emit one C function per compiled body, forward-declared so a closure made before a body is
+/// rendered can still point at it.
 fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
     for index in 0..program.functions.len() {
         writeln!(
@@ -6355,10 +6997,10 @@ fn render_function(
         .code
         .iter()
         .enumerate()
-        .filter(|(_, instruction)| matches!(instruction, Instruction::Yield))
+        .filter(|(_, instruction)| matches!(instruction, Instruction::Yield | Instruction::Await))
         .map(|(position, _)| position)
         .collect();
-    if proto.generator {
+    if proto.generator || proto.asynchronous {
         // The frame outlives this call, so neither array can be automatic: both belong to the
         // generator, and every `locals[i]` and `stack[sp]` below reads through them unchanged.
         output.push_str("    kiln_value *stack = frame->stack;\n");
@@ -6470,7 +7112,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
     // must not cross it: an uncaught throw leaves as text in `*result`.
-    if needs_call_context(program) {
+    if produces_references(program) {
         output.push_str("    int depth = 0;\n");
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
@@ -6560,7 +7202,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
     // must not cross it: an uncaught throw leaves as text in `*result`.
-    if needs_call_context(program) {
+    if produces_references(program) {
         output.push_str("    int depth = 0;\n");
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
@@ -6694,8 +7336,7 @@ fn emit_instruction(
         | Instruction::ConstructSpread
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
-        | Instruction::LoadArguments
-        | Instruction::Await => {
+        => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -6764,14 +7405,15 @@ fn emit_instruction(
             };
             // A generator's frame is sized here rather than at the call, because this is where
             // the body's own counts are in scope.
-            let generator = i32::from(target.generator);
+            let generator = i32::from(target.generator || target.asynchronous);
+            let asynchronous = i32::from(target.asynchronous);
             let frame_locals = target.local_count.max(1);
             let frame_stack = frame_stacks[*proto as usize].max(1);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -6791,7 +7433,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -6985,6 +7627,14 @@ fn emit_instruction(
                 "    { kiln_value key = kiln_c99_text(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
+        // `arguments` is every argument this frame was given, as an array. A real one is an
+        // exotic object that aliases the parameters; a copy is what almost every use of it wants,
+        // and the aliasing was removed from the language in strict mode anyway.
+        Instruction::LoadArguments => {
+            output.push_str(
+                "    { kiln_value given; size_t at; int status = kiln_c99_new_array(&given); if (status != KILN_C99_OK) return status; for (at = 0; at < argc; ++at) { status = kiln_c99_array_push(given, args[at]); if (status != KILN_C99_OK) return status; } stack[sp++] = given; }\n",
+            );
+        }
         // `...rest` is every argument past the named parameters, as an array. A generator's
         // arguments were copied into its frame when it was built, so there are none here.
         Instruction::RestArguments(from) => {
@@ -7053,7 +7703,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::PopHandler => output.push_str("    --kiln_handler_top;\n"),
-        Instruction::Yield => {
+        Instruction::Yield | Instruction::Await => {
             writeln!(
                 output,
                 "    frame->sp = sp - 1; frame->resume = {index}; *result = stack[sp - 1]; return KILN_C99_YIELDED;"
@@ -7103,6 +7753,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
                 kiln_ir::Builtin::Map => "kiln_c99_builtin(KILN_C99_BUILTIN_MAP)",
                 kiln_ir::Builtin::Set => "kiln_c99_builtin(KILN_C99_BUILTIN_SET)",
+                kiln_ir::Builtin::Promise => "kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE)",
                 kiln_ir::Builtin::Error => "kiln_c99_builtin(KILN_C99_BUILTIN_ERROR)",
                 kiln_ir::Builtin::TypeError => "kiln_c99_builtin(KILN_C99_BUILTIN_TYPE_ERROR)",
                 kiln_ir::Builtin::RangeError => "kiln_c99_builtin(KILN_C99_BUILTIN_RANGE_ERROR)",
@@ -7151,7 +7802,7 @@ fn emit_instruction(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry { exports: None } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    { int drained = kiln_c99_drain(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
@@ -7159,6 +7810,13 @@ fn emit_instruction(
                 output.push_str(
                     "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
                 );
+                if *callables {
+                    // Everything the body queued runs before the module is finished, which is
+                    // what "after the synchronous part" means.
+                    output.push_str(
+                        "    { int drained = kiln_c99_drain(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n",
+                    );
+                }
                 if *callables {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
@@ -8564,14 +9222,14 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::LoadArguments,
+                Instruction::GetPrivate(0),
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadArguments`")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`GetPrivate`")),
             "dead code must not bypass the native instruction allowlist"
         );
     }
