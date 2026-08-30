@@ -224,6 +224,7 @@ fn convert(s: DbStats) -> Stats {
         project_computed: s.project_computed,
         validated: s.validated,
         early_cutoff: s.early_cutoff,
+        ..Stats::default()
     }
 }
 
