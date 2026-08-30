@@ -12,8 +12,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kiln_artifact_cache::{
@@ -978,15 +978,6 @@ impl NativeBuilder {
         );
         let compile_started = Instant::now();
         let (module_objects, wrapper_object) = std::thread::scope(|scope| {
-            let worker_count = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(modules.len().max(1));
-            let chunk_size = modules.len().div_ceil(worker_count).max(1);
-            let index_chunks = (0..modules.len())
-                .collect::<Vec<_>>()
-                .chunks(chunk_size)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
             let module_keys_ref = &module_keys;
             let module_sources_ref = &module_sources;
             let module_c_ref = &paths.module_c;
@@ -996,31 +987,8 @@ impl NativeBuilder {
             let module_compile_options_ref = &module_compile_options;
             let wrapper_compile_options_ref = &wrapper_compile_options;
             let wrapper_bytes_ref = &wrapper_bytes;
-            let module_handles = index_chunks
-                .into_iter()
-                .map(|chunk| {
-                    scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|&index| {
-                                let result = self.object(
-                                    &module_keys_ref[index],
-                                    &module_sources_ref[index].0,
-                                    &module_c_ref[index],
-                                    &module_o_ref[index],
-                                    module_compile_options_ref,
-                                );
-                                (
-                                    index,
-                                    result.map(|(object, digest, hit, _elapsed)| {
-                                        (object, digest, hit)
-                                    }),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>();
+            // The wrapper is spawned before the module workers so that it overlaps them, exactly as
+            // it did when the modules were chunked ahead of it.
             let wrapper = scope.spawn(move || {
                 self.object(
                     &wrapper_object_key,
@@ -1030,23 +998,21 @@ impl NativeBuilder {
                     wrapper_compile_options_ref,
                 )
             });
-            let modules = (|| {
-                let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
-                for handle in module_handles {
-                    for (index, result) in join_worker(handle.join(), "module compile")? {
-                        modules[index] = Some(result?);
-                    }
-                }
-                modules
-                    .into_iter()
-                    .map(|result| {
-                        result.ok_or(NativeError::WorkerPanic {
-                            stage: "module compile",
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })();
-            let module_objects = modules?;
+            let module_objects = compile_indexed(
+                scope,
+                module_keys_ref.len(),
+                "module compile",
+                move |index| {
+                    self.object(
+                        &module_keys_ref[index],
+                        &module_sources_ref[index].0,
+                        &module_c_ref[index],
+                        &module_o_ref[index],
+                        module_compile_options_ref,
+                    )
+                    .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
+                },
+            )?;
             let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
             Ok::<_, NativeError>((module_objects, wrapper_object))
         })?;
@@ -1290,15 +1256,6 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
         let (module_objects, runtime_object, launcher_object) = std::thread::scope(|scope| {
-            let worker_count = std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(modules.len().max(1));
-            let chunk_size = modules.len().div_ceil(worker_count).max(1);
-            let index_chunks = (0..modules.len())
-                .collect::<Vec<_>>()
-                .chunks(chunk_size)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
             let module_keys_ref = &module_keys;
             let module_sources_ref = &module_sources;
             let module_c_ref = &paths.module_c;
@@ -1308,32 +1265,8 @@ impl NativeBuilder {
             let runtime_o_ref = &paths.runtime_o;
             let launcher_c_ref = &paths.launcher_c;
             let launcher_o_ref = &paths.launcher_o;
-            let module_handles = index_chunks
-                .into_iter()
-                .map(|chunk| {
-                    scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|&index| {
-                                let object_key = &module_keys_ref[index];
-                                let result = self.object(
-                                    object_key,
-                                    &module_sources_ref[index].0,
-                                    &module_c_ref[index],
-                                    &module_o_ref[index],
-                                    compile_options_ref,
-                                );
-                                (
-                                    index,
-                                    result.map(|(object, digest, hit, _elapsed)| {
-                                        (object, digest, hit)
-                                    }),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>();
+            // Runtime and launcher are spawned before the module workers so that they overlap them,
+            // exactly as they did when the modules were chunked ahead of them.
             let runtime = scope.spawn(move || {
                 self.object(
                     &runtime_key,
@@ -1352,23 +1285,21 @@ impl NativeBuilder {
                     compile_options_ref,
                 )
             });
-            let modules = (|| {
-                let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
-                for handle in module_handles {
-                    for (index, result) in join_worker(handle.join(), "module compile")? {
-                        modules[index] = Some(result?);
-                    }
-                }
-                modules
-                    .into_iter()
-                    .map(|result| {
-                        result.ok_or(NativeError::WorkerPanic {
-                            stage: "module compile",
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })();
-            let module_objects = modules?;
+            let module_objects = compile_indexed(
+                scope,
+                module_keys_ref.len(),
+                "module compile",
+                move |index| {
+                    self.object(
+                        &module_keys_ref[index],
+                        &module_sources_ref[index].0,
+                        &module_c_ref[index],
+                        &module_o_ref[index],
+                        compile_options_ref,
+                    )
+                    .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
+                },
+            )?;
             let runtime_object = join_worker(runtime.join(), "runtime compile")??;
             let launcher_object = join_worker(launcher.join(), "launcher compile")??;
             Ok::<_, NativeError>((module_objects, runtime_object, launcher_object))
@@ -2250,6 +2181,74 @@ fn join_worker<T>(result: std::thread::Result<T>, stage: &'static str) -> Result
     result.map_err(|_| NativeError::WorkerPanic { stage })
 }
 
+/// Runs `work` over `0..count` on scoped workers that claim indices as they finish.
+///
+/// Object compile times are wildly uneven: a twenty-line module and a bundled application are both
+/// one index here, and they differ by orders of magnitude. Splitting the index space into
+/// contiguous chunks up front therefore decides the build's wall-clock before any compiling
+/// happens — whichever worker draws the bundle holds the whole build while the others sit idle on
+/// chunks they finished in milliseconds. The thread count was never the problem; the static
+/// partition was. Workers here claim one index at a time from a shared cursor with `fetch_add`, so
+/// a slow index costs only itself and every thread stays busy until the work actually runs out.
+///
+/// The cursor is deliberately the entire scheduler. A general work-stealing pool would want its own
+/// global threads, and this repository builds through `mbx` precisely so that concurrent cargo
+/// invocations share one CPU budget; a second scheduler underneath that would fight it.
+///
+/// Results come back in index order regardless of which worker produced them, and the failure
+/// reported is the one belonging to the lowest failing index — either the error `work` returned or
+/// [`NativeError::WorkerPanic`] where the worker holding that index died.
+fn compile_indexed<'scope, 'env, T, F>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    count: usize,
+    stage: &'static str,
+    work: F,
+) -> Result<Vec<T>, NativeError>
+where
+    F: Fn(usize) -> Result<T, NativeError> + Copy + Send + 'scope,
+    T: Send + 'scope,
+{
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(count.max(1));
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let workers = (0..worker_count)
+        .map(|_| {
+            let cursor = Arc::clone(&cursor);
+            scope.spawn(move || {
+                let mut claimed = Vec::new();
+                loop {
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    if index >= count {
+                        break claimed;
+                    }
+                    claimed.push((index, work(index)));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
+    let mut panic = None;
+    for worker in workers {
+        // A panic is held rather than returned here so that every worker's finished work is laid
+        // out first: which worker claimed a failing index is now a scheduling accident, and the
+        // caller should still see the lowest failing index either way.
+        match join_worker(worker.join(), stage) {
+            Ok(claimed) => {
+                for (index, result) in claimed {
+                    results[index] = Some(result);
+                }
+            }
+            Err(error) => panic = panic.or(Some(error)),
+        }
+    }
+    let completed = results
+        .into_iter()
+        .map(|result| result.unwrap_or_else(|| Err(NativeError::WorkerPanic { stage })))
+        .collect::<Result<Vec<_>, _>>()?;
+    panic.map_or(Ok(completed), Err)
+}
+
 fn read(path: &Path, operation: &'static str) -> Result<Vec<u8>, NativeError> {
     fs::read(path).map_err(|source| NativeError::Io {
         operation,
@@ -2890,6 +2889,106 @@ mod tests {
             .map(|(name, value)| ((*name).to_owned(), std::ffi::OsString::from(value)))
             .collect::<std::collections::HashMap<_, _>>();
         compiler_environment_digest_with(kind, |name| values.get(name).cloned())
+    }
+
+    #[test]
+    fn indexed_compiles_return_in_index_order_under_uneven_work() {
+        let count = 64;
+        let objects = std::thread::scope(|scope| {
+            compile_indexed(scope, count, "test compile", |index| {
+                // Deliberately uneven: the low indices are the slow ones, so a scheduler that
+                // returned completion order rather than index order would say so loudly.
+                if index % 8 == 0 {
+                    std::thread::sleep(Duration::from_millis(10 * (8 - index / 8) as u64));
+                }
+                Ok(index)
+            })
+        })
+        .expect("every index compiles");
+        assert_eq!(objects, (0..count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_indexed_compile_reports_the_lowest_failing_index() {
+        let failure = std::thread::scope(|scope| {
+            compile_indexed(scope, 32, "test compile", |index| {
+                // The later failure is also the faster one, so whichever worker claims it will
+                // usually report first. The lowest failing index must still win.
+                if index == 3 {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if index == 3 || index == 17 {
+                    return Err(NativeError::NumberProvider {
+                        message: format!("index {index}"),
+                    });
+                }
+                Ok(index)
+            })
+        })
+        .expect_err("a failing index fails the batch");
+        match failure {
+            NativeError::NumberProvider { message } => assert_eq!(message, "index 3"),
+            other => panic!("unexpected failure: {other}"),
+        }
+    }
+
+    #[test]
+    fn a_panicking_indexed_worker_becomes_a_worker_panic() {
+        let failure = std::thread::scope(|scope| {
+            compile_indexed(scope, 16, "panicking test compile", |index| {
+                assert_ne!(index, 9, "deliberate test panic");
+                Ok(index)
+            })
+        })
+        .expect_err("a panicking worker fails the batch");
+        assert!(matches!(
+            failure,
+            NativeError::WorkerPanic {
+                stage: "panicking test compile"
+            }
+        ));
+    }
+
+    #[test]
+    fn one_slow_index_does_not_hold_the_indices_behind_it() {
+        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if workers < 2 {
+            // Nothing to steal from on a single-core machine.
+            return;
+        }
+        let count = workers * 4;
+        // Index zero blocks until every other index has finished. Under a static partition its
+        // chunk-mates could never run, so this would time out; claiming indices one at a time lets
+        // the other workers drain the whole rest of the space while zero waits.
+        let progress = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
+        let progress_ref = &progress;
+        let observed = std::thread::scope(|scope| {
+            compile_indexed(scope, count, "test compile", move |index| {
+                let (finished, signal) = progress_ref;
+                if index == 0 {
+                    let mut finished = finished.lock().expect("progress lock");
+                    while *finished < count - 1 {
+                        let (guard, timeout) = signal
+                            .wait_timeout(finished, Duration::from_secs(20))
+                            .expect("progress lock");
+                        finished = guard;
+                        if timeout.timed_out() {
+                            break;
+                        }
+                    }
+                    return Ok(*finished);
+                }
+                *finished.lock().expect("progress lock") += 1;
+                signal.notify_all();
+                Ok(0)
+            })
+        })
+        .expect("every index compiles");
+        assert_eq!(
+            observed[0],
+            count - 1,
+            "every other index should finish while index zero is blocked"
+        );
     }
 
     #[test]
