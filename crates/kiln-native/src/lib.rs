@@ -2338,6 +2338,7 @@ fn graph_shared_wrapper_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     wrapper_symbol: &str,
 ) -> Result<String, NativeError> {
+    let impl_symbol = format!("{}_impl", wrapper_symbol);
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
@@ -2494,7 +2495,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         let export_count = node.program.exports.len();
         writeln!(
             output,
-            "    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) goto cleanup;",
+            "    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
             modules[index].1.symbol
         )
         .unwrap();
@@ -2520,15 +2521,16 @@ static int {wrapper_symbol}_realm_entry(void *opaque) {{
     return {wrapper_symbol}_body(&context->proxy_host, context->result);
 }}
 
-int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
+static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_result) {{
     {wrapper_symbol}_realm_context context;
     uint64_t realm = 0;
+    char *preserved = NULL;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     context.result = result;
     context.arena = (kiln_proxy_arena){{ NULL, 0, 0 }};
-    context.proxy = (kiln_proxy_host){{ host, &context.arena }};
+    context.proxy = (kiln_proxy_host){{ host, &context.arena, KILN_C99_OK }};
     context.proxy_host = (kiln_host){{ kiln_proxy_call, &context.proxy }};
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
@@ -2539,18 +2541,38 @@ int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
         destroy_status = kiln_realm_destroy(realm);
         if (status == KILN_C99_OK) status = destroy_status;
     }}
+    /* Public v1 results remain borrowed; private v2 calls preserve strings across cleanup. */
+    if (preserve_result != 0 && result->tag == KILN_VALUE_STRING) {{
+        if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
+            *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+            status = KILN_C99_INVALID_ARGUMENT;
+        }} else {{
+            preserved = (char *)malloc(result->len == 0 ? 1 : result->len);
+            if (preserved == NULL) {{
+                *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+                status = KILN_C99_HOST_ERROR;
+            }} else {{
+                if (result->len != 0) memcpy(preserved, result->ptr, result->len);
+            }}
+        }}
+    }}
     kiln_proxy_arena_clear(&context.arena);
+    if (preserved != NULL) result->ptr = preserved;
     return status;
+}}
+
+int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
+    return {impl_symbol}(host, result, 0);
 }}
 "#
     )
     .unwrap();
-    let invocation = format!("{wrapper_symbol}(&proxy_host, &value)");
+    let invocation = format!("{impl_symbol}(&proxy_host, &value, 1)");
     output.push_str(&owned_result_wrapper_source(
         wrapper_symbol,
         "graph",
         &invocation,
-        "",
+        "if (value.tag == KILN_VALUE_STRING) { free((void *)value.ptr); value.ptr = NULL; value.len = 0; }",
     ));
     Ok(output)
 }
@@ -5772,8 +5794,22 @@ int main(void) {{
 #include <stdint.h>
 #include <string.h>
 
+typedef int (*kiln_entry_fn)(kiln_host *, kiln_value *);
+
+static kiln_entry_fn load_entry(void *handle, const char *name) {{
+    void *symbol = dlsym(handle, name);
+    kiln_entry_fn entry = NULL;
+    if (symbol == NULL || sizeof(entry) != sizeof(symbol)) return NULL;
+    memcpy(&entry, &symbol, sizeof(entry));
+    return entry;
+}}
+
 int main(int argc, char **argv) {{
     kiln_value result;
+    void *first;
+    void *second;
+    kiln_entry_fn first_entry;
+    kiln_entry_fn second_entry;
     if (argc != 3) return 1;
     first = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
     if (first == NULL) return 2;
@@ -5788,7 +5824,7 @@ int main(int argc, char **argv) {{
     if (first_entry(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits}))
         return 1;
-    if ({second_symbol}(NULL, &result) != KILN_C99_OK ||
+    if (second_entry(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits}))
         return 2;
     {{
@@ -5810,8 +5846,8 @@ int main(int argc, char **argv) {{
         first_api->dispose(&first_owned);
         second_api->dispose(&second_owned);
     }}
-    dlclose(second_handle);
-    dlclose(first_handle);
+    dlclose(second);
+    dlclose(first);
     return 0;
 }}
 "#,
