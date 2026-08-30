@@ -97,10 +97,10 @@ pub fn emit_c(program: &Program) -> Result<CModule, EmitError> {
 /// [`ModuleProgram::exports`].  Import slots are initialized before the first instruction and
 /// export slots are written only after successful execution.
 pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
-    let max_stack = validate_module(module)?;
+    validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair(module);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, max_stack, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol);
     Ok(CModule {
         symbol,
         source,
@@ -121,11 +121,11 @@ pub fn emit_module_with_logical_path(
     logical_path: &str,
 ) -> Result<CModule, EmitError> {
     validate_logical_path(logical_path)?;
-    let max_stack = validate_module(module)?;
+    validate_module(module)?;
     let (program_hash, _) = hash_module_pair(module);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, max_stack, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol);
     Ok(CModule {
         symbol,
         source,
@@ -178,14 +178,45 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+#define KILN_C99_OUT_OF_MEMORY (-4)
+#define KILN_C99_CALL_DEPTH_ERROR (-5)
+#define KILN_C99_UNINITIALIZED_ERROR (-6)
+
+/* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
+ * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
+ * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
+ * bound is far lower and has to be enforced rather than hoped for. */
+#define KILN_C99_MAX_CALL_DEPTH 256
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
     KILN_VALUE_NULL = 1,
     KILN_VALUE_BOOLEAN = 2,
     KILN_VALUE_NUMBER = 3,
-    KILN_VALUE_STRING = 4
+    KILN_VALUE_STRING = 4,
+    /* The two tags below are internal to a generated unit and never cross the embedding
+     * boundary: a function is converted to text before any host call and before the module
+     * result, and a cell is never a program-visible value at all.  That is what keeps
+     * KILN_C_ABI_VERSION at 1 -- the boundary value is still exactly tags 0 through 4. */
+
+    /* bits holds a kiln_closure*. */
+    KILN_VALUE_FUNCTION = 5,
+    /* A shared box; bits holds a kiln_value*.  It appears only in a local slot the compiler
+     * marked captured, and in a closure's upvalue array. */
+    KILN_VALUE_CELL = 6,
+    /* A `let` or `const` slot before its declaration runs.  Reading one is the temporal dead
+     * zone, and it is a distinct state from undefined: `let x; x` is undefined, `x; let x` is
+     * an error.  Only slots the program actually marks are ever tested for it. */
+    KILN_VALUE_UNINITIALIZED = 7,
+    /* A callable the runtime supplies rather than the program.  bits holds the builtin's code
+     * below.  It is a separate tag from a closure because it has no body to point at and no
+     * captures to carry. */
+    KILN_VALUE_BUILTIN = 8
 };
+
+/* `String(x)`.  A template's `${x}` lowers to a call to it rather than to `+`, because the two
+ * use different hints: `${x}` asks `toString` first and `+` asks `valueOf` first. */
+#define KILN_C99_BUILTIN_STRING 1
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -197,6 +228,7 @@ typedef struct kiln_value {
     size_t len;
 } kiln_value;
 
+
 /* A nonzero callback return is propagated as KILN_C99_HOST_ERROR.  The callback owns any
  * interpretation of operation numbers and may replace *result. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
@@ -205,6 +237,23 @@ typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
 } kiln_host;
+
+/* A closure is its body plus the boxes it captured.
+ *
+ * The body is a function pointer rather than an index into the emitting program's table,
+ * because a function does not have to be called by the unit that made it: a module exports one,
+ * another module imports and calls it, and an index would then be resolved against the wrong
+ * table.  `proto` is kept only to name the function in text -- it is the same index the
+ * interpreter uses, so both engines print `[Function 3]` for the same function. */
+struct kiln_closure;
+typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                            const kiln_value *args, size_t argc, int depth);
+typedef struct kiln_closure {
+    kiln_body_fn body;
+    uint32_t proto;
+    uint32_t upvalue_count;
+    kiln_value *upvalues;
+} kiln_closure;
 
 /* Internal link-time runtime contract. The final executable/shared library supplies this symbol
  * from kiln-native-number; it is not part of the public embedding ABI. */
@@ -225,12 +274,118 @@ static kiln_value kiln_c99_undefined(void) {
     return kiln_c99_value(KILN_VALUE_UNDEFINED, 0, NULL, 0);
 }
 
+static kiln_value kiln_c99_builtin(uint64_t code) {
+    return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
+}
+
+/* A closure and a builtin are both callable, and every operator that coerces treats them alike:
+ * `valueOf` hands the object back, so `toString` decides. */
+static int kiln_c99_is_callable(kiln_value value) {
+    return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN;
+}
+
+static kiln_value kiln_c99_uninitialized(void) {
+    return kiln_c99_value(KILN_VALUE_UNINITIALIZED, 0, NULL, 0);
+}
+
 static kiln_value kiln_c99_null(void) {
     return kiln_c99_value(KILN_VALUE_NULL, 0, NULL, 0);
 }
 
 static kiln_value kiln_c99_boolean(int value) {
     return kiln_c99_value(KILN_VALUE_BOOLEAN, value ? 1u : 0u, NULL, 0);
+}
+
+static kiln_value kiln_c99_function(kiln_closure *closure) {
+    return kiln_c99_value(KILN_VALUE_FUNCTION, (uint64_t)(uintptr_t)closure, NULL, 0);
+}
+
+static kiln_closure *kiln_c99_closure_of(kiln_value value) {
+    return (kiln_closure *)(uintptr_t)value.bits;
+}
+
+static kiln_value *kiln_c99_cell_of(kiln_value value) {
+    return (kiln_value *)(uintptr_t)value.bits;
+}
+
+/* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
+ * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
+static int kiln_c99_make_cell(kiln_value *slot) {
+    kiln_value *box = (kiln_value *)malloc(sizeof *box);
+    if (box == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *box = *slot;
+    *slot = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)box, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* The marker goes *through* an existing box rather than over it.  The cell is created before
+ * the marker is written -- it has to exist before a hoisted function can capture it -- so
+ * overwriting the slot here would drop the box every capture already points at. */
+static void kiln_c99_mark_uninitialized(kiln_value *slot) {
+    if (slot->tag == KILN_VALUE_CELL) {
+        *kiln_c99_cell_of(*slot) = kiln_c99_uninitialized();
+    } else {
+        *slot = kiln_c99_uninitialized();
+    }
+}
+
+/* The captured values are boxes, copied by pointer rather than by contents: two closures over one
+ * variable have to see each other's writes, which is the whole reason a cell exists. */
+static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, uint32_t proto,
+                                 const kiln_value *captured, uint32_t count) {
+    kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
+    kiln_value *upvalues = NULL;
+    uint32_t index;
+    if (closure == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (count != 0) {
+        upvalues = (kiln_value *)malloc((size_t)count * sizeof *upvalues);
+        if (upvalues == NULL) {
+            free(closure);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < count; ++index) {
+            upvalues[index] = captured[index];
+        }
+    }
+    closure->body = body;
+    closure->proto = proto;
+    closure->upvalue_count = count;
+    closure->upvalues = upvalues;
+    *out = kiln_c99_function(closure);
+    return KILN_C99_OK;
+}
+
+static kiln_value kiln_c99_text(kiln_value value);
+
+/* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
+ * frame is entered rather than discovered by crashing. */
+static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                         const kiln_value *args, size_t argc, int depth) {
+    kiln_closure *closure;
+    if (!kiln_c99_is_callable(callee)) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    if (depth >= KILN_C99_MAX_CALL_DEPTH) {
+        return KILN_C99_CALL_DEPTH_ERROR;
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN) {
+        static const char empty[] = "";
+        switch (callee.bits) {
+        case KILN_C99_BUILTIN_STRING:
+            /* `String()` with no argument is the empty string, not `"undefined"`. */
+            *result = argc == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0)
+                                : kiln_c99_text(args[0]);
+            return KILN_C99_OK;
+        default:
+            return KILN_C99_CONTROL_ERROR;
+        }
+    }
+    closure = kiln_c99_closure_of(callee);
+    return closure->body(host, result, closure->upvalues, args, argc, depth + 1);
 }
 
 static kiln_value kiln_c99_number(double value) {
@@ -273,6 +428,9 @@ static int kiln_c99_truthy(kiln_value value) {
     }
     case KILN_VALUE_STRING:
         return value.len != 0;
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+        return 1;
     default:
         return 0;
     }
@@ -314,6 +472,32 @@ static kiln_value kiln_c99_text(kiln_value value) {
             return kiln_c99_undefined();
         }
         return kiln_c99_copy_text(buffer, (size_t)len);
+    }
+    case KILN_VALUE_BUILTIN: {
+        /* The interpreter names a runtime-supplied callable by the native it resolves to, and
+         * this has to be the same text for the same program. */
+        static const char string_constructor[] = "[Function StringConstructor]";
+        if (value.bits == KILN_C99_BUILTIN_STRING) {
+            return kiln_c99_value(KILN_VALUE_STRING, 0, string_constructor,
+                                  sizeof(string_constructor) - 1);
+        }
+        return kiln_c99_undefined();
+    }
+    case KILN_VALUE_FUNCTION: {
+        /* `Function.prototype.toString` returns the source text, which needs the span and the
+         * original source -- neither of which reaches a backend.  Naming the body by its index
+         * is what the interpreter does, and the index is the same on both sides. */
+        static const char prefix[] = "[Function ";
+        char buffer[80];
+        int len = kiln_number_to_js_string((double)kiln_c99_closure_of(value)->proto,
+                                           buffer + sizeof(prefix) - 1,
+                                           sizeof(buffer) - sizeof(prefix));
+        if (len < 0) {
+            return kiln_c99_undefined();
+        }
+        memcpy(buffer, prefix, sizeof(prefix) - 1);
+        buffer[sizeof(prefix) - 1 + (size_t)len] = ']';
+        return kiln_c99_copy_text(buffer, sizeof(prefix) + (size_t)len);
     }
     default:
         return kiln_c99_undefined();
@@ -415,6 +599,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     static const char boolean_text[] = "boolean";
     static const char number_text[] = "number";
     static const char string_text[] = "string";
+    static const char function_text[] = "function";
     switch (value.tag) {
     case KILN_VALUE_NULL:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
@@ -424,6 +609,9 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
     case KILN_VALUE_STRING:
         return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
         return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
@@ -534,6 +722,12 @@ static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 }
 
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
+    /* Only the numeric operators coerce.  `typeof` reports a type, `void` discards, and `!` asks
+     * whether the value is truthy -- a function always is. */
+    if (kiln_c99_is_callable(value) &&
+        (operation == 1 || operation == 2 || operation == 5)) {
+        value = kiln_c99_text(value);
+    }
     switch (operation) {
     case 1: return kiln_c99_number(kiln_c99_as_number(value));
     case 2: return kiln_c99_number(-kiln_c99_as_number(value));
@@ -546,6 +740,28 @@ static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
 }
 
 static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right) {
+    /* A function reduces to a primitive before every coercing operator, exactly as it does in
+     * the interpreter: its `valueOf` hands back the object itself, so `toString` decides.
+     * Strict equality is identity and never coerces, and a nullish `==` is answered without any
+     * conversion at all. */
+    if (kiln_c99_is_callable(left) || kiln_c99_is_callable(right)) {
+        int coerces = 1;
+        if (operation == 7 || operation == 8) {
+            coerces = 0;
+        } else if ((operation == 15 || operation == 16) &&
+                   (left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
+                    right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL)) {
+            coerces = 0;
+        }
+        if (coerces) {
+            if (kiln_c99_is_callable(left)) {
+                left = kiln_c99_text(left);
+            }
+            if (kiln_c99_is_callable(right)) {
+                right = kiln_c99_text(right);
+            }
+        }
+    }
     switch (operation) {
     case 1:
         if (left.tag == KILN_VALUE_STRING || right.tag == KILN_VALUE_STRING) {
@@ -605,7 +821,18 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
 
 "#;
 
+/// The stack each emitted C function needs: the module body, then one entry per compiled
+/// function body in [`Program::functions`], in the same order.
+struct StackPlan {
+    body: usize,
+    functions: Vec<usize>,
+}
+
 fn validate(program: &Program) -> Result<usize, EmitError> {
+    Ok(validate_program(program)?.body)
+}
+
+fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
     if program.version != BYTECODE_VERSION {
         return Err(EmitError::Unsupported {
             feature: format!(
@@ -630,7 +857,57 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
             feature: "BigInt literals in the native backend".to_string(),
         });
     }
-    for (index, instruction) in program.code.iter().enumerate() {
+    for proto in &program.functions {
+        // A generator does not run when it is called: it builds an object that runs in pieces,
+        // each resumption picking up where the last left off. That is a suspended frame, which
+        // an automatic C frame cannot be. An `async` function is compiled as one for the same
+        // reason -- `await` suspends exactly as `yield` does.
+        if proto.generator || proto.asynchronous || proto.async_generator {
+            return Err(EmitError::Unsupported {
+                feature: "generator and async functions in the native backend".to_string(),
+            });
+        }
+        if proto.parameter_count > proto.local_count {
+            return Err(EmitError::InvalidProgram {
+                message: format!(
+                    "function takes {} parameter(s) but has only {} local slot(s)",
+                    proto.parameter_count, proto.local_count
+                ),
+            });
+        }
+        if proto.code.is_empty() {
+            return Err(EmitError::InvalidProgram {
+                message: "function body has no instructions".into(),
+            });
+        }
+    }
+    let body = validate_code(&program.code, program, program.local_count, 0)?;
+    let functions = program
+        .functions
+        .iter()
+        .map(|proto| {
+            validate_code(
+                &proto.code,
+                program,
+                proto.local_count,
+                proto.upvalues.len(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StackPlan { body, functions })
+}
+
+/// Validate one body -- the module's or a function's -- and report the stack depth it reaches.
+///
+/// `local_count` and `upvalue_count` describe the frame this body runs in, which is why this
+/// cannot simply read them off the program: every function has its own.
+fn validate_code(
+    code: &[Instruction],
+    program: &Program,
+    local_count: u32,
+    upvalue_count: usize,
+) -> Result<usize, EmitError> {
+    for (index, instruction) in code.iter().enumerate() {
         validate_supported_instruction(instruction)?;
         match instruction {
             Instruction::Const(constant) if (*constant as usize) >= program.constants.len() => {
@@ -644,15 +921,24 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
             | Instruction::NewCell(local)
             | Instruction::LoadCell(local)
             | Instruction::StoreCell(local)
-                if (*local as u64) >= u64::from(program.local_count) =>
+            | Instruction::MarkUninitialized(local)
+                if (*local as u64) >= u64::from(local_count) =>
             {
                 return Err(invalid(index, format!("local {local} is out of bounds")));
+            }
+            Instruction::LoadUpvalue(upvalue) | Instruction::StoreUpvalue(upvalue)
+                if (*upvalue as usize) >= upvalue_count =>
+            {
+                return Err(invalid(
+                    index,
+                    format!("upvalue {upvalue} is out of bounds"),
+                ));
             }
             Instruction::Jump(target)
             | Instruction::JumpIfFalse(target)
             | Instruction::JumpIfTruthy(target)
             | Instruction::JumpIfNotNullish(target)
-                if (*target as usize) >= program.code.len() =>
+                if (*target as usize) >= code.len() =>
             {
                 return Err(invalid(
                     index,
@@ -664,13 +950,34 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
                     feature: format!("host operation {op:?} at instruction {index}"),
                 });
             }
+            // Where a closure's captures are checked: the descriptors name slots in *this*
+            // frame, so this is the only place that knows whether they exist.
+            Instruction::MakeFunction(proto) => {
+                let Some(target) = program.functions.get(*proto as usize) else {
+                    return Err(invalid(index, format!("function {proto} is out of bounds")));
+                };
+                for upvalue in &target.upvalues {
+                    let ok = match upvalue {
+                        Upvalue::ParentLocal(slot) => u64::from(*slot) < u64::from(local_count),
+                        Upvalue::ParentUpvalue(slot) => (*slot as usize) < upvalue_count,
+                    };
+                    if !ok {
+                        return Err(invalid(
+                            index,
+                            format!(
+                                "function {proto} captures {upvalue:?}, which this frame does not have"
+                            ),
+                        ));
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     // Dataflow validation keeps generated stack indexing defined on every reachable branch and
     // calculates a compact allocation for the emitted function.
-    let mut heights: Vec<Option<usize>> = vec![None; program.code.len()];
+    let mut heights: Vec<Option<usize>> = vec![None; code.len()];
     let mut work = vec![(0usize, 0usize)];
     let mut max_height = 0usize;
     while let Some((index, height)) = work.pop() {
@@ -685,7 +992,7 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
         }
         heights[index] = Some(height);
         max_height = max_height.max(height);
-        let instruction = &program.code[index];
+        let instruction = &code[index];
         let (next_height, terminal) = stack_effect(instruction, height, index)?;
         max_height = max_height.max(next_height);
         if terminal {
@@ -697,11 +1004,11 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
             | Instruction::JumpIfTruthy(target)
             | Instruction::JumpIfNotNullish(target) => {
                 work.push((*target as usize, next_height));
-                if index + 1 < program.code.len() {
+                if index + 1 < code.len() {
                     work.push((index + 1, next_height));
                 }
             }
-            _ if index + 1 < program.code.len() => work.push((index + 1, next_height)),
+            _ if index + 1 < code.len() => work.push((index + 1, next_height)),
             _ => {
                 return Err(invalid(index, "control falls off the end of the program"));
             }
@@ -710,20 +1017,43 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
     Ok(max_height.max(1))
 }
 
+/// Name the instruction a refusal is about.
+///
+/// The catch-all used to answer "functions and objects in the native backend" for all forty of
+/// them, which tells a reader nothing about which one their program actually reached -- the same
+/// defect the frontend's "unsupported expression: expression" had. A variant name is not a
+/// polished feature name, but it is the truth and it sorts a backlog.
+fn instruction_feature(instruction: &Instruction) -> String {
+    let rendered = format!("{instruction:?}");
+    let name = rendered
+        .split(['(', ' ', '{'])
+        .next()
+        .unwrap_or("instruction");
+    format!("`{name}` in the native backend")
+}
+
 fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitError> {
     match instruction {
+        // A template's `${x}` lowers to a call to `String`, so this is not an optional extra:
+        // without it the backend loses every program containing a template literal.
+        Instruction::LoadBuiltin(kiln_ir::Builtin::String) => Ok(()),
+        Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
+            feature: format!("the `{builtin:?}` builtin in the native backend"),
+        }),
         Instruction::Binary(BinaryOp::In | BinaryOp::InstanceOf) => Err(EmitError::Unsupported {
             feature: "reference operators in the native backend".to_string(),
         }),
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
-        // A cell is a shared box and only a closure can share one; this backend refuses
-        // `MakeFunction`, so a cell here reaches only the module body that made it and is
-        // indistinguishable from its slot. See the emitter for the same reasoning.
         | Instruction::NewCell(_)
         | Instruction::LoadCell(_)
         | Instruction::StoreCell(_)
+        | Instruction::MakeFunction(_)
+        | Instruction::Call { .. }
+        | Instruction::LoadUpvalue(_)
+        | Instruction::StoreUpvalue(_)
+        | Instruction::MarkUninitialized(_)
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -735,7 +1065,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::HostCall { .. }
         | Instruction::Return => Ok(()),
         _ => Err(EmitError::Unsupported {
-            feature: "functions and objects in the native backend".to_string(),
+            feature: instruction_feature(instruction),
         }),
     }
 }
@@ -797,16 +1127,11 @@ fn stack_effect(
         // module with a flat local array and no call stack, so these have no lowering yet --
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
-        Instruction::MakeFunction(_)
-        | Instruction::Call { .. }
-        | Instruction::LoadGlobal(_)
+        Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::LoadUpvalue(_)
-        | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
-        | Instruction::LoadBuiltin(_)
         | Instruction::New { .. }
         | Instruction::Dup2
         | Instruction::NewArray { .. }
@@ -816,7 +1141,6 @@ fn stack_effect(
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
-        | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
@@ -841,14 +1165,29 @@ fn stack_effect(
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
-            feature: "functions and objects in the native backend".to_string(),
+            feature: instruction_feature(instruction),
         }),
-        Instruction::Const(_) | Instruction::LoadLocal(_) | Instruction::LoadCell(_) => {
-            Ok((height + 1, false))
+        Instruction::Const(_)
+        | Instruction::LoadLocal(_)
+        | Instruction::LoadCell(_)
+        | Instruction::LoadUpvalue(_)
+        | Instruction::LoadBuiltin(_)
+        | Instruction::MakeFunction(_) => Ok((height + 1, false)),
+        // The callee sits under its arguments, and the result replaces both.
+        Instruction::Call { argc } => {
+            let needed = usize::from(*argc) + 1;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
         }
-        // Making a cell touches no stack: the slot becomes the box in place.
-        Instruction::NewCell(_) => Ok((height, false)),
-        Instruction::StoreLocal(_) | Instruction::StoreCell(_) | Instruction::Pop => {
+        // Both write a slot in place and touch no stack.
+        Instruction::NewCell(_) | Instruction::MarkUninitialized(_) => Ok((height, false)),
+        Instruction::StoreLocal(_)
+        | Instruction::StoreCell(_)
+        | Instruction::StoreUpvalue(_)
+        | Instruction::Pop => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -906,8 +1245,161 @@ fn stack_effect(
     }
 }
 
+/// Whether any body in this program can produce a callable value.
+///
+/// The boundary conversions depend on it, and they are not free to emit unconditionally:
+/// reaching `kiln_c99_text` from every entry point makes every unit reference the number
+/// provider, which the graph link tests deliberately link without. It would also change the
+/// bytes of a scalar unit, and those bytes are a cache key.
+fn produces_callables(program: &Program) -> bool {
+    let makes_one = |code: &[Instruction]| {
+        code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::MakeFunction(_) | Instruction::LoadBuiltin(_)
+            )
+        })
+    };
+    makes_one(&program.code) || program.functions.iter().any(|proto| makes_one(&proto.code))
+}
+
+/// Whether the emitted entry point needs a call-depth counter.
+///
+/// A program with no call is the scalar shape this backend has always produced, and it must keep
+/// producing byte-for-byte the same unit: the output is content-addressed, so even a declaration
+/// nothing reads would invalidate every cached object.
+fn tracks_call_depth(program: &Program) -> bool {
+    program
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Call { .. }))
+}
+
+/// Emit one C function per compiled body, forward-declared so a closure made before a body is
+/// rendered can still point at it.
+/// Local slots this body treats as cells without ever creating one.
+///
+/// For an import, whose cell belongs to the exporter and arrives through the linker. The
+/// compiler always lowers an import to `LoadCell`, because an import is a live view of the
+/// exporter's binding -- but hand-written bytecode need not, and a body that treats the slot as
+/// a plain local has to keep getting a plain local. So this asks the body rather than assuming.
+fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> HashSet<u32> {
+    let mut needed = HashSet::new();
+    let mut created = HashSet::new();
+    for instruction in code {
+        match instruction {
+            Instruction::LoadCell(slot) | Instruction::StoreCell(slot) => {
+                needed.insert(*slot);
+            }
+            Instruction::NewCell(slot) => {
+                created.insert(*slot);
+            }
+            // Capturing a slot is only possible if it holds a cell.
+            Instruction::MakeFunction(proto) => {
+                if let Some(target) = functions.get(*proto as usize) {
+                    for upvalue in &target.upvalues {
+                        if let Upvalue::ParentLocal(slot) = upvalue {
+                            needed.insert(*slot);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    needed.retain(|slot| !created.contains(slot));
+    needed
+}
+
+/// The local slots a body puts into the temporal dead zone.
+fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
+    code.iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::MarkUninitialized(local) => Some(*local),
+            _ => None,
+        })
+        .collect()
+}
+
+fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
+    for index in 0..program.functions.len() {
+        writeln!(
+            output,
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, const kiln_value *args, size_t argc, int depth);"
+        )
+        .unwrap();
+    }
+    for (index, proto) in program.functions.iter().enumerate() {
+        render_function(output, program, proto, plan.functions[index], index, symbol);
+    }
+}
+
+fn render_function(
+    output: &mut String,
+    program: &Program,
+    proto: &FunctionProto,
+    max_stack: usize,
+    index: usize,
+    symbol: &str,
+) {
+    let locals = usize::try_from(proto.local_count).unwrap().max(1);
+    // Only when the name is already a C identifier: it goes into a comment, and a name is
+    // program text that could otherwise close one.
+    if let Some(name) = proto.name.as_ref().filter(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
+    }) {
+        writeln!(output, "/* function {index}: {name} */").unwrap();
+    }
+    writeln!(
+        output,
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, const kiln_value *args, size_t argc, int depth) {{"
+    )
+    .unwrap();
+    output.push_str("    size_t sp = 0;\n    size_t slot;\n");
+    writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
+    writeln!(output, "    kiln_value locals[{locals}];").unwrap();
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str("    (void)host; (void)upvalues; (void)depth;\n");
+    writeln!(
+        output,
+        "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
+    )
+    .unwrap();
+    if proto.parameter_count == 0 {
+        output.push_str("    (void)args; (void)argc;\n");
+    } else {
+        // Parameters occupy the first slots in declaration order. An argument that was not
+        // passed leaves its slot undefined, which is what a missing argument is.
+        writeln!(
+            output,
+            "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
+            proto.parameter_count
+        )
+        .unwrap();
+    }
+    let emitter = Emitter {
+        constants: &program.constants,
+        functions: &program.functions,
+        symbol,
+        callables: produces_callables(program),
+        site: ReturnSite::Body,
+        guarded: dead_zone_slots(&proto.code),
+    };
+    for position in 0..proto.code.len() {
+        writeln!(output, "kiln_label_{position}:;").unwrap();
+        emit_instruction(output, &proto.code[position], position, &emitter);
+    }
+    // A body whose control reaches the end without a `Return` is a compiler bug, not a program
+    // error: the lowering always ends a body with one.
+    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+}
+
 fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
-    let max_stack = validate(program).expect("render called after validation");
+    let plan = validate_program(program).expect("render called after validation");
+    let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 64);
     output.push_str(HEADER);
     writeln!(
@@ -925,12 +1417,16 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
             .unwrap();
         }
     }
+    render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
         "int {symbol}(kiln_host *host, kiln_value *result) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    if tracks_call_depth(program) {
+        output.push_str("    int depth = 0;\n");
+    }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(
         output,
@@ -942,28 +1438,26 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
     }
+    let emitter = Emitter {
+        constants: &program.constants,
+        functions: &program.functions,
+        symbol,
+        callables: produces_callables(program),
+        site: ReturnSite::Entry { exports: None },
+        guarded: dead_zone_slots(&program.code),
+    };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
-        emit_instruction(
-            &mut output,
-            &program.code[index],
-            &program.constants,
-            index,
-            symbol,
-            None,
-        );
+        emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
 
-fn render_module(
-    module: &ModuleProgram,
-    max_stack: usize,
-    program_hash: u64,
-    symbol: &str,
-) -> String {
+fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> String {
     let program = &module.program;
+    let plan = validate_program(program).expect("render called after validation");
+    let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
     output.push_str(HEADER);
     writeln!(
@@ -983,12 +1477,16 @@ fn render_module(
             .unwrap();
         }
     }
+    render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
         "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    if tracks_call_depth(program) {
+        output.push_str("    int depth = 0;\n");
+    }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(
         output,
@@ -1012,51 +1510,88 @@ fn render_module(
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
     }
+    let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
     for (index, binding) in module.imports.iter().enumerate() {
-        writeln!(
-            output,
-            "    locals[{}] = imports[{index}];",
-            binding.local_slot
-        )
-        .unwrap();
+        let slot = binding.local_slot;
+        writeln!(output, "    locals[{slot}] = imports[{index}];").unwrap();
+        // The exporter boxes only what can change, so an immutable export arrives as a plain
+        // value where the body expects a cell. Wrapping it here is the same thing
+        // `execute_module` does on the interpreter side, and for the same reason: the body has
+        // one way to read an import and the linker has two ways to deliver one.
+        if boxed_imports.contains(&slot) {
+            writeln!(
+                output,
+                "    if (locals[{slot}].tag != KILN_VALUE_CELL && kiln_c99_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+            )
+            .unwrap();
+        }
     }
+    let emitter = Emitter {
+        constants: &program.constants,
+        functions: &program.functions,
+        symbol,
+        callables: produces_callables(program),
+        site: ReturnSite::Entry {
+            exports: Some(&module.exports),
+        },
+        guarded: dead_zone_slots(&program.code),
+    };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
-        emit_instruction(
-            &mut output,
-            &program.code[index],
-            &program.constants,
-            index,
-            symbol,
-            Some(&module.exports),
-        );
+        emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
 
+/// Where a `Return` lands.
+///
+/// The entry point's value crosses the embedding boundary and a function body's does not, which
+/// is the difference between converting a returned function to text and handing back the closure
+/// so the caller can call it.
+struct Emitter<'a> {
+    constants: &'a [Constant],
+    functions: &'a [FunctionProto],
+    symbol: &'a str,
+    /// Whether a value reaching the embedding boundary could be a callable and so has to be
+    /// converted first. False for a scalar program, whose emitted bytes must not change.
+    callables: bool,
+    site: ReturnSite<'a>,
+    /// The local slots this body puts into the temporal dead zone, so a read of one is checked
+    /// and every other read is not.
+    guarded: HashSet<u32>,
+}
+
+enum ReturnSite<'a> {
+    Entry {
+        exports: Option<&'a [kiln_ir::ExportBinding]>,
+    },
+    Body,
+}
+
 fn emit_instruction(
     output: &mut String,
     instruction: &Instruction,
-    constants: &[Constant],
     index: usize,
-    symbol: &str,
-    exports: Option<&[kiln_ir::ExportBinding]>,
+    emitter: &Emitter<'_>,
 ) {
     let _ = index;
+    let Emitter {
+        constants,
+        functions,
+        symbol,
+        callables,
+        site,
+        guarded,
+    } = emitter;
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
-        Instruction::MakeFunction(_)
-        | Instruction::Call { .. }
-        | Instruction::LoadGlobal(_)
+        Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::LoadUpvalue(_)
-        | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
-        | Instruction::LoadBuiltin(_)
         | Instruction::New { .. }
         | Instruction::Dup2
         | Instruction::NewArray { .. }
@@ -1066,7 +1601,6 @@ fn emit_instruction(
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
-        | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
@@ -1109,20 +1643,102 @@ fn emit_instruction(
                 unreachable!("verification rejects a BigInt constant before emission")
             }
         },
-        // A cell is a shared box, and only a closure can share one. This backend refuses
-        // `MakeFunction`, so nothing here can capture: a cell reaches only the module body that
-        // made it, which makes it indistinguishable from the slot it lives in. Emitting the three
-        // cell instructions as plain slot access is sound *because* of that refusal, and would
-        // stop being sound the moment callable functions land -- which is why it says so here.
-        Instruction::NewCell(_) => {}
+        // A cell is a shared box: the slot stops holding the value and starts holding a
+        // pointer to it, so that a closure over the variable and the frame that declared it are
+        // writing to the same place. Until closures existed here this was emitted as plain slot
+        // access, which was sound only because nothing could capture.
+        Instruction::NewCell(local) => {
+            writeln!(
+                output,
+                "    {{ int status = kiln_c99_make_cell(&locals[{local}]); if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
         Instruction::LoadCell(local) => {
-            writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
+            if guarded.contains(local) {
+                writeln!(
+                    output,
+                    "    if (kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                )
+                .unwrap();
+            }
+            writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(locals[{local}]);").unwrap();
         }
         Instruction::StoreCell(local) => {
-            writeln!(output, "    locals[{local}] = stack[--sp];").unwrap();
+            writeln!(output, "    *kiln_c99_cell_of(locals[{local}]) = stack[--sp];").unwrap();
         }
-        Instruction::LoadLocal(local) => writeln!(output, "    stack[sp++] = locals[{local}];").unwrap(),
+        // A `let` or `const` slot is in the temporal dead zone until its declaration runs.
+        // Reading one is an error rather than `undefined`, and only the slots a program marks
+        // are ever tested -- the check would otherwise be a branch on every local read for a
+        // state almost no program reaches.
+        Instruction::MarkUninitialized(local) => {
+            writeln!(output, "    kiln_c99_mark_uninitialized(&locals[{local}]);").unwrap();
+        }
+        // An upvalue slot always holds a cell -- that is what capturing means -- so unlike a
+        // local it needs no test to know whether to read through it.
+        Instruction::LoadUpvalue(upvalue) => {
+            writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(upvalues[{upvalue}]);").unwrap();
+        }
+        Instruction::StoreUpvalue(upvalue) => {
+            writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = stack[--sp];").unwrap();
+        }
+        Instruction::MakeFunction(proto) => {
+            let captures = &functions[*proto as usize].upvalues;
+            output.push_str("    {\n        int status;\n");
+            if captures.is_empty() {
+                writeln!(
+                    output,
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, UINT32_C({proto}), NULL, 0);"
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "        kiln_value captured[{}];", captures.len()).unwrap();
+                for (position, upvalue) in captures.iter().enumerate() {
+                    // The box is copied by pointer, which is the point: two closures over one
+                    // variable have to observe each other's writes.
+                    match upvalue {
+                        Upvalue::ParentLocal(slot) => {
+                            writeln!(output, "        captured[{position}] = locals[{slot}];")
+                        }
+                        Upvalue::ParentUpvalue(slot) => {
+                            writeln!(output, "        captured[{position}] = upvalues[{slot}];")
+                        }
+                    }
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, UINT32_C({proto}), captured, UINT32_C({}));",
+                    captures.len()
+                )
+                .unwrap();
+            }
+            output.push_str("        if (status != KILN_C99_OK) return status;\n        ++sp;\n    }\n");
+        }
+        Instruction::Call { argc } => {
+            let argc = usize::from(*argc);
+            writeln!(
+                output,
+                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                argc + 1
+            )
+            .unwrap();
+        }
+        Instruction::LoadLocal(local) => {
+            if guarded.contains(local) {
+                writeln!(
+                    output,
+                    "    if (locals[{local}].tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                )
+                .unwrap();
+            }
+            writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
+        }
         Instruction::StoreLocal(local) => writeln!(output, "    locals[{local}] = stack[--sp];").unwrap(),
+        Instruction::LoadBuiltin(_) => {
+            // Verification admits only `String`, so this needs no discrimination.
+            output.push_str("    stack[sp++] = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);\n");
+        }
         Instruction::Pop => output.push_str("    --sp;\n"),
         Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
         Instruction::Unary(operator) => {
@@ -1142,17 +1758,41 @@ fn emit_instruction(
             writeln!(output, "    {{ kiln_value value = stack[--sp]; if (value.tag != KILN_VALUE_UNDEFINED && value.tag != KILN_VALUE_NULL) goto kiln_label_{target}; }}").unwrap()
         }
         Instruction::HostCall { op, argc } => {
+            // The embedding boundary carries only the five scalar tags, so a function argument
+            // is reduced to its text before the host sees it -- which is also what the
+            // interpreter prints for one.
+            if *argc > 0 && *callables {
+                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_is_callable(stack[arg])) stack[arg] = kiln_c99_text(stack[arg]); }}").unwrap();
+            }
             writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
         }
-        Instruction::Return => match exports {
-            None => output.push_str(
+        Instruction::Return => match site {
+            ReturnSite::Body => output.push_str(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
-            Some(exports) => {
+            ReturnSite::Entry { exports: None } if !callables => output.push_str(
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+            ),
+            ReturnSite::Entry { exports: None } => output.push_str(
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_is_callable(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
+            ),
+            ReturnSite::Entry {
+                exports: Some(exports),
+            } => {
                 output.push_str(
                     "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
                 );
+                if *callables {
+                    output.push_str(
+                        "    if (kiln_c99_is_callable(*result)) *result = kiln_c99_text(*result);\n",
+                    );
+                }
                 for (index, binding) in exports.iter().enumerate() {
+                    // The slot is handed over exactly as it stands, box included. A mutable
+                    // export *is* its cell: that is what makes an import a live view of the
+                    // exporter's binding rather than a copy of the value it happened to hold
+                    // when the exporter finished. Only an export that can change is boxed, so
+                    // an immutable one arrives here as a plain value and stays one.
                     writeln!(
                         output,
                         "    exports[{index}] = locals[{}];",
@@ -2547,15 +3187,145 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::MakeFunction(0),
+                Instruction::LoadThis,
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("functions and objects")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadThis`")),
             "dead code must not bypass the native instruction allowlist"
+        );
+    }
+
+    /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
+    fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::process::Output {
+        let executable = std::env::temp_dir().join(format!(
+            "kiln-backend-c-{label}-{}-{}",
+            std::process::id(),
+            generated.program_hash
+        ));
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(&executable)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(linked_source(&generated.source, wrapper).as_bytes())
+            .expect("source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated executable runs");
+        let _ = std::fs::remove_file(&executable);
+        run
+    }
+
+    /// A closure over a module-level binding, which is the shape every counter has: the module
+    /// body and the function must write through one box, and the module must still read the
+    /// current value out of the slot afterwards.
+    #[test]
+    fn executable_closure_shares_a_cell_with_the_module_body() {
+        let bump = FunctionProto {
+            local_count: 0,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            code: vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::Const(1),
+                Instruction::Binary(BinaryOp::Add),
+                Instruction::StoreUpvalue(0),
+                Instruction::LoadUpvalue(0),
+                Instruction::Return,
+            ],
+            ..function(Vec::new())
+        };
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::Number(0f64.to_bits()),
+                Constant::Number(1f64.to_bits()),
+            ],
+            code: vec![
+                Instruction::NewCell(0),
+                Instruction::Const(0),
+                Instruction::StoreCell(0),
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 0 },
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 0 },
+                Instruction::Pop,
+                // The module reads the shared box, which must now hold 2.
+                Instruction::LoadCell(0),
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![bump],
+        })
+        .expect("program emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; return kiln_c99_as_number(result) == 2.0 ? 0 : 4; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "closure-cell");
+        assert!(
+            run.status.success(),
+            "a closure and its module body did not share one cell (exit {:?})",
+            run.status.code()
+        );
+    }
+
+    /// Recursion is bounded rather than left to exhaust the C stack, which aborts the process
+    /// instead of reporting anything.
+    #[test]
+    fn executable_runaway_recursion_reports_rather_than_crashing() {
+        let forever = FunctionProto {
+            local_count: 0,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            code: vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Return,
+            ],
+            ..function(Vec::new())
+        };
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![
+                Instruction::NewCell(0),
+                Instruction::MakeFunction(0),
+                Instruction::StoreCell(0),
+                Instruction::LoadCell(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![forever],
+        })
+        .expect("program emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; return {}(NULL, &result) == KILN_C99_CALL_DEPTH_ERROR ? 0 : 1; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "depth");
+        assert!(
+            run.status.success(),
+            "unbounded recursion did not report a call-depth error (exit {:?})",
+            run.status.code()
         );
     }
 

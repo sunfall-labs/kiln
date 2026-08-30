@@ -108,8 +108,12 @@ if [[ $KILN_CI_REEXPORTS_STDOUT != "$KILN_CI_REEXPORTS_EXPECTED" ]]; then
 fi
 
 # An import is a live view of the exporter's binding, not a copy of the value it had when the
-# exporter finished. Only a binding that can change is boxed, which is why `examples/modules`
-# above still compiles natively: its one export is a `const`.
+# exporter finished. Only a binding that can change is boxed.
+#
+# Both engines run this now, which is a stronger claim than it looks: the module exports a
+# mutable `let`, a `const` and a *function*, so the native path has to hand a cell across the
+# module boundary for the first, a plain value for the second, and a closure for the third --
+# and then call that closure from a unit that did not create it.
 KILN_CI_LIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/live/main.ts)"
 KILN_CI_LIVE_EXPECTED=$'0 10\n2 10'
@@ -118,3 +122,13 @@ if [[ $KILN_CI_LIVE_STDOUT != "$KILN_CI_LIVE_EXPECTED" ]]; then
 	printf 'expected: %s\nactual: %s\n' "$KILN_CI_LIVE_EXPECTED" "$KILN_CI_LIVE_STDOUT" >&2
 	exit 1
 fi
+KILN_CI_LIVE_NATIVE="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/live/main.ts --native)"
+if [[ $KILN_CI_LIVE_NATIVE != "$KILN_CI_LIVE_STDOUT" ]]; then
+	echo "native stdout differs from interpreter stdout for a live binding" >&2
+	printf 'interpreter: %s\nnative: %s\n' "$KILN_CI_LIVE_STDOUT" "$KILN_CI_LIVE_NATIVE" >&2
+	exit 1
+fi
+
+# The engines must also agree on the corpus that exists only to compare them.
+scripts/native.sh
