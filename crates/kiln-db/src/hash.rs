@@ -1,15 +1,14 @@
 //! Content hashing for the query database.
 //!
 //! FNV-1a, written out by hand rather than reached for from `std::hash`. `DefaultHasher` is
-//! explicitly documented as unstable across Rust releases, and these hashes end up in
-//! `ModuleSummary` on the wire and (later) in an on-disk cache, so they have to mean the same
-//! thing tomorrow as they do today.
+//! explicitly documented as unstable across Rust releases, and these summaries end up in
+//! `ModuleSummary` on the wire, so they have to mean the same thing tomorrow as they do today.
 //!
 //! FNV is not collision resistant, which is survivable here because a hash is never the sole
 //! basis for a cache decision: early cutoff compares whole values with `PartialEq`, and the
 //! hashes are carried *inside* those values. A collision therefore costs an extra recompute at
-//! worst, never a stale result. If a hash ever becomes the only thing compared, this needs to
-//! be a real 128-bit hash instead.
+//! worst, never a stale result. Source synchronization and artifact keys use
+//! `kiln-digest` instead because their digest is the whole decision.
 
 const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const PRIME: u64 = 0x0000_0100_0000_01b3;

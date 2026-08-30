@@ -172,7 +172,7 @@ pub fn run(
                     match commands::read_source(&dependency) {
                         Ok(source) => {
                             let canonical = commands::canonical_path(&dependency)?;
-                            let hash = kiln_db::content_hash(&source);
+                            let hash = kiln_proto::source_digest(&source);
                             if source_manifest.get(&canonical) != Some(&hash) {
                                 dependency_updates.push((canonical, source, hash));
                                 dependency_changed = true;

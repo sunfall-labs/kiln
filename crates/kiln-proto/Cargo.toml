@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kiln-digest = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

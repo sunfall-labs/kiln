@@ -5,21 +5,86 @@
 //! changes only once the daemon is real - a client and daemon of different versions must be
 //! able to detect the mismatch rather than misinterpret each other, hence `PROTOCOL_VERSION`.
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use kiln_digest::Digest;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
-/// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
-/// of its text.
+/// SHA-256 of a source file's exact UTF-8 bytes.
+///
+/// This digest is the whole [`Request::Sync`] coherence decision, so unlike the readable 64-bit
+/// FNV summaries elsewhere in the protocol it must be collision resistant. The wire form is
+/// exactly 64 lowercase hexadecimal characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceDigest(Digest);
+
+impl SourceDigest {
+    pub fn to_hex(self) -> String {
+        self.0.to_hex()
+    }
+}
+
+/// Hash one source snapshot for [`Request::Sync`].
+pub fn source_digest(text: &str) -> SourceDigest {
+    SourceDigest(Digest::hash(text.as_bytes()))
+}
+
+impl Serialize for SourceDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SourceDigestVisitor;
+
+        impl Visitor<'_> for SourceDigestVisitor {
+            type Value = SourceDigest;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a 64-character lowercase hexadecimal SHA-256 digest")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                {
+                    return Err(E::custom(
+                        "source digest must contain only lowercase hexadecimal characters",
+                    ));
+                }
+                Digest::from_hex(value).map(SourceDigest).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(SourceDigestVisitor)
+    }
+}
+
+/// A file as the client sees it: the path the daemon knows it by, and SHA-256 of its text.
 ///
 /// The hash is the point of [`Request::Sync`]. A stateless client can afford to name every file
 /// in the project on every command; it cannot afford to send every file's contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceHash {
     pub path: String,
-    pub hash: u64,
+    pub hash: SourceDigest,
 }
 
 /// A source file, interned by the daemon. Stable for the lifetime of a session.
@@ -327,6 +392,59 @@ pub struct Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_digest_is_sha256_and_sync_serializes_one_canonical_hex_value() {
+        assert_eq!(
+            source_digest("").to_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            source_digest("hello").to_hex(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+
+        let request = Request::Sync {
+            files: vec![SourceHash {
+                path: "main.js".to_owned(),
+                hash: source_digest("hello"),
+            }],
+        };
+        let encoded = serde_json::to_value(&request).expect("serialize strong source digest");
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "Sync": {
+                    "files": [{
+                        "path": "main.js",
+                        "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                    }]
+                }
+            })
+        );
+        let decoded: Request =
+            serde_json::from_value(encoded).expect("round trip strong source digest");
+        let Request::Sync { files } = decoded else {
+            panic!("decoded request must remain Sync");
+        };
+        assert_eq!(files[0].hash, source_digest("hello"));
+    }
+
+    #[test]
+    fn source_digest_rejects_the_old_number_and_noncanonical_text() {
+        for hash in [
+            serde_json::json!(7),
+            serde_json::json!("abc"),
+            serde_json::json!("2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"),
+            serde_json::json!("gcf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
+        ] {
+            let encoded = serde_json::json!({"path": "main.js", "hash": hash});
+            assert!(
+                serde_json::from_value::<SourceHash>(encoded).is_err(),
+                "invalid source digest must not cross protocol v13"
+            );
+        }
+    }
 
     #[test]
     fn scalar_value_identity_round_trips_without_losing_number_bits_or_string_bytes() {

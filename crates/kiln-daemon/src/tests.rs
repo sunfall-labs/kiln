@@ -489,11 +489,11 @@ fn sync_reconciles_omissions_and_rejects_duplicates_without_partial_removal() {
             files: vec![
                 SourceHash {
                     path: "alpha.js".into(),
-                    hash: kiln_db::content_hash(alpha),
+                    hash: kiln_proto::source_digest(alpha),
                 },
                 SourceHash {
                     path: "alpha.js".into(),
-                    hash: kiln_db::content_hash(alpha),
+                    hash: kiln_proto::source_digest(alpha),
                 },
             ],
         },
@@ -514,7 +514,7 @@ fn sync_reconciles_omissions_and_rejects_duplicates_without_partial_removal() {
         Request::Sync {
             files: vec![SourceHash {
                 path: "alpha.js".into(),
-                hash: kiln_db::content_hash(alpha),
+                hash: kiln_proto::source_digest(alpha),
             }],
         },
     );
@@ -529,8 +529,22 @@ fn sync_reconciles_omissions_and_rejects_duplicates_without_partial_removal() {
         &mut engine,
         Request::Sync {
             files: vec![SourceHash {
+                path: "alpha.js".into(),
+                hash: kiln_proto::source_digest("different bytes"),
+            }],
+        },
+    );
+    assert!(
+        matches!(response, Response::Needed { paths } if paths == ["alpha.js"]),
+        "a wrong strong digest must never retain held source bytes"
+    );
+
+    let (response, _) = dispatch(
+        &mut engine,
+        Request::Sync {
+            files: vec![SourceHash {
                 path: "gamma.js".into(),
-                hash: 7,
+                hash: kiln_proto::source_digest("not gamma"),
             }],
         },
     );
@@ -926,14 +940,14 @@ fn protocol_mismatch_is_rejected_and_the_connection_dropped() {
 
     let response = client
         .request(&Request::Ping {
-            protocol: PROTOCOL_VERSION + 1,
+            protocol: PROTOCOL_VERSION - 1,
         })
         .expect("the daemon answers before hanging up");
     let Response::Error { message } = response else {
         panic!("a version-skewed client must be refused, got {response:?}");
     };
     assert!(
-        message.contains(&(PROTOCOL_VERSION + 1).to_string())
+        message.contains(&(PROTOCOL_VERSION - 1).to_string())
             && message.contains(&PROTOCOL_VERSION.to_string()),
         "the error must name both versions: {message}"
     );
@@ -1558,7 +1572,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .request(&Request::Sync {
             files: vec![SourceHash {
                 path: entry_path.clone(),
-                hash: kiln_db::content_hash(&entry_source),
+                hash: kiln_proto::source_digest(&entry_source),
             }],
         })
         .expect("sync authoritative view");

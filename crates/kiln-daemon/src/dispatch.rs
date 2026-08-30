@@ -207,7 +207,7 @@ fn sync<E: QueryEngine>(engine: &mut E, files: Vec<kiln_proto::SourceHash>) -> R
         .source_files()
         .into_iter()
         .map(|(file, path)| {
-            let hash = engine.source(file).map(kiln_db::content_hash);
+            let hash = engine.source(file).map(kiln_proto::source_digest);
             (path, (file, hash))
         })
         .collect::<BTreeMap<_, _>>();

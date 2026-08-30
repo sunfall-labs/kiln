@@ -7,9 +7,6 @@ repository.workspace = true
 
 [dependencies]
 kiln-proto = { workspace = true }
-# For content_hash alone: the sync handshake is sound only if both ends compute a file's hash
-# the same way, so the client borrows the database's definition rather than writing one.
-kiln-db = { workspace = true }
 serde_json = { workspace = true }
 kiln-daemon = { workspace = true }
 kiln-host-abi = { workspace = true }

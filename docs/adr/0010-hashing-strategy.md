@@ -2,11 +2,10 @@
 
 ## Status
 
-Accepted. Two of the three parts describe the tree as it should be now; the blake3 part is a
-decision about *when*, and the when is §7's artifact cache, not today.
-
-It is also where `kiln-db`'s first dependency is written down. Under ADR 0004 as corrected,
-`rustc-hash` no longer needs an ADR to justify it; blake3, which carries a build script, will.
+Accepted. Amended 2026-08-30 when protocol `Sync` was found to use FNV as its whole coherence
+decision and the implemented artifact cache had already chosen SHA-256 rather than the proposed
+blake3 dependency. The rule survives unchanged; the concrete strong digest is now the workspace's
+dependency-free, full-width SHA-256, shared by those two consumers through `kiln-digest`.
 
 ## Context
 
@@ -25,12 +24,19 @@ benefit anyone here can name.
 
 In the other direction, `kiln-db::hash` is 64-bit FNV-1a, written out by hand. Its module comment
 argues the case correctly and then names its own expiry date: "if a hash ever becomes the only
-thing compared, this needs to be a real 128-bit hash instead." Today nothing does. The hashes
-that reach `Interface`, `ModuleSummary`, and the wire are carried *inside* values that early
+thing compared, this needs to be a real 128-bit hash instead." The hashes that reach `Interface`
+and `ModuleSummary` are carried *inside* values that early
 cutoff compares with `PartialEq` (ADR 0003), so a collision costs a redundant recompute and can
 never produce a stale result. FNV also has the one property that mattered for choosing it over
 `DefaultHasher`: it is a fixed algorithm that means the same thing across Rust releases and
 across the wire, and `matches_reference_fnv1a` pins it.
+
+The original decision missed one wire use that does not have a value behind it. `Request::Sync`
+lets a stateless client name every source while uploading only changed contents. The daemon has
+only its held bytes and the client's digest; matching digests are the entire reason it retains the
+held bytes. A chosen FNV collision therefore retained stale source. Protocol 13 replaces that
+field with a full SHA-256 digest encoded as 64 lowercase hexadecimal characters. The readable FNV
+module summaries remain unchanged.
 
 Design.md §7 is the trigger the comment describes. A content-addressed artifact cache reuses an
 artifact "whenever its inputs have identical hashes" — key equality is the entire decision, and
@@ -48,9 +54,8 @@ that because "swap the hash function" usually is one. Measured here on the `medi
 workload with an optimized build, the byte-at-a-time FNV loop runs at about 0.9 GB/s: 1.5 µs for
 a single module of 1.2 KB, and 0.42 ms to hash all 320 modules and 373 KB of the project at
 once. Against §13's budget of 200 ms for a warm small edit, hashing is not visible and would not
-become visible if it were three times slower. blake3 is in fact the faster function in bulk, but
-that is a bonus and not a reason. The reasons are collision resistance and a documented,
-versioned output format.
+become visible if it were three times slower. The reasons for a strong digest are collision
+resistance and a documented, versioned output format, not throughput.
 
 The relevant thing ADR 0004 has to say has changed, which is why this ADR is possible at all.
 Its zero-dependency rule for `kiln-db` rested on a false claim about incremental rebuild cost and
@@ -58,8 +63,9 @@ has been narrowed to what it was actually protecting: no procedural macros, noth
 enough to be re-instantiated at every use site. `rustc-hash` clears that easily — about 650 lines,
 no build script, no non-optional dependencies, and `FxHashMap` is a type alias for std's
 `HashMap` under a different `BuildHasher`. That is one more instantiation of map machinery the
-crate already compiles, plus a hasher of a few multiplies — not a new generic layer. blake3 does
-not clear the bar as easily, and the honest accounting is below.
+crate already compiles, plus a hasher of a few multiplies — not a new generic layer. The eventual
+strong digest takes the other permitted route: a small concrete dependency with no macros, generic
+framework, external dependencies, or build script.
 
 ## Decision
 
@@ -80,17 +86,15 @@ time. The rule that comes with it is the one the workspace manifest already stat
 hash that is persisted or sent on the wire. Fx is fast because it is weak, it has no stability
 guarantee across `rustc-hash` releases, and its per-byte behaviour is architecture-dependent.
 
-**Where a hash is the whole decision, use blake3, and adopt it when §7 lands.** Every key of the
-content-addressed artifact cache — the source→HIR, HIR→IR, IR→C and C→object edges of §7,
-together with the namespace inputs that section lists — is a blake3 hash, truncated to 128 bits
-for storage, which leaves a 2^64 birthday bound and is far more than a build cache needs. Cache
-keys are computed by hashing the artifact's inputs directly. They do not reuse the FNV summaries,
-and no FNV value is ever fed into a cache key; if that ever looks convenient, the FNV value is to
-be replaced rather than wrapped, because a strong hash over a weak one is a weak hash.
+**Where a digest is the whole decision, use full-width SHA-256.** `Request::Sync` source coherence
+and every content-addressed artifact key use the concrete `kiln-digest::Digest`. Cache keys hash
+their inputs directly. They do not reuse FNV summaries, and no FNV value is ever fed into a strong
+key; a strong hash over a weak summary would still have the weak summary's collision boundary.
 
-We adopt blake3 at §7 and not before. Nothing in the tree today keys anything by hash alone, and
-a dependency added early for a use that does not exist yet is one we cannot evaluate, since the
-thing that would tell us whether it is configured right is the cache we have not built.
+`kiln-digest` owns the pinned FIPS 180-4 implementation and reference vectors. It is deliberately
+small and dependency-free. `kiln-proto` owns the source-specific newtype and its strict wire form;
+`kiln-artifact-cache` re-exports the same digest type so its existing public API does not fork the
+algorithm.
 
 ## Consequences
 
@@ -107,23 +111,12 @@ whose order reaches a diagnostic, a generated file, or a cache key, that iterati
 that map gets replaced with an ordered one. Fx's order is deterministic across runs, which makes
 this failure mode easier to introduce and no less wrong.
 
-Two hash functions in one workspace is a cost we pay on purpose, and three once blake3 lands.
-The mitigation is that each has a one-line rule attached to it — persisted-and-compared,
-process-local, key-only — and that they live in different places: `kiln-db::hash` for the format
-hashes, a type alias for the maps, and the cache crate for blake3. A hash function reached for
-because it was nearby is how the version of this decision that we are trying to avoid happens.
+Three hash choices in one workspace is a cost we pay on purpose. Each has a one-line rule attached
+to it — full-value-backed summaries, process-local tables, digest-only decisions — and they live in
+separate places: `kiln-db::hash`, the Fx map type, and `kiln-digest`. Reaching for whichever hash is
+nearby is how the unsafe version of this design returns.
 
-blake3 will need its own scrutiny at adoption time, and it is not free under ADR 0004's other
-rules. blake3 1.8 ships a `build.rs` with a `cc` build-dependency to assemble its x86 SIMD
-kernels, and ADR 0004 says a build script anywhere in this workspace needs an ADR first. This is
-that ADR only in principle: the concrete decision — whether we take the assembly path, or the
-`pure` feature that drops `cc` and the build script for portable Rust at some throughput cost, and
-what that costs a clean build — is deferred to when we actually add it, with `--timings` before
-and after. It belongs in the cache crate, which is a leaf, and not in `kiln-db`.
-
-Moving the persisted hashes to blake3 later, if we ever want to, is a format change and not a
-refactor. `ModuleSummary` carries `u64` hashes on the wire and `matches_reference_fnv1a` pins the
-algorithm, so widening those fields is a protocol revision that needs its own decision. This ADR
-deliberately does not make it: the summaries are compared against whole values, that is what makes
-64 bits sufficient, and the day they stop being compared that way is the day the question is
-worth reopening.
+Changing the strong algorithm later is a format change, not a refactor: artifact cache records pin
+their format and `SourceDigest` pins protocol 13's JSON representation. Likewise,
+`ModuleSummary` still carries `u64` FNV values on the wire. Widening those summaries would need its
+own protocol revision only if they ever stop being backed by whole-value equality.
