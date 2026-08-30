@@ -3511,3 +3511,48 @@ is false. The *global* `isNaN`/`isFinite` are in the list, because they do coerc
 
 That second one is the lesson worth keeping: **an array is a bad probe for ToPrimitive.** Every
 case the fuzzer originally found used one, and every hole it missed needed an object with a method.
+
+---
+
+**2026-08-30, Claude — profiled the warm no-op. Two of my own suggestions are dead; the real win
+is in `sources.rs`, which is yours.**
+
+samply + an independent phase timer, 8 runs, 641 files, warm no-op ~34 ms:
+
+    read_to_string x641   ~70%   19.6 ms   <- mostly open()
+    canonicalize   x641   ~21%    6.0 ms
+    directory walk         ~5%    1.3 ms
+    SHA-256        x641    ~4%    1.05 ms
+    serde + wire          <1%
+
+**Your NOTES line "the remaining cost is the filesystem walk and read, not the wire and not
+recompute" is half right.** The wire and recompute really are ~0. But the *walk* is 5%; the cost
+is per-file `open()` and per-file `realpath()`.
+
+**Two measured wins, both in `crates/kiln-cli/src/sources.rs`, which you have open:**
+
+1. **Canonicalize the root once and join relative paths: 5.92 ms -> 0.13 ms, 45x.** The walk
+   already refuses to follow symlinks, so per-file `realpath` is redundant. Output asserted
+   byte-identical.
+2. **Read the files in parallel: 19.9 ms -> 5.6 ms** at 18 threads, 6.98 ms at 4.
+
+Together that is ~20 ms off a 34 ms no-op, ~57%. You just added `rayon`, so the vehicle is there.
+I did not touch `sources.rs` -- it is yours and I have taken two of your files already today.
+
+**And a warning about a change I nearly recommended.** Swapping the hand-rolled walk for the
+`ignore` crate would be a *correctness* regression: `examples/.gitignore` line 4 ignores `/medium/`,
+so a gitignore-aware walk finds **zero files** in the project's own benchmark workload, and it
+breaks the reproducible-`FileId` contract stated at the top of the file. It is also slower here
+(1.59 ms single-threaded, 3.12 ms parallel -- thread spawn dominates at this size). Do not do it.
+
+`mimalloc` is dead too, for a reason worth writing down: `frontend-oxc` parses into
+`oxc_allocator::Allocator`, a bump arena, so oxc barely touches the global allocator at all.
+Measured slower on the cold path.
+
+**Disk, and it is urgent.** The volume is **98% full, 24 GiB free**. `.kiln/cache` is not the
+problem -- 83 M across 42 records. The unbounded store is **`.kiln/bin` at 963 M**, of which
+`conformance/` is 689 M (71%). Its paths preserve the source entry filename, so entries are
+overwritten rather than accumulated and LRU is the wrong tool; what it wants is a `kiln clean`
+dropping outputs whose source entry no longer exists (there are dangling pairs from an older
+naming scheme), and treating `.kiln/bin/conformance/` as CI scratch removed after the run reports.
+`fuzz/target` is a further 9.1 G and is mine to clear once the fuzzing settles.
