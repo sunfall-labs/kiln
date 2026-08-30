@@ -7,10 +7,11 @@ use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
-    ScalarValueSummary, Stats,
+    NativeSharedLibrarySummary, ProjectSummary, Request, Response, RunSummary, ScalarValueSummary,
+    Stats, PROTOCOL_VERSION,
 };
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 /// What the connection loop should do once the response has been written.
@@ -71,23 +72,42 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             Next::Continue,
         ),
 
-        Request::Sync { files } => (sync(engine, files), Next::Continue),
+        // Transactional Sync is owned by the connection loop. Keeping this arm as an explicit
+        // error makes accidental use of the old one-shot helper fail closed rather than
+        // publishing a partially staged source set.
+        Request::Sync { .. } | Request::StageSource { .. } | Request::CommitSync { .. } => (
+            Response::Error {
+                message: "transactional sync requests require daemon connection state".into(),
+            },
+            Next::Continue,
+        ),
 
-        Request::SetSource { path, text } => {
+        Request::SetSource {
+            path,
+            text,
+            source_view,
+        } => {
             let file = engine.intern(&path);
             engine.set_source(file, text);
-            (Response::Ok, Next::Continue)
+            (Response::SourceUpdated { source_view }, Next::Continue)
         }
 
-        Request::Check { path, project_root } => {
-            (check(engine, path, project_root), Next::Continue)
-        }
-        Request::Run { path, project_root } => (run(engine, path, project_root), Next::Continue),
+        Request::Check {
+            path,
+            project_root,
+            source_view: _,
+        } => (check(engine, path, project_root), Next::Continue),
+        Request::Run {
+            path,
+            project_root,
+            source_view: _,
+        } => (run(engine, path, project_root), Next::Continue),
         Request::NativeBuild {
             path,
             project_root,
             output,
             profile,
+            source_view: _,
         } => (
             match native_graph(engine, &path, &project_root) {
                 Ok(Some(graph)) => native_build_graph(graph, path, project_root, output, profile),
@@ -112,6 +132,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             project_root,
             output,
             profile,
+            source_view: _,
         } => (
             match native_graph(engine, &path, &project_root) {
                 Ok(Some(graph)) if graph.module_count() > 1 => {
@@ -131,6 +152,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             path,
             project_root,
             profile,
+            source_view: _,
         } => (
             match native_graph(engine, &path, &project_root) {
                 Ok(Some(graph)) => native_run_graph(graph, path, project_root, profile),
@@ -155,7 +177,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             Next::Continue,
         ),
 
-        Request::Project => {
+        Request::Project { source_view: _ } => {
             let project = engine.project();
             (
                 Response::Project(ProjectSummary {
@@ -176,61 +198,6 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
 
         Request::Shutdown => (Response::Ok, Next::StopDaemon),
     }
-}
-
-/// Reconcile the daemon's inputs with the client's complete view.
-///
-/// Sync is intentionally authoritative: an input omitted by the client is no longer part of
-/// the project and must be removed before the response is returned. Validate the complete
-/// request before mutating the engine so a malformed request cannot leave a half-reconciled
-/// project behind.
-fn sync<E: QueryEngine>(engine: &mut E, files: Vec<kiln_proto::SourceHash>) -> Response {
-    let mut client = BTreeMap::new();
-    let mut ordered = Vec::new();
-    let mut duplicates = BTreeSet::new();
-    for file in files {
-        if client.insert(file.path.clone(), file.hash).is_some() {
-            duplicates.insert(file.path);
-        } else {
-            ordered.push((file.path, file.hash));
-        }
-    }
-    if !duplicates.is_empty() {
-        let paths = duplicates.into_iter().collect::<Vec<_>>().join(", ");
-        return Response::Error {
-            message: format!("Sync request contains duplicate paths: {paths}"),
-        };
-    }
-
-    // Keep both the stable file id and the current hash from one snapshot. In particular, do
-    // not call `intern` while validating: a missing path needs no id until its SetSource arrives,
-    // and interning before validation would make a rejected request observable.
-    let held = engine
-        .source_files()
-        .into_iter()
-        .map(|(file, path)| {
-            let hash = engine.source(file).map(kiln_proto::source_digest);
-            (path, (file, hash))
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    // Removal is part of the Sync transaction's authoritative reconciliation. QueryEngine's
-    // input mutation invalidates all dependent queries, so this happens before determining what
-    // the client still needs to upload.
-    for (path, (file, _)) in &held {
-        if !client.contains_key(path) {
-            engine.remove_source(*file);
-        }
-    }
-
-    let needed = ordered
-        .into_iter()
-        .filter_map(|(path, expected)| match held.get(&path) {
-            Some((_, Some(actual))) if *actual == expected => None,
-            _ => Some(path),
-        })
-        .collect();
-    Response::Needed { paths: needed }
 }
 
 /// Run the pipeline for one module.
