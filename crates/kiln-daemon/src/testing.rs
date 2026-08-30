@@ -2,10 +2,14 @@
 //! selected batch without launching a compiler process per test.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use kiln_conformance::{CaseResult, ConformanceTest, Outcome, Provenance, ReasonReport, RunMode};
+use kiln_conformance::{
+    CaseResult, ConformanceTest, Outcome, Provenance, ReasonReport, RunMode, VariantResult,
+};
 use kiln_proto::{
     Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestReasonSummary, TestSummary,
 };
@@ -46,25 +50,36 @@ pub fn run(
         discovered: tests_by_id.len(),
         ..TestSummary::default()
     };
+    // Resolve the selection into a dense list once, in selection order. Every stage below indexes
+    // into this list, which is what keeps thread completion order out of the reported summary:
+    // the workers only ever answer "slot `i` produced these variants".
+    let pending = selection
+        .tests
+        .iter()
+        .filter_map(|selected| {
+            tests_by_id
+                .get(selected.id.as_str())
+                .map(|test| (selected.id.to_string(), test))
+        })
+        .collect::<Vec<_>>();
+    let executed = execute(&pending, run_mode)?;
+
     let mut results = Vec::new();
-    for selected in selection.tests {
-        let Some(test) = tests_by_id.get(selected.id.as_str()) else {
-            continue;
-        };
-        for variant in test.run(run_mode) {
+    for ((id, test), variants) in pending.iter().zip(executed) {
+        for variant in variants {
             let variant_name = variant.variant.name();
-            let id = match test.provenance() {
+            let case_id = match test.provenance() {
                 // A manifest expectation records one observed invocation, so its stable manifest
                 // ID already names the complete case. Realm suffixes distinguish only the
                 // multiple executions required by Test262 frontmatter.
-                Provenance::Manifest => selected.id.to_string(),
-                Provenance::Frontmatter => format!("{}#{variant_name}", selected.id),
+                Provenance::Manifest => id.clone(),
+                Provenance::Frontmatter => format!("{id}#{variant_name}"),
             };
             let outcome = wire_outcome(variant.result.outcome);
             count(&mut summary, outcome);
             summary.cases.push(TestCaseSummary {
-                id: id.clone(),
-                path: selected.id.to_string(),
+                id: case_id.clone(),
+                path: id.clone(),
                 variant: variant_name.to_owned(),
                 outcome,
                 elapsed_nanos: duration_nanos(variant.result.timing.elapsed),
@@ -73,20 +88,101 @@ pub fn run(
                     .diagnostics
                     .iter()
                     .map(|diagnostic| Diagnostic {
-                        path: Some(selected.id.to_string()),
+                        path: Some(id.clone()),
                         message: format!("{}: {}", diagnostic.phase.tag(), diagnostic.message),
                         start: diagnostic.span.map(|span| span.start),
                         end: diagnostic.span.map(|span| span.end),
                     })
                     .collect(),
             });
-            results.push((id, variant.result));
+            results.push((case_id, variant.result));
         }
     }
     summary.reasons = reason_distribution(&results);
     summary.selected = summary.cases.len();
+    // Wall clock, which no longer equals the summed case time now that cases run concurrently.
+    // That is the intended reading: `docs/design.md` §13 budgets how long a developer waits for
+    // the affected tests, not how much CPU the batch consumed. The per-case `elapsed_nanos` is
+    // still each case's own duration, so the two no longer add up and are not meant to.
     summary.elapsed_millis = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(summary)
+}
+
+/// Run every selected test, returning each one's variants in the caller's order.
+///
+/// The workers are plain scoped threads over a shared cursor rather than pre-cut chunks, because
+/// conformance durations are wildly uneven -- a parse-only refusal is microseconds, an interpreted
+/// async test is many milliseconds -- so any static split leaves one worker holding the tail while
+/// the rest idle. Claiming the next index atomically is the whole of the work stealing, and needs
+/// nothing outside `std`.
+///
+/// Each worker only ever touches `ConformanceTest`, which is inert data; the interpreter's `Rc`
+/// graph is built and dropped entirely inside one `test.run` call, so nothing `!Send` is ever
+/// held across the boundary. What crosses back is `VariantResult`: owned strings, spans and
+/// durations.
+fn execute(
+    pending: &[(String, &ConformanceTest)],
+    mode: RunMode,
+) -> Result<Vec<Vec<VariantResult>>, String> {
+    if pending.len() < 2 {
+        return Ok(pending.iter().map(|(_, test)| test.run(mode)).collect());
+    }
+    let cursor = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let cursor = &cursor;
+        let workers = (0..worker_count(available_workers(), pending.len()))
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut claimed = Vec::new();
+                    loop {
+                        let index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some((_, test)) = pending.get(index) else {
+                            break;
+                        };
+                        claimed.push((index, test.run(mode)));
+                    }
+                    claimed
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut slots = (0..pending.len()).map(|_| None).collect::<Vec<_>>();
+        for worker in workers {
+            for (index, variants) in join_worker(worker.join())? {
+                slots[index] = Some(variants);
+            }
+        }
+        slots
+            .into_iter()
+            .map(|slot| slot.ok_or_else(|| WORKER_PANIC.to_owned()))
+            .collect()
+    })
+}
+
+const WORKER_PANIC: &str = "conformance worker panicked";
+
+/// Turn a worker panic into this call's error rather than letting it escape as a panic on an
+/// unrelated thread, mirroring `kiln_native`'s `join_worker`.
+fn join_worker<T>(result: std::thread::Result<T>) -> Result<T, String> {
+    result.map_err(|_| WORKER_PANIC.to_owned())
+}
+
+/// The parallelism the machine will admit for a conformance batch.
+///
+/// `mbx` budgets CPU across concurrent cargo invocations, but it does not publish that budget to
+/// the processes it launches (see NOTES.md "Conventions"), and on macOS there is no cgroup for
+/// `available_parallelism` to read either -- so a batch run under `mbx test` alongside another
+/// build will happily ask for every core. `KILN_TEST_WORKERS` is the way to say otherwise.
+fn available_workers() -> usize {
+    std::env::var("KILN_TEST_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, NonZeroUsize::get))
+}
+
+/// Never more workers than there is work for them, and never none.
+fn worker_count(available: usize, pending: usize) -> usize {
+    available.clamp(1, pending.max(1))
 }
 
 /// Group every non-passing result by reason, so the summary carries the backlog and not only its
@@ -332,6 +428,43 @@ expected_stdout = "bundle\n"
             )
             .full_run
         );
+    }
+
+    #[test]
+    fn a_batch_never_spawns_more_workers_than_it_has_cases() {
+        assert_eq!(
+            worker_count(8, 3),
+            3,
+            "three cases never need eight threads"
+        );
+        assert_eq!(worker_count(2, 900), 2);
+        assert_eq!(
+            worker_count(0, 5),
+            1,
+            "a machine always runs at least one worker"
+        );
+        assert_eq!(worker_count(8, 0), 1);
+    }
+
+    /// The point of the index-keyed collection: the summary must not be able to observe which
+    /// worker finished first. Running the same corpus repeatedly is the only honest check, since
+    /// a single run of a scheduler that happens to stay ordered proves nothing.
+    #[test]
+    fn parallel_execution_reports_the_same_order_every_time() {
+        let first = run_corpus("conformance");
+        for _ in 0..4 {
+            let again = run_corpus("conformance");
+            assert_eq!(
+                first.cases.iter().map(|case| &case.id).collect::<Vec<_>>(),
+                again.cases.iter().map(|case| &case.id).collect::<Vec<_>>(),
+                "case order is selection order, not completion order"
+            );
+            assert_eq!(first.reasons, again.reasons);
+            assert_eq!(
+                (first.passed, first.failed, first.unsupported, first.skipped),
+                (again.passed, again.failed, again.unsupported, again.skipped)
+            );
+        }
     }
 
     #[test]
