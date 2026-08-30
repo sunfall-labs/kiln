@@ -11,5 +11,20 @@ repository.workspace = true
 # the policy to this crate and its complete dependency graph without changing workspace profiles.
 crate-type = ["rlib"]
 
+[features]
+# The regexp engine is wanted only in the packaged static archive, and the packaging build asks
+# for it by name. Off by default because a workspace build unifies features across packages: the
+# interpreter takes `regress` with `std`, and unifying that into a `no_std` crate gives it two
+# panic handlers and no way to compile.
+default = []
+regexp = ["dep:regress"]
+
 [dependencies]
 kiln-number-core = { workspace = true }
+# The regexp engine, in its `no_std` shape. The interpreter links the same crate, which is the
+# whole point: two engines running one implementation cannot disagree about a backreference.
+regress = { version = "0.12", default-features = false, features = [
+	"backend-pikevm",
+	"alloc",
+	"utf16",
+], optional = true }

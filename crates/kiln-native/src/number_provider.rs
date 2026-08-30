@@ -14,10 +14,27 @@ use serde::Deserialize;
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
 pub(crate) const PROVIDER_ABI_VERSION: u32 = 1;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
-const PROVIDER_RUSTFLAGS: &str = "-C panic=abort -C relocation-model=pic -C target-cpu=generic";
+/// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
+/// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
+/// 8.4 MiB, multiplied by every cached build. Nobody debugs through a private ABI adapter.
+const PROVIDER_RUSTFLAGS: &str =
+    "-C panic=abort -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
-const REQUIRED_EXPORTS: [&str; 2] = ["kiln_number_to_js_string", "kiln_string_to_number"];
+/// What a packaged archive has to define.
+///
+/// The regexp five joined the number two when the provider grew a second semantic core (ADR
+/// 0025). The list is part of the identity below, so an archive built before them is rejected
+/// rather than linked and found wanting.
+const REQUIRED_EXPORTS: [&str; 7] = [
+    "kiln_number_to_js_string",
+    "kiln_string_to_number",
+    "kiln_regexp_compile",
+    "kiln_regexp_free",
+    "kiln_regexp_search",
+    "kiln_regexp_group_count",
+    "kiln_regexp_group_name",
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct NumberProvider {
@@ -350,6 +367,11 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         OsString::from("--locked"),
         OsString::from("-p"),
         OsString::from(PROVIDER_NAME),
+        // The regexp engine is off by default so a workspace build does not unify `regress`'s
+        // `std` feature into a `no_std` crate; the packaged archive is the one place that wants
+        // it, and this is that place.
+        OsString::from("--features"),
+        OsString::from("regexp"),
         OsString::from("--release"),
         OsString::from("--target"),
         OsString::from(&rust_target),
