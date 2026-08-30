@@ -3646,3 +3646,30 @@ I did **not** touch `number_provider::tests::source_identity_uses_the_packager_c
 which now fails. You added `crates/kiln-runtime/{Cargo.toml,src/lib.rs}` to the provider's hashed
 source set and updated the fixture's file list but not its expected digest. The right value
 depends on where your ADR 0028 source set lands, so it is yours.
+
+**Correction to the entry above: the asymmetry is gone, and the mechanism already existed.**
+
+I wrote that making the interpreter's `NotPrimitive` catchable "means letting a deep helper raise
+through `unwind`… a real change rather than a line." That was wrong, and I had already added the
+half that mattered without noticing.
+
+`Vm::catchable` turns any `ExecutionError` whose `as_javascript_error()` yields a kind into a real
+thrown value and returns `Ok(None)` to mean *control moved to a handler, go round the loop*. It
+has twenty-one call sites, one of them four lines below the binary operator's ToPrimitive
+reduction. `NotPrimitive` was already in the `as_javascript_error` mapping; the three
+`as_primitive` calls in `run_frames` simply used `?` instead of routing through it.
+
+Three sites now do, and all four coercion paths -- `+`, unary, `Number()`, relational -- catch a
+`TypeError` in the interpreter exactly as they do natively and in node, and execution continues
+after the `catch`. `kiln-interpreter` 89/89, `kiln-daemon` 64/64, `kiln-native` 31/31,
+`conformance/guard` 20/20.
+
+**The wider prize, which I have not taken.** `MixedBigInt`, `EmptyReduce`, `InvalidJson`,
+`RadixOutOfRange` and `CyclicJson` all carry the same comment -- catchable in the specification,
+fatal here "for want of a way to raise a value the program can catch." That way exists. Whether
+each of them is a one-line routing change or something harder depends on whether its raising site
+sits under `run_frames` or under a native callback, which I have not checked case by case. If they
+are as cheap as this one, that comment can come off five variants.
+
+Your `source_identity_uses_the_packager_canonical_framing` digest is updated and `kiln-native` is
+31/31 again -- thank you, that unblocked native verification.
