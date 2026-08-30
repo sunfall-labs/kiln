@@ -226,8 +226,13 @@ enum kiln_value_tag {
      * `a.map === b.map` true, and `CallMethod` keeps the receiver on the stack anyway. */
     KILN_VALUE_METHOD = 11,
     /* bits holds a kiln_generator*: a body that has been started and not finished. */
-    KILN_VALUE_GENERATOR = 12
+    KILN_VALUE_GENERATOR = 12,
+    /* bits holds a double* -- an instant in milliseconds since the epoch. A pointer rather than
+     * the value itself because a Date is mutable: `setFullYear` writes through it. */
+    KILN_VALUE_DATE = 13
 };
+
+#define KILN_C99_BUILTIN_DATE 7
 
 /* A body that yielded rather than returned.  Not an error: the caller is the generator's `next`,
  * which turns it into `{ value, done: false }`. */
@@ -323,6 +328,26 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_GENERATOR_NEXT 71
 #define KILN_C99_METHOD_GENERATOR_RETURN 72
 #define KILN_C99_METHOD_GENERATOR_SELF 73
+
+/* Date readers. Every one of these is UTC, because the realm has one zone and it is UTC
+ * (ADR 0015) -- so the local reader and the UTC reader are the same function rather than two
+ * that happen to agree. */
+#define KILN_C99_METHOD_GET_TIME 74
+#define KILN_C99_METHOD_GET_FULL_YEAR 75
+#define KILN_C99_METHOD_GET_MONTH 76
+#define KILN_C99_METHOD_GET_DATE 77
+#define KILN_C99_METHOD_GET_DAY 78
+#define KILN_C99_METHOD_GET_HOURS 79
+#define KILN_C99_METHOD_GET_MINUTES 80
+#define KILN_C99_METHOD_GET_SECONDS 81
+#define KILN_C99_METHOD_GET_MILLISECONDS 82
+#define KILN_C99_METHOD_GET_TIMEZONE_OFFSET 83
+#define KILN_C99_METHOD_TO_ISO_STRING 84
+#define KILN_C99_METHOD_TO_JSON 85
+#define KILN_C99_METHOD_DATE_TO_STRING 86
+#define KILN_C99_METHOD_DATE_NOW 87
+#define KILN_C99_METHOD_DATE_UTC 88
+#define KILN_C99_METHOD_DATE_PARSE 89
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -449,6 +474,20 @@ typedef struct kiln_generator {
     int done;
 } kiln_generator;
 
+/* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
+ * is no local variant of any of these to keep in step. */
+typedef struct kiln_date_parts {
+    int64_t year;
+    int month;
+    int day;
+    int weekday;
+    int hour;
+    int minute;
+    int second;
+    int millisecond;
+    int valid;
+} kiln_date_parts;
+
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
     const char *bytes;
@@ -515,6 +554,14 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
+static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
+static kiln_date_parts kiln_c99_date_parts(double time);
+static double kiln_c99_date_time(kiln_value value);
+static int kiln_c99_new_date(kiln_value *out, double time);
+static int kiln_c99_iso_string(kiln_value *out, double time);
+static int kiln_c99_date_to_string(kiln_value *out, double time);
+static double kiln_c99_instant_from_parts(const double parts[7]);
+static double kiln_c99_parse_date(const char *bytes, size_t len);
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
@@ -778,6 +825,36 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     return KILN_C99_OK;
 }
 
+/* The instant a set of UTC parts names, with every part allowed out of range.
+ *
+ * Out-of-range parts roll over rather than clamping: `Date.UTC(2026, 12)` is January of 2027.
+ * That falls out of normalising the month into a year offset and then counting in whole units,
+ * and it is what the specification says -- clamping would quietly produce a different date than
+ * the program asked for. */
+static double kiln_c99_instant_from_parts(const double parts[7]) {
+    double months;
+    double year;
+    double month;
+    double days;
+    size_t index;
+    for (index = 0; index < 7; ++index) {
+        if (!isfinite(parts[index])) {
+            return 0.0 / 0.0;
+        }
+    }
+    months = floor(parts[1]);
+    year = trunc(parts[0]) + floor(months / 12.0);
+    month = months - floor(months / 12.0) * 12.0;
+    /* Beyond what a civil date can name; the calendar arithmetic would overflow. */
+    if (fabs(year) > 400000.0) {
+        return 0.0 / 0.0;
+    }
+    days = (double)kiln_c99_days_from_civil((int64_t)year, (int64_t)month + 1, 1) +
+           (parts[2] - 1.0);
+    return days * 86400000.0 + parts[3] * 3600000.0 + parts[4] * 60000.0 + parts[5] * 1000.0 +
+           parts[6];
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -862,6 +939,22 @@ static const char *kiln_c99_method_name(uint64_t code) {
      * spread, destructured or walked by `for...of` -- and what makes walking it twice walk a
      * generator that is already finished. */
     case KILN_C99_METHOD_GENERATOR_SELF: return "@@iterator";
+    case KILN_C99_METHOD_GET_TIME: return "getTime";
+    case KILN_C99_METHOD_GET_FULL_YEAR: return "getFullYear";
+    case KILN_C99_METHOD_GET_MONTH: return "getMonth";
+    case KILN_C99_METHOD_GET_DATE: return "getDate";
+    case KILN_C99_METHOD_GET_DAY: return "getDay";
+    case KILN_C99_METHOD_GET_HOURS: return "getHours";
+    case KILN_C99_METHOD_GET_MINUTES: return "getMinutes";
+    case KILN_C99_METHOD_GET_SECONDS: return "getSeconds";
+    case KILN_C99_METHOD_GET_MILLISECONDS: return "getMilliseconds";
+    case KILN_C99_METHOD_GET_TIMEZONE_OFFSET: return "getTimezoneOffset";
+    case KILN_C99_METHOD_TO_ISO_STRING: return "toISOString";
+    case KILN_C99_METHOD_TO_JSON: return "toJSON";
+    case KILN_C99_METHOD_DATE_TO_STRING: return "toString";
+    case KILN_C99_METHOD_DATE_NOW: return "now";
+    case KILN_C99_METHOD_DATE_UTC: return "UTC";
+    case KILN_C99_METHOD_DATE_PARSE: return "parse";
     default: return NULL;
     }
 }
@@ -917,6 +1010,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_JSON:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_JSON_STRINGIFY,
                                       KILN_C99_METHOD_JSON_PARSE);
+    case KILN_C99_BUILTIN_DATE:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATE_NOW,
+                                      KILN_C99_METHOD_DATE_PARSE);
     default:
         return 0;
     }
@@ -937,6 +1033,9 @@ static int kiln_c99_is_callable(kiln_value value) {
  * do it by calling: this backend has no user `valueOf` to reach, because a property holding a
  * function is refused at the point it would be called. So reduction is conversion to text. */
 static int kiln_c99_is_reference(kiln_value value) {
+    /* A Date is a reference, but it is *not* in this set: `as_number` already gives its instant,
+     * which is what `valueOf` would produce, so reducing it to text first would turn every date
+     * subtraction into NaN. */
     return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
            value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR;
 }
@@ -1092,6 +1191,10 @@ static double kiln_c99_as_number(kiln_value value) {
         return number;
     case KILN_VALUE_STRING:
         return kiln_string_to_number(value.ptr, value.len);
+    /* `end - start` on two dates is the difference in milliseconds, which is the whole reason
+     * `valueOf` on a Date is its instant. */
+    case KILN_VALUE_DATE:
+        return kiln_c99_date_time(value);
     default:
         return NAN;
     }
@@ -1117,6 +1220,7 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_DATE:
         return 1;
     default:
         return 0;
@@ -1182,6 +1286,15 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_OBJECT: {
         static const char object_text[] = "[object Object]";
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+    }
+    case KILN_VALUE_DATE: {
+        /* `String(date)` is the human form, not the ISO one: the hint is a string and
+         * `toString` decides. Arithmetic reaches the instant through `as_number` instead. */
+        kiln_value shown;
+        if (kiln_c99_date_to_string(&shown, kiln_c99_date_time(value)) != KILN_C99_OK) {
+            return kiln_c99_undefined();
+        }
+        return shown;
     }
     case KILN_VALUE_ARRAY: {
         /* `String([1, , 3])` is "1,,3": the separator is a comma and a nullish element
@@ -1577,6 +1690,42 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_DATE: {
+        static const struct {
+            const char *name;
+            uint64_t code;
+        } ALIASES[] = {
+            {"valueOf", KILN_C99_METHOD_GET_TIME},
+            {"getUTCFullYear", KILN_C99_METHOD_GET_FULL_YEAR},
+            {"getUTCMonth", KILN_C99_METHOD_GET_MONTH},
+            {"getUTCDate", KILN_C99_METHOD_GET_DATE},
+            {"getUTCDay", KILN_C99_METHOD_GET_DAY},
+            {"getUTCHours", KILN_C99_METHOD_GET_HOURS},
+            {"getUTCMinutes", KILN_C99_METHOD_GET_MINUTES},
+            {"getUTCSeconds", KILN_C99_METHOD_GET_SECONDS},
+            {"getUTCMilliseconds", KILN_C99_METHOD_GET_MILLISECONDS},
+            {"toUTCString", KILN_C99_METHOD_DATE_TO_STRING},
+            {"toLocaleString", KILN_C99_METHOD_DATE_TO_STRING},
+            {"toLocaleDateString", KILN_C99_METHOD_DATE_TO_STRING},
+            {"toLocaleTimeString", KILN_C99_METHOD_DATE_TO_STRING},
+            {"toDateString", KILN_C99_METHOD_DATE_TO_STRING},
+            {"toTimeString", KILN_C99_METHOD_DATE_TO_STRING},
+        };
+        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
+                                               KILN_C99_METHOD_DATE_TO_STRING);
+        size_t alias;
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        for (alias = 0; alias < sizeof ALIASES / sizeof *ALIASES; ++alias) {
+            if (kiln_c99_same_name(key, key_len, ALIASES[alias].name)) {
+                *out = kiln_c99_method(ALIASES[alias].code);
+                return KILN_C99_OK;
+            }
+        }
+        return KILN_C99_CONTROL_ERROR;
+    }
     case KILN_VALUE_GENERATOR: {
         uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
                                                KILN_C99_METHOD_GENERATOR_SELF);
@@ -1921,6 +2070,17 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         return kiln_c99_text_append_c(text, "]");
+    }
+    case KILN_VALUE_DATE: {
+        /* A console shows the ISO form, which is what the interpreter shows. */
+        kiln_value iso;
+        if (kiln_c99_iso_string(&iso, kiln_c99_date_time(value)) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (iso.tag != KILN_VALUE_STRING) {
+            return kiln_c99_text_append_c(text, "Invalid Date");
+        }
+        return kiln_c99_text_append(text, iso.ptr, iso.len);
     }
     case KILN_VALUE_GENERATOR:
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
@@ -2577,6 +2737,109 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 }
             }
             *result = target;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_DATE_NOW:
+            /* The clock is virtual and nothing here advances it (ADR 0015). A program that asks
+             * the time twice gets the same answer, which is what makes a run repeatable -- and
+             * is why a probe may compare `typeof Date.now()` and nothing more. */
+            *result = kiln_c99_number(0.0);
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_DATE_PARSE: {
+            /* Parsing accepts the ISO forms and rejects the rest, rather than guessing: a date
+             * a program did not write is worse than no date at all. */
+            kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
+            *result = kiln_c99_number(source.tag == KILN_VALUE_STRING
+                                          ? kiln_c99_parse_date(source.ptr, source.len)
+                                          : 0.0 / 0.0);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_DATE_UTC:
+        case KILN_C99_METHOD_GET_TIME:
+        case KILN_C99_METHOD_GET_FULL_YEAR:
+        case KILN_C99_METHOD_GET_MONTH:
+        case KILN_C99_METHOD_GET_DATE:
+        case KILN_C99_METHOD_GET_DAY:
+        case KILN_C99_METHOD_GET_HOURS:
+        case KILN_C99_METHOD_GET_MINUTES:
+        case KILN_C99_METHOD_GET_SECONDS:
+        case KILN_C99_METHOD_GET_MILLISECONDS:
+        case KILN_C99_METHOD_GET_TIMEZONE_OFFSET:
+        case KILN_C99_METHOD_TO_ISO_STRING:
+        case KILN_C99_METHOD_TO_JSON:
+        case KILN_C99_METHOD_DATE_TO_STRING: {
+            kiln_date_parts parts;
+            double time;
+            if (code == KILN_C99_METHOD_DATE_UTC) {
+                double fields[7];
+                for (index = 0; index < 7; ++index) {
+                    /* Day defaults to 1 and everything else to 0, which is what makes
+                     * `Date.UTC(2026, 7)` the first of August. */
+                    fields[index] = index < argc  ? kiln_c99_as_number(args[index])
+                                    : index == 2 ? 1.0
+                                                 : 0.0;
+                }
+                *result = kiln_c99_number(kiln_c99_instant_from_parts(fields));
+                return KILN_C99_OK;
+            }
+            if (receiver.tag != KILN_VALUE_DATE) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            time = kiln_c99_date_time(receiver);
+            if (code == KILN_C99_METHOD_GET_TIME) {
+                *result = kiln_c99_number(time);
+                return KILN_C99_OK;
+            }
+            if (code == KILN_C99_METHOD_GET_TIMEZONE_OFFSET) {
+                /* Zero, honestly reported rather than left to be discovered: the realm is UTC. */
+                *result = kiln_c99_number(0.0);
+                return KILN_C99_OK;
+            }
+            if (code == KILN_C99_METHOD_TO_ISO_STRING || code == KILN_C99_METHOD_TO_JSON) {
+                kiln_value iso;
+                status = kiln_c99_iso_string(&iso, time);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (iso.tag == KILN_VALUE_STRING) {
+                    *result = iso;
+                    return KILN_C99_OK;
+                }
+                /* An instant with no ISO spelling makes `toISOString` throw where `toJSON`
+                 * answers null, so the enclosing document still serialises. */
+                if (code == KILN_C99_METHOD_TO_JSON) {
+                    *result = kiln_c99_null();
+                    return KILN_C99_OK;
+                }
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (code == KILN_C99_METHOD_DATE_TO_STRING) {
+                return kiln_c99_date_to_string(result, time);
+            }
+            parts = kiln_c99_date_parts(time);
+            if (!parts.valid) {
+                *result = kiln_c99_number(0.0 / 0.0);
+                return KILN_C99_OK;
+            }
+            switch (code) {
+            case KILN_C99_METHOD_GET_FULL_YEAR:
+                *result = kiln_c99_number((double)parts.year);
+                break;
+            /* Zero-based, alone among the readers, which is the language's oldest wart. */
+            case KILN_C99_METHOD_GET_MONTH:
+                *result = kiln_c99_number((double)(parts.month - 1));
+                break;
+            case KILN_C99_METHOD_GET_DATE: *result = kiln_c99_number((double)parts.day); break;
+            case KILN_C99_METHOD_GET_DAY: *result = kiln_c99_number((double)parts.weekday); break;
+            case KILN_C99_METHOD_GET_HOURS: *result = kiln_c99_number((double)parts.hour); break;
+            case KILN_C99_METHOD_GET_MINUTES:
+                *result = kiln_c99_number((double)parts.minute);
+                break;
+            case KILN_C99_METHOD_GET_SECONDS:
+                *result = kiln_c99_number((double)parts.second);
+                break;
+            default: *result = kiln_c99_number((double)parts.millisecond); break;
+            }
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_GENERATOR_SELF:
@@ -3236,8 +3499,9 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      *
      * Only an object is asked. An array's named properties are not stored here at all, so there
      * is nowhere for one to have been put -- and asking would reach the array method table,
-     * which reports an unknown name as an error rather than as absence. */
-    if (value.tag == KILN_VALUE_OBJECT) {
+     * which reports an unknown name as an error rather than as absence. A Date is asked because
+     * carrying one is the whole reason the step exists. */
+    if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE) {
         kiln_value method;
         status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -3719,9 +3983,238 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
     }
 }
 
+/* Days-to-civil and back: Howard Hinnant's algorithm, the same one the interpreter uses. The two
+ * have to agree exactly, so this is a transcription rather than a reimplementation. */
+static void kiln_c99_civil_from_days(int64_t days, int64_t *year, int *month, int *day) {
+    int64_t shifted = days + 719468;
+    int64_t era = (shifted >= 0 ? shifted : shifted - 146096) / 146097;
+    int64_t day_of_era = shifted - era * 146097;
+    int64_t year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    int64_t computed_year = year_of_era + era * 400;
+    int64_t day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    int64_t shifted_month = (5 * day_of_year + 2) / 153;
+    int computed_day = (int)(day_of_year - (153 * shifted_month + 2) / 5 + 1);
+    int computed_month = (int)(shifted_month < 10 ? shifted_month + 3 : shifted_month - 9);
+    *year = computed_year + (computed_month <= 2 ? 1 : 0);
+    *month = computed_month;
+    *day = computed_day;
+}
+
+static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day) {
+    int64_t era;
+    int64_t year_of_era;
+    int64_t shifted_month;
+    int64_t day_of_year;
+    int64_t day_of_era;
+    year -= month <= 2 ? 1 : 0;
+    era = (year >= 0 ? year : year - 399) / 400;
+    year_of_era = year - era * 400;
+    shifted_month = month > 2 ? month - 3 : month + 9;
+    day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+/* Floor division, not truncation: an instant before the epoch is a negative count and has to
+ * round *down* to the day containing it. */
+static int64_t kiln_c99_floor_div(int64_t value, int64_t divisor) {
+    int64_t quotient = value / divisor;
+    return (value % divisor != 0 && ((value < 0) != (divisor < 0))) ? quotient - 1 : quotient;
+}
+
+static int64_t kiln_c99_floor_mod(int64_t value, int64_t divisor) {
+    int64_t remainder = value % divisor;
+    return remainder != 0 && ((remainder < 0) != (divisor < 0)) ? remainder + divisor : remainder;
+}
+
+static kiln_date_parts kiln_c99_date_parts(double time) {
+    kiln_date_parts parts;
+    int64_t millis;
+    int64_t days;
+    int64_t within;
+    parts.valid = 0;
+    if (!isfinite(time)) {
+        return parts;
+    }
+    millis = (int64_t)time;
+    days = kiln_c99_floor_div(millis, 86400000);
+    within = kiln_c99_floor_mod(millis, 86400000);
+    kiln_c99_civil_from_days(days, &parts.year, &parts.month, &parts.day);
+    /* 1970-01-01 was a Thursday, which is day 4. */
+    parts.weekday = (int)kiln_c99_floor_mod(days + 4, 7);
+    parts.hour = (int)(within / 3600000);
+    parts.minute = (int)(within / 60000 % 60);
+    parts.second = (int)(within / 1000 % 60);
+    parts.millisecond = (int)(within % 1000);
+    parts.valid = 1;
+    return parts;
+}
+
+static double kiln_c99_date_time(kiln_value value) {
+    return *(double *)(uintptr_t)value.bits;
+}
+
+static int kiln_c99_new_date(kiln_value *out, double time) {
+    double *slot = (double *)malloc(sizeof *slot);
+    if (slot == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *slot = time;
+    *out = kiln_c99_value(KILN_VALUE_DATE, (uint64_t)(uintptr_t)slot, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* Fixed-width decimal, because every field of an ISO instant is written to its own width and
+ * `kiln_number_to_js_string` writes the shortest form instead. */
+static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width) {
+    char digits[24];
+    int at = (int)sizeof digits;
+    int negative = value < 0;
+    uint64_t magnitude = negative ? (uint64_t)(-value) : (uint64_t)value;
+    do {
+        digits[--at] = (char)('0' + (magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude != 0);
+    while ((int)sizeof digits - at < width) {
+        digits[--at] = '0';
+    }
+    if (negative && kiln_c99_text_append(text, "-", 1) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    return kiln_c99_text_append(text, digits + at, (size_t)((int)sizeof digits - at));
+}
+
+/* `toISOString`, or a string with no contents when the instant has no ISO spelling -- the caller
+ * decides whether that is a throw or a null, because `toISOString` and `toJSON` differ there. */
+static int kiln_c99_iso_string(kiln_value *out, double time) {
+    kiln_date_parts parts = kiln_c99_date_parts(time);
+    kiln_text text = {NULL, 0, 0};
+    if (!parts.valid) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    /* A year outside four digits is written with a sign and six, which is the only shape that
+     * stays unambiguous. */
+    if (parts.year >= 0 && parts.year <= 9999) {
+        if (kiln_c99_pad_number(&text, parts.year, 4) != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    } else {
+        if (kiln_c99_text_append_c(&text, parts.year < 0 ? "-" : "+") != KILN_C99_OK ||
+            kiln_c99_pad_number(&text, parts.year < 0 ? -parts.year : parts.year, 6) !=
+                KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    if (kiln_c99_text_append_c(&text, "-") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.month, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, "-") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.day, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, "T") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.hour, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, ":") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.minute, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, ":") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.second, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, ".") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.millisecond, 3) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, "Z") != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
+/* `String(date)`: the human form, which is UTC here because the realm has no other zone. */
+static int kiln_c99_date_to_string(kiln_value *out, double time) {
+    static const char *const WEEKDAYS[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *const MONTHS[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    kiln_date_parts parts = kiln_c99_date_parts(time);
+    kiln_text text = {NULL, 0, 0};
+    if (!parts.valid) {
+        *out = kiln_c99_copy_text("Invalid Date", 12);
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_text_append_c(&text, WEEKDAYS[parts.weekday]) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, " ") != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, MONTHS[parts.month - 1]) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, " ") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.day, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, " ") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.year, 4) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, " ") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.hour, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, ":") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.minute, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, ":") != KILN_C99_OK ||
+        kiln_c99_pad_number(&text, parts.second, 2) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text, " GMT+0000 (Coordinated Universal Time)") != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
  * unless the body returned an object, which wins. That override is what makes a factory
  * constructor work. */
+/* An ISO-8601 instant, or NaN. Deliberately narrow: the shapes a program writes down and the
+ * shapes `toISOString` produces, which is what a round trip needs. Anything looser would accept
+ * text the interpreter rejects, and the two have to agree. */
+static double kiln_c99_parse_date(const char *bytes, size_t len) {
+    int64_t fields[7] = {0, 1, 1, 0, 0, 0, 0};
+    size_t at = 0;
+    size_t index;
+    static const size_t WIDTHS[7] = {4, 2, 2, 2, 2, 2, 3};
+    while (at < len && (bytes[at] == ' ' || bytes[at] == '\t')) {
+        at += 1;
+    }
+    while (len > at && (bytes[len - 1] == ' ' || bytes[len - 1] == '\t')) {
+        len -= 1;
+    }
+    for (index = 0; index < 7; ++index) {
+        size_t width = WIDTHS[index];
+        size_t digit;
+        if (index > 0) {
+            /* The separator each field is introduced by, and the point past which the rest is
+             * optional: a date alone is a valid instant. */
+            char expected = index == 1 || index == 2 ? '-' : index == 3 ? 'T' : index == 6 ? '.' : ':';
+            if (at >= len || bytes[at] != expected) {
+                break;
+            }
+            at += 1;
+        }
+        if (len - at < width) {
+            return 0.0 / 0.0;
+        }
+        fields[index] = 0;
+        for (digit = 0; digit < width; ++digit) {
+            char byte = bytes[at + digit];
+            if (byte < '0' || byte > '9') {
+                return 0.0 / 0.0;
+            }
+            fields[index] = fields[index] * 10 + (byte - '0');
+        }
+        at += width;
+    }
+    /* A trailing `Z` is the only zone accepted, because the realm has no other. */
+    if (at < len && bytes[at] == 'Z') {
+        at += 1;
+    }
+    if (at != len || fields[1] < 1 || fields[1] > 12 || fields[2] < 1 || fields[2] > 31) {
+        return 0.0 / 0.0;
+    }
+    return (double)kiln_c99_days_from_civil(fields[0], fields[1], fields[2]) * 86400000.0 +
+           (double)fields[3] * 3600000.0 + (double)fields[4] * 60000.0 +
+           (double)fields[5] * 1000.0 + (double)fields[6];
+}
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
@@ -3729,6 +4222,29 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value instance;
     kiln_value produced;
     int status;
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_DATE) {
+        /* `new Date()` is the current instant, which is virtual here and never advances; one
+         * argument is either milliseconds or an instant written down; more than one is the field
+         * form, where the month is zero-based and the day defaults to 1. */
+        double time;
+        if (argc == 0) {
+            time = 0.0;
+        } else if (argc == 1) {
+            time = args[0].tag == KILN_VALUE_STRING
+                       ? kiln_c99_parse_date(args[0].ptr, args[0].len)
+                       : kiln_c99_as_number(args[0]);
+        } else {
+            double fields[7];
+            size_t index;
+            for (index = 0; index < 7; ++index) {
+                fields[index] = index < argc  ? kiln_c99_as_number(args[index])
+                                : index == 2 ? 1.0
+                                             : 0.0;
+            }
+            time = kiln_c99_instant_from_parts(fields);
+        }
+        return kiln_c99_new_date(result, time);
+    }
     if (callee.tag != KILN_VALUE_FUNCTION) {
         return KILN_C99_CONTROL_ERROR;
     }
@@ -3757,6 +4273,19 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     kiln_value current;
     size_t steps;
     int status;
+    /* A builtin constructor has no prototype object here; the question it answers is about the
+     * tag instead, which is the same question and a shorter walk. */
+    if (constructor.tag == KILN_VALUE_BUILTIN) {
+        switch (constructor.bits) {
+        case KILN_C99_BUILTIN_DATE: *answer = value.tag == KILN_VALUE_DATE; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_OBJECT:
+            *answer = value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_ARRAY ||
+                      value.tag == KILN_VALUE_DATE;
+            return KILN_C99_OK;
+        default: return KILN_C99_CONTROL_ERROR;
+        }
+    }
     if (constructor.tag != KILN_VALUE_FUNCTION) {
         return KILN_C99_CONTROL_ERROR;
     }
@@ -3808,6 +4337,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_DATE:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -4209,6 +4739,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Object
             | kiln_ir::Builtin::Array
             | kiln_ir::Builtin::Json
+            | kiln_ir::Builtin::Date
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity,
         ) => Ok(()),
@@ -5469,6 +6000,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::Object => "kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT)",
                 kiln_ir::Builtin::Array => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)",
                 kiln_ir::Builtin::Json => "kiln_c99_builtin(KILN_C99_BUILTIN_JSON)",
+                kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),

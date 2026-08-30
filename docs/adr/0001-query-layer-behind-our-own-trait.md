@@ -48,7 +48,10 @@ outside the engine. Recompute counts are a first-class output, not debug logging
 claim about invalidation that nothing asserts on is a claim that quietly stops being true.
 The input side also exposes each active source's last mutation revision. That is ordering
 metadata, not another invalidation mechanism: daemon adapters use it to collapse relative and
-canonical spellings without letting an older disk or editor value win by accident.
+canonical spellings without letting an older disk or editor value win by accident. Every request
+that resolves a source against the filesystem, including a single-file check, carries the caller's
+project root and performs that reconciliation before entering the query pipeline; checking and
+executing the same editor buffer cannot observe different source identities.
 
 `kiln-db` has no parser, procedural-macro, or generic query-framework dependency, and v0 ships
 `MemoEngine`, a hand-written implementation. Its dependencies are the compiler-owned HIR/IR

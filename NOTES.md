@@ -2224,18 +2224,34 @@ does not take; it is unobservable here because nothing can replace `Array.protot
 .iterator]`, and it is written down at the site so it stops being unobservable the day something
 can.
 
-**Still refused, and this is the queue in order:** `Date` (6), `async` (4), `NewRegExp` (4),
-`Map`/`Set` (3), `in` (3), `delete` (3), `Apply` (3), then `EnumerateKeys` and
-`SuperCall`/`SuperForward` (so `class D extends C` still refuses). `async` is now the only one
-with a real design question left: it needs promises and a microtask queue, and the queue is the
-part that has nowhere obvious to live in a program that just returns from `main`.
+**`Date` followed**, taking the count 40 to 44. The calendar arithmetic is a transcription of
+the interpreter's rather than a reimplementation -- Hinnant's days-to-civil both ways -- because
+the two have to agree exactly and there is no second-best way to be right about leap centuries.
+Every reader is UTC, so the local spelling and the UTC spelling are *the same function* rather
+than two that happen to agree.
+
+Three things that had to be stated in the backend rather than inherited: a Date is deliberately
+**not** in the reduce-to-text set, because `as_number` already gives its instant and reducing it
+first would turn every date subtraction into `NaN`; `x instanceof Date` asks about the tag,
+because a builtin constructor has no prototype object here; and `JSON.stringify` asks a Date for
+`toJSON`, which is the whole reason that step exists.
+
+`Date.now()` is zero and stays zero. The clock is virtual and nothing native advances it (ADR
+0015), which is the same answer the interpreter gives -- so a probe may compare `typeof
+Date.now()` and nothing more, exactly as the differential corpus already says.
+
+**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Map`/`Set` (3),
+`in` (3), `delete` (3), `Apply` (3), `BigInt` (2), then `EnumerateKeys` and
+`SuperCall`/`SuperForward` (so `class D extends C` still refuses). `async` is the only one with a
+real design question left: it needs promises and a microtask queue, and the queue is the part
+with nowhere obvious to live in a program that just returns from `main`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 13/13, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 14/14, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked

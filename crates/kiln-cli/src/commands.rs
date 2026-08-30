@@ -246,11 +246,12 @@ fn native_output_path(
 }
 
 /// Check one file: push its current contents, ask for its summary, report the cost.
-pub fn check(backend: &mut dyn Backend, path: &Path) -> Result<Output> {
+pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
+    let root = canonical_path(root)?;
     let text = read_source(path)?;
-    check_source(backend, &display, canonical, text)
+    check_source(backend, &display, canonical, root, text)
 }
 
 /// The half of [`check`] that already has the file's text, so `watch` - which reads the file
@@ -260,12 +261,13 @@ pub fn check_source(
     backend: &mut dyn Backend,
     display: &str,
     canonical: String,
+    project_root: String,
     text: String,
 ) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
     backend.set_source(canonical.clone(), text)?;
-    let summary = backend.check(canonical)?;
+    let summary = backend.check(canonical, project_root)?;
     let elapsed = started.elapsed();
     let after = backend.stats()?;
 
@@ -831,7 +833,7 @@ mod tests {
                 Request::Sync { files } => Response::Needed {
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
-                Request::Check { path } => {
+                Request::Check { path, .. } => {
                     self.stats.parse_computed += self.per_check.parse_computed;
                     self.stats.interface_computed += self.per_check.interface_computed;
                     self.stats.early_cutoff += self.per_check.early_cutoff;
@@ -981,11 +983,17 @@ mod tests {
             &mut fake,
             "a.js",
             "/tmp/a.js".to_string(),
+            "/tmp".to_string(),
             "let x = 1;".to_string(),
         )
         .expect("check succeeds");
 
         assert_eq!(fake.names(), ["Stats", "SetSource", "Check", "Stats"]);
+        let Request::Check { path, project_root } = &fake.seen[2] else {
+            panic!("expected rooted check request");
+        };
+        assert_eq!(path, "/tmp/a.js");
+        assert_eq!(project_root, "/tmp");
         assert!(out.text.starts_with("a.js  r1  "), "{}", out.text);
         assert!(
             out.text.contains("recomputed      parse 1, interface 1"),
@@ -1429,8 +1437,14 @@ mod tests {
             validated: 2,
             ..Stats::default()
         };
-        let out = check_source(&mut fake, "a.js", "/tmp/a.js".to_string(), "x".to_string())
-            .expect("check succeeds");
+        let out = check_source(
+            &mut fake,
+            "a.js",
+            "/tmp/a.js".to_string(),
+            "/tmp".to_string(),
+            "x".to_string(),
+        )
+        .expect("check succeeds");
         assert!(out.text.contains("recomputed      nothing"), "{}", out.text);
         assert!(
             out.text.contains("reused          2 validated"),
@@ -1452,6 +1466,7 @@ mod tests {
             &mut fake,
             "broken.ts",
             "/tmp/broken.ts".to_string(),
+            "/tmp".to_string(),
             "export const = 1;".to_string(),
         )
         .expect("a malformed parse is still a cached check result");
@@ -1631,7 +1646,12 @@ mod tests {
     #[test]
     fn a_missing_file_is_a_usage_error_not_an_io_dump() {
         let mut fake = Fake::new();
-        let err = check(&mut fake, Path::new("definitely/not/here.js")).expect_err("should fail");
+        let err = check(
+            &mut fake,
+            Path::new("definitely/not/here.js"),
+            Path::new("."),
+        )
+        .expect_err("should fail");
         assert!(matches!(err, Error::MissingFile(_)), "{err:?}");
         assert!(err.to_string().contains("no such file"), "{err}");
         assert!(fake.seen.is_empty(), "nothing should have been sent");
