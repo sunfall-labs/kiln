@@ -4,14 +4,13 @@
 //! is written against is [`QueryEngine`], and a stub is the only way to provoke the failure modes
 //! that matter here - notably a query that panics, which a correct engine never does.
 
-use crate::dispatch::{
-    Next, dispatch, execute_prepared_run, install_run_gate, install_test_gate, prepare_run,
-};
+use crate::dispatch::{execute_prepared_run, install_run_gate, install_test_gate, prepare_run};
 use crate::framing::MAX_MESSAGE_BYTES;
-use crate::{Client, Daemon, DaemonError, ShutdownHandle};
+use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 use kiln_proto::{
-    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, TestMode, TestOutcome,
+    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, SyncId, TestMode,
+    TestOutcome,
 };
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -55,6 +54,100 @@ fn exports_of(text: &str) -> Vec<String> {
         .filter_map(|line| line.trim().strip_prefix("export "))
         .map(str::to_string)
         .collect()
+}
+
+/// Test clients keep the current protocol source view automatically. This lets the older daemon
+/// tests focus on query behavior while still exercising the v16 CAS contract.
+struct Client {
+    raw: RawClient,
+    source_view: SourceView,
+}
+
+impl Client {
+    fn connect(socket: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            raw: RawClient::connect(socket)?,
+            source_view: SourceView(0),
+        })
+    }
+
+    fn handshake(&mut self) -> std::io::Result<u32> {
+        self.raw.handshake()
+    }
+
+    fn request(&mut self, request: &Request) -> std::io::Result<Response> {
+        let mut response = self.raw_request(request)?;
+        if matches!(response, Response::StaleSourceView { .. })
+            && matches!(
+                request,
+                Request::SetSource { .. }
+                    | Request::Check { .. }
+                    | Request::Run { .. }
+                    | Request::NativeBuild { .. }
+                    | Request::NativeBuildAtRevision { .. }
+                    | Request::NativeSharedBuild { .. }
+                    | Request::NativeRun { .. }
+                    | Request::Project { .. }
+            )
+        {
+            response = self.raw_request(request)?;
+        }
+        Ok(match response {
+            Response::SourceUpdated { .. } => Response::Ok,
+            response => response,
+        })
+    }
+
+    fn raw_request(&mut self, request: &Request) -> std::io::Result<Response> {
+        self.request_at_view(request, self.source_view)
+    }
+
+    fn request_at_view(
+        &mut self,
+        request: &Request,
+        source_view: SourceView,
+    ) -> std::io::Result<Response> {
+        let mut request = request.clone();
+        match &mut request {
+            Request::SetSource {
+                source_view: view, ..
+            }
+            | Request::Check {
+                source_view: view, ..
+            }
+            | Request::Run {
+                source_view: view, ..
+            }
+            | Request::NativeBuild {
+                source_view: view, ..
+            }
+            | Request::NativeBuildAtRevision {
+                source_view: view, ..
+            }
+            | Request::NativeSharedBuild {
+                source_view: view, ..
+            }
+            | Request::NativeRun {
+                source_view: view, ..
+            }
+            | Request::Project { source_view: view } => *view = source_view,
+            _ => {}
+        }
+        let response = self.raw.request(&request)?;
+        match response {
+            Response::SourceUpdated { source_view: view }
+            | Response::Synced { source_view: view } => {
+                self.source_view = view;
+            }
+            Response::StaleSourceView { current } => self.source_view = current,
+            _ => {}
+        }
+        Ok(response)
+    }
+
+    fn source_view(&self) -> SourceView {
+        self.source_view
+    }
 }
 
 impl QueryEngine for StubEngine {
@@ -240,6 +333,241 @@ fn within<T: Send + 'static>(limit: Duration, body: impl FnOnce() -> T + Send + 
     rx.recv_timeout(limit).expect("timed out")
 }
 
+fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<String>) {
+    let response = client
+        .raw_request(&Request::Sync {
+            files: files
+                .iter()
+                .map(|(path, text)| SourceHash {
+                    path: (*path).to_owned(),
+                    hash: kiln_proto::source_digest(text),
+                })
+                .collect(),
+        })
+        .expect("begin sync");
+    let Response::Needed { sync_id, paths } = response else {
+        panic!("expected Needed response, got {response:?}");
+    };
+    (sync_id, paths)
+}
+
+fn stage_sync(client: &mut Client, sync_id: SyncId, path: &str, text: &str) -> Response {
+    client
+        .raw_request(&Request::StageSource {
+            sync_id,
+            path: path.to_owned(),
+            text: text.to_owned(),
+        })
+        .expect("stage source")
+}
+
+fn commit_sync(client: &mut Client, sync_id: SyncId) -> Response {
+    client
+        .raw_request(&Request::CommitSync { sync_id })
+        .expect("commit sync")
+}
+
+#[test]
+fn staged_sync_is_invisible_until_commit_and_is_visible_to_other_clients_afterward() {
+    let fixture = Fixture::started();
+    let mut staging = fixture.client();
+    let mut observer = fixture.client();
+    staging.handshake().expect("staging handshake");
+    observer.handshake().expect("observer handshake");
+
+    let (sync_id, paths) = begin_sync(&mut staging, &[("staged.js", "export staged\n")]);
+    assert_eq!(paths, ["staged.js"]);
+    assert!(matches!(
+        stage_sync(&mut staging, sync_id, "staged.js", "export staged\n"),
+        Response::Ok
+    ));
+    let Response::Project(project) = observer
+        .raw_request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project before commit")
+    else {
+        panic!("expected project response");
+    };
+    assert_eq!(project.modules, 0);
+
+    let Response::Synced { source_view } = commit_sync(&mut staging, sync_id) else {
+        panic!("expected synced response");
+    };
+    assert_eq!(source_view, SourceView(1));
+    let Response::Project(project) = observer
+        .request_at_view(&Request::Project { source_view }, source_view)
+        .expect("project after commit")
+    else {
+        panic!("expected project response");
+    };
+    assert_eq!(project.modules, 1);
+}
+
+#[test]
+fn stale_commit_is_consumed_without_mutating_the_authoritative_sources() {
+    let fixture = Fixture::started();
+    let mut first = fixture.client();
+    let mut second = fixture.client();
+    first.handshake().expect("first handshake");
+    second.handshake().expect("second handshake");
+
+    let (first_sync, _) = begin_sync(&mut first, &[("first.js", "export first\n")]);
+    stage_sync(&mut first, first_sync, "first.js", "export first\n");
+    let (second_sync, _) = begin_sync(&mut second, &[("second.js", "export second\n")]);
+    stage_sync(&mut second, second_sync, "second.js", "export second\n");
+    assert!(matches!(
+        commit_sync(&mut second, second_sync),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+
+    assert!(matches!(
+        commit_sync(&mut first, first_sync),
+        Response::StaleSourceView {
+            current: SourceView(1)
+        }
+    ));
+    let Response::Project(project) = second
+        .request_at_view(
+            &Request::Project {
+                source_view: SourceView(1),
+            },
+            SourceView(1),
+        )
+        .expect("project after stale commit")
+    else {
+        panic!("expected project response");
+    };
+    assert_eq!(project.modules, 1);
+}
+
+#[test]
+fn stale_source_operations_are_rejected_after_a_competing_commit() {
+    let fixture = Fixture::started();
+    let mut writer = fixture.client();
+    let mut stale = fixture.client();
+    writer.handshake().expect("writer handshake");
+    stale.handshake().expect("stale handshake");
+    let (sync_id, _) = begin_sync(&mut writer, &[("source.js", "export source\n")]);
+    stage_sync(&mut writer, sync_id, "source.js", "export source\n");
+    assert!(matches!(
+        commit_sync(&mut writer, sync_id),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+    stale.source_view = SourceView(1);
+    let old_view = stale.source_view();
+    let (other_sync, _) = begin_sync(&mut writer, &[("source.js", "export changed\n")]);
+    stage_sync(&mut writer, other_sync, "source.js", "export changed\n");
+    assert!(matches!(
+        commit_sync(&mut writer, other_sync),
+        Response::Synced {
+            source_view: SourceView(2)
+        }
+    ));
+    let response = stale.request_at_view(
+        &Request::Check {
+            source_view: old_view,
+            path: "source.js".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        },
+        old_view,
+    );
+    assert!(matches!(
+        response.expect("stale check response"),
+        Response::StaleSourceView {
+            current: SourceView(2)
+        }
+    ));
+    let response = stale
+        .request_at_view(
+            &Request::Run {
+                source_view: old_view,
+                path: "source.js".into(),
+                project_root: fixture.dir.to_string_lossy().into_owned(),
+            },
+            old_view,
+        )
+        .expect("stale run response");
+    assert!(matches!(
+        response,
+        Response::StaleSourceView {
+            current: SourceView(2)
+        }
+    ));
+}
+
+#[test]
+fn warm_noop_sync_still_advances_the_source_view() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let files = [("warm.js", "export warm\n")];
+    let (first, _) = begin_sync(&mut client, &files);
+    stage_sync(&mut client, first, "warm.js", files[0].1);
+    assert!(matches!(
+        commit_sync(&mut client, first),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+    let (second, paths) = begin_sync(&mut client, &files);
+    assert!(paths.is_empty());
+    assert!(matches!(
+        commit_sync(&mut client, second),
+        Response::Synced {
+            source_view: SourceView(2)
+        }
+    ));
+}
+
+#[test]
+fn sync_rejects_bad_digest_and_incomplete_commit_without_losing_pending_state() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let (sync_id, _) = begin_sync(&mut client, &[("checked.js", "export checked\n")]);
+    assert!(matches!(
+        stage_sync(&mut client, sync_id, "checked.js", "wrong\n"),
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        commit_sync(&mut client, sync_id),
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        stage_sync(&mut client, sync_id, "checked.js", "export checked\n"),
+        Response::Ok
+    ));
+    assert!(matches!(
+        commit_sync(&mut client, sync_id),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+}
+
+#[test]
+fn disconnect_drops_staged_sync_without_publishing_it() {
+    let fixture = Fixture::started();
+    let mut disconnected = fixture.client();
+    disconnected.handshake().expect("handshake");
+    let (sync_id, _) = begin_sync(&mut disconnected, &[("dropped.js", "export dropped\n")]);
+    assert!(matches!(
+        stage_sync(&mut disconnected, sync_id, "dropped.js", "export dropped\n"),
+        Response::Ok
+    ));
+    drop(disconnected);
+
+    let mut fresh = fixture.client();
+    fresh.handshake().expect("fresh handshake");
+    let (_sync_id, paths) = begin_sync(&mut fresh, &[("dropped.js", "export dropped\n")]);
+    assert_eq!(paths, ["dropped.js"]);
+}
+
 #[test]
 fn request_and_response_round_trip_over_a_socket() {
     let fixture = Fixture::started();
@@ -250,6 +578,7 @@ fn request_and_response_round_trip_over_a_socket() {
 
     let set = client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "a.js".into(),
             text: "export a\nexport b\nconst hidden = 1\n".into(),
         })
@@ -258,6 +587,7 @@ fn request_and_response_round_trip_over_a_socket() {
 
     let Response::Checked(summary) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: "a.js".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -269,7 +599,12 @@ fn request_and_response_round_trip_over_a_socket() {
     assert_eq!(summary.exports, vec!["a".to_string(), "b".to_string()]);
     assert_ne!(summary.implementation_hash, summary.interface_hash);
 
-    let Response::Project(project) = client.request(&Request::Project).expect("project") else {
+    let Response::Project(project) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project")
+    else {
         panic!("expected a project summary");
     };
     assert_eq!(project.modules, 1);
@@ -304,12 +639,14 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     setup.handshake().expect("handshake");
     setup
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: "console.log('old');\n".into(),
         })
         .expect("set initial source");
     let Response::Checked(initial) = setup
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
         })
@@ -327,6 +664,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                source_view: SourceView(0),
                 path: run_path,
                 project_root: run_root,
             })
@@ -342,6 +680,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     editor.handshake().expect("editor handshake");
     let edit = editor
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: "console.log('new');\n".into(),
         })
@@ -353,6 +692,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     assert_eq!(stats.revision, 2);
     let Response::Checked(summary) = editor
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
         })
@@ -375,7 +715,11 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     // A later run should prepare against the edited revision and see the new source, while the
     // already-prepared run above stays on the old bytecode.
     let Response::Ran(second) = editor
-        .request(&Request::Run { path, project_root })
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path,
+            project_root,
+        })
         .expect("later run")
     else {
         panic!("expected later run response");
@@ -447,6 +791,7 @@ expected_stdout = "ok\n"
     editor.handshake().expect("editor handshake");
     let edit = editor
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "while-testing.js".into(),
             text: "export const answer = 42;\n".into(),
         })
@@ -477,94 +822,6 @@ expected_stdout = "ok\n"
 }
 
 #[test]
-fn sync_reconciles_omissions_and_rejects_duplicates_without_partial_removal() {
-    let mut engine = StubEngine::default();
-    let alpha = "export alpha\n";
-    let beta = "export beta\n";
-    dispatch(
-        &mut engine,
-        Request::SetSource {
-            path: "alpha.js".into(),
-            text: alpha.into(),
-        },
-    );
-    dispatch(
-        &mut engine,
-        Request::SetSource {
-            path: "beta.js".into(),
-            text: beta.into(),
-        },
-    );
-
-    let (response, next) = dispatch(
-        &mut engine,
-        Request::Sync {
-            files: vec![
-                SourceHash {
-                    path: "alpha.js".into(),
-                    hash: kiln_proto::source_digest(alpha),
-                },
-                SourceHash {
-                    path: "alpha.js".into(),
-                    hash: kiln_proto::source_digest(alpha),
-                },
-            ],
-        },
-    );
-    assert_eq!(next, Next::Continue);
-    assert!(
-        matches!(response, Response::Error { ref message } if message.contains("duplicate paths") && message.contains("alpha.js")),
-        "got {response:?}"
-    );
-    assert_eq!(
-        engine.source_files().len(),
-        2,
-        "rejection is all-or-nothing"
-    );
-
-    let (response, _) = dispatch(
-        &mut engine,
-        Request::Sync {
-            files: vec![SourceHash {
-                path: "alpha.js".into(),
-                hash: kiln_proto::source_digest(alpha),
-            }],
-        },
-    );
-    assert!(matches!(response, Response::Needed { paths } if paths.is_empty()));
-    assert_eq!(
-        engine.source_files(),
-        vec![(FileId(0), "alpha.js".to_owned())],
-        "omitted held files are removed before Needed is returned"
-    );
-
-    let (response, _) = dispatch(
-        &mut engine,
-        Request::Sync {
-            files: vec![SourceHash {
-                path: "alpha.js".into(),
-                hash: kiln_proto::source_digest("different bytes"),
-            }],
-        },
-    );
-    assert!(
-        matches!(response, Response::Needed { paths } if paths == ["alpha.js"]),
-        "a wrong strong digest must never retain held source bytes"
-    );
-
-    let (response, _) = dispatch(
-        &mut engine,
-        Request::Sync {
-            files: vec![SourceHash {
-                path: "gamma.js".into(),
-                hash: kiln_proto::source_digest("not gamma"),
-            }],
-        },
-    );
-    assert!(matches!(response, Response::Needed { paths } if paths == ["gamma.js"]));
-}
-
-#[test]
 fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     let fixture = Fixture::started();
     let mut client = fixture.client();
@@ -574,12 +831,14 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     let project_root = fixture.dir.to_string_lossy().into_owned();
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: "console.log('native daemon', 6 * 7);".to_owned(),
         })
         .expect("upload native source");
 
     let request = Request::NativeRun {
+        source_view: SourceView(0),
         path,
         project_root,
         profile: NativeProfile::Dev,
@@ -634,12 +893,14 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: "console.log('first snapshot');".to_owned(),
         })
         .expect("upload first source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
         })
@@ -650,12 +911,14 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: "console.log('second snapshot');".to_owned(),
         })
         .expect("upload second source");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
         })
@@ -667,6 +930,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     let stale = client
         .request(&Request::NativeBuildAtRevision {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
             output: Some(output.to_string_lossy().into_owned()),
@@ -687,6 +951,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     let response = client
         .request(&Request::NativeBuildAtRevision {
+            source_view: SourceView(0),
             path,
             project_root,
             output: Some(output.to_string_lossy().into_owned()),
@@ -744,6 +1009,7 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         .to_string_lossy()
         .into_owned();
     let request = Request::NativeSharedBuild {
+        source_view: SourceView(0),
         path: path.clone(),
         project_root: root.clone(),
         output: None,
@@ -826,12 +1092,14 @@ fn native_shared_build_rejects_header_source_and_output_collisions() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "embed.h".into(),
             text: "console.log('embedded');\n".into(),
         })
         .expect("upload header-named source");
     let response = client
         .request(&Request::NativeSharedBuild {
+            source_view: SourceView(0),
             path: "embed.h".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
             output: Some("embed".into()),
@@ -845,12 +1113,14 @@ fn native_shared_build_rejects_header_source_and_output_collisions() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "embed.js".into(),
             text: "console.log('embedded');\n".into(),
         })
         .expect("upload source");
     let response = client
         .request(&Request::NativeSharedBuild {
+            source_view: SourceView(0),
             path: "embed.js".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
             output: Some("embed.H".into()),
@@ -890,12 +1160,14 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
     for path in [&dependency, &entry] {
         client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: path.to_string_lossy().into_owned(),
                 text: std::fs::read_to_string(path).expect("read source"),
             })
             .expect("upload source");
     }
     let request = Request::NativeSharedBuild {
+        source_view: SourceView(0),
         path: entry.to_string_lossy().into_owned(),
         project_root: root.clone(),
         output: None,
@@ -980,13 +1252,19 @@ fn many_requests_reuse_one_connection() {
     for index in 0..64 {
         let response = client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: format!("m{index}.js"),
                 text: format!("export e{index}\n"),
             })
             .expect("set source");
         assert!(matches!(response, Response::Ok));
     }
-    let Response::Project(project) = client.request(&Request::Project).expect("project") else {
+    let Response::Project(project) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project")
+    else {
         panic!("expected a project summary");
     };
     assert_eq!(project.modules, 64);
@@ -1013,7 +1291,9 @@ fn protocol_mismatch_is_rejected_and_the_connection_dropped() {
 
     // Refusing the request but continuing to serve the connection would let a skewed client go
     // on to issue requests we cannot interpret.
-    let after = client.request(&Request::Project);
+    let after = client.request(&Request::Project {
+        source_view: SourceView(0),
+    });
     assert!(
         after.is_err(),
         "the connection must be closed, got {after:?}"
@@ -1076,6 +1356,7 @@ fn a_panicking_query_costs_one_request_not_the_daemon() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "boom.js".into(),
             text: POISON.into(),
         })
@@ -1085,6 +1366,7 @@ fn a_panicking_query_costs_one_request_not_the_daemon() {
     // and is expected noise in this test's output.
     let response = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: "boom.js".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1096,7 +1378,11 @@ fn a_panicking_query_costs_one_request_not_the_daemon() {
 
     // Same connection, then a fresh one: neither the client's session nor the daemon is lost.
     assert!(matches!(
-        client.request(&Request::Project).expect("still serving"),
+        client
+            .request(&Request::Project {
+                source_view: SourceView(0)
+            })
+            .expect("still serving"),
         Response::Project(_)
     ));
     let mut fresh = fixture.client();
@@ -1193,6 +1479,7 @@ fn check_reads_from_disk_when_nothing_was_pushed() {
     let mut client = fixture.client();
     let Response::Checked(summary) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: module.to_string_lossy().into_owned(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1222,19 +1509,29 @@ fn a_relative_pushed_buffer_wins_over_disk_during_a_canonical_check() {
     let mut client = fixture.client();
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "buffered.js".into(),
             text: "export unsaved\n".into(),
         })
         .expect("set source");
 
     let Response::Checked(summary) = client
-        .request(&Request::Check { path, project_root })
+        .request(&Request::Check {
+            source_view: SourceView(0),
+            path,
+            project_root,
+        })
         .expect("check")
     else {
         panic!("expected a module summary");
     };
     assert_eq!(summary.exports, vec!["unsaved".to_string()]);
-    let Response::Project(project) = client.request(&Request::Project).expect("project") else {
+    let Response::Project(project) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project")
+    else {
         panic!("expected a project summary");
     };
     assert_eq!(project.modules, 1, "one file must have one active spelling");
@@ -1248,6 +1545,7 @@ fn checking_a_missing_file_is_an_error_not_a_panic() {
     let mut client = fixture.client();
     let response = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: missing.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1257,7 +1555,11 @@ fn checking_a_missing_file_is_an_error_not_a_panic() {
         "got {response:?}"
     );
     assert!(matches!(
-        client.request(&Request::Project).expect("still serving"),
+        client
+            .request(&Request::Project {
+                source_view: SourceView(0)
+            })
+            .expect("still serving"),
         Response::Project(_)
     ));
 }
@@ -1296,6 +1598,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
     client.handshake().expect("handshake");
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "real.ts".into(),
             text: concat!(
                 "export interface Shape { width: number }\n",
@@ -1307,6 +1610,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
         .expect("set source");
     let response = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: "real.ts".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1320,7 +1624,11 @@ fn the_default_daemon_serves_the_real_query_engine() {
     // Prime the whole-project query, then prove a body-only edit parsed by Oxc still cuts off at
     // the interface exactly as the original query-engine contract requires.
     assert!(matches!(
-        client.request(&Request::Project).expect("project"),
+        client
+            .request(&Request::Project {
+                source_view: SourceView(0)
+            })
+            .expect("project"),
         Response::Project(_)
     ));
     client
@@ -1328,6 +1636,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
         .expect("reset counters");
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "real.ts".into(),
             text: concat!(
                 "export interface Shape { width: number }\n",
@@ -1338,7 +1647,9 @@ fn the_default_daemon_serves_the_real_query_engine() {
         })
         .expect("edit source");
     client
-        .request(&Request::Project)
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
         .expect("project after edit");
     let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
         panic!("expected stats");
@@ -1350,12 +1661,14 @@ fn the_default_daemon_serves_the_real_query_engine() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "real.ts".into(),
             text: "export const answer: = ;".into(),
         })
         .expect("set malformed source");
     let Response::Checked(summary) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: "real.ts".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1402,6 +1715,7 @@ fn production_check_reports_the_graph_resolved_star_surface() {
     ] {
         client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: path.to_string_lossy().into_owned(),
                 text: text.to_owned(),
             })
@@ -1410,6 +1724,7 @@ fn production_check_reports_the_graph_resolved_star_surface() {
 
     let Response::Checked(summary) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: barrel.to_string_lossy().into_owned(),
             project_root: project_root.to_string_lossy().into_owned(),
         })
@@ -1424,17 +1739,27 @@ fn production_check_reports_the_graph_resolved_star_surface() {
     assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
     assert_eq!(summary.resolved_exports, Some(vec!["answer".to_owned()]));
 
-    let Response::Project(before) = client.request(&Request::Project).expect("project before")
+    let Response::Project(before) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project before")
     else {
         panic!("expected project summary");
     };
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: barrel.to_string_lossy().into_owned(),
             text: "export * from './right.js';\n".to_owned(),
         })
         .expect("switch star target");
-    let Response::Project(after) = client.request(&Request::Project).expect("project after") else {
+    let Response::Project(after) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("project after")
+    else {
         panic!("expected project summary");
     };
     assert_eq!(
@@ -1445,12 +1770,14 @@ fn production_check_reports_the_graph_resolved_star_surface() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: barrel.to_string_lossy().into_owned(),
             text: "export * from './broken.js';\n".to_owned(),
         })
         .expect("point barrel at broken dependency");
     let Response::Checked(failed) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: barrel.to_string_lossy().into_owned(),
             project_root: project_root.to_string_lossy().into_owned(),
         })
@@ -1485,6 +1812,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
 
     let Response::Checked(disk_summary) = client
         .request(&Request::Check {
+            source_view: SourceView(0),
             path: disk_module.to_string_lossy().into_owned(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1497,6 +1825,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     let path = "run.ts".to_string();
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             text: concat!(
                 "let n: number = 0;\n",
@@ -1510,6 +1839,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1530,6 +1860,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("reset counters");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1550,6 +1881,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: path.clone(),
             // Any construct lowering still refuses works here; `import.meta` is one that
             // parses cleanly, so the diagnostic comes from lowering with a span attached rather
@@ -1559,6 +1891,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set unsupported source");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
         })
@@ -1611,6 +1944,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         let path = std::fs::canonicalize(path).expect("canonical source");
         client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: path.to_string_lossy().into_owned(),
                 text: std::fs::read_to_string(path).expect("read source"),
             })
@@ -1619,6 +1953,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
 
     let response = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
                 .to_string_lossy()
@@ -1636,6 +1971,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
                 .to_string_lossy()
@@ -1660,6 +1996,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     .expect("write cycle");
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: std::fs::canonicalize(&dependency)
                 .expect("canonical dependency")
                 .to_string_lossy()
@@ -1669,6 +2006,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set cycle");
     let Response::Ran(cycle) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
                 .to_string_lossy()
@@ -1724,7 +2062,11 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
     ] {
         assert!(matches!(
             client
-                .request(&Request::SetSource { path, text })
+                .request(&Request::SetSource {
+                    source_view: SourceView(0),
+                    path,
+                    text,
+                })
                 .expect("upload source"),
             Response::Ok
         ));
@@ -1733,6 +2075,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
     let project_root = fixture.dir.to_string_lossy().into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: entry_path.clone(),
             project_root: project_root.clone(),
         })
@@ -1751,10 +2094,20 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
             }],
         })
         .expect("sync authoritative view");
-    assert!(matches!(sync, Response::Needed { paths } if paths.is_empty()));
+    let Response::Needed { sync_id, paths } = sync else {
+        panic!("expected Needed response");
+    };
+    assert!(paths.is_empty());
+    let Response::Synced { .. } = client
+        .request(&Request::CommitSync { sync_id })
+        .expect("commit authoritative view")
+    else {
+        panic!("expected Synced response");
+    };
 
     let Response::Ran(second) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: entry_path,
             project_root,
         })
@@ -1806,12 +2159,14 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
     {
         client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: "overlay.js".into(),
                 text: source.into(),
             })
             .expect("set relative overlay");
         let Response::Ran(result) = client
             .request(&Request::Run {
+                source_view: SourceView(0),
                 path: canonical_entry.clone(),
                 project_root: root.clone(),
             })
@@ -1829,7 +2184,9 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         }
 
         let Response::Project(project) = client
-            .request(&Request::Project)
+            .request(&Request::Project {
+                source_view: SourceView(0),
+            })
             .expect("read canonical project")
         else {
             panic!("expected project response");
@@ -1841,6 +2198,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
 
         let Response::Ran(repeated) = client
             .request(&Request::Run {
+                source_view: SourceView(0),
                 path: "overlay.js".into(),
                 project_root: root.clone(),
             })
@@ -1857,12 +2215,14 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
     }
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "missing/../overlay.js".into(),
             text: "console.log('lexical overlay');\n".into(),
         })
         .expect("set unresolved lexical overlay");
     let Response::Ran(lexical) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: canonical_entry.clone(),
             project_root: root.clone(),
         })
@@ -1871,7 +2231,11 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         panic!("expected lexical overlay response");
     };
     assert_eq!(lexical.stdout, "lexical overlay\n");
-    let Response::Project(project) = client.request(&Request::Project).expect("read project")
+    let Response::Project(project) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("read project")
     else {
         panic!("expected project response");
     };
@@ -1879,18 +2243,21 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "overlay.js".into(),
             text: "console.log('older alias');\n".into(),
         })
         .expect("set older relative overlay");
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: canonical_entry,
             text: "console.log('newer canonical');\n".into(),
         })
         .expect("set newer canonical overlay");
     let Response::Ran(newest) = client
         .request(&Request::Run {
+            source_view: SourceView(0),
             path: "overlay.js".into(),
             project_root: root,
         })
@@ -1914,6 +2281,7 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
     client.handshake().expect("handshake");
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: "relative-snapshot.js".into(),
             text: "console.log('overlay');\n".into(),
         })
@@ -1923,7 +2291,8 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
     };
 
     let response = client
-        .request(&Request::NativeBuildAtRevision {
+        .raw_request(&Request::NativeBuildAtRevision {
+            source_view: SourceView(0),
             path: "relative-snapshot.js".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
             output: Some(
@@ -1944,10 +2313,15 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
             "alias reconciliation advanced to {current_revision} while holding the preparation \
              lock and must become the build snapshot"
         ),
+        Response::StaleSourceView { .. } => {}
         other => panic!("unexpected relative native build response: {other:?}"),
     }
 
-    let Response::Project(project) = client.request(&Request::Project).expect("read project")
+    let Response::Project(project) = client
+        .request(&Request::Project {
+            source_view: SourceView(0),
+        })
+        .expect("read project")
     else {
         panic!("expected project response");
     };
@@ -1984,12 +2358,14 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
     for path in [&canonical_dependency, &canonical_entry] {
         client
             .request(&Request::SetSource {
+                source_view: SourceView(0),
                 path: path.to_string_lossy().into_owned(),
                 text: std::fs::read_to_string(path).expect("read source"),
             })
             .expect("set source");
     }
     let request = Request::NativeRun {
+        source_view: SourceView(0),
         path: canonical_entry.to_string_lossy().into_owned(),
         project_root: root,
         profile: NativeProfile::Dev,
@@ -2021,6 +2397,7 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
 
     client
         .request(&Request::SetSource {
+            source_view: SourceView(0),
             path: canonical_dependency.to_string_lossy().into_owned(),
             text: "import './native-entry.js'; export const answer = 42;\n".into(),
         })
