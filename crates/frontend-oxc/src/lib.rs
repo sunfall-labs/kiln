@@ -663,6 +663,25 @@ impl Lowerer {
                             value: Box::new(self.expression(&expression.right)),
                         }
                     }
+                    // `[a, b] = pair` and `({ a } = record)`. Only `=` takes a pattern, so a
+                    // compound operator here is a different error than an unsupported shape.
+                    AssignmentTarget::ArrayAssignmentTarget(_)
+                    | AssignmentTarget::ObjectAssignmentTarget(_)
+                        if expression.operator.as_str() == "=" =>
+                    {
+                        match self.assignment_pattern(&expression.left) {
+                            Some(pattern) => HirExpressionKind::PatternAssignment {
+                                pattern,
+                                value: Box::new(self.expression(&expression.right)),
+                            },
+                            None => {
+                                return self.unsupported_expression(
+                                    "destructuring assignment target",
+                                    expression_span,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         return self
                             .unsupported_expression("non-identifier assignment", expression_span);
@@ -942,9 +961,7 @@ impl Lowerer {
             Expression::ImportMeta(_) => {
                 return self.unsupported_expression("import.meta expression", expression_span);
             }
-            Expression::NewTarget(_) => {
-                return self.unsupported_expression("new.target expression", expression_span);
-            }
+            Expression::NewTarget(_) => HirExpressionKind::NewTarget,
             Expression::JSXElement(_) | Expression::JSXFragment(_) => {
                 return self.unsupported_expression("JSX expression", expression_span);
             }
@@ -980,6 +997,95 @@ impl Lowerer {
         match lowered {
             Some(kind) => kind,
             None => self.unsupported_statement("default function or class export", statement_span),
+        }
+    }
+
+    /// An assignment target read as a binding pattern.
+    ///
+    /// `None` when the target holds something a [`kiln_hir::Pattern`] cannot say -- a member
+    /// expression, `[o.a] = xs`, is legal JavaScript and is refused here rather than lowered to
+    /// something else. Patterns bind names; teaching them to store through a member would make
+    /// them a second assignment language.
+    fn assignment_pattern(&mut self, target: &AssignmentTarget<'_>) -> Option<kiln_hir::Pattern> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                Some(kiln_hir::Pattern::Identifier(identifier.name.to_string()))
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                let mut elements = Vec::with_capacity(array.elements.len());
+                for element in &array.elements {
+                    elements.push(match element {
+                        // A hole assigns nothing, and skips the index all the same.
+                        None => None,
+                        Some(element) => Some(self.assignment_maybe_default(element)?),
+                    });
+                }
+                let rest = match &array.rest {
+                    Some(rest) => Some(Box::new(self.assignment_pattern(&rest.target)?)),
+                    None => None,
+                };
+                Some(kiln_hir::Pattern::Array { elements, rest })
+            }
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                let mut properties = Vec::with_capacity(object.properties.len());
+                for property in &object.properties {
+                    match property {
+                        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                            shorthand,
+                        ) => {
+                            let name = shorthand.binding.name.to_string();
+                            let value = kiln_hir::Pattern::Identifier(name.clone());
+                            properties.push(kiln_hir::PatternProperty {
+                                key: name,
+                                // `({ a = 1 } = o)`: the default belongs to the value, exactly
+                                // as it does in a declaration.
+                                value: match &shorthand.init {
+                                    Some(default) => kiln_hir::Pattern::WithDefault {
+                                        inner: Box::new(value),
+                                        default: Box::new(self.expression(default)),
+                                    },
+                                    None => value,
+                                },
+                            });
+                        }
+                        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
+                            named,
+                        ) => {
+                            properties.push(kiln_hir::PatternProperty {
+                                key: named.name.static_name()?.to_string(),
+                                value: self.assignment_maybe_default(&named.binding)?,
+                            });
+                        }
+                    }
+                }
+                let rest = match &object.rest {
+                    Some(rest) => match &rest.target {
+                        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                            Some(identifier.name.to_string())
+                        }
+                        _ => return None,
+                    },
+                    None => None,
+                };
+                Some(kiln_hir::Pattern::Object { properties, rest })
+            }
+            _ => None,
+        }
+    }
+
+    /// One element of a destructuring assignment, which may carry a default.
+    fn assignment_maybe_default(
+        &mut self,
+        element: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>,
+    ) -> Option<kiln_hir::Pattern> {
+        match element {
+            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with) => {
+                Some(kiln_hir::Pattern::WithDefault {
+                    inner: Box::new(self.assignment_pattern(&with.binding)?),
+                    default: Box::new(self.expression(&with.init)),
+                })
+            }
+            other => self.assignment_pattern(other.as_assignment_target()?),
         }
     }
 

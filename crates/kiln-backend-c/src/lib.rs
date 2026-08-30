@@ -823,6 +823,7 @@ fn stack_effect(
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
+        | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
         | Instruction::PushHandler(_)
@@ -1070,6 +1071,7 @@ fn emit_instruction(
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
+        | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
         | Instruction::PushHandler(_)
@@ -1295,6 +1297,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*count));
             }
             Instruction::LoadThis => byte(&mut hash, 33),
+            Instruction::LoadNewTarget => byte(&mut hash, 59),
             Instruction::Dup2 => byte(&mut hash, 27),
             Instruction::IterableToArray => byte(&mut hash, 44),
             Instruction::SpreadInto => byte(&mut hash, 41),
