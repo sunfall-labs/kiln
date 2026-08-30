@@ -60,6 +60,14 @@ requests cannot replace the program another request is about to execute. The CLI
 C numeric locale before module initialization so `strtod` and `snprintf` do not inherit
 locale-dependent semantics.
 
+Generated modules cannot assume that policy when embedded in a host process. On the supported
+macOS and Linux shared-library targets, string-to-number conversion therefore uses an explicit C
+`locale_t` with `strtod_l`, and number formatting temporarily installs that locale only for the
+calling thread with `uselocale` before restoring it. Generated code never calls process-global
+`setlocale`. Locale creation failure is an ordinary conversion failure rather than permission to
+fall back to ambient host semantics. This isolates concurrent embedders while leaving the separate
+`%.17g` versus ECMAScript-shortest formatting gap visible for a future Ryu-style runtime.
+
 Embedding uses the same module entry ABI without linking the command-line runtime or launcher.
 `kiln-native-runtime` publishes a deterministic, self-contained C header for the versioned value
 layout, status codes, and HostOps callback. For each scalar build it composes those declarations

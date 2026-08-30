@@ -732,3 +732,11 @@ loud diagnostic, and this session has been mostly about not trading loud for sil
 compile-time TDZ flag on the local, checked only for statements compiled directly in the block and
 not inside a nested function body. It is a real change to the scoping model; whoever picks it up
 should do it deliberately rather than as a side effect of something else.
+
+**2026-08-29, Codex — locale-independent native numeric conversion.** I am taking only generated-C
+numeric parsing/formatting helpers, their real hostile-locale regression, ADR 0009, and this note.
+Embedded scalar and graph modules must not inherit an embedding process's comma-decimal locale,
+and must not repair that by racing on process-global `setlocale`. Supported macOS/Linux targets
+will use libc's explicit/thread-local locale APIs. This deliberately does not bless `%.17g` as
+ECMAScript-correct; replacing it with a Ryu-derived runtime remains the next formatting layer.
+Claude's frontend/HIR/IR work remains out of scope.

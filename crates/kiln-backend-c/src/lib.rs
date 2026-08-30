@@ -7,8 +7,8 @@
 
 use std::{collections::HashSet, fmt::Write as _};
 
-use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
-use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
+use kiln_host_abi::{HostOp, HOST_ABI_VERSION};
+use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, BYTECODE_VERSION};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
@@ -158,6 +158,16 @@ fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
 }
 
 const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#include <locale.h>
+#if defined(__APPLE__)
+#include <xlocale.h>
+#endif
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -230,6 +240,50 @@ static kiln_value kiln_c99_number_bits(uint64_t bits) {
     return kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0);
 }
 
+/* Native shared libraries inherit their embedding process's locale. Use an explicit C locale
+ * for language-level numeric conversion instead of mutating process-global state with setlocale.
+ * macOS and Linux are the supported shared-library targets; other C targets retain the libc
+ * fallback until they gain an equivalent per-thread locale API. */
+static double kiln_c99_strtod_c(const char *text, char **end) {
+#if defined(__APPLE__) || defined(__linux__)
+    locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    double value;
+    if (c_locale == (locale_t)0) {
+        *end = (char *)text;
+        return NAN;
+    }
+    value = strtod_l(text, end, c_locale);
+    freelocale(c_locale);
+    return value;
+#else
+    return strtod(text, end);
+#endif
+}
+
+static int kiln_c99_snprintf_number_c(char *buffer, size_t capacity, double number) {
+#if defined(__APPLE__) || defined(__linux__)
+    locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    locale_t previous;
+    int length;
+    if (c_locale == (locale_t)0) {
+        return -1;
+    }
+    previous = uselocale(c_locale);
+    if (previous == (locale_t)0) {
+        freelocale(c_locale);
+        return -1;
+    }
+    length = snprintf(buffer, capacity, "%.17g", number);
+    if (uselocale(previous) == (locale_t)0) {
+        length = -1;
+    }
+    freelocale(c_locale);
+    return length;
+#else
+    return snprintf(buffer, capacity, "%.17g", number);
+#endif
+}
+
 static double kiln_c99_as_number(kiln_value value) {
     double number;
     switch (value.tag) {
@@ -258,7 +312,7 @@ static double kiln_c99_as_number(kiln_value value) {
             }
             memcpy(copy, value.ptr, value.len);
             copy[value.len] = '\0';
-            parsed = strtod(copy, &end);
+            parsed = kiln_c99_strtod_c(copy, &end);
             while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') {
                 ++end;
             }
@@ -322,7 +376,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_NUMBER: {
         char buffer[64];
         double number = kiln_c99_as_number(value);
-        int len = snprintf(buffer, sizeof(buffer), "%.17g", number);
+        int len = kiln_c99_snprintf_number_c(buffer, sizeof(buffer), number);
         if (len < 0 || (size_t)len >= sizeof(buffer)) {
             return kiln_c99_undefined();
         }
@@ -1381,11 +1435,9 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.symbol.starts_with("kiln_module_"));
         assert_eq!(first.symbol.len(), "kiln_module_".len() + 32);
-        assert!(
-            first.symbol["kiln_module_".len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        );
+        assert!(first.symbol["kiln_module_".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
         assert!(!first.source.contains("/Users/"));
         assert!(first.source.contains(&format!(
             "int {}(kiln_host *host, kiln_value *result)",
@@ -1458,11 +1510,10 @@ mod tests {
         assert_ne!(one.source, two.source);
         assert_ne!(one.symbol, other.symbol);
         assert!(!one.symbol.contains("/"));
-        assert!(
-            one.symbol
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        );
+        assert!(one
+            .symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
     }
 
     #[test]
@@ -1635,6 +1686,132 @@ mod tests {
         assert!(generated.contains("char kiln_module_") || generated.contains("_constant_4"));
         assert!(!generated.contains("printf(") || generated.contains("snprintf("));
         assert!(generated.contains("\\x00\"\""));
+    }
+
+    #[test]
+    fn generated_numeric_conversion_ignores_the_embedding_process_locale() {
+        let program = program(
+            vec![
+                Constant::String("1.5".into()),
+                Constant::Number(0.0_f64.to_bits()),
+                Constant::String("value=".into()),
+                Constant::Number(1.5_f64.to_bits()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::Binary(BinaryOp::Subtract),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::Const(2),
+                Instruction::Const(3),
+                Instruction::Binary(BinaryOp::Add),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        );
+        let generated = emit(&program).expect("locale probe emits");
+        assert!(generated.source.contains("strtod_l(text, end, c_locale)"));
+        assert!(generated.source.contains("previous = uselocale(c_locale)"));
+        assert!(generated.source.contains("uselocale(previous)"));
+        assert!(!generated.source.contains("setlocale("));
+        let wrapper = format!(
+            r#"
+static int calls = 0;
+
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL)
+        return KILN_C99_HOST_ERROR;
+    if (calls == 0) {{
+        if (arguments[0].tag != KILN_VALUE_NUMBER ||
+            arguments[0].bits != UINT64_C({number_bits}))
+            return KILN_C99_HOST_ERROR;
+    }} else if (calls == 1) {{
+        static const char expected[] = "value=1.5";
+        if (arguments[0].tag != KILN_VALUE_STRING || arguments[0].ptr == NULL ||
+            arguments[0].len != sizeof(expected) - 1 ||
+            memcmp(arguments[0].ptr, expected, sizeof(expected) - 1) != 0)
+            return KILN_C99_HOST_ERROR;
+    }} else {{
+        return KILN_C99_HOST_ERROR;
+    }}
+    ++calls;
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    static const char *candidates[] = {{
+        "de_DE.UTF-8", "de_DE.utf8", "de_DE",
+        "fr_FR.UTF-8", "fr_FR.utf8", "fr_FR",
+        "it_IT.UTF-8", "es_ES.UTF-8", "pt_BR.UTF-8"
+    }};
+    kiln_host host = {{ host_call, NULL }};
+    kiln_value result;
+    size_t index;
+    int found = 0;
+    for (index = 0; index < sizeof(candidates) / sizeof(candidates[0]); ++index) {{
+        struct lconv *conventions;
+        if (setlocale(LC_NUMERIC, candidates[index]) == NULL) continue;
+        conventions = localeconv();
+        if (conventions != NULL && strcmp(conventions->decimal_point, ",") == 0) {{
+            found = 1;
+            break;
+        }}
+    }}
+    if (!found) return 77;
+    if ({symbol}(&host, &result) != KILN_C99_OK) return 2;
+    return calls == 2 ? 0 : 3;
+}}
+"#,
+            number_bits = 1.5_f64.to_bits(),
+            symbol = generated.symbol,
+        );
+        let output_path =
+            std::env::temp_dir().join(format!("kiln-backend-c-locale-{}", std::process::id()));
+        let mut child = Command::new("cc")
+            .args(["-std=c11", "-x", "c", "-"])
+            .arg("-lm")
+            .arg("-o")
+            .arg(&output_path)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for locale test");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(format!("{}{}", generated.source, wrapper).as_bytes())
+            .expect("locale source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "locale-independent generated C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&output_path)
+            .output()
+            .expect("locale probe runs");
+        let _ = std::fs::remove_file(output_path);
+        if run.status.code() == Some(77) {
+            eprintln!("skipping hostile-locale execution: no comma-decimal locale is installed");
+            return;
+        }
+        assert!(
+            run.status.success(),
+            "generated numeric conversion inherited the embedding locale: {:?}",
+            run.status.code()
+        );
     }
 
     #[test]
