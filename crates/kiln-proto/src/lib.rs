@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -66,6 +66,14 @@ pub enum Request {
         output: Option<String>,
         profile: NativeProfile,
     },
+    /// Build from an exact database snapshot, publishing only if that snapshot remains current.
+    NativeBuildAtRevision {
+        path: String,
+        project_root: String,
+        output: Option<String>,
+        profile: NativeProfile,
+        expected_revision: u64,
+    },
     /// Emit, compile, and link one scalar module as a shared library for an embedding host.
     NativeSharedBuild {
         path: String,
@@ -108,6 +116,10 @@ pub enum Response {
     Checked(ModuleSummary),
     Ran(RunSummary),
     NativeBuilt(NativeBuildSummary),
+    /// The requested snapshot was superseded before the native artifact could be published.
+    Stale {
+        current_revision: u64,
+    },
     NativeSharedBuilt(NativeSharedLibrarySummary),
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
@@ -240,6 +252,8 @@ pub struct TestSummary {
 /// than transport errors so callers can retain source ranges and any stdout produced first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
+    /// Database revision whose source state was interpreted.
+    pub revision: u64,
     pub path: String,
     pub file: FileId,
     pub succeeded: bool,

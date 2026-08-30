@@ -65,6 +65,15 @@ requests cannot replace the program another request is about to execute. The CLI
 C numeric locale before module initialization as an additional defence against locale-dependent
 parsing.
 
+Watch mode remains interpreter-first: each `Run` response carries the database revision whose
+source state it executed, and native refresh uses that revision on a second daemon connection. The
+daemon prepares only a matching snapshot, compiles outside the engine lock to a request-unique
+sibling output, then reacquires the lock and atomically publishes only if the revision is still
+current. A stale success or failure removes its temporary output and is reported as superseded.
+The CLI permits one active native compile and one overwritable latest pending request, so edits do
+not block interpretation or create an unbounded build queue. This is logical cancellation: an
+obsolete toolchain process may finish, but it cannot publish.
+
 Generated modules cannot assume that policy when embedded in a host process. ADR 0014 therefore
 replaces the interim `strtod_l` path with a bounded, locale-free decimal parser and an explicit
 ECMAScript grammar/radix adapter. Number formatting likewise does not use libc locale or `printf`:

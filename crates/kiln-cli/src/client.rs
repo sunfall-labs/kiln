@@ -33,13 +33,17 @@ const MAX_SOCKET_PATH: usize = 100;
 
 pub struct DaemonClient {
     inner: kiln_daemon::Client,
+    socket: PathBuf,
 }
 
 impl DaemonClient {
     /// Connect to a daemon that is already listening.
     pub fn connect(socket: &Path) -> Result<DaemonClient> {
         match kiln_daemon::Client::connect(socket) {
-            Ok(inner) => Ok(DaemonClient { inner }),
+            Ok(inner) => Ok(DaemonClient {
+                inner,
+                socket: socket.to_owned(),
+            }),
             // Both kinds mean "nobody is serving here": no socket file at all, or a file left
             // behind by a daemon that died.
             Err(source)
@@ -98,6 +102,12 @@ impl DaemonClient {
 }
 
 impl Backend for DaemonClient {
+    fn peer(&self) -> Result<Box<dyn Backend>> {
+        let mut peer = DaemonClient::connect(&self.socket)?;
+        peer.handshake()?;
+        Ok(Box::new(peer))
+    }
+
     fn request(&mut self, request: Request) -> Result<Response> {
         let response = self
             .inner

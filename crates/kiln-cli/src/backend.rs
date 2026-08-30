@@ -11,10 +11,41 @@ use kiln_proto::{
 
 use crate::error::{Error, Result};
 
-pub trait Backend {
+pub trait Backend: Send {
     /// Send one request and return its response. Implementations must already have turned
     /// [`Response::Error`] into [`Error::Daemon`] via [`interpret`].
     fn request(&mut self, request: Request) -> Result<Response>;
+
+    /// Open an independent request/response channel to the same engine. Watch uses this to
+    /// keep a slow native toolchain off the interpreter's critical path.
+    fn peer(&self) -> Result<Box<dyn Backend>> {
+        Err(Error::Protocol(
+            "backend does not support peer connections".into(),
+        ))
+    }
+
+    fn native_build_at_revision(
+        &mut self,
+        path: String,
+        project_root: String,
+        output: Option<String>,
+        profile: NativeProfile,
+        expected_revision: u64,
+    ) -> Result<NativeBuildAtRevision> {
+        match self.request(Request::NativeBuildAtRevision {
+            path,
+            project_root,
+            output,
+            profile,
+            expected_revision,
+        })? {
+            Response::NativeBuilt(summary) => Ok(NativeBuildAtRevision::Built(summary)),
+            Response::Stale { current_revision } => {
+                Ok(NativeBuildAtRevision::Stale { current_revision })
+            }
+            other => Err(mismatch("NativeBuildAtRevision", &other)),
+        }
+    }
 
     fn set_source(&mut self, path: String, text: String) -> Result<()> {
         match self.request(Request::SetSource { path, text })? {
@@ -130,6 +161,12 @@ pub trait Backend {
     }
 }
 
+#[derive(Debug)]
+pub enum NativeBuildAtRevision {
+    Built(NativeBuildSummary),
+    Stale { current_revision: u64 },
+}
+
 /// Lift a daemon-reported failure out of the response type. Every backend funnels through
 /// this so that `Response::Error` can never be mistaken for a wrong-variant bug.
 pub fn interpret(response: Response) -> Result<Response> {
@@ -149,6 +186,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::Checked(_) => "Checked",
         Response::Ran(_) => "Ran",
         Response::NativeBuilt(_) => "NativeBuilt",
+        Response::Stale { .. } => "Stale",
         Response::NativeSharedBuilt(_) => "NativeSharedBuilt",
         Response::NativeRan(_) => "NativeRan",
         Response::Tested(_) => "Tested",

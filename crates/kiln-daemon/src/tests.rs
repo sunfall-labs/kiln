@@ -401,6 +401,106 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     assert!(second.build.executable_cache_hit);
 }
 
+#[test]
+fn revision_pinned_native_build_rejects_stale_source_before_publication() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let source_path = fixture.dir.join("snapshot-native.js");
+    let path = source_path.to_string_lossy().into_owned();
+    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let output = fixture.dir.join("snapshot-native");
+    std::fs::write(&output, b"existing artifact").expect("write existing artifact");
+
+    client
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "console.log('first snapshot');".to_owned(),
+        })
+        .expect("upload first source");
+    let Response::Ran(first) = client
+        .request(&Request::Run {
+            path: path.clone(),
+            project_root: project_root.clone(),
+        })
+        .expect("run first source")
+    else {
+        panic!("expected interpreted run");
+    };
+
+    client
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "console.log('second snapshot');".to_owned(),
+        })
+        .expect("upload second source");
+    let Response::Ran(second) = client
+        .request(&Request::Run {
+            path: path.clone(),
+            project_root: project_root.clone(),
+        })
+        .expect("run second source")
+    else {
+        panic!("expected interpreted run");
+    };
+    assert!(second.revision > first.revision);
+
+    let stale = client
+        .request(&Request::NativeBuildAtRevision {
+            path: path.clone(),
+            project_root: project_root.clone(),
+            output: Some(output.to_string_lossy().into_owned()),
+            profile: NativeProfile::Dev,
+            expected_revision: first.revision,
+        })
+        .expect("stale native build response");
+    assert!(
+        matches!(stale, Response::Stale { current_revision } if current_revision == second.revision),
+        "expected stale revision {}, got {stale:?}",
+        second.revision,
+    );
+    assert_eq!(
+        std::fs::read(&output).expect("read existing artifact"),
+        b"existing artifact",
+        "a stale request must not replace the published executable"
+    );
+
+    let response = client
+        .request(&Request::NativeBuildAtRevision {
+            path,
+            project_root,
+            output: Some(output.to_string_lossy().into_owned()),
+            profile: NativeProfile::Dev,
+            expected_revision: second.revision,
+        })
+        .expect("current native build response");
+    let Response::NativeBuilt(summary) = response else {
+        if let Response::Error { ref message } = response
+            && message.contains("no supported C compiler")
+        {
+            eprintln!("skipping revision-pinned native integration: {message}");
+            return;
+        }
+        panic!("expected current native build, got {response:?}");
+    };
+    assert_eq!(summary.output_path, output.to_string_lossy());
+    assert_ne!(
+        std::fs::read(&output).expect("read published executable"),
+        b"existing artifact"
+    );
+    let temp_prefix = ".kiln-snapshot-native-";
+    assert!(
+        std::fs::read_dir(&fixture.dir)
+            .expect("read fixture")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(temp_prefix)),
+        "snapshot temporary outputs must be cleaned after publication"
+    );
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
