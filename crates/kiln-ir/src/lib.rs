@@ -393,6 +393,7 @@ pub enum Builtin {
     Process,
     /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
     Function,
+    Proxy,
 }
 
 impl Builtin {
@@ -436,6 +437,7 @@ impl Builtin {
             "BigInt" => Some(Self::BigInt),
             "process" => Some(Self::Process),
             "Function" => Some(Self::Function),
+            "Proxy" => Some(Self::Proxy),
             _ => None,
         }
     }
@@ -479,6 +481,7 @@ impl Builtin {
             Self::BigInt => "BigInt",
             Self::Process => "process",
             Self::Function => "Function",
+            Self::Proxy => "Proxy",
         }
     }
 }

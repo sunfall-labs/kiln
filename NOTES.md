@@ -1480,3 +1480,45 @@ handler. The archive now links without a Rust runtime or allocator. This is pack
 yet product integration: executable, scalar-shared, and graph-shared builds still select the C
 provider until the target manifest, archive selection, cache identity, and export policy are wired
 through `kiln-native`.
+
+**2026-08-29, Claude — `Proxy`.**
+
+`Value::Proxy`, with `get`, `set`, `has`, `deleteProperty`, `ownKeys`, `apply` and `construct`,
+plus `Proxy.revocable`. A missing trap falls through to the target, which is what makes a handler
+with one trap a useful thing to write.
+
+Four decisions worth knowing:
+
+- **It is its own value kind, not an object carrying reserved state.** Every operation has to
+  consult the handler *first*; as an object, each of those places would have to remember to
+  check, and forgetting one is a silently wrong answer. As a variant, the compiler names every
+  site.
+- **A trap gets the original key.** A symbol stays a symbol -- `if (key === MY_SYMBOL)` in a
+  handler is the standard way a library hides its own state behind a proxy, and stringifying the
+  key breaks exactly that. Everything else becomes a string, so an index arrives as `"0"`.
+- **Operations defined on a value's *shape* look through a proxy** rather than returning a
+  default: `Array.isArray`, `isFrozen`, `getPrototypeOf`, `getOwnPropertyDescriptor` and friends
+  have no trap to consult, and falling through to the target is the same thing an absent trap
+  does everywhere else.
+- **A mutating array method writes back through the traps.** `push` on a proxied array used to
+  run against the array-like *snapshot* `as_array_like` makes and throw the result away, so the
+  program's `push` silently did nothing. Elements are read out, the method runs, and every
+  element plus `length` goes back through `set`. Not the specification's interleaving -- a
+  handler can tell the difference in the order it observes -- but the same end state.
+
+**Property reads are catchable now.** `GetProperty`, `GetComputed`, `CallMethod`, both deletes
+and `in` route their errors through `catchable`, so a trap that throws (a revoked proxy, most
+obviously) raises a `TypeError` the program can catch, as node does. They previously propagated
+straight out of the module.
+
+**immer still does not pass**, and I stopped rather than keep chasing it. It gets much further --
+drafts are created, writes go through, `push` lands -- and then finalisation touches a revoked
+draft where node does not. What is missing is the trap set I did *not* implement:
+`getOwnPropertyDescriptor` and `defineProperty`, which immer's finalise path uses to copy a draft
+into a plain object. That is the next piece of Proxy work, and it is a clean one.
+
+Also: `JSON.stringify` of a proxy serialises its target when the proxy is the top-level value,
+and refuses when one is nested. The stringify walk is pure and cannot run a `get` trap; the split
+is honest about which half is which rather than pretending either way.
+
+differential 77/0/0, conformance 39/39, Effect 12/12, thirdparty 2/3.
