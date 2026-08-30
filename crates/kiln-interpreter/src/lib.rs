@@ -5661,6 +5661,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         argc: u16,
         instruction: usize,
         this_value: Value,
+        new_target: Value,
     ) -> Result<Value, ExecutionError> {
         let proto = &closure.program.functions[closure.function as usize];
         let argc = argc as usize;
@@ -5688,6 +5689,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // in whatever frame the consumer happens to be in. Dropping it here made `this`
             // undefined in every generator, async function and async method body.
             this_value,
+            new_target,
             arguments: received,
             started: false,
             running: false,
@@ -11262,13 +11264,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(captured) => captured.clone(),
             None => this_value,
         };
+        let target = match &closure.captured_new_target {
+            Some(captured) => captured.clone(),
+            None if constructing.is_some() => Value::Function(Rc::clone(&closure)),
+            None => Value::Undefined,
+        };
         if proto.generator {
             // Calling a generator function does not run it: it captures the arguments and hands
             // back an object whose `next` runs the body up to each `yield`.
             // An async generator is called like a plain one: it hands back an object, and
             // nothing runs until the consumer asks for a step.
             let asynchronous = proto.asynchronous && !proto.async_generator;
-            let generator = self.build_generator(&closure, argc, instruction, entering)?;
+            let generator = self.build_generator(&closure, argc, instruction, entering, target)?;
             if !asynchronous {
                 self.stack.push(generator);
                 return Ok(());
@@ -11308,11 +11315,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `new.target` is the constructor this call named, which is this closure when the call
         // is a `new` and nothing otherwise. An arrow keeps the one it captured, for the same
         // reason it keeps `this`.
-        let target = match &closure.captured_new_target {
-            Some(captured) => captured.clone(),
-            None if constructing.is_some() => Value::Function(Rc::clone(&closure)),
-            None => Value::Undefined,
-        };
         // The frame keeps what this call was actually given, whatever the closure is: an arrow's
         // rest parameter needs it, and `LoadArguments` is the one place that substitutes the
         // captured list instead.
@@ -19615,6 +19617,7 @@ mod tests {
             generator: false,
             async_generator: false,
             parameter_count: 0,
+            declared_length: 0,
             local_count: 0,
             code: vec![Instruction::MakeFunction(1), Instruction::Return],
             upvalues: Vec::new(),
@@ -19626,6 +19629,7 @@ mod tests {
             generator: true,
             async_generator: false,
             parameter_count: 0,
+            declared_length: 0,
             local_count: 0,
             code: vec![
                 Instruction::LoadThis,
@@ -19641,6 +19645,7 @@ mod tests {
             generator: false,
             async_generator: false,
             parameter_count: 1,
+            declared_length: 1,
             local_count: 1,
             code: vec![
                 Instruction::LoadLocal(0),

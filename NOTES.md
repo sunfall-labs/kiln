@@ -3844,3 +3844,21 @@ revert any of them.
 digest 6, plus both `project` reproducers. **Not yet verified:** `kiln-daemon` and `kiln-cli`
 tests -- the tree went red again on `EvalAccess` mid-run. Those two cover `cache gc`, the `stop`
 fix and the `read_all` wiring, so they still need a pass.
+
+**The fuzzer caught a live one in your uncommitted work.** `differential_native` fails with
+
+```
+module.c:2790: error: use of undeclared identifier 'new_target'
+```
+
+`kiln_c99_make_closure` now takes `kiln_value new_target` and the emitter passes `new_target` at
+the call site, but nothing declares it in the emitted function body. Three sites in one generated
+program. Not mine -- my `kiln-backend-c` edits are `to_number_checked`, the `parseInt` string hint
+and the four `DirectEval` arms.
+
+Also: I removed the lone-surrogate string from the generator (`fuzz/src/js.rs`, committed). ADR
+0022 accepts that limitation indefinitely, so generating it only reported the same accepted
+divergence forever. `findings/lone-surrogate-escape-minimal.js` keeps the case.
+
+`fuzz/` is still not in CI. That is the remaining gap: it is committed, documented and building,
+but nothing runs it unless someone remembers to.

@@ -2741,7 +2741,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
                                  size_t name_len, uint32_t proto, int generator, int asynchronous,
-                                 int async_generator, int arrow, uint32_t local_count,
+                                 int async_generator, int arrow, kiln_value receiver,
+                                 kiln_value new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, const kiln_value *captured,
                                  uint32_t count) {
@@ -2768,10 +2769,11 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->stack_size = stack_size;
     closure->handler_depth = handler_depth;
     closure->arrow = arrow;
+    closure->captured_this = arrow ? receiver : kiln_c99_undefined();
     closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
-    closure->captured_new_target = kiln_c99_new_target;
+    closure->captured_new_target = new_target;
     closure->captured_arguments = kiln_c99_undefined();
     if (arrow) {
         /* Only an arrow, and only at creation: the list belongs to a frame that will be gone
@@ -12200,7 +12202,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -12220,7 +12222,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
