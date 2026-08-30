@@ -317,6 +317,7 @@ pub enum Builtin {
     ClearTimeout,
     ClearInterval,
     QueueMicrotask,
+    Promise,
 }
 
 impl Builtin {
@@ -350,6 +351,7 @@ impl Builtin {
             "clearTimeout" => Some(Self::ClearTimeout),
             "clearInterval" => Some(Self::ClearInterval),
             "queueMicrotask" => Some(Self::QueueMicrotask),
+            "Promise" => Some(Self::Promise),
             _ => None,
         }
     }
@@ -383,6 +385,7 @@ impl Builtin {
             Self::ClearTimeout => "clearTimeout",
             Self::ClearInterval => "clearInterval",
             Self::QueueMicrotask => "queueMicrotask",
+            Self::Promise => "Promise",
         }
     }
 }
