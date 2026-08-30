@@ -51,9 +51,10 @@ filesystem specifiers. It canonicalizes the project root, importer, and target; 
 canonical target to remain inside the canonical project root; requires a regular file and one of
 Kiln's supported source extensions; and preserves structured errors.
 
-The resolver never guesses an extension, an `index` file, or a package entry point. Bare package
-names, URLs, query/fragment specifiers, and package/Node/TypeScript resolution are not silently
-interpreted. Those policies may be added above this boundary with a separate decision.
+The explicit resolver never guesses an extension, an `index` file, or a package entry point. Bare
+package names, URLs, query/fragment specifiers, and package/Node/TypeScript resolution are not
+silently interpreted by that adapter. ADR 0027 introduces a separate resolution-policy interface
+and a bounded Node-package adapter without changing this explicit-filesystem policy.
 
 ### Per-file module IR is a separate memoized query
 

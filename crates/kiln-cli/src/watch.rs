@@ -152,7 +152,8 @@ pub fn run(
                     .flat_map(|event| event.paths.iter())
                     .filter(|event_path| {
                         !target.matches_path(event_path)
-                            && sources::is_discoverable(&project_dir, event_path)
+                            && (sources::is_discoverable(&project_dir, event_path)
+                                || is_synchronized_source(&source_manifest, event_path))
                     })
                     .cloned()
                     .collect::<BTreeSet<_>>();
@@ -308,6 +309,16 @@ pub fn run(
         }
         refresher.drain(notes)?;
     }
+}
+
+/// Package sources are synchronized entry-rooted rather than discovered by the project walk.
+/// Once present in the manifest they are ordinary watched dependencies even though their
+/// `node_modules` parent remains excluded from recursive source discovery.
+fn is_synchronized_source(manifest: &commands::SourceManifest, path: &Path) -> bool {
+    path.canonicalize()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .is_some_and(|path| manifest.contains_key(&path))
 }
 
 /// Where the watch is registered, and what the file is called inside it.
@@ -1424,6 +1435,25 @@ mod tests {
             "watch must name the file the same way `check` does"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_synchronized_package_source_remains_watchable() {
+        let dir = scratch("package-source");
+        let package = dir.join("node_modules/pkg/index.js");
+        std::fs::create_dir_all(package.parent().expect("package parent"))
+            .expect("create package directory");
+        std::fs::write(&package, "export const value = 1;").expect("write package source");
+        let canonical = commands::canonical_path(&package).expect("canonical package source");
+        let mut manifest = commands::SourceManifest::new();
+        manifest.insert(
+            canonical,
+            kiln_proto::source_digest("export const value = 1;"),
+        );
+
+        assert!(!sources::is_discoverable(&dir, &package));
+        assert!(is_synchronized_source(&manifest, &package));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

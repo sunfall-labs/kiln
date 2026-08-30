@@ -443,6 +443,12 @@ impl NodePackageResolver {
                 project_root: self.project_root().to_path_buf(),
             });
         }
+        if !canonical_target.starts_with(package_dir) {
+            return Err(ResolveError::InvalidPackageTarget {
+                package: package.to_owned(),
+                target: target.to_owned(),
+            });
+        }
         if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
             return Err(ResolveError::NotRegularFile {
                 role: PathRole::Target,
@@ -993,6 +999,20 @@ mod tests {
         assert!(matches!(
             resolver.resolve("pkg/missing", &importer),
             Err(ResolveError::PackageSubpathNotExported { .. })
+        ));
+    }
+
+    #[test]
+    fn package_target_cannot_escape_into_another_in_project_directory() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        project.write("node_modules/shared.js", "");
+        write_package(&project, "pkg", r#"{"exports":{".":"./../shared.js"}}"#);
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+
+        assert!(matches!(
+            resolver.resolve("pkg", &importer),
+            Err(ResolveError::InvalidPackageTarget { .. })
         ));
     }
 
