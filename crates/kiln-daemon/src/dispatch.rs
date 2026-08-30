@@ -1150,6 +1150,7 @@ fn native_shared_summary(
 ) -> NativeSharedLibrarySummary {
     NativeSharedLibrarySummary {
         module_symbol: report.module_symbol,
+        module_api_symbol: report.module_api_symbol,
         output_path: report.output.to_string_lossy().into_owned(),
         loader_path: report.loader.to_string_lossy().into_owned(),
         header_path: report.header.to_string_lossy().into_owned(),

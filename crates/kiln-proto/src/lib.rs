@@ -486,7 +486,10 @@ pub struct NativeBuildSummary {
 /// Measurements and cache observability for one embedded shared-library build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSharedLibrarySummary {
+    /// Legacy ABI-v1 entry point exported by the shared library.
     pub module_symbol: String,
+    /// ABI-v2 owned-result descriptor accessor exported by the shared library.
+    pub module_api_symbol: String,
     pub output_path: String,
     /// Canonical library to package; add its parent directory to the host's loader search path.
     pub loader_path: String,

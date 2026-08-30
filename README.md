@@ -31,7 +31,7 @@ What exists today:
 | `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
 | `crates/kiln-native-number` | Versioned, locale-free Ryu/fast_float runtime for ECMAScript-exact native number conversion. |
-| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
+| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime, per-module launcher, and generated embedding headers with borrowed ABI-v1 and explicitly owned ABI-v2 results. |
 | `crates/kiln-digest` | Dependency-free, pinned SHA-256 shared by source coherence and artifact keys. |
 | `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
 | `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
