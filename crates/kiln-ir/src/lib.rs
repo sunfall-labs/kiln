@@ -1234,7 +1234,8 @@ impl Compiler {
         let slot = self.local_count;
         self.local_count += 1;
         let in_module_scope = !self.compiling_function() && scope_index == 0;
-        let celled = self.captured.contains(name) && !in_module_scope;
+        let captured = self.captured.contains(name);
+        let celled = captured && !in_module_scope;
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -1258,10 +1259,10 @@ impl Compiler {
             } else {
                 Instruction::StoreLocal(slot)
             });
-        } else if celled || in_module_scope {
+        } else if celled || (in_module_scope && captured) {
             // Only these can be read before the declaration without the compiler seeing it: a
-            // captured binding through a cell or upvalue, and a module binding through a
-            // function that was called too early. A plain local cannot, so it pays nothing.
+            // captured binding through a cell or upvalue, and a captured module binding through
+            // a function that was called too early. A plain local cannot, so it pays nothing.
             self.code.push(Instruction::MarkUninitialized(slot));
         }
     }
@@ -5253,6 +5254,53 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("before its declaration")),
             "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn an_uncaptured_module_lexical_needs_no_runtime_dead_zone_marker() {
+        let program = compile(&module(vec![statement(StatementKind::Variable {
+            kind: VariableKind::Let,
+            declarations: vec![kiln_hir::VariableDeclarator {
+                pattern: kiln_hir::Pattern::Identifier("value".into()),
+                initializer: Some(number(1.0)),
+                span: Span::default(),
+            }],
+        })]))
+        .expect("compiles");
+
+        assert!(
+            !program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::MarkUninitialized(_)))
+        );
+    }
+
+    #[test]
+    fn a_module_lexical_captured_by_a_nested_function_needs_a_dead_zone_marker() {
+        let program = compile(&module(vec![
+            function(
+                "read",
+                &[],
+                vec![statement(StatementKind::Return(Some(identifier("value"))))],
+            ),
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("value".into()),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+        ]))
+        .expect("compiles");
+
+        assert!(
+            program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::MarkUninitialized(_)))
         );
     }
 

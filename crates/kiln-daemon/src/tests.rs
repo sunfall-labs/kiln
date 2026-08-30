@@ -1072,7 +1072,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     client
         .request(&Request::SetSource {
             path: path.clone(),
-            text: "function main() {}\nmain();\n".into(),
+            text: "export function main() {}\n".into(),
         })
         .expect("set unsupported source");
     let Response::Ran(failed) = client

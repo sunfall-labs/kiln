@@ -378,9 +378,9 @@ mod tests {
         assert_eq!(summary.discovered, 4);
         assert_eq!(summary.selected, 5, "ordinary scripts have two variants");
         assert_eq!(summary.failed, 0);
-        assert_eq!(summary.unsupported, 1);
+        assert_eq!(summary.unsupported, 0);
         assert_eq!(summary.skipped, 2, "ordinary execution needs the harness");
-        assert_eq!(summary.passed, 2);
+        assert_eq!(summary.passed, 3);
     }
 
     fn corpus(relative: &str) -> String {
@@ -458,8 +458,8 @@ mod tests {
     fn one_manifest_serves_each_of_its_groups_and_the_whole_corpus() {
         let whole = run_corpus("conformance");
         assert_eq!(
-            whole.discovered, 32,
-            "pointing at the corpus root picks up both groups"
+            whole.discovered, 39,
+            "pointing at the corpus root picks up all groups"
         );
         assert!(
             whole
