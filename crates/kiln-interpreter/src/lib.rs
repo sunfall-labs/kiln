@@ -1836,6 +1836,9 @@ fn own_property_state(
             Ok(index) => items.borrow().get(index).cloned().map(Property::Value),
             Err(_) => items.properties.borrow().get_own_property(key).cloned(),
         },
+        Value::TypedArray(view) => canonical_index(key)
+            .and_then(|index| view.get(index))
+            .map(Property::Value),
         // A built-in keeps what a program changed in the realm's store and everything else in
         // the tables, so a property it has never touched still reads as the specification built
         // it. `own_attributes` has already decided which of the two is answering.
@@ -12599,7 +12602,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "constructor" => Value::Native(Native::TypedArrayConstructor(view.kind)),
                 // Everything else comes from the same table `%TypedArray%.prototype` answers
                 // from, so an instance and the prototype can never resolve a name differently.
-                other => typed_array_method(other),
+                other => match typed_array_method(other) {
+                    Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                    found => found,
+                },
             },
             Value::ArrayBuffer(buffer) => match name {
                 "byteLength" => Value::Number(buffer.byte_length() as f64),
@@ -12903,7 +12909,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         if let Value::TypedArray(view) = target
-            && let Some(index) = array_index(key)
+            && let Some(index) = typed_array_index(key)
         {
             // Out of range is `undefined`, and never an ordinary property: a typed array's
             // indices are its whole contents.
@@ -14225,7 +14231,8 @@ fn call_native(
             | Value::Function(_)
             | Value::Native(_)
             | Value::Callback(_)
-            | Value::Bound(_) => own_attributes(intrinsics,
+            | Value::Bound(_)
+            | Value::TypedArray(_) => own_attributes(intrinsics,
                 receiver,
                 &arguments
                     .first()
@@ -14426,18 +14433,14 @@ fn call_native(
             _ => true,
         }),
         Native::ObjectHasOwn => Value::Boolean(match arguments.first() {
-            Some(Value::Object(object)) => object
-                .borrow()
-                .get_own_property(
-                    &arguments
-                        .get(1)
-                        .map_or_else(String::new, Value::property_key),
-                )
-                .is_some(),
-            Some(target) => has_property(intrinsics,
+            Some(target) => own_attributes(
+                intrinsics,
                 target,
-                arguments.get(1).unwrap_or(&Value::Undefined),
-            ),
+                &arguments
+                    .get(1)
+                    .map_or_else(String::new, Value::property_key),
+            )
+            .is_some(),
             None => false,
         }),
         Native::ObjectCreate => {
@@ -14569,6 +14572,9 @@ fn call_native(
                     .enumerate()
                     .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
                     .map(|(index, _)| Value::String(index.to_string()))
+                    .collect(),
+                Some(Value::TypedArray(view)) => (0..view.len())
+                    .map(|index| Value::String(index.to_string()))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -16515,6 +16521,11 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
             .get(index)
             .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
     }
+    if let Value::TypedArray(view) = target
+        && let Some(index) = typed_array_index(key)
+    {
+        return index < view.len();
+    }
     let name = key.property_key();
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
     // agree with the read rather than only with the property store.
@@ -17292,6 +17303,11 @@ fn canonical_index(name: &str) -> Option<usize> {
     (index.to_string() == name).then_some(index)
 }
 
+/// A typed array integer index, accepting a numeric key or its canonical decimal spelling.
+fn typed_array_index(key: &Value) -> Option<usize> {
+    array_index(key)
+}
+
 /// `Array.prototype.join` semantics: null and undefined become empty, everything else stringifies.
 /// A hole and `undefined` both render as nothing here, which is what `join` and `String()` do.
 ///
@@ -17363,6 +17379,7 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             }
             true
         }
+        Value::TypedArray(view) => typed_array_index(key).is_none_or(|index| index >= view.len()),
         Value::String(text) => {
             let key = key.property_key();
             let indexed =
@@ -17412,6 +17429,12 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
             .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
             .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
+            .collect(),
+        Value::TypedArray(view) => (0..view.len())
+            .filter_map(|index| {
+                view.get(index)
+                    .map(|value| (index.to_string(), Property::Value(value)))
+            })
             .collect(),
         Value::String(text) => text
             .chars()
@@ -20886,6 +20909,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
+        Value::TypedArray(view) => (0..view.len()).map(|index| index.to_string()).collect(),
         _ => Vec::new(),
     }
 }
@@ -20944,6 +20968,9 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             }
             Err(_) => items.properties.borrow().get_own_attributes(key),
         },
+        Value::TypedArray(view) => canonical_index(key)
+            .filter(|index| *index < view.len())
+            .map(|_| Attributes::DEFAULT),
         // A string's characters are own properties, and immovable ones: nothing can rewrite or
         // delete `"abc"[1]`, which is why they are the one shape here with no writable slot.
         Value::String(text) => string_index_attributes(text, key),
