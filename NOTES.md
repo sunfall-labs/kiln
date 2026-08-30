@@ -1527,3 +1527,33 @@ and refuses when one is nested. The stringify walk is pure and cannot run a `get
 is honest about which half is which rather than pretending either way.
 
 differential 77/0/0, conformance 39/39, Effect 12/12, thirdparty 2/3.
+
+**2026-08-29, Codex — native artifacts now use the Rust number provider.**
+
+The archive proof is now in the product link path rather than beside it. `kiln-native-runtime`
+emits only the private number-provider declarations; executable, graph-executable, scalar shared,
+and graph-shared builds resolve one PIC Rust archive, cache it as a runtime library, include its
+payload digest in the final link key, and pass it to the platform linker as a positional archive.
+Changing the provider therefore relinks the artifact without invalidating generated module C or
+module objects.
+
+Resolution prefers a strict shipped JSON manifest (`KILN_NATIVE_NUMBER_PROVIDER_MANIFEST`, then
+the install locations beside the compiler), validates the schema/ABI/semantic versions, exact
+exports, PIC/static/release policy, target family, archive file name and SHA-256 payload, and rejects
+unknown fields. In a source checkout it falls back to an exact Rust-host-target `cargo rustc`
+staticlib build with `panic=abort` and `relocation-model=pic`; if neither exists it fails with a
+number-provider diagnostic rather than silently switching semantics. This implements the first
+static number slice of proposed ADR 0018, not its unresolved dynamic-development-runtime or target
+shipping matrix.
+
+Shared libraries now apply a final-link export allowlist: Mach-O gets an exported-symbols list and
+ELF gets a version script plus archive exclusion. Only the public module/graph wrapper is visible;
+the private number ABI, `rust_eh_personality`, compiler-builtins, and path-derived graph entries do
+not escape the DSO. Existing two-library `dlopen` coverage now checks the Rust support symbols too.
+
+**Perf note.** The interpreter loop was doing an `Rc::clone` of the running program *per
+instruction* (the borrow has to come off a local, not off `self`); it now compares pointers and
+clones only when the frame's program actually changes. Recompute counters -- the thing
+`ci-perf.sh` gates on -- are unchanged throughout today's work. The wall-clock columns are not
+readable right now: we are both compiling, and an *optimisation* measured 5% slower than the run
+before it. Worth one quiet re-measure before trusting any of those numbers.

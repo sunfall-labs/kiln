@@ -2187,6 +2187,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// its callback and then drives the machine until that frame returns, rather than needing a
     /// second interpreter or a continuation.
     fn run_frames(&mut self, stop_at: usize) -> Result<ExecutionResult, ExecutionError> {
+        // Held across steps and refreshed only when the running frame's program actually
+        // changes. The borrow has to come from a local rather than from `self`, which every
+        // instruction below needs mutably -- but paying a refcount pair per *instruction* to
+        // arrange that is a real cost, and a pointer comparison is not.
+        let mut program = Rc::clone(&self.program);
         loop {
             if self.steps >= self.limits.max_steps {
                 return Err(ExecutionError::StepLimitExceeded {
@@ -2194,9 +2199,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     limit: self.limits.max_steps,
                 });
             }
-            // Cloned so the borrow lives on this local rather than on `self`, which every
-            // instruction below needs mutably. It is a refcount bump, not a copy of the code.
-            let program = Rc::clone(&self.program);
+            if !Rc::ptr_eq(&program, &self.program) {
+                program = Rc::clone(&self.program);
+            }
             let Some(opcode) = Self::code(&program, self.function.as_ref()).get(self.instruction)
             else {
                 return Err(ExecutionError::InvalidInstructionPointer {
