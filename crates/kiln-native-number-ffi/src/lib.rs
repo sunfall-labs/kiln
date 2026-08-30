@@ -1,7 +1,16 @@
-//! Private C ABI adapter for Kiln's allocation-free number semantic core.
+//! Private C ABI adapter for the semantics a generated artifact cannot compute for itself.
 //!
-//! The exported names intentionally match the existing vendored C provider. They are link-time
-//! implementation details of generated artifacts, not additions to the public embedding ABI.
+//! Two of those so far: ECMAScript number conversion, whose shortest spelling no printf
+//! conversion can express, and regular expressions, which are an engine rather than a function
+//! (ADR 0025). Both are here for the same reason -- one implementation, shared with the
+//! interpreter, rather than two that agree until they do not.
+//!
+//! The exported names are link-time implementation details of generated artifacts, not additions
+//! to the public embedding ABI.
+//!
+//! The crate is still called `kiln-native-number-ffi`, which is now half a name. Renaming it moves
+//! a packaging contract -- the manifest field, the archive filename, the environment variable --
+//! and that is `kiln-native`'s to move; see NOTES.md.
 #![no_std]
 #![deny(
     unsafe_op_in_unsafe_fn,
@@ -12,10 +21,65 @@
     clippy::unwrap_used
 )]
 
+#[cfg(feature = "regexp")]
+extern crate alloc;
+
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
 const INVALID_ARGUMENT: i32 = -1;
+
+/// The allocator the regexp engine runs on.
+///
+/// `malloc` and `free`, because the generated artifact this is linked into already has them and a
+/// second allocator would be a second heap in one process. Alignment above `max_align_t` goes
+/// through `posix_memalign`, which is the only part `malloc` cannot promise.
+#[cfg(all(not(test), feature = "regexp"))]
+mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+
+    unsafe extern "C" {
+        fn malloc(size: usize) -> *mut core::ffi::c_void;
+        fn free(pointer: *mut core::ffi::c_void);
+        fn posix_memalign(
+            out: *mut *mut core::ffi::c_void,
+            alignment: usize,
+            size: usize,
+        ) -> core::ffi::c_int;
+    }
+
+    /// What `malloc` already guarantees on every target this compiles for.
+    const MALLOC_ALIGNMENT: usize = 16;
+
+    struct CHeap;
+
+    // SAFETY: every allocation is returned by `malloc` or `posix_memalign` and freed by `free`,
+    // which is the contract both halves of libc's allocator keep.
+    unsafe impl GlobalAlloc for CHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if layout.align() <= MALLOC_ALIGNMENT {
+                // SAFETY: a nonzero size is guaranteed by the `Layout` contract.
+                return unsafe { malloc(layout.size()) }.cast::<u8>();
+            }
+            let mut out = core::ptr::null_mut();
+            // SAFETY: `out` is a valid slot for the returned pointer.
+            let status = unsafe { posix_memalign(&raw mut out, layout.align(), layout.size()) };
+            if status == 0 {
+                out.cast::<u8>()
+            } else {
+                core::ptr::null_mut()
+            }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+            // SAFETY: the pointer came from `alloc` above and is freed exactly once.
+            unsafe { free(pointer.cast::<core::ffi::c_void>()) };
+        }
+    }
+
+    #[global_allocator]
+    static HEAP: CHeap = CHeap;
+}
 
 /// Format `value` using ECMAScript `Number::toString` spelling.
 ///
@@ -85,6 +149,244 @@ pub unsafe extern "C" fn kiln_string_to_number(bytes: *const u8, length: usize) 
     // alignment one, and the explicit bound satisfies `slice::from_raw_parts`' size requirement.
     let input = unsafe { core::slice::from_raw_parts(bytes, length) };
     kiln_number_core::string_to_number(input)
+}
+
+#[cfg(feature = "regexp")]
+mod regexp {
+    use super::INVALID_ARGUMENT;
+
+    /// A compiled pattern, and the last match it produced.
+    ///
+    /// The match is kept because a capture group's *name* is only reachable through one -- `regress`
+    /// clones the names into each match rather than exposing them on the pattern. Keeping it also
+    /// means the C side reads a result with two calls instead of marshalling a variable-length
+    /// structure across the boundary.
+    pub struct KilnRegex {
+        compiled: regress::Regex,
+        last: Option<regress::Match>,
+    }
+
+    /// Compile `pattern` with `flags`.
+    ///
+    /// Returns 0 and writes the handle on success, and -1 for a pattern the engine rejects -- which
+    /// the caller turns into a SyntaxError, because that is what `new RegExp` with the same text
+    /// produces.
+    ///
+    /// # Safety
+    ///
+    /// `pattern` and `flags` must name readable UTF-8 spans of the given lengths, and `out_handle`
+    /// must be a writable slot. The handle belongs to the caller and is released by
+    /// [`kiln_regexp_free`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_compile(
+        pattern: *const u8,
+        pattern_len: usize,
+        flags: *const u8,
+        flags_len: usize,
+        out_handle: *mut *mut KilnRegex,
+    ) -> i32 {
+        if out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees both spans are readable for their lengths; a null
+        // pointer with a zero length is the empty span, which `from_raw_parts` requires be dangling
+        // rather than null.
+        let (pattern, flags) = unsafe { (span(pattern, pattern_len), span(flags, flags_len)) };
+        let (Some(pattern), Some(flags)) = (pattern, flags) else {
+            return INVALID_ARGUMENT;
+        };
+        let (Ok(pattern), Ok(flags)) = (core::str::from_utf8(pattern), core::str::from_utf8(flags))
+        else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(compiled) = regress::Regex::with_flags(pattern, flags) else {
+            return INVALID_ARGUMENT;
+        };
+        let handle = alloc::boxed::Box::new(KilnRegex {
+            compiled,
+            last: None,
+        });
+        // SAFETY: `out_handle` is a writable slot by the caller contract.
+        unsafe { out_handle.write(alloc::boxed::Box::into_raw(handle)) };
+        0
+    }
+
+    /// Release a handle from [`kiln_regexp_compile`].
+    ///
+    /// # Safety
+    ///
+    /// `handle` must have come from [`kiln_regexp_compile`] and must not be used again.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_free(handle: *mut KilnRegex) {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the caller contract guarantees the pointer came from `Box::into_raw` above.
+        drop(unsafe { alloc::boxed::Box::from_raw(handle) });
+    }
+
+    /// Search `subject` from `start`, both counted in UTF-16 code units.
+    ///
+    /// Returns 1 for a match, 0 for none, and -1 for an invalid argument. On a match, up to
+    /// `out_capacity` pairs of `(start, end)` offsets are written to `out_ranges`, one pair per group
+    /// beginning with the whole match; a group that did not participate writes `(-1, -1)`.
+    ///
+    /// The offsets are UTF-16 code units because that is what the language counts in (ADR 0022), and
+    /// matching over UTF-16 is what makes them so without a conversion.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live, `subject` must name a readable span of `subject_len` units, and
+    /// `out_ranges` must be writable for `out_capacity * 2` values.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_search(
+        handle: *mut KilnRegex,
+        subject: *const u16,
+        subject_len: usize,
+        start: usize,
+        out_ranges: *mut i64,
+        out_capacity: usize,
+    ) -> i32 {
+        if handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live and uniquely borrowed here.
+        let state = unsafe { &mut *handle };
+        if start > subject_len {
+            state.last = None;
+            return 0;
+        }
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Some(units) = (unsafe { units(subject, subject_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(found) = state.compiled.find_from_utf16(units, start).next() else {
+            state.last = None;
+            return 0;
+        };
+        let mut written = 0usize;
+        for group in found.groups() {
+            if written >= out_capacity || out_ranges.is_null() {
+                break;
+            }
+            let (from, to) = match group {
+                Some(range) => (as_offset(range.start), as_offset(range.end)),
+                // Not zero: a group that did not participate is `undefined`, which is a different
+                // answer from one that matched nothing.
+                None => (-1, -1),
+            };
+            // SAFETY: `written` is below `out_capacity`, and the caller promised twice that many
+            // writable values.
+            unsafe {
+                out_ranges.add(written.wrapping_mul(2)).write(from);
+                out_ranges
+                    .add(written.wrapping_mul(2).wrapping_add(1))
+                    .write(to);
+            }
+            written = written.wrapping_add(1);
+        }
+        state.last = Some(found);
+        1
+    }
+
+    /// How many groups the last match reported, including the whole match as group zero.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_group_count(handle: *const KilnRegex) -> usize {
+        if handle.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        let state = unsafe { &*handle };
+        state
+            .last
+            .as_ref()
+            .map_or(0, |found| found.groups().count())
+    }
+
+    /// The name of capture group `index` from the last match, as UTF-8 without a terminator.
+    ///
+    /// Returns the byte length written, 0 for a group with no name, and -1 when there is no last match
+    /// or the buffer is too small.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and `buffer` must be writable for `capacity` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_regexp_group_name(
+        handle: *const KilnRegex,
+        index: usize,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> i32 {
+        if handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        let state = unsafe { &*handle };
+        let Some(found) = state.last.as_ref() else {
+            return INVALID_ARGUMENT;
+        };
+        // `named_groups` counts from the first capture group, where the caller counts from the whole
+        // match -- so group zero has no name by construction and the rest are shifted by one.
+        let Some(wanted) = index.checked_sub(1) else {
+            return 0;
+        };
+        let Some((name, _)) = found.named_groups().nth(wanted) else {
+            return 0;
+        };
+        let bytes = name.as_bytes();
+        let Ok(length) = i32::try_from(bytes.len()) else {
+            return INVALID_ARGUMENT;
+        };
+        if bytes.len() > capacity || buffer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the length is within the capacity the caller promised, and `name` is disjoint from
+        // the caller's buffer.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+        length
+    }
+
+    /// A byte span, or `None` when the pointer contract is violated.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `pointer` must be readable for `length` bytes.
+    unsafe fn span<'a>(pointer: *const u8, length: usize) -> Option<&'a [u8]> {
+        if length == 0 {
+            return Some(&[]);
+        }
+        if pointer.is_null() || length > isize::MAX as usize {
+            return None;
+        }
+        // SAFETY: checked above and guaranteed by the caller contract.
+        Some(unsafe { core::slice::from_raw_parts(pointer, length) })
+    }
+
+    /// The same, for the UTF-16 subject.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `pointer` must be readable for `length` units.
+    unsafe fn units<'a>(pointer: *const u16, length: usize) -> Option<&'a [u16]> {
+        if length == 0 {
+            return Some(&[]);
+        }
+        if pointer.is_null() || length > isize::MAX as usize / 2 {
+            return None;
+        }
+        // SAFETY: checked above and guaranteed by the caller contract.
+        Some(unsafe { core::slice::from_raw_parts(pointer, length) })
+    }
+
+    /// An offset that fits the boundary type, saturating rather than wrapping.
+    fn as_offset(value: usize) -> i64 {
+        i64::try_from(value).unwrap_or(i64::MAX)
+    }
 }
 
 // A no-std static library must define a panic personality. All reachable core and adapter paths

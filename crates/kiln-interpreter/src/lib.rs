@@ -170,9 +170,21 @@ pub enum Native {
     JsonStringify,
     /// The `Math` namespace, and the functions reached through it.
     ///
-    /// `Math.random` is deliberately absent: a nondeterministic builtin needs a seeding decision
-    /// this compiler has not made, and an unseeded one would make every artifact hash a lie.
+    /// `Math.random` is here and is *deterministic*: a fixed seed and a fixed generator, the same
+    /// in both engines, for the same reason the clock is virtual. See ADR 0026.
     Math,
+    MathRandom,
+    MathSinh,
+    MathCosh,
+    MathTanh,
+    MathAsinh,
+    MathAcosh,
+    MathAtanh,
+    MathLog1p,
+    MathExpm1,
+    MathFround,
+    MathClz32,
+    MathImul,
     MathAbs,
     MathFloor,
     DateToJson,
@@ -225,6 +237,11 @@ pub enum Native {
     ArrayUnshift,
     ArrayLastIndexOf,
     ArrayFill,
+    ArraySplice,
+    ArrayCopyWithin,
+    /// `toString`, which is `join` with the separator fixed rather than defaulted -- a program can
+    /// pass one to `join` and cannot to `toString`.
+    ArrayJoinDefault,
     SetTimeout,
     SetInterval,
     /// `clearTimeout` and `clearInterval` are one operation: both remove a scheduled callback by
@@ -637,6 +654,18 @@ impl Native {
             (Self::Math, "sign") => Some(Value::Native(Self::MathSign)),
             (Self::Math, "sqrt") => Some(Value::Native(Self::MathSqrt)),
             (Self::Math, "cbrt") => Some(Value::Native(Self::MathCbrt)),
+            (Self::Math, "random") => Some(Value::Native(Self::MathRandom)),
+            (Self::Math, "sinh") => Some(Value::Native(Self::MathSinh)),
+            (Self::Math, "cosh") => Some(Value::Native(Self::MathCosh)),
+            (Self::Math, "tanh") => Some(Value::Native(Self::MathTanh)),
+            (Self::Math, "asinh") => Some(Value::Native(Self::MathAsinh)),
+            (Self::Math, "acosh") => Some(Value::Native(Self::MathAcosh)),
+            (Self::Math, "atanh") => Some(Value::Native(Self::MathAtanh)),
+            (Self::Math, "log1p") => Some(Value::Native(Self::MathLog1p)),
+            (Self::Math, "expm1") => Some(Value::Native(Self::MathExpm1)),
+            (Self::Math, "fround") => Some(Value::Native(Self::MathFround)),
+            (Self::Math, "clz32") => Some(Value::Native(Self::MathClz32)),
+            (Self::Math, "imul") => Some(Value::Native(Self::MathImul)),
             (Self::Math, "pow") => Some(Value::Native(Self::MathPow)),
             (Self::Math, "min") => Some(Value::Native(Self::MathMin)),
             (Self::Math, "max") => Some(Value::Native(Self::MathMax)),
@@ -1813,6 +1842,11 @@ pub enum ExecutionError {
     /// A catchable `SyntaxError` in the specification, and fatal here for the same reason
     /// [`Self::CyclicJson`] is: a native cannot yet raise a value the program can catch.
     InvalidJson,
+    /// A pattern the regexp engine will not take.
+    ///
+    /// Catchable, because a program can build one out of user input -- and the frontend cannot
+    /// refuse it, because `new RegExp(text)` has no text to look at until it runs.
+    InvalidRegExp,
     /// `JSON.stringify` reached a value that contains itself.
     ///
     /// The specification throws a catchable `TypeError` here. A native cannot yet raise a value
@@ -1935,6 +1969,7 @@ impl fmt::Display for ExecutionError {
             }
             Self::EmptyReduce => write!(formatter, "reduce of empty array with no initial value"),
             Self::InvalidJson => write!(formatter, "unexpected token in JSON"),
+            Self::InvalidRegExp => write!(formatter, "invalid regular expression"),
             Self::RevokedProxy => write!(
                 formatter,
                 "cannot perform this operation on a revoked proxy"
@@ -2055,6 +2090,7 @@ impl ExecutionError {
                 ErrorKind::Range,
                 "toString() radix must be between 2 and 36".to_owned(),
             ),
+            Self::InvalidRegExp => (ErrorKind::Syntax, "Invalid regular expression".to_owned()),
             Self::EmptyReduce => (
                 ErrorKind::Type,
                 "Reduce of empty array with no initial value".to_owned(),
@@ -2109,6 +2145,7 @@ pub fn execute<H: HostOps + ?Sized>(
         unhandled: None,
         symbol_registry: Vec::new(),
         next_timer_id: 1.0,
+        random_state: RANDOM_SEED,
         next_sequence: 0,
         limits,
     };
@@ -2255,6 +2292,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         unhandled: None,
         symbol_registry: Vec::new(),
         next_timer_id: 1.0,
+        random_state: RANDOM_SEED,
         next_sequence: 0,
         limits,
     };
@@ -2542,6 +2580,10 @@ struct Vm<'host, H: HostOps + ?Sized> {
     symbol_registry: Vec<(String, Value)>,
     /// Ids handed out to timers, and the tie-break order among those due together.
     next_timer_id: f64,
+    /// The state `Math.random` advances. Seeded from a constant rather than from the environment
+    /// (ADR 0026), so the same program produces the same sequence in both engines and on every
+    /// machine -- the same trade the virtual clock makes.
+    random_state: u64,
     next_sequence: u64,
     steps: u64,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
@@ -3897,6 +3939,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let collected = self.array_from(arguments, instruction)?;
                 Ok(construct_typed_array(kind, &[collected]))
             }
+            // `Math.random` advances state that lives on the machine, so it cannot be a pure
+            // function of its arguments either.
+            Native::MathRandom => Ok(Value::Number(random_double(&mut self.random_state))),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
             Native::SetTimeout | Native::SetInterval => {
@@ -4504,17 +4549,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     },
                     Some(value) => value.to_display_string(),
                 };
-                match build_regexp(&pattern, &flags) {
-                    Some(regexp) => Ok(regexp),
-                    None => {
-                        self.throw_error(
-                            ErrorKind::Syntax,
-                            format!("Invalid regular expression: /{pattern}/{flags}"),
-                            instruction,
-                        )?;
-                        Ok(Value::Undefined)
-                    }
-                }
+                // An error rather than `throw_error` followed by a value: this function returns
+                // one, and throwing *and* returning undefined pushed the undefined on top of the
+                // handler's stack -- so `catch (e)` caught nothing rather than a SyntaxError.
+                build_regexp(&pattern, &flags).ok_or(ExecutionError::InvalidRegExp)
             }
             Native::RegExpTest | Native::RegExpExec => {
                 let Value::RegExp(regexp) = receiver else {
@@ -4573,11 +4611,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let subject: Vec<u16> = text.encode_utf16().collect();
                 let mut parts = Vec::new();
                 let mut copied = 0;
+                if subject.is_empty() {
+                    // An empty subject is the one case with no trailing piece: a separator that
+                    // matches it splits it into nothing, and one that does not leaves it whole.
+                    if regexp_search(regexp, &subject, 0).is_none() {
+                        parts.push(Value::String(String::new()));
+                    }
+                    return Ok(Value::Array(ArrayData::new(parts)));
+                }
                 for (range, groups) in regexp_search_all(regexp, &subject) {
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
                     if range.start == range.end && range.start == copied {
+                        continue;
+                    }
+                    // A match *at* the end is never a separator: the walk stops before the last
+                    // position, and the piece after the final separator is pushed below. Without
+                    // this, `"abc".split(/x*/)` grew a fourth, empty part.
+                    if range.start == subject.len() {
                         continue;
                     }
                     parts.push(Value::String(utf16_slice(&subject, copied..range.start)));
@@ -4819,6 +4871,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Value::Boolean(false));
                     }
                 }
+                CallbackMethod::FlatMap => collected.push(result),
+                // Walked backwards below rather than here, so reaching this is a dispatch bug.
+                CallbackMethod::FindLast | CallbackMethod::FindLastIndex => {
+                    unreachable!("the last-first walks are handled by `array_callback_backwards`")
+                }
+                CallbackMethod::ReduceRight => {
+                    unreachable!("`reduceRight` is handled by `array_reduce`")
+                }
             }
             index += 1;
         }
@@ -4829,8 +4889,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | CallbackMethod::AsyncGeneratorNext => {
                 unreachable!("generator methods are handled by `invoke`")
             }
-            CallbackMethod::Reduce => unreachable!("`reduce` is handled by `array_reduce`"),
+            CallbackMethod::Reduce | CallbackMethod::ReduceRight => {
+                unreachable!("`reduce` is handled by `array_reduce`")
+            }
             CallbackMethod::Sort => unreachable!("`sort` is handled by `array_sort`"),
+            CallbackMethod::FindLast | CallbackMethod::FindLastIndex => {
+                unreachable!("the last-first walks are handled by `array_callback_backwards`")
+            }
+            // One level, and only of what the callback produced -- `flatMap` does not flatten an
+            // array that was already an element.
+            CallbackMethod::FlatMap => Value::Array(ArrayData::new(flatten(&collected, 1))),
             // Not undefined: `findIndex` reports -1 for "nowhere", where `find` reports the
             // absence of a value.
             CallbackMethod::FindIndex => Value::Number(-1.0),
@@ -4846,8 +4914,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// With no initial value the first element seeds the accumulator and the walk starts at the
     /// second, which is why this cannot share `array_callback`'s loop: the starting index depends
     /// on an argument, and the callback takes four parameters rather than three.
-    fn array_reduce(
+    /// `findLast` and `findLastIndex`, which walk from the end.
+    ///
+    /// A separate walk rather than a flag on the forward one: the length is re-read each step so a
+    /// callback that shortens the array stops the walk, and "the step after the last one" is a
+    /// different thing when counting down.
+    fn array_callback_backwards(
         &mut self,
+        method: CallbackMethod,
         receiver: &Value,
         arguments: &[Value],
         instruction: usize,
@@ -4856,30 +4930,96 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(Value::Undefined);
         };
         let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        let mut index = items.borrow().len();
+        while index > 0 {
+            index -= 1;
+            // A hole is visited as undefined here, unlike `find`: the last-first pair were added
+            // to the language after the decision to stop skipping them.
+            let item = items
+                .borrow()
+                .get(index)
+                .cloned()
+                .filter(|item| !Self::is_hole(item))
+                .unwrap_or(Value::Undefined);
+            let result = self.call_value(
+                &callback,
+                this_value.clone(),
+                vec![item.clone(), Value::Number(index as f64), receiver.clone()],
+                instruction,
+            )?;
+            if result.is_truthy() {
+                return Ok(if matches!(method, CallbackMethod::FindLastIndex) {
+                    Value::Number(index as f64)
+                } else {
+                    item
+                });
+            }
+        }
+        Ok(if matches!(method, CallbackMethod::FindLastIndex) {
+            Value::Number(-1.0)
+        } else {
+            Value::Undefined
+        })
+    }
+
+    fn array_reduce(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        backwards: bool,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Array(items) = receiver else {
+            return Ok(Value::Undefined);
+        };
+        let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let length = items.borrow().len();
         let (mut accumulator, mut index) = match arguments.get(1) {
-            Some(initial) => (initial.clone(), 0usize),
+            Some(initial) => (
+                initial.clone(),
+                if backwards { length.wrapping_sub(1) } else { 0 },
+            ),
             None => {
                 // Reducing an empty array with no initial value has no answer to give, which is
                 // a TypeError in the specification and fatal here for want of a way to throw one.
-                // The seed is the first element that is *there*: an array of nothing but
-                // holes has no answer to give, exactly as an empty one does not.
+                // The seed is the first element that is *there* from whichever end the walk
+                // starts: an array of nothing but holes has no answer to give, exactly as an
+                // empty one does not.
                 let borrowed = items.borrow();
-                let Some(at) = borrowed.iter().position(|item| !Self::is_hole(item)) else {
+                let found = if backwards {
+                    borrowed.iter().rposition(|item| !Self::is_hole(item))
+                } else {
+                    borrowed.iter().position(|item| !Self::is_hole(item))
+                };
+                let Some(at) = found else {
                     return Err(ExecutionError::EmptyReduce);
                 };
-                (borrowed[at].clone(), at + 1)
+                (
+                    borrowed[at].clone(),
+                    if backwards {
+                        at.wrapping_sub(1)
+                    } else {
+                        at + 1
+                    },
+                )
             }
         };
         loop {
             // The length is re-read each step, so a callback that shortens the array stops the
             // walk rather than reading past the end -- the same rule `array_callback` follows.
+            // Walking backwards, the step past the start wraps, which `get` reports the same way.
             let Some(item) = items.borrow().get(index).cloned() else {
                 return Ok(accumulator);
             };
             // `reduce` walks elements, and a hole is not one: visiting it would fold undefined
             // into the accumulator and turn every sum over a sparse array into NaN.
             if Self::is_hole(&item) {
-                index += 1;
+                index = if backwards {
+                    index.wrapping_sub(1)
+                } else {
+                    index + 1
+                };
                 continue;
             }
             accumulator = self.call_value(
@@ -4893,7 +5033,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ],
                 instruction,
             )?;
-            index += 1;
+            index = if backwards {
+                index.wrapping_sub(1)
+            } else {
+                index + 1
+            };
         }
     }
 
@@ -6986,6 +7130,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "sticky" => Value::Boolean(regexp.sticky),
                 "ignoreCase" => Value::Boolean(regexp.flags.contains('i')),
                 "multiline" => Value::Boolean(regexp.flags.contains('m')),
+                // Read off the flag string rather than from a field per flag, so a flag nothing
+                // else looks at still reads back correctly.
+                "dotAll" => Value::Boolean(regexp.flags.contains('s')),
+                "unicode" => Value::Boolean(regexp.flags.contains('u')),
+                "unicodeSets" => Value::Boolean(regexp.flags.contains('v')),
+                "hasIndices" => Value::Boolean(regexp.flags.contains('d')),
                 "lastIndex" => Value::Number(regexp.last_index.get() as f64),
                 _ => Value::Undefined,
             },
@@ -7119,9 +7269,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `reduce` threads an accumulator and `sort` compares pairs, so neither is the walk
             // the other callback methods share. All three coerce their receiver first, for the
             // same reason the native array methods do.
-            Value::Callback(CallbackMethod::Reduce) => {
+            Value::Callback(CallbackMethod::Reduce | CallbackMethod::ReduceRight) => {
+                let backwards = matches!(method, Value::Callback(CallbackMethod::ReduceRight));
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
-                self.array_reduce(&receiver, &arguments, instruction)
+                self.array_reduce(&receiver, &arguments, backwards, instruction)
+                    .map(Some)
+            }
+            Value::Callback(
+                callback @ (CallbackMethod::FindLast | CallbackMethod::FindLastIndex),
+            ) => {
+                let receiver = self.as_array_like(&method, receiver, instruction)?;
+                self.array_callback_backwards(callback, &receiver, &arguments, instruction)
                     .map(Some)
             }
             Value::Callback(CallbackMethod::Sort) => {
@@ -7643,6 +7801,28 @@ fn unary(operator: UnaryOp, value: Value) -> Value {
 ///
 /// This is why `1 << 31` is negative and why `2 ** 32 | 0` is zero. Not a cast: the value wraps
 /// modulo 2^32 rather than saturating, and anything not finite becomes zero.
+/// The seed `Math.random` starts from, and the constants that advance it.
+///
+/// SplitMix64: a full-period generator with good statistical properties in five lines, which is
+/// what a language builtin needs. The seed is a constant so a run is reproducible; see ADR 0026
+/// for why that is a decision rather than a shortcut.
+const RANDOM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+fn split_mix_64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut mixed = *state;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^ (mixed >> 31)
+}
+
+/// A double in `[0, 1)` from 53 random bits, which is every bit the mantissa has.
+fn random_double(state: &mut u64) -> f64 {
+    #[expect(clippy::cast_precision_loss)]
+    let bits = (split_mix_64(state) >> 11) as f64;
+    bits / 9_007_199_254_740_992.0
+}
+
 fn to_int32(value: f64) -> i32 {
     to_uint32(value) as i32
 }
@@ -8709,6 +8889,8 @@ fn call_native(
         | Native::ClearTimeout
         | Native::ClearInterval
         | Native::QueueMicrotask
+        // ...and `Math.random` advances state that lives on the machine.
+        | Native::MathRandom
         // Every promise operation settles something, schedules something, or calls back into the
         // program -- so none of them is a pure function of its arguments.
         | Native::PromiseConstructor
@@ -8971,6 +9153,64 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
+        Native::ArrayJoinDefault => match receiver {
+            Value::Array(items) => Value::String(join(&items.borrow(), ",")),
+            _ => Value::String(String::new()),
+        },
+        Native::ArraySplice => match receiver {
+            Value::Array(items) => {
+                let length = items.borrow().len();
+                let start = relative_index(arguments.first(), length, 0);
+                // A missing count removes everything from `start`, where an explicit `undefined`
+                // removes nothing: `splice(1)` and `splice(1, undefined)` are different calls.
+                let removing = match arguments.get(1) {
+                    None => length - start,
+                    Some(value) => {
+                        let wanted = value.as_number();
+                        if wanted.is_nan() || wanted < 0.0 {
+                            0
+                        } else {
+                            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let wanted = wanted as usize;
+                            wanted.min(length - start)
+                        }
+                    }
+                };
+                let inserted: Vec<Value> = arguments.get(2..).unwrap_or_default().to_vec();
+                let removed: Vec<Value> = items
+                    .borrow_mut()
+                    .splice(start..start + removing, inserted)
+                    .collect();
+                // The removed elements, which is what makes `splice` usable as a queue read.
+                Value::Array(ArrayData::new(removed))
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayCopyWithin => match receiver {
+            Value::Array(items) => {
+                let length = items.borrow().len();
+                let target = relative_index(arguments.first(), length, 0);
+                let start = relative_index(arguments.get(1), length, 0);
+                let end = relative_index(arguments.get(2), length, length);
+                // Copied out first, because the source and the destination overlap by design --
+                // that overlap is the whole reason the method exists.
+                let taken: Vec<Value> = items
+                    .borrow()
+                    .iter()
+                    .take(end)
+                    .skip(start)
+                    .take(length - target)
+                    .cloned()
+                    .collect();
+                for (offset, value) in taken.into_iter().enumerate() {
+                    if let Some(slot) = items.borrow_mut().get_mut(target + offset) {
+                        *slot = value;
+                    }
+                }
+                receiver.clone()
+            }
+            _ => Value::Undefined,
+        },
         Native::ArrayFill => match receiver {
             Value::Array(items) => {
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -9029,6 +9269,26 @@ fn call_native(
         }
         Native::MathSqrt => Value::Number(argument_number(arguments).sqrt()),
         Native::MathCbrt => Value::Number(argument_number(arguments).cbrt()),
+        Native::MathSinh => Value::Number(argument_number(arguments).sinh()),
+        Native::MathCosh => Value::Number(argument_number(arguments).cosh()),
+        Native::MathTanh => Value::Number(argument_number(arguments).tanh()),
+        Native::MathAsinh => Value::Number(argument_number(arguments).asinh()),
+        Native::MathAcosh => Value::Number(argument_number(arguments).acosh()),
+        Native::MathAtanh => Value::Number(argument_number(arguments).atanh()),
+        // `ln(1 + x)` and `e^x - 1` as one operation each, which is the whole point of both: the
+        // two-step spelling loses every significant digit for small `x`.
+        Native::MathLog1p => Value::Number(argument_number(arguments).ln_1p()),
+        Native::MathExpm1 => Value::Number(argument_number(arguments).exp_m1()),
+        // The nearest `f32`, widened back. A round trip, not a truncation.
+        #[expect(clippy::cast_possible_truncation)]
+        Native::MathFround => Value::Number(f64::from(argument_number(arguments) as f32)),
+        Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
+        // Both operands are truncated to 32-bit *first*, which is what makes this different from
+        // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
+        Native::MathImul => Value::Number(f64::from(
+            to_int32(argument_number(arguments))
+                .wrapping_mul(to_int32(arguments.get(1).map_or(f64::NAN, Value::as_number))),
+        )),
         // `hypot` is not `sqrt(x*x + y*y)`: squaring overflows for arguments whose result is
         // perfectly representable, which is the whole reason it exists.
         Native::MathHypot => Value::Number(arguments.iter().fold(0.0f64, |total, argument| {
@@ -9442,13 +9702,27 @@ fn call_native(
                     if index < 0.0 || index >= units.len() as f64 {
                         Value::Undefined
                     } else {
-                        // A surrogate pair reads as the whole code point, which is the entire
-                        // difference from `charCodeAt`.
-                        let rest = String::from_utf16_lossy(&units[index as usize..]);
-                        match rest.chars().next() {
-                            Some(character) => Value::Number(f64::from(character as u32)),
-                            None => Value::Undefined,
-                        }
+                        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let at = index as usize;
+                        let lead = units.get(at).copied().unwrap_or(0);
+                        // A surrogate *pair* reads as the whole code point, which is the entire
+                        // difference from `charCodeAt`. A lone surrogate reads as itself: the
+                        // answer is a number, so there is no string here to be unable to hold one
+                        // (ADR 0022). Decoding through a `String` answered U+FFFD instead, which
+                        // is what the trailing half of an emoji became.
+                        let paired = if (0xD800..=0xDBFF).contains(&lead) {
+                            units
+                                .get(at + 1)
+                                .filter(|low| (0xDC00..=0xDFFF).contains(*low))
+                                .map(|low| {
+                                    0x10000
+                                        + ((u32::from(lead) - 0xD800) << 10)
+                                        + (u32::from(*low) - 0xDC00)
+                                })
+                        } else {
+                            None
+                        };
+                        Value::Number(f64::from(paired.unwrap_or_else(|| u32::from(lead))))
                     }
                 }
                 Native::StringLocaleCompare => {
@@ -10130,6 +10404,10 @@ fn array_callback_method(name: &str) -> Option<CallbackMethod> {
         "find" => Some(CallbackMethod::Find),
         "some" => Some(CallbackMethod::Some),
         "every" => Some(CallbackMethod::Every),
+        "flatMap" => Some(CallbackMethod::FlatMap),
+        "findLast" => Some(CallbackMethod::FindLast),
+        "findLastIndex" => Some(CallbackMethod::FindLastIndex),
+        "reduceRight" => Some(CallbackMethod::ReduceRight),
         _ => None,
     }
 }
@@ -10159,6 +10437,15 @@ pub enum CallbackMethod {
     Find,
     Some,
     Every,
+    /// `flatMap`: the forward walk, and then one level of flattening -- which is the whole of what
+    /// it adds over `map`.
+    FlatMap,
+    /// The two that walk from the end. They visit a hole as undefined where `find` skips it: the
+    /// language added them after it stopped skipping.
+    FindLast,
+    FindLastIndex,
+    /// `reduceRight`: `reduce` from the other end, seeded with the last element that is there.
+    ReduceRight,
 }
 
 /// The methods a number primitive exposes.
@@ -10195,6 +10482,10 @@ fn array_property(name: &str) -> Value {
         "unshift" => Value::Native(Native::ArrayUnshift),
         "lastIndexOf" => Value::Native(Native::ArrayLastIndexOf),
         "fill" => Value::Native(Native::ArrayFill),
+        "splice" => Value::Native(Native::ArraySplice),
+        "copyWithin" => Value::Native(Native::ArrayCopyWithin),
+        // `Array.prototype.toString` is `join(",")`, which is why `String([1, 2])` is `"1,2"`.
+        "toString" => Value::Native(Native::ArrayJoinDefault),
         "values" => Value::Native(Native::ArrayValues),
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,

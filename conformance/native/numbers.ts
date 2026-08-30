@@ -39,3 +39,21 @@ console.log(Math, JSON, typeof Math, typeof JSON, String(Math), `${JSON}`);
 // `String(f)` of a runtime-supplied function is node's source text, which no backend has. Both
 // kiln engines name the function instead, so this checks it is named rather than what it says.
 console.log(`${parseInt}`.length > 0, String(Boolean).length > 0, typeof Boolean, typeof parseInt);
+
+// `Math`'s second half, and the twelve functions neither engine had. Two of them exist precisely
+// because the two-step spelling is wrong: `log1p` and `expm1` keep the significant digits that
+// `log(1 + x)` and `exp(x) - 1` lose for small `x`.
+console.log(Math.sinh(0), Math.cosh(0), Math.tanh(0), Math.asinh(0), Math.acosh(1), Math.atanh(0));
+console.log(Math.log1p(0), Math.expm1(0), Math.log1p(1e-10), Math.expm1(1e-10));
+console.log(Math.sinh(1).toFixed(6), Math.tanh(1).toFixed(6), Math.acosh(2).toFixed(6));
+// `fround` is a round trip through `float`, not a truncation; `imul` truncates *first*, which is
+// what makes it different from multiplying.
+console.log(Math.fround(1.1), Math.fround(5.5), Math.clz32(1), Math.clz32(0), Math.clz32(-1));
+console.log(Math.imul(3, 4), Math.imul(-5, 12), Math.imul(0xffffffff, 5), Math.imul(1e9, 1e9));
+
+// `Math.random` is seeded and reproducible (ADR 0026), which is why the *values* can be checked
+// here rather than only their range: both engines run the same generator from the same seed, so a
+// disagreement is a bug rather than the weather. Node is not asked -- it could not agree.
+const drawn: number[] = [];
+for (let index = 0; index < 5; index += 1) { drawn.push(Math.random()); }
+console.log(drawn.every((value) => value >= 0 && value < 1), new Set(drawn).size, typeof Math.random());

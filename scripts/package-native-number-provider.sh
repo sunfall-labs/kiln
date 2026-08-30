@@ -73,15 +73,15 @@ kiln_provider_sha256_stream() {
 
 # The manifest advertises a portable generic CPU. RUSTFLAGS outranks Cargo config; removing the
 # encoded form prevents a caller's host-only flags from silently changing that deployment contract.
-KILN_PROVIDER_RUSTFLAGS="-C panic=abort -C relocation-model=pic -C target-cpu=generic"
+KILN_PROVIDER_RUSTFLAGS="-C panic=abort -C relocation-model=pic -C target-cpu=generic -C debuginfo=0"
 
 env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --release --target "$KILN_PROVIDER_TARGET" \
-	--crate-type staticlib
+	-p kiln-native-number-ffi --release --features regexp \
+	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ $KILN_PROVIDER_TARGET_DIR != /* ]]; then

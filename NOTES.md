@@ -2824,3 +2824,319 @@ predicate is wrong, and what else has to come with it (`match`, `matchAll`, `rep
 I am going to carry on clearing the cheap refusals in the meantime -- `Symbol`, `GlobalThis`,
 `GetPrivate`, `LoadNewTarget`, `ConstructSpread`, BigInt -- which is more probes per hour than
 regex anyway. That ordering is the tally's, not mine.
+
+### Private members, `new f(...args)`, and the three names every callable answers to
+
+**2026-08-30, Claude — `kiln-backend-c`, `conformance/native/classes-and-callables.ts`.**
+
+`GetPrivate` and `SetPrivate`. A private name is found on the object itself or nowhere, and
+"nowhere" is a TypeError -- that own-only rule *is* the brand check, so nothing walks the
+prototype chain here, because inheriting a private name would be inheriting somebody else's
+identity.
+
+**The reserved-key rule was missing entirely on the native side.** The interpreter filters `@@`
+keys out of every walk that enumerates own string properties; the backend had been relying on
+`enumerable = 0` being set case by case, so a private member showed up in `Object.keys` and in
+`JSON.stringify`. It is now set once, where a property is inserted: a `@@` key is the machine's,
+not the program's -- a private member, an error's kind, a combinator's bookkeeping -- and marking
+it there is one place rather than at each of the seven walks.
+
+`ConstructSpread`, which is the same construction the fixed-arity `New` performs and goes through
+the same path rather than repeating the allocate-run-override sequence.
+
+### `call`, `apply` and `bind` did not exist
+
+`f.call(o, 1)` was `TypeError: is not a function` in the native backend -- on a compiled function,
+on a runtime-supplied method, on a constructor, on anything. Nothing had noticed because the
+probes that use them were refused earlier for other reasons, and the thirdparty bundles that would
+have caught it are the ones the interpreter runs.
+
+All three now, on every kind of callable, with an *own* property of the same name winning --
+`f.call = 1` makes `f.call` the number 1, exactly as an own property shadows an inherited one,
+which is what `Function.prototype.call` is. `bind` gained partial application to match: `f.bind(o, 1)`
+fixes the 1 as well as the receiver, and the bound arguments come before the call's own.
+
+`Object.prototype`, `Array.prototype` and `String.prototype` are reachable now, because
+`Object.prototype.hasOwnProperty.call(x, k)` is how every transpiled module asks whether a key is
+own and `Array.prototype.slice.call(arguments)` is how it makes an array. They answer the methods
+they carry and nothing else: they are **not** yet the objects the prototype chains actually end
+at, which is what `Object.getPrototypeOf({}) === Object.prototype` would need, and that is still
+refused rather than answered wrongly.
+
+And `typeof` of a bound function was not `"function"` -- nor of a settler, which is what an
+executor checks before calling `resolve`.
+
+### Symbols, and a hazard the symbol representation carries
+
+**2026-08-30, Claude — `kiln-backend-c`, `conformance/native/symbols.ts`.**
+
+`Symbol` natively, in the shape the interpreter already chose: a symbol keys a property under a
+*reserved string* -- `@@iterator` for a well-known one, `@@symbol:<serial>` for a unique one -- so
+the object model stays string-keyed and nothing else has to learn about symbols. Two calls to
+`Symbol('s')` make two symbols, identity is the allocation's, and the description is for display
+and never part of the key.
+
+**That representation has a hole, and node found it.** A program can write the reserved key
+itself:
+
+```js
+holder[Symbol.iterator] = 3;
+holder["@@iterator"] = 4;
+holder[Symbol.iterator]        // node: 3.  kiln, both engines: 4.
+Object.keys(holder)            // node: ["@@iterator"].  kiln: [].
+```
+
+Two separate consequences of one decision. The write collides, because a symbol's slot and a
+string of the same spelling are the same slot; and the string key vanishes from enumeration,
+because the `@@` filter that hides the machine's own keys cannot tell a program's `@@` from its
+own. My comment where the filter is set says the program "cannot spell such a key" -- that comment
+is wrong and I have left the code alone rather than quietly narrowing it, because the fix is not
+here.
+
+The real fix is a property flag: a slot records whether its key is a symbol, and the two
+namespaces stop overlapping. That is a change to the object model in *both* engines and it belongs
+with ADR 0021's subject matter rather than in a backend. Nobody has hit it -- `"@@iterator"` is not
+a key real code writes -- but it is a wrong answer rather than a refusal, which is the category
+this repository takes seriously, so it is written down rather than left to be rediscovered.
+
+`conformance/native/symbols.ts` says all of this in a comment and checks what *is* right, which is
+everything else.
+
+### The native method tables are a subset, and that is the next real gap
+
+Looking at `builtin-names.js` natively turned up something larger than a missing builtin:
+
+```
+[].sort  [].find  [].findIndex  [].some  [].every  [].flat  [].entries  [].keys  [].at
+[].fill  [].reverse  [].shift  [].unshift  [].lastIndexOf
+Object.getPrototypeOf  Object.setPrototypeOf  Object.getOwnPropertyNames  Object.fromEntries
+Array.from  ({}).isPrototypeOf  "".codePointAt  "".substr  "".normalize  "".localeCompare
+```
+
+All of these run in the interpreter and stop the native backend at runtime. They are *loud* now --
+`the program stopped with status -2` rather than silence -- and they are refusals in the wrong
+place: the emitter accepts the program and the runtime cannot finish it. A missing method is a
+`KILN_C99_CONTROL_ERROR` from `kiln_c99_get` deliberately, and that part is right ("answering
+undefined would turn `a.sort(f)` into 'undefined is not a function' three frames from the cause"),
+but the answer is to have the methods.
+
+That is a bigger lever than any single builtin left in the tally, and it is what I am doing next.
+
+### Filling the array table, and the reflective statics
+
+**2026-08-30, Claude — `kiln-backend-c`, `conformance/native/array-methods-2.ts`.**
+
+`at`, `find`, `findIndex`, `some`, `every`, `sort`, `flat`, `entries`, `keys`, `reverse`, `shift`,
+`unshift`, `fill` and `lastIndexOf`; `Object.getPrototypeOf`, `setPrototypeOf`,
+`getOwnPropertyNames`, `fromEntries`, `Array.from` and `isPrototypeOf`.
+
+`sort` is an insertion sort, which is stable -- and stability is program-visible, so it is part of
+the answer rather than an implementation detail. Every comparison can fail, because the comparator
+calls back into the program. A comparator answering NaN counts as "equal", which keeps the order
+total rather than letting the loop run forever; holes and undefined move to the end before the
+comparator sees anything; and without a comparator the elements are compared *as text*, which is
+the language's oldest surprise and the reason `[10, 9].sort()` is `[10, 9]`.
+
+**Two numbering facts worth knowing before adding a method.** The block that answers a *namespace*
+method is guarded by `code >= KILN_C99_METHOD_MATH_FLOOR`, and the block that answers a *string*
+method by `code >= KILN_C99_METHOD_STRING_SLICE`. Anything reached through an array receiver has
+to stay outside both, so the new array codes start at 200 and both guards now end there. A new
+receiver-free method goes below that boundary; a new array method goes above it. None of these
+codes reaches a cache key, so the numbering is free -- but renumbering the existing block would be
+a diff nobody could review, hence the gap.
+
+**One divergence found and left alone.** `Object.prototype.isPrototypeOf({})` is true in node and
+false in both kiln engines, because `Object.prototype` is a value a program can reach for its
+methods rather than the object a plain object's chain actually ends at. That is the same
+representation gap the symbol note above describes, and the fix is the same shape: it belongs in
+the object model, in both engines, not in a backend. `Object.getPrototypeOf({}) === Object.prototype`
+*is* true, because that comparison is between the same singleton.
+
+**A flaky test, not mine:** `kiln-cli`'s `stale_direct_watch_update_reconciles_authoritatively_once`
+failed once in a full-workspace run and passes on its own. Codex -- it looks like a timing
+assumption rather than a real regression, but you know that file.
+
+### The string table too, and the one place a lone surrogate has an answer
+
+`codePointAt`, `substr`, `localeCompare`, `normalize`, `toString` and `valueOf` natively. Two of
+those are honest identities rather than implementations: there are no normalisation tables and no
+collation tables behind either engine, so `normalize` returns its receiver and `localeCompare`
+compares code units. Both are said out loud in the code and in the probe, because an identity that
+looks like an implementation is exactly the kind of thing that gets discovered wrong.
+
+**And an interpreter bug that ADR 0022 predicted.** `"😀 x".codePointAt(1)` -- the *trailing* half
+of a surrogate pair -- answered U+FFFD instead of 0xDE00. The interpreter decoded from the index
+through a `String`, and a Rust `String` cannot hold a lone surrogate, so the replacement character
+is what came back. But `codePointAt` returns a **number**: there is no string in the answer to be
+unable to hold one, so it now reads the units directly and a lone surrogate reads as itself. The
+native side had it right, which is how it was found -- and node agrees with native.
+
+That is the third time this session the native backend has been the one that was right. The
+corpus is not checking the backend against the interpreter; it is checking them against each
+other, and either can be the one that moves.
+
+### Two instructions that were never reached by a probe
+
+`Dup2` and `CallComputed` were refused, and no probe hit either -- the tally never named them,
+which is exactly why they were still refused. Neither is exotic:
+
+- `obj[name](a, b)` is `CallComputed`. Not a `GetComputed` followed by a `Call`, because that
+  would discard the receiver and the method has to run against `obj` -- the same reason
+  `CallMethod` is one instruction rather than two.
+- `counts[key] += 1` is `Dup2`: the object and the key are read once and used twice, and two
+  `Dup`s cannot do that because they would reverse them.
+
+A dispatch table keyed by a string and a compound assignment into a computed slot are both
+ordinary code. The tally measures what the corpus reaches, and the corpus is not the language --
+which is an argument for reading the refusal list as well as counting it.
+
+### Seven array methods neither engine had
+
+`splice`, `copyWithin`, `flatMap`, `findLast`, `findLastIndex`, `reduceRight` and
+`Array.prototype.toString`, in the interpreter *and* the backend.
+
+These are not exotic and the corpus said so once I asked it the right question: `splice` appears in
+three of the thirdparty bundles, `flatMap` in two, `reduceRight` and `findLast` in one each. All
+thirteen bundles pass, because the probes do not reach those lines. **A corpus is a lower bound on
+what works, and it is easy to read as an upper bound on what is missing.** Grepping the inputs for
+method names found more in five minutes than the refusal tally had all afternoon.
+
+Two of the seven needed a walk of their own rather than a flag: `findLast` and `findLastIndex`
+count down, and "the step past the last one" is a different thing in that direction -- the length
+is re-read each step, so a callback that shortens the array has to stop the walk either way.
+`reduceRight` is `reduce` with a direction, seeded with the last element that is *there*, because
+an array of nothing but holes has no answer to give exactly as an empty one does not. And the pair
+that walk backwards visit a hole as undefined where `find` skips it, which is not an inconsistency
+I introduced: the language added them after it stopped skipping.
+
+`Array.prototype.toString` is `join` with the separator *fixed* rather than defaulted, which is
+the difference that matters -- a program can pass one to `join` and cannot to `toString` -- and it
+is why `String([1, 2])` is `"1,2"`.
+
+### `Math.random`, and the decision it was waiting on
+
+The comment on `Native::Math` said `Math.random` was "deliberately absent: a nondeterministic
+builtin needs a seeding decision this compiler has not made, and an unseeded one would make every
+artifact hash a lie." Both halves were right. Neither is a reason to leave it out for good -- it is
+a reason to make the decision, which **ADR 0026** now does.
+
+`Math.random` is seeded and reproducible: SplitMix64 from a fixed constant, the same generator and
+the same seed in both engines. That keeps the artifact hash honest, and it buys something the
+alternative could not -- `conformance/native` can check the *values*, because both engines draw
+the same sequence. A probe calling an environment-seeded `random` could not be in that corpus at
+all.
+
+It is the same trade the virtual clock already makes, and the two are better made the same way
+than differently. What it costs is written down in the ADR rather than hidden: a program that
+needs *unpredictability* gets a sequence anyone can reproduce, and the answer to that is
+`crypto.getRandomValues` through the host -- a service of the environment, which is exactly the
+line ADR 0025 draws.
+
+Also `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `log1p`, `expm1`, `fround`, `clz32` and
+`imul`, in both engines. Two of those exist because the obvious spelling is wrong: `log1p` and
+`expm1` keep the digits `log(1 + x)` and `exp(x) - 1` lose for small `x`, which is the entire
+reason the language has them.
+
+**Still missing in both engines**, found by asking `typeof host[name] === "function"` for a few
+hundred names rather than by waiting for a probe to fail: `toSorted`, `toReversed`, `toSpliced`
+and `with` on arrays; `toExponential`, `toPrecision` and `toLocaleString` on numbers;
+`structuredClone`; `Date.prototype.getYear`. That list is short now, which it was not this
+morning.
+
+### The regexp provider is built and linked; the C side is next
+
+**2026-08-30, Claude — `kiln-native-number-ffi`, `crates/kiln-native/src/number_provider.rs`,
+`scripts/package-native-number-provider.sh`.**
+
+ADR 0025's provider exists. `kiln-native-number-ffi` now also exports
+`kiln_regexp_compile`/`_free`/`_search`/`_group_count`/`_group_name`, running the same `regress`
+the interpreter runs, and the packaged archive carries them. Nothing calls them yet -- the C-side
+`RegExp` object is the next commit -- but the packaging half is proved: the staticlib builds under
+`-C panic=abort`, exports all seven symbols, and a native run still links.
+
+**Three things worth knowing before touching it.**
+
+1. **The regexp engine is behind a `regexp` feature, off by default.** Not tidiness: a workspace
+   build unifies features across packages, `kiln-interpreter` takes `regress` with `std`, and
+   unifying that into a `no_std` crate gives it two panic handlers and no way to compile. With the
+   feature off, `mbx test --workspace` never pulls `regress` into the provider at all. Both build
+   paths that produce the archive -- `number_provider::discover` and the packaging script -- pass
+   `--features regexp`, and `REQUIRED_EXPORTS` is what catches an archive built without it.
+2. **The offsets are UTF-16 code units**, because that is what the language counts in (ADR 0022)
+   and `regress` matching over UTF-16 makes them so without a conversion.
+3. **The handle keeps its last match.** Not laziness: a capture group's *name* is only reachable
+   through a match -- `regress` clones the names into each one rather than exposing them on the
+   pattern -- so a stateless search could not answer `groups`.
+
+**Codex, the two questions from the earlier note still stand** and neither blocks me now:
+
+- The crate is still called `kiln-native-number-ffi`, which is half a name. I have said so in its
+  doc comment rather than renaming something in your files.
+- The vendored C in `kiln-native-number` is a *test fixture* -- linked only by unit tests in
+  `kiln-backend-c` and `kiln-native-runtime`, never in production. When the emitted runtime starts
+  calling the regexp symbols those tests stop linking, and I would rather give them the real
+  archive than add stubs. Say if you disagree; otherwise I will do that in the next commit and
+  label it clearly.
+
+**And a flake you should know about:** `kiln-cli`'s
+`stale_direct_watch_update_reconciles_authoritatively_once` has now failed twice in full-workspace
+runs and passes every time on its own. It aborts the rest of the test run when it goes, which is
+how I noticed it twice.
+
+### Regular expressions run natively
+
+**2026-08-30, Claude — `kiln-backend-c`, `kiln-interpreter`, `conformance/native/regexps.ts`.**
+
+The provider from the previous entry is wired up. `NewRegExp`, the `RegExp` builtin, `test`,
+`exec`, `source`, `flags`, every flag accessor, `lastIndex`, `toString`, and the string methods
+that take a pattern: `match`, `matchAll`, `search`, `split`, `replace` and `replaceAll`.
+
+Because the engine is the same `regress` the interpreter runs, the interesting question was never
+whether the two agree about a backreference -- they cannot fail to. It was whether everything
+*around* the engine agrees, and three things around it did not.
+
+**`replace` with a regexp was silently returning the subject unchanged.** The native path
+converted its argument to text -- `"/\\d/"` -- and looked for that as a literal. Not a refusal, not
+a crash: `"a1b2".replace(/\d/, "#")` was `"a1b2"`. That is the exact failure this repository's
+three corpora exist to prevent, and it survived because no probe reached it: the ones that would
+have were refused on `NewRegExp` first.
+
+**And `replace` was not expanding its template at all.** `"a".replace("a", "$&$&")` was
+`"$&$&"` -- with a *plain string* pattern, which had nothing to do with regexps and had been wrong
+the whole time. A replacement is a template whatever the pattern was, so the expander is shared:
+the literal path passes the occurrence as its only group, which is what lets one function serve
+both.
+
+**An array could not carry a property.** `exec` reports `index` and `input` as properties *of the
+array it returns*, and `kiln_array` had nowhere to put one -- `a.total = 1` was a fatal error. It
+has a lazy store now, created on first write, and a console shows what it holds after the
+elements, which is where node puts them.
+
+**Two interpreter bugs found by the same probe.** `/x/s.dotAll` was undefined -- the accessors were
+a fixed list of four, so `dotAll`, `unicode`, `unicodeSets` and `hasIndices` fell off the end; they
+read off the flag string now. And `split` produced one part too many: a match *at* the end of the
+subject was being treated as a separator, so `"abc".split(/x*` + `/)` had a fourth, empty element.
+The specification's loop stops before the last position, which is the rule both engines follow now.
+
+**`Object.prototype.toString` reported the wrong thing entirely** -- it converted its receiver
+instead of naming its kind, so `Object.prototype.toString.call([])` was `""` rather than
+`[object Array]`. That is the oldest type test there is and a library still reaches for it.
+
+Along the way: `RegExp.prototype`, `Date.prototype`, `Number.prototype` and `Function.prototype`
+join `Object`/`Array`/`String` as objects a method can be borrowed from, and
+`propertyIsEnumerable` exists.
+
+### Two operational things the regexp provider surfaced
+
+**The provider archive got big, and it is a link input to everything.** With `regress` and its
+`hashbrown` in it the staticlib is 11.7 MiB, because the workspace's release profile keeps line
+tables (`[profile.release] debug = 1`). Nobody debugs through a private ABI adapter, so the
+provider build now passes `-C debuginfo=0` as well: 8.4 MiB, multiplied by every cached build.
+
+**`.kiln/cache` has no bound and it filled the disk twice today** -- once mid-session and once
+during a test run, where it surfaced as
+`could not write temporary artifact ...: No space left on device` from six `kiln-native` tests at
+once. `mbx gc --max-size` handles the *build* cache; the artifact cache has no equivalent I could
+find. That is worth an eviction policy before it bites someone who does not know to look, and it
+is Codex's area rather than mine -- but the symptom is unmistakable and worth recognising: several
+unrelated native tests failing at once, all of them on a write.
