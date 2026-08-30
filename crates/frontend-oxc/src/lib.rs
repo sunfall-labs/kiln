@@ -145,12 +145,7 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         .collect::<Vec<_>>();
     diagnostics.extend(early_errors(&parsed));
     let mut lowerer = Lowerer;
-    let body = parsed
-        .program
-        .body
-        .iter()
-        .filter_map(|statement| lowerer.statement(statement))
-        .collect();
+    let body = lowerer.statements(&parsed.program.body);
 
     Module {
         source_kind: source_kind(source_type),
@@ -245,6 +240,26 @@ fn bigint_digits(raw: &str) -> Option<String> {
 struct Lowerer;
 
 impl Lowerer {
+    /// Lower a list of statements into one vector, sized for the source list up front.
+    ///
+    /// Nothing here needs the capacity to be exact -- `statement` erases a type-only declaration
+    /// and returns `None`, so the result can be shorter -- but it does need the vector to be
+    /// allocated *once*. Grown by pushes instead, a list of n statements reallocates log n times
+    /// and leaves a freed block of every intermediate size behind it, and an allocator that
+    /// keeps those blocks rather than handing them back makes each successive parse of a large
+    /// source dirty fresh pages instead of reusing the last one's. That is invisible for a
+    /// program compiled once and fatal for `eval`, which compiles a fresh program every call:
+    /// three evals of a four-megabyte source held a gigabyte that nothing pointed at.
+    fn statements(&mut self, source: &[Statement<'_>]) -> Vec<HirStatement> {
+        let mut lowered = Vec::with_capacity(source.len());
+        lowered.extend(
+            source
+                .iter()
+                .filter_map(|statement| self.statement(statement)),
+        );
+        lowered
+    }
+
     fn statement(&mut self, statement: &Statement<'_>) -> Option<HirStatement> {
         let statement_span = span(statement.span());
         let kind = match statement {
@@ -293,13 +308,9 @@ impl Lowerer {
             Statement::ExpressionStatement(expression) => {
                 HirStatementKind::Expression(self.expression(&expression.expression))
             }
-            Statement::BlockStatement(block) => HirStatementKind::Block(
-                block
-                    .body
-                    .iter()
-                    .filter_map(|statement| self.statement(statement))
-                    .collect(),
-            ),
+            Statement::BlockStatement(block) => {
+                HirStatementKind::Block(self.statements(&block.body))
+            }
             Statement::IfStatement(statement) => HirStatementKind::If {
                 test: self.expression(&statement.test),
                 consequent: Box::new(self.statement_or_unsupported(&statement.consequent)),
@@ -482,11 +493,7 @@ impl Lowerer {
                     .iter()
                     .map(|case| kiln_hir::SwitchCase {
                         test: case.test.as_ref().map(|test| self.expression(test)),
-                        body: case
-                            .consequent
-                            .iter()
-                            .filter_map(|statement| self.statement(statement))
-                            .collect(),
+                        body: self.statements(&case.consequent),
                     })
                     .collect(),
             },
@@ -533,6 +540,7 @@ impl Lowerer {
                                 }
                             },
                         };
+                        body.reserve(clause.body.body.len());
                         body.extend(
                             clause
                                 .body
@@ -545,23 +553,12 @@ impl Lowerer {
                     None => None,
                 };
                 HirStatementKind::Try {
-                    block: statement
-                        .block
-                        .body
-                        .iter()
-                        .filter_map(|statement| self.statement(statement))
-                        .collect(),
+                    block: self.statements(&statement.block.body),
                     handler,
                     finalizer: statement
                         .finalizer
                         .as_ref()
-                        .map(|block| {
-                            block
-                                .body
-                                .iter()
-                                .filter_map(|statement| self.statement(statement))
-                                .collect()
-                        })
+                        .map(|block| self.statements(&block.body))
                         .unwrap_or_default(),
                 }
             }
@@ -1607,11 +1604,7 @@ impl Lowerer {
         let (parameters, rest) = self.parameters(&arrow.params);
 
         let body = match &arrow.body {
-            ArrowFunctionBody::FunctionBody(block) => block
-                .statements
-                .iter()
-                .filter_map(|statement| self.statement(statement))
-                .collect(),
+            ArrowFunctionBody::FunctionBody(block) => self.statements(&block.statements),
             // A concise body (`x => x + 1`) is an expression whose value is returned, not an
             // expression statement whose value is discarded.
             concise => {
@@ -1649,11 +1642,7 @@ impl Lowerer {
         let (parameters, rest) = self.parameters(&declaration.params);
 
         let body = declaration.body.as_ref()?;
-        let statements = body
-            .statements
-            .iter()
-            .filter_map(|statement| self.statement(statement))
-            .collect();
+        let statements = self.statements(&body.statements);
 
         Some(HirFunction {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
