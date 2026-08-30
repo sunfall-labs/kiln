@@ -155,12 +155,19 @@ impl MemoEngine {
 
     /// Guards the whole fetch, not just the recompute. Validation recurses into dependencies
     /// exactly like computation does, so a cycle reached while validating would spin between two
-    /// stale memos forever without either of them ever being recomputed.
+    /// stale memos forever without either of them ever being recomputed. The query stack must be
+    /// restored before any panic continues unwinding: the daemon catches a failed request and
+    /// keeps this same engine alive for the next one.
     fn force_derived(&mut self, key: QueryKey) -> Epoch {
         self.enter(key);
-        let changed_at = self.validate_or_recompute(key);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.validate_or_recompute(key)
+        }));
         self.exit(key);
-        changed_at
+        match result {
+            Ok(changed_at) => changed_at,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// The red-green core: validate if we can, recompute if we must.
@@ -376,8 +383,8 @@ impl MemoEngine {
     ///
     /// A cycle is a bug in the query graph, not a user error, so it aborts rather than being
     /// reported: there is no correct value to return and silently returning a stale one would be
-    /// far worse than a crash. The panic leaves `active` non-empty, so an engine that survives it
-    /// (a daemon catching the unwind) must be discarded rather than queried again.
+    /// far worse than a crash. Each active fetch removes itself while the panic unwinds, allowing
+    /// a daemon to report this request as failed without poisoning every later query.
     fn enter(&mut self, key: QueryKey) {
         if let Some(start) = self.active.iter().position(|active| *active == key) {
             let cycle: Vec<String> = self.active[start..]
@@ -511,6 +518,14 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
         diagnostics: Vec::new(),
         panicked: false,
     }
+}
+
+#[cfg(test)]
+fn panic_injecting_frontend(path: &str, text: &str) -> Module {
+    if text == "panic during parse" {
+        panic!("injected frontend panic");
+    }
+    fixture_frontend(path, text)
 }
 
 impl QueryEngine for MemoEngine {
@@ -1169,6 +1184,30 @@ mod tests {
             message.contains("cyclic(0) -> cyclic(1) -> cyclic(0)"),
             "the panic should name the cycle, got: {message}"
         );
+        assert!(
+            db.active.is_empty(),
+            "cycle unwinding must restore the stack"
+        );
+    }
+
+    #[test]
+    fn a_frontend_panic_does_not_turn_the_next_request_into_a_false_cycle() {
+        let mut db = MemoEngine::new(panic_injecting_frontend);
+        let file = db.intern("recover.js");
+        db.set_source(file, "panic during parse".to_owned());
+
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.parse(file)));
+        assert!(failed.is_err(), "the injected frontend must panic");
+        assert!(
+            db.active.is_empty(),
+            "a failed query must leave no active key"
+        );
+
+        db.set_source(file, A_V1.to_owned());
+        assert_eq!(db.parse(file).exports, ["alpha"]);
+        assert_eq!(db.interface(file).exports, ["alpha"]);
+        assert_eq!(db.project().modules, 1);
+        assert!(db.active.is_empty());
     }
 
     #[test]
