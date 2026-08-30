@@ -1020,6 +1020,8 @@ fn unary_code(operator: UnaryOp) -> u16 {
         // Stable: these are persisted cache keys, so a new operator takes the next free code
         // rather than renumbering the existing ones.
         UnaryOp::TypeOf => 4,
+        UnaryOp::BitwiseNot => 5,
+        UnaryOp::Void => 6,
     }
 }
 
@@ -1040,6 +1042,14 @@ fn binary_code(operator: BinaryOp) -> u16 {
         // Stable codes: a new operator takes the next free value.
         BinaryOp::In => 13,
         BinaryOp::InstanceOf => 14,
+        BinaryOp::LooseEqual => 15,
+        BinaryOp::LooseNotEqual => 16,
+        BinaryOp::BitwiseAnd => 17,
+        BinaryOp::BitwiseOr => 18,
+        BinaryOp::BitwiseXor => 19,
+        BinaryOp::ShiftLeft => 20,
+        BinaryOp::ShiftRight => 21,
+        BinaryOp::UnsignedShiftRight => 22,
     }
 }
 

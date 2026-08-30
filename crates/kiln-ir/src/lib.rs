@@ -37,6 +37,8 @@ pub enum UnaryOp {
     Negate,
     Not,
     TypeOf,
+    BitwiseNot,
+    Void,
 }
 
 /// Binary operations understood by the bytecode runtime.
@@ -52,6 +54,14 @@ pub enum BinaryOp {
     Exponentiate,
     StrictEqual,
     StrictNotEqual,
+    LooseEqual,
+    LooseNotEqual,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
+    UnsignedShiftRight,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -263,6 +273,19 @@ pub enum Builtin {
     Array,
     Object,
     Json,
+    // Appended rather than inserted: the discriminant is hashed into the artifact cache key, so
+    // renumbering the existing ones would invalidate every cached native build.
+    Math,
+    Number,
+    Boolean,
+    /// `NaN` and `Infinity` are values rather than callables, but they reach the program the same
+    /// way -- as a name the compiler resolves to something the runtime supplies.
+    NotANumber,
+    Infinity,
+    ParseInt,
+    ParseFloat,
+    IsNaN,
+    IsFinite,
 }
 
 impl Builtin {
@@ -278,6 +301,15 @@ impl Builtin {
             "Array" => Some(Self::Array),
             "Object" => Some(Self::Object),
             "JSON" => Some(Self::Json),
+            "Math" => Some(Self::Math),
+            "Number" => Some(Self::Number),
+            "Boolean" => Some(Self::Boolean),
+            "NaN" => Some(Self::NotANumber),
+            "Infinity" => Some(Self::Infinity),
+            "parseInt" => Some(Self::ParseInt),
+            "parseFloat" => Some(Self::ParseFloat),
+            "isNaN" => Some(Self::IsNaN),
+            "isFinite" => Some(Self::IsFinite),
             _ => None,
         }
     }
@@ -293,6 +325,15 @@ impl Builtin {
             Self::Array => "Array",
             Self::Object => "Object",
             Self::Json => "JSON",
+            Self::Math => "Math",
+            Self::Number => "Number",
+            Self::Boolean => "Boolean",
+            Self::NotANumber => "NaN",
+            Self::Infinity => "Infinity",
+            Self::ParseInt => "parseInt",
+            Self::ParseFloat => "parseFloat",
+            Self::IsNaN => "isNaN",
+            Self::IsFinite => "isFinite",
         }
     }
 }
@@ -1509,6 +1550,8 @@ impl Compiler {
                     UnaryOperator::Negate => UnaryOp::Negate,
                     UnaryOperator::Not => UnaryOp::Not,
                     UnaryOperator::TypeOf => UnaryOp::TypeOf,
+                    UnaryOperator::BitwiseNot => UnaryOp::BitwiseNot,
+                    UnaryOperator::Void => UnaryOp::Void,
                 }));
             }
             ExpressionKind::Binary {
@@ -1529,6 +1572,14 @@ impl Compiler {
                     BinaryOperator::In => BinaryOp::In,
                     BinaryOperator::InstanceOf => BinaryOp::InstanceOf,
                     BinaryOperator::StrictNotEqual => BinaryOp::StrictNotEqual,
+                    BinaryOperator::LooseEqual => BinaryOp::LooseEqual,
+                    BinaryOperator::LooseNotEqual => BinaryOp::LooseNotEqual,
+                    BinaryOperator::BitwiseAnd => BinaryOp::BitwiseAnd,
+                    BinaryOperator::BitwiseOr => BinaryOp::BitwiseOr,
+                    BinaryOperator::BitwiseXor => BinaryOp::BitwiseXor,
+                    BinaryOperator::ShiftLeft => BinaryOp::ShiftLeft,
+                    BinaryOperator::ShiftRight => BinaryOp::ShiftRight,
+                    BinaryOperator::UnsignedShiftRight => BinaryOp::UnsignedShiftRight,
                     BinaryOperator::LessThan => BinaryOp::LessThan,
                     BinaryOperator::LessThanOrEqual => BinaryOp::LessThanOrEqual,
                     BinaryOperator::GreaterThan => BinaryOp::GreaterThan,

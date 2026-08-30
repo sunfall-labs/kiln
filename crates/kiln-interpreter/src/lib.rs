@@ -112,6 +112,41 @@ pub enum Native {
     StringConstructor,
     JsonParse,
     JsonStringify,
+    /// The `Math` namespace, and the functions reached through it.
+    ///
+    /// `Math.random` is deliberately absent: a nondeterministic builtin needs a seeding decision
+    /// this compiler has not made, and an unseeded one would make every artifact hash a lie.
+    Math,
+    MathAbs,
+    MathFloor,
+    MathCeil,
+    MathRound,
+    MathTrunc,
+    MathSign,
+    MathSqrt,
+    MathCbrt,
+    MathPow,
+    MathMin,
+    MathMax,
+    MathLog,
+    MathLog2,
+    MathLog10,
+    MathExp,
+    NumberConstructor,
+    NumberIsInteger,
+    NumberIsSafeInteger,
+    /// `Number.isNaN`, which does not coerce -- unlike the global `isNaN`, which does.
+    NumberIsNaN,
+    NumberIsFinite,
+    /// `Number.prototype.toString`, `toFixed` and `valueOf`.
+    NumberToString,
+    NumberToFixed,
+    NumberValueOf,
+    BooleanConstructor,
+    ParseInt,
+    ParseFloat,
+    IsNaN,
+    IsFinite,
     /// `Array.prototype.join`.
     ArrayJoin,
     /// `next` on an array iterator.
@@ -184,6 +219,51 @@ impl Native {
             (Self::ObjectConstructor, "getPrototypeOf") => {
                 Some(Value::Native(Self::ObjectGetPrototypeOf))
             }
+            (Self::Math, "abs") => Some(Value::Native(Self::MathAbs)),
+            (Self::Math, "floor") => Some(Value::Native(Self::MathFloor)),
+            (Self::Math, "ceil") => Some(Value::Native(Self::MathCeil)),
+            (Self::Math, "round") => Some(Value::Native(Self::MathRound)),
+            (Self::Math, "trunc") => Some(Value::Native(Self::MathTrunc)),
+            (Self::Math, "sign") => Some(Value::Native(Self::MathSign)),
+            (Self::Math, "sqrt") => Some(Value::Native(Self::MathSqrt)),
+            (Self::Math, "cbrt") => Some(Value::Native(Self::MathCbrt)),
+            (Self::Math, "pow") => Some(Value::Native(Self::MathPow)),
+            (Self::Math, "min") => Some(Value::Native(Self::MathMin)),
+            (Self::Math, "max") => Some(Value::Native(Self::MathMax)),
+            (Self::Math, "log") => Some(Value::Native(Self::MathLog)),
+            (Self::Math, "log2") => Some(Value::Native(Self::MathLog2)),
+            (Self::Math, "log10") => Some(Value::Native(Self::MathLog10)),
+            (Self::Math, "exp") => Some(Value::Native(Self::MathExp)),
+            (Self::Math, "PI") => Some(Value::Number(std::f64::consts::PI)),
+            (Self::Math, "E") => Some(Value::Number(std::f64::consts::E)),
+            (Self::Math, "LN2") => Some(Value::Number(std::f64::consts::LN_2)),
+            (Self::Math, "LN10") => Some(Value::Number(std::f64::consts::LN_10)),
+            (Self::Math, "SQRT2") => Some(Value::Number(std::f64::consts::SQRT_2)),
+            (Self::NumberConstructor, "isInteger") => Some(Value::Native(Self::NumberIsInteger)),
+            (Self::NumberConstructor, "isSafeInteger") => {
+                Some(Value::Native(Self::NumberIsSafeInteger))
+            }
+            // `Number.isNaN` is not the global `isNaN`: it does not coerce, so
+            // `Number.isNaN("x")` is false where `isNaN("x")` is true. Same code, different
+            // entry points would be wrong -- these are genuinely two functions.
+            (Self::NumberConstructor, "isNaN") => Some(Value::Native(Self::NumberIsNaN)),
+            (Self::NumberConstructor, "isFinite") => Some(Value::Native(Self::NumberIsFinite)),
+            (Self::NumberConstructor, "parseInt") => Some(Value::Native(Self::ParseInt)),
+            (Self::NumberConstructor, "parseFloat") => Some(Value::Native(Self::ParseFloat)),
+            (Self::NumberConstructor, "MAX_SAFE_INTEGER") => {
+                Some(Value::Number(9_007_199_254_740_991.0))
+            }
+            (Self::NumberConstructor, "MIN_SAFE_INTEGER") => {
+                Some(Value::Number(-9_007_199_254_740_991.0))
+            }
+            (Self::NumberConstructor, "MAX_VALUE") => Some(Value::Number(f64::MAX)),
+            (Self::NumberConstructor, "MIN_VALUE") => Some(Value::Number(5e-324)),
+            (Self::NumberConstructor, "EPSILON") => Some(Value::Number(f64::EPSILON)),
+            (Self::NumberConstructor, "POSITIVE_INFINITY") => Some(Value::Number(f64::INFINITY)),
+            (Self::NumberConstructor, "NEGATIVE_INFINITY") => {
+                Some(Value::Number(f64::NEG_INFINITY))
+            }
+            (Self::NumberConstructor, "NaN") => Some(Value::Number(f64::NAN)),
             (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
             (Self::SymbolConstructor, "iterator") => {
@@ -678,6 +758,11 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// A radix or digit count outside the range its method accepts.
+    ///
+    /// A catchable `RangeError` in the specification; fatal here for the same reason
+    /// [`Self::CyclicJson`] is.
+    RadixOutOfRange,
     /// `reduce` on an empty array with no initial value.
     ///
     /// A catchable `TypeError` in the specification; fatal here for the same reason
@@ -765,6 +850,12 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
+            Self::RadixOutOfRange => {
+                write!(
+                    formatter,
+                    "argument is out of the range this method accepts"
+                )
+            }
             Self::EmptyReduce => write!(formatter, "reduce of empty array with no initial value"),
             Self::InvalidJson => write!(formatter, "unexpected token in JSON"),
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
@@ -1293,6 +1384,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             globals.set("JSON", Value::Native(Native::Json));
                             globals.set("Symbol", Value::Native(Native::SymbolConstructor));
                             globals.set("String", Value::Native(Native::StringConstructor));
+                            globals.set("Math", Value::Native(Native::Math));
+                            globals.set("Number", Value::Native(Native::NumberConstructor));
+                            globals.set("Boolean", Value::Native(Native::BooleanConstructor));
+                            globals.set("NaN", Value::Number(f64::NAN));
+                            globals.set("Infinity", Value::Number(f64::INFINITY));
                             self.stack
                                 .push(Value::Object(Rc::new(RefCell::new(globals))));
                             continue;
@@ -1300,6 +1396,23 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
+                        kiln_ir::Builtin::Math => Native::Math,
+                        kiln_ir::Builtin::Number => Native::NumberConstructor,
+                        kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
+                        kiln_ir::Builtin::ParseInt => Native::ParseInt,
+                        kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
+                        kiln_ir::Builtin::IsNaN => Native::IsNaN,
+                        kiln_ir::Builtin::IsFinite => Native::IsFinite,
+                        // Values rather than callables, so they leave the loop early like
+                        // `globalThis` does rather than being wrapped in a `Native`.
+                        kiln_ir::Builtin::NotANumber => {
+                            self.stack.push(Value::Number(f64::NAN));
+                            continue;
+                        }
+                        kiln_ir::Builtin::Infinity => {
+                            self.stack.push(Value::Number(f64::INFINITY));
+                            continue;
+                        }
                     }));
                 }
                 Instruction::New { argc } => {
@@ -2279,6 +2392,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Value::Number(text.encode_utf16().count() as f64)
             }
             Value::String(_) => string_property(name),
+            Value::Number(_) => number_property(name),
             Value::Array(_) => array_property(name),
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
@@ -2589,7 +2703,31 @@ fn unary(operator: UnaryOp, value: Value) -> Value {
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
         // `typeof` never coerces and never throws; it reports the type tag directly.
         UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
+        // `~x` is `-(ToInt32(x) + 1)`: a numeric operator, despite reading as a logical one.
+        UnaryOp::BitwiseNot => Value::Number(f64::from(!to_int32(value.as_number()))),
+        // `void x` evaluates its operand -- which already happened -- and discards it.
+        UnaryOp::Void => Value::Undefined,
     }
+}
+
+/// `ToInt32`: the truncation every bitwise operator applies to its operands first.
+///
+/// This is why `1 << 31` is negative and why `2 ** 32 | 0` is zero. Not a cast: the value wraps
+/// modulo 2^32 rather than saturating, and anything not finite becomes zero.
+fn to_int32(value: f64) -> i32 {
+    to_uint32(value) as i32
+}
+
+/// `ToUint32`, the same truncation read as unsigned. `>>>` is the only operator that uses it
+/// directly, which is what makes `x >>> 0` the idiom for reading a number as unsigned.
+fn to_uint32(value: f64) -> u32 {
+    if !value.is_finite() || value == 0.0 {
+        return 0;
+    }
+    let truncated = value.trunc();
+    // `rem_euclid` gives the non-negative remainder, which is the wrap the specification asks
+    // for; `as u32` alone saturates instead, so `2 ** 32` would come out as u32::MAX.
+    (truncated.rem_euclid(4_294_967_296.0)) as u32
 }
 
 fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
@@ -2619,6 +2757,30 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
         BinaryOp::InstanceOf => unreachable!("instanceof is evaluated with realm context"),
 
         BinaryOp::StrictNotEqual => Value::Boolean(!strict_equal(&left, &right)),
+        BinaryOp::LooseEqual => Value::Boolean(loose_equal(&left, &right)),
+        BinaryOp::LooseNotEqual => Value::Boolean(!loose_equal(&left, &right)),
+        // Every bitwise operator truncates to 32 bits first, so `1 << 31` is negative.
+        BinaryOp::BitwiseAnd => Value::Number(f64::from(
+            to_int32(left.as_number()) & to_int32(right.as_number()),
+        )),
+        BinaryOp::BitwiseOr => Value::Number(f64::from(
+            to_int32(left.as_number()) | to_int32(right.as_number()),
+        )),
+        BinaryOp::BitwiseXor => Value::Number(f64::from(
+            to_int32(left.as_number()) ^ to_int32(right.as_number()),
+        )),
+        // Only the low five bits of the shift count are used, so `1 << 32` is 1, not 0.
+        BinaryOp::ShiftLeft => Value::Number(f64::from(
+            to_int32(left.as_number()).wrapping_shl(to_uint32(right.as_number()) & 31),
+        )),
+        BinaryOp::ShiftRight => Value::Number(f64::from(
+            to_int32(left.as_number()).wrapping_shr(to_uint32(right.as_number()) & 31),
+        )),
+        // The one shift that reads its left operand as unsigned, and so the one whose result can
+        // exceed i32::MAX -- `(1 << 31) >>> 0` is 2147483648.
+        BinaryOp::UnsignedShiftRight => Value::Number(f64::from(
+            to_uint32(left.as_number()).wrapping_shr(to_uint32(right.as_number()) & 31),
+        )),
         BinaryOp::LessThan => Value::Boolean(compare(&left, &right, OrderingPredicate::Less)),
         BinaryOp::LessThanOrEqual => {
             Value::Boolean(compare(&left, &right, OrderingPredicate::LessEqual))
@@ -2935,6 +3097,123 @@ fn call_native(
                 _ => Value::String(String::new()),
             }
         }
+        // Every one of these is a plain transformation of its arguments, which is what keeps
+        // them in this function rather than on the interpreter.
+        Native::MathAbs => Value::Number(argument_number(arguments).abs()),
+        Native::MathFloor => Value::Number(argument_number(arguments).floor()),
+        Native::MathCeil => Value::Number(argument_number(arguments).ceil()),
+        // Not `f64::round`, which rounds a half away from zero: JavaScript rounds a half toward
+        // positive infinity, so `Math.round(-1.5)` is -1 rather than -2.
+        Native::MathRound => {
+            let value = argument_number(arguments);
+            Value::Number(if !value.is_finite() {
+                value
+            } else {
+                let rounded = (value + 0.5).floor();
+                // A negative input that rounds to zero gives *negative* zero, which the floor
+                // has already thrown away. Only `Object.is` and `1 / x` can see the difference,
+                // and a console shows it, so it is worth putting back.
+                if rounded == 0.0 && value < 0.0 {
+                    -0.0
+                } else {
+                    rounded
+                }
+            })
+        }
+        Native::MathTrunc => Value::Number(argument_number(arguments).trunc()),
+        // `Math.sign` preserves the sign of zero and passes NaN through, which `signum` does not.
+        Native::MathSign => {
+            let value = argument_number(arguments);
+            Value::Number(if value.is_nan() || value == 0.0 {
+                value
+            } else {
+                value.signum()
+            })
+        }
+        Native::MathSqrt => Value::Number(argument_number(arguments).sqrt()),
+        Native::MathCbrt => Value::Number(argument_number(arguments).cbrt()),
+        Native::MathPow => Value::Number(
+            argument_number(arguments).powf(arguments.get(1).map_or(f64::NAN, Value::as_number)),
+        ),
+        // `Math.min()` with no arguments is Infinity and `Math.max()` is -Infinity, which are the
+        // identities for the fold rather than an error. Any NaN argument wins outright.
+        Native::MathMin | Native::MathMax => {
+            let smallest = matches!(native, Native::MathMin);
+            let identity = if smallest {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+            let mut best = identity;
+            for argument in arguments {
+                let value = argument.as_number();
+                if value.is_nan() {
+                    best = f64::NAN;
+                    break;
+                }
+                if (smallest && value < best) || (!smallest && value > best) {
+                    best = value;
+                }
+            }
+            Value::Number(best)
+        }
+        Native::MathLog => Value::Number(argument_number(arguments).ln()),
+        Native::MathLog2 => Value::Number(argument_number(arguments).log2()),
+        Native::MathLog10 => Value::Number(argument_number(arguments).log10()),
+        Native::MathExp => Value::Number(argument_number(arguments).exp()),
+        // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
+        Native::NumberValueOf => Value::Number(receiver.as_number()),
+        Native::NumberToString => {
+            let value = receiver.as_number();
+            match arguments.first().map(Value::as_number) {
+                // Radix 10 is the default and is exactly `String(n)`, exponent rules included.
+                None | Some(10.0) => Value::String(number_string(value)),
+                Some(radix) if (2.0..=36.0).contains(&radix) => {
+                    Value::String(number_in_radix(value, radix as u32))
+                }
+                // A radix outside 2..=36 is a RangeError; returning NaN would look like a result.
+                _ => return Err(ExecutionError::RadixOutOfRange),
+            }
+        }
+        Native::NumberToFixed => {
+            let value = receiver.as_number();
+            let digits = arguments.first().map_or(0.0, Value::as_number);
+            if !(0.0..=100.0).contains(&digits) {
+                return Err(ExecutionError::RadixOutOfRange);
+            }
+            if !value.is_finite() {
+                Value::String(number_string(value))
+            } else {
+                Value::String(format!("{value:.*}", digits as usize))
+            }
+        }
+        Native::NumberConstructor => Value::Number(match arguments.first() {
+            None => 0.0,
+            Some(value) => value.as_number(),
+        }),
+        Native::BooleanConstructor => {
+            Value::Boolean(arguments.first().is_some_and(Value::is_truthy))
+        }
+        // The `Number.*` predicates do not coerce: they answer about the argument as given, which
+        // is the whole reason they exist alongside the global `isNaN` and `isFinite`.
+        Native::NumberIsNaN => Value::Boolean(
+            matches!(arguments.first(), Some(Value::Number(value)) if value.is_nan()),
+        ),
+        Native::NumberIsFinite => Value::Boolean(
+            matches!(arguments.first(), Some(Value::Number(value)) if value.is_finite()),
+        ),
+        Native::NumberIsInteger => Value::Boolean(
+            matches!(arguments.first(), Some(Value::Number(value)) if is_integer(*value)),
+        ),
+        Native::NumberIsSafeInteger => {
+            Value::Boolean(matches!(arguments.first(), Some(Value::Number(value))
+                if is_integer(*value) && value.abs() <= 9_007_199_254_740_991.0))
+        }
+        // The globals do coerce, which is the difference.
+        Native::IsNaN => Value::Boolean(argument_number(arguments).is_nan()),
+        Native::IsFinite => Value::Boolean(argument_number(arguments).is_finite()),
+        Native::ParseInt => parse_int(arguments),
+        Native::ParseFloat => parse_float(arguments),
         Native::JsonStringify => {
             let indent = json_indent(arguments.get(2));
             let mut seen = Vec::new();
@@ -3247,6 +3526,9 @@ fn call_native(
         | Native::SymbolConstructor
         | Native::ArrayConstructor
         | Native::ObjectConstructor
+        // A namespace, not a function: `Math` has no call behaviour of its own, and reaching
+        // here means something called it.
+        | Native::Math
         | Native::Json => Value::Undefined,
     })
 }
@@ -3488,6 +3770,19 @@ pub enum CallbackMethod {
     Every,
 }
 
+/// The methods a number primitive exposes.
+///
+/// Read off the value rather than through `Number.prototype`, which does not exist yet. Unbound,
+/// like the string and array tables, so `CallMethod` supplies the receiver.
+fn number_property(name: &str) -> Value {
+    match name {
+        "toString" => Value::Native(Native::NumberToString),
+        "toFixed" => Value::Native(Native::NumberToFixed),
+        "valueOf" => Value::Native(Native::NumberValueOf),
+        _ => Value::Undefined,
+    }
+}
+
 fn array_property(name: &str) -> Value {
     if let Some(method) = array_callback_method(name) {
         return Value::Callback(method);
@@ -3560,6 +3855,128 @@ fn own_properties(value: &Value) -> Vec<(String, Value)> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A number written in a base other than ten.
+///
+/// The fraction is expanded by repeated multiplication rather than converted through a decimal
+/// string, because there is no decimal spelling of `0.1` in base 3 to convert. It stops at 52
+/// digits, which is where the mantissa runs out and every further digit would be invented.
+fn number_in_radix(value: f64, radix: u32) -> String {
+    if !value.is_finite() {
+        return number_string(value);
+    }
+    let negative = value < 0.0;
+    let magnitude = value.abs();
+
+    let mut whole = magnitude.trunc();
+    let mut digits = Vec::new();
+    if whole == 0.0 {
+        digits.push('0');
+    }
+    while whole >= 1.0 {
+        let digit = (whole % f64::from(radix)) as u32;
+        digits.push(char::from_digit(digit, radix).expect("a digit below the radix"));
+        whole = (whole / f64::from(radix)).trunc();
+    }
+    digits.reverse();
+    let mut text: String = digits.into_iter().collect();
+
+    let mut fraction = magnitude.fract();
+    if fraction > 0.0 {
+        text.push('.');
+        for _ in 0..52 {
+            if fraction == 0.0 {
+                break;
+            }
+            fraction *= f64::from(radix);
+            let digit = fraction.trunc();
+            text.push(char::from_digit(digit as u32, radix).expect("a digit below the radix"));
+            fraction -= digit;
+        }
+    }
+
+    if negative { format!("-{text}") } else { text }
+}
+
+/// The first argument as a number, or NaN when there is none.
+///
+/// `Math.abs()` is NaN rather than 0: a missing argument is `undefined`, and `Number(undefined)`
+/// is NaN.
+fn argument_number(arguments: &[Value]) -> f64 {
+    arguments.first().map_or(f64::NAN, Value::as_number)
+}
+
+fn is_integer(value: f64) -> bool {
+    value.is_finite() && value.fract() == 0.0
+}
+
+/// `parseInt(text, radix?)`.
+///
+/// Reads as far as it can and stops, rather than rejecting: `parseInt("12px")` is 12. That
+/// tolerance is the entire difference from `Number("12px")`, which is NaN.
+fn parse_int(arguments: &[Value]) -> Value {
+    let text = arguments
+        .first()
+        .map_or_else(String::new, Value::to_display_string);
+    let text = text.trim();
+    let radix = match arguments.get(1).map(Value::as_number) {
+        Some(radix) if radix.is_finite() && radix != 0.0 => radix as u32,
+        _ => 0,
+    };
+    if !(radix == 0 || (2..=36).contains(&radix)) {
+        return Value::Number(f64::NAN);
+    }
+
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    // `0x` selects hexadecimal when no radix was given, and is also allowed when 16 was.
+    let (radix, digits) = match rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+        Some(after) if radix == 0 || radix == 16 => (16, after),
+        _ => (if radix == 0 { 10 } else { radix }, rest),
+    };
+
+    let end = digits
+        .find(|character: char| !character.is_digit(radix))
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return Value::Number(f64::NAN);
+    }
+    // Folded as f64 rather than parsed into an integer: the result is a double either way, and a
+    // long run of digits must saturate toward infinity rather than overflow.
+    let magnitude = digits[..end].chars().fold(0.0f64, |total, digit| {
+        total * f64::from(radix) + f64::from(digit.to_digit(radix).expect("checked by `find`"))
+    });
+    Value::Number(if negative { -magnitude } else { magnitude })
+}
+
+/// `parseFloat(text)`, which is `parseInt`'s tolerance applied to a decimal literal.
+fn parse_float(arguments: &[Value]) -> Value {
+    let text = arguments
+        .first()
+        .map_or_else(String::new, Value::to_display_string);
+    let text = text.trim_start();
+    if text.starts_with("Infinity") || text.starts_with("+Infinity") {
+        return Value::Number(f64::INFINITY);
+    }
+    if text.starts_with("-Infinity") {
+        return Value::Number(f64::NEG_INFINITY);
+    }
+    // Take the longest prefix that parses, which is what "reads as far as it can" means when the
+    // grammar allows an exponent: "1e" is 1, not an error.
+    let mut best = None;
+    for end in (1..=text.len()).rev() {
+        if !text.is_char_boundary(end) {
+            continue;
+        }
+        if let Ok(number) = text[..end].parse::<f64>() {
+            best = Some(number);
+            break;
+        }
+    }
+    Value::Number(best.unwrap_or(f64::NAN))
 }
 
 /// Resolve one end of a `slice`-style range.
@@ -3985,6 +4402,54 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
         _ => false,
     }
+}
+
+/// `==`, the abstract equality comparison.
+///
+/// Not `strict_equal` with a coercion in front of it. The rules are their own algorithm and two
+/// of them are not conversions at all: `null == undefined` is true while neither converts to the
+/// other, and every comparison with NaN is false however it is spelled.
+fn loose_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        // Same type: `==` is `===`, including NaN being unequal to itself.
+        (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
+        (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Boolean(_), Value::Boolean(_))
+        | (Value::Symbol(_), Value::Symbol(_)) => strict_equal(left, right),
+        // Nullish compares equal to itself and to nothing else -- not even to 0 or "".
+        (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
+        // A boolean converts to a number *first*, so `[] == false` is true by way of "" and 0.
+        (Value::Boolean(value), other) => loose_equal(&Value::Number(f64::from(*value)), other),
+        (other, Value::Boolean(value)) => loose_equal(other, &Value::Number(f64::from(*value))),
+        // A symbol converts to nothing, so it is equal only to itself and that case is above.
+        (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
+        (Value::Number(number), Value::String(text))
+        | (Value::String(text), Value::Number(number)) => {
+            Value::String(text.clone()).as_number() == *number
+        }
+        // An object compares by identity against another object, and by its primitive form
+        // against anything else -- which is what makes `[1] == 1` true.
+        (Value::Object(_) | Value::Array(_), Value::Object(_) | Value::Array(_)) => {
+            strict_equal(left, right)
+        }
+        (object @ (Value::Object(_) | Value::Array(_)), primitive) => {
+            loose_equal(&to_primitive(object), primitive)
+        }
+        (primitive, object @ (Value::Object(_) | Value::Array(_))) => {
+            loose_equal(primitive, &to_primitive(object))
+        }
+        _ => strict_equal(left, right),
+    }
+}
+
+/// `ToPrimitive` with no hint, which for everything here means `toString`.
+///
+/// `valueOf` comes first in the specification and is skipped because nothing yet returns a
+/// primitive from it; when a user-defined `valueOf` can exist, this needs the interpreter and
+/// moves onto it.
+fn to_primitive(value: &Value) -> Value {
+    Value::String(value.to_display_string())
 }
 
 fn compare(left: &Value, right: &Value, predicate: OrderingPredicate) -> bool {
@@ -5422,5 +5887,98 @@ mod tests {
         let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
         assert_eq!(inspect(&symbol), "Symbol(Symbol.iterator)");
         assert_eq!(symbol.property_key(), "@@iterator");
+    }
+
+    #[test]
+    fn bitwise_operands_truncate_to_thirty_two_bits() {
+        // Not a cast: the value wraps modulo 2^32 rather than saturating, which is why
+        // `1 << 31` is negative and `2 ** 32 | 0` is zero.
+        assert_eq!(to_int32(1.0), 1);
+        assert_eq!(to_int32(2147483648.0), i32::MIN);
+        assert_eq!(to_int32(4294967296.0), 0);
+        assert_eq!(to_int32(-1.5), -1);
+        assert_eq!(to_int32(f64::NAN), 0);
+        assert_eq!(to_int32(f64::INFINITY), 0);
+        assert_eq!(to_uint32(-1.0), u32::MAX);
+    }
+
+    #[test]
+    fn loose_equality_is_not_strict_equality_with_a_conversion() {
+        // The three rules that are not conversions at all.
+        assert!(loose_equal(&Value::Null, &Value::Undefined));
+        assert!(!loose_equal(&Value::Null, &Value::Number(0.0)));
+        assert!(!loose_equal(
+            &Value::Number(f64::NAN),
+            &Value::Number(f64::NAN)
+        ));
+        // A boolean becomes a number first, so `[] == false` goes by way of "" and 0.
+        assert!(loose_equal(&array(&[]), &Value::Boolean(false)));
+        assert!(loose_equal(
+            &Value::Number(1.0),
+            &Value::String("1".to_owned())
+        ));
+        assert!(loose_equal(
+            &array(&[Value::Number(1.0)]),
+            &Value::Number(1.0)
+        ));
+        // Two objects compare by identity even when their contents match.
+        assert!(!loose_equal(&object(&[]), &object(&[])));
+        let shared = object(&[]);
+        assert!(loose_equal(&shared, &shared.clone()));
+    }
+
+    #[test]
+    fn math_round_goes_toward_positive_infinity() {
+        // Not `f64::round`, which rounds a half away from zero.
+        let round = |value: f64| {
+            let Ok(Value::Number(result)) = call_native(
+                Native::MathRound,
+                &Value::Undefined,
+                &[Value::Number(value)],
+            ) else {
+                panic!("Math.round returns a number");
+            };
+            result
+        };
+        assert_eq!(round(1.5), 2.0);
+        assert_eq!(round(-1.5), -1.0);
+        assert_eq!(round(2.5), 3.0);
+        // A negative input rounding to zero gives negative zero, which the floor loses.
+        assert!(round(-0.5).is_sign_negative());
+        assert_eq!(round(-0.5), 0.0);
+    }
+
+    #[test]
+    fn parse_int_reads_as_far_as_it_can() {
+        // The whole difference from `Number(text)`, which is NaN for every one of these.
+        let parsed = |text: &str, radix: Option<f64>| {
+            let mut arguments = vec![Value::String(text.to_owned())];
+            if let Some(radix) = radix {
+                arguments.push(Value::Number(radix));
+            }
+            let Value::Number(result) = parse_int(&arguments) else {
+                panic!("parseInt returns a number");
+            };
+            result
+        };
+        assert_eq!(parsed("12px", None), 12.0);
+        assert_eq!(parsed("  -42  ", None), -42.0);
+        assert_eq!(parsed("0x1f", None), 31.0);
+        assert_eq!(parsed("ff", Some(16.0)), 255.0);
+        assert!(parsed("px", None).is_nan());
+        // A radix outside 2..=36 has no meaning, and neither does an empty prefix.
+        assert!(parsed("12", Some(1.0)).is_nan());
+        assert!(parsed("", None).is_nan());
+    }
+
+    #[test]
+    fn a_number_in_another_base_expands_its_fraction() {
+        // There is no decimal spelling of 0.1 in base 3 to convert through, so the fraction is
+        // produced by repeated multiplication instead.
+        assert_eq!(number_in_radix(255.0, 16), "ff");
+        assert_eq!(number_in_radix(255.0, 2), "11111111");
+        assert_eq!(number_in_radix(0.5, 2), "0.1");
+        assert_eq!(number_in_radix(-10.25, 4), "-22.1");
+        assert_eq!(number_in_radix(0.0, 8), "0");
     }
 }
