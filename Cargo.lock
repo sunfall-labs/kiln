@@ -220,6 +220,7 @@ dependencies = [
  "frontend-oxc",
  "kiln-conformance",
  "kiln-db",
+ "kiln-digest",
  "kiln-interpreter",
  "kiln-ir",
  "kiln-module-graph",

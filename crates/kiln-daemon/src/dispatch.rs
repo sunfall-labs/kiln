@@ -620,7 +620,7 @@ pub(crate) fn native_build_program(
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let output = output.map_or_else(
-        || default_native_output(&project_root, &path),
+        || crate::default_native_output(&project_root, Path::new(&path)),
         PathBuf::from,
     );
     if output == Path::new(&path)
@@ -660,7 +660,7 @@ pub(crate) fn native_build_output(
     output: Option<String>,
 ) -> PathBuf {
     output.map_or_else(
-        || default_native_output(Path::new(project_root), path),
+        || crate::default_native_output(Path::new(project_root), Path::new(path)),
         PathBuf::from,
     )
 }
@@ -713,7 +713,7 @@ fn prepare_native_shared_build(
 ) -> Result<(kiln_native::NativeBuilder, kiln_native::NativeBuildOptions), String> {
     let project_root = PathBuf::from(project_root);
     let output = output.map_or_else(
-        || default_native_shared_output(&project_root, path),
+        || crate::default_native_shared_output(&project_root, Path::new(path)),
         |output| {
             let output = PathBuf::from(output);
             if output.is_absolute() {
@@ -772,7 +772,7 @@ pub(crate) fn native_build_graph(
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let output = output.map_or_else(
-        || default_native_output(&project_root, &path),
+        || crate::default_native_output(&project_root, Path::new(&path)),
         PathBuf::from,
     );
     if output == Path::new(&path)
@@ -812,7 +812,7 @@ pub(crate) fn native_run_program(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = default_native_output(&project_root, &path);
+    let output = crate::default_native_output(&project_root, Path::new(&path));
     let builder =
         match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
             Ok(builder) => builder,
@@ -849,7 +849,7 @@ pub(crate) fn native_run_graph(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = default_native_output(&project_root, &path);
+    let output = crate::default_native_output(&project_root, Path::new(&path));
     let builder =
         match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
             Ok(builder) => builder,
@@ -915,36 +915,6 @@ fn native_profile(profile: NativeProfile) -> kiln_native::NativeProfile {
         NativeProfile::Check => kiln_native::NativeProfile::Check,
         NativeProfile::Release => kiln_native::NativeProfile::Release,
     }
-}
-
-fn default_native_output(project_root: &Path, source: &str) -> PathBuf {
-    let stem = Path::new(source)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("module");
-    let mut output = project_root.join(".kiln/bin").join(stem);
-    if cfg!(windows) {
-        output.set_extension("exe");
-    }
-    output
-}
-
-fn default_native_shared_output(project_root: &Path, source: &str) -> PathBuf {
-    let stem = Path::new(source)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("module");
-    let extension = if cfg!(target_os = "macos") {
-        "dylib"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    project_root
-        .join(".kiln/lib")
-        .join(stem)
-        .with_extension(extension)
 }
 
 fn native_summary(report: kiln_native::NativeBuildReport) -> NativeBuildSummary {

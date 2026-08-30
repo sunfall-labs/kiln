@@ -556,7 +556,7 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     let fixture = Fixture::started();
     let mut client = fixture.client();
     client.handshake().expect("handshake");
-    let source_path = fixture.dir.join("native.js");
+    let source_path = fixture.dir.join("src/native.js");
     let path = source_path.to_string_lossy().into_owned();
     let project_root = fixture.dir.to_string_lossy().into_owned();
     client
@@ -583,6 +583,13 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     };
     assert_eq!(first.exit_code, Some(0));
     assert_eq!(first.stdout, "native daemon 42\n");
+    let expected_output = fixture.dir.join(".kiln/bin/src").join(if cfg!(windows) {
+        "native.exe"
+    } else {
+        "native"
+    });
+    assert_eq!(first.build.output_path, expected_output.to_string_lossy());
+    assert!(expected_output.is_file());
     assert_eq!(
         first.scalar_value,
         Some(kiln_proto::ScalarValueSummary::Undefined)
@@ -705,7 +712,9 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 #[test]
 fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     let fixture = Fixture::empty();
-    let source = fixture.dir.join("native-shared.js");
+    let source_dir = fixture.dir.join("src");
+    std::fs::create_dir(&source_dir).expect("create shared source directory");
+    let source = source_dir.join("native-shared.js");
     std::fs::write(&source, "console.log('shared daemon', 6 * 7);\n").expect("write shared source");
 
     let daemon = Daemon::bind(&fixture.socket).expect("bind");
@@ -746,7 +755,7 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         "so"
     };
     let expected_output = Path::new(&root)
-        .join(".kiln/lib")
+        .join(".kiln/lib/src")
         .join("native-shared")
         .with_extension(extension);
     assert_eq!(first.output_path, expected_output.to_string_lossy());
