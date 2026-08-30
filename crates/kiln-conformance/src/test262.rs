@@ -79,6 +79,10 @@ pub fn run_variant_with_harness(
     harness: Option<&Harness>,
 ) -> CaseResult {
     let started = Instant::now();
+    // `eval` and `Function` compile source while a program is running, and the interpreter has no
+    // frontend of its own to do it with. Installing one here rather than at startup is what keeps
+    // this crate's execution path the same one the CLI takes -- a VM per case, nothing global.
+    crate::source_compiler::install();
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
     // `language/expressions` reported nothing at all for the other eleven thousand tests in the
@@ -885,7 +889,7 @@ fn missing_intrinsic(message: &str) -> Option<&str> {
     intrinsic_shaped.then_some(name)
 }
 
-fn is_intentionally_unsupported(message: &str) -> bool {
+pub(crate) fn is_intentionally_unsupported(message: &str) -> bool {
     message.starts_with("unsupported statement:")
         || message.starts_with("unsupported expression:")
         || message.starts_with("unsupported member access")

@@ -39,6 +39,7 @@ pub(crate) fn run_against_expected_stdout(
 
 fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     let started = Instant::now();
+    crate::source_compiler::install();
 
     if let Some(reason) = out_of_process_build_requirement(path) {
         return skipped(reason, started);

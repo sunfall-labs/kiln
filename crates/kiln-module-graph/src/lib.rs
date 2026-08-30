@@ -619,20 +619,20 @@ impl ModuleGraph {
                 &mut runtime,
             )
             .map_err(|error| {
-                    let error = match error {
-                        ExecutionError::StepLimitExceeded { steps, .. } => {
-                            ExecutionError::StepLimitExceeded {
-                                steps: total_steps.saturating_add(steps),
-                                limit: limits.max_steps,
-                            }
+                let error = match error {
+                    ExecutionError::StepLimitExceeded { steps, .. } => {
+                        ExecutionError::StepLimitExceeded {
+                            steps: total_steps.saturating_add(steps),
+                            limit: limits.max_steps,
                         }
-                        error => error,
-                    };
-                    ModuleGraphError::Execution {
-                        module: path.clone(),
-                        error,
                     }
-                })?;
+                    error => error,
+                };
+                ModuleGraphError::Execution {
+                    module: path.clone(),
+                    error,
+                }
+            })?;
             total_steps = total_steps
                 .checked_add(result.execution.steps)
                 .ok_or(ModuleGraphError::StepOverflow)?;

@@ -102,6 +102,13 @@ pub enum Instruction {
     },
     /// Push a callable for `Program::functions[index]`.
     MakeFunction(u32),
+    /// `eval(...)` written as that exact name, with nothing shadowing it.
+    ///
+    /// Its own instruction rather than a call to a value, because the eval'd source is compiled
+    /// against the *caller's* scope and no value can carry that: the site's [`EvalSite`] is the
+    /// only record of which names are visible here and where they live. Boxed so that the one
+    /// instruction that needs a whole scope description does not widen every other one.
+    DirectEval(Box<EvalSite>),
     /// Call the value `argc` slots below the top of the stack, consuming it and its arguments
     /// and leaving the result.
     Call {
@@ -429,6 +436,11 @@ pub enum Builtin {
     Uint32Array,
     Float32Array,
     Float64Array,
+    /// `eval` reached as a *value* rather than by a direct call: `(0, eval)(src)`,
+    /// `globalThis.eval(src)`, or a reference stashed and called later. Every one of those is an
+    /// indirect eval, which runs in global scope; a direct call is [`Instruction::DirectEval`]
+    /// instead, because only the compiler knows what a caller's scope contains.
+    Eval,
 }
 
 impl Builtin {
@@ -492,6 +504,7 @@ impl Builtin {
             "Uint32Array" => Some(Self::Uint32Array),
             "Float32Array" => Some(Self::Float32Array),
             "Float64Array" => Some(Self::Float64Array),
+            "eval" => Some(Self::Eval),
 
             _ => None,
         }
@@ -553,6 +566,7 @@ impl Builtin {
             Self::Uint32Array => "Uint32Array",
             Self::Float32Array => "Float32Array",
             Self::Float64Array => "Float64Array",
+            Self::Eval => "eval",
         }
     }
 }
@@ -568,6 +582,62 @@ pub enum Upvalue {
     ParentLocal(u32),
     /// A cell the enclosing closure had already captured, threaded one level further in.
     ParentUpvalue(u32),
+}
+
+/// Where a binding visible at a direct `eval` call site lives in the running frame.
+///
+/// Always a cell, never a raw slot: the eval'd source may write the binding, and the caller has
+/// to see that write. A cell is the only storage two independently compiled programs can share,
+/// which is why a function containing a direct eval boxes every binding in scope
+/// ([`Compiler::cell_everything`]) rather than only the ones a nested function names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalAccess {
+    /// A cell in the calling frame's own local slot.
+    Cell(u32),
+    /// A cell the calling closure had already captured.
+    Upvalue(u32),
+}
+
+/// How the caller declared a binding a direct `eval` can see.
+///
+/// Not just "may it be written": `var x` inside a sloppy eval *is* the caller's binding when the
+/// caller declared a `var`, and is a `SyntaxError` when the caller declared a `let`. One flag
+/// cannot answer both questions, and answering the second wrong turns a redeclaration the
+/// language allows into a refusal.
+///
+/// A kind of its own rather than `kiln_hir::VariableKind`, because this crosses into the
+/// interpreter and ADR 0007 keeps HIR out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalDeclaration {
+    Var,
+    Let,
+    Const,
+}
+
+/// One name a direct `eval` can see, and how the machine reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalBinding {
+    pub name: String,
+    pub access: EvalAccess,
+    pub declaration: EvalDeclaration,
+}
+
+/// Everything a direct `eval(...)` call needs that only the compiler knows.
+///
+/// A direct eval evaluates in its *caller's* scope, and the caller's names are gone by run time:
+/// the compiler resolved them to slot numbers. So the call site carries them. Held inline in the
+/// instruction rather than in a side table on [`Program`], because a direct eval is rare and a
+/// table would cost every program a field it never uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSite {
+    /// The names in scope where the call is written, innermost binding first so a shadowed outer
+    /// name never wins.
+    pub bindings: Vec<EvalBinding>,
+    /// Whether the calling code is strict, which decides whether the eval'd source gets its own
+    /// scope for `var` declarations or shares the caller's bindings.
+    pub strict: bool,
+    /// Arguments on the stack above the call, or `None` when a spread put them in one array.
+    pub argc: Option<u16>,
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the
@@ -650,9 +720,28 @@ pub struct CompileDiagnostic {
     pub span: Option<Span>,
 }
 
+/// What the caller knows about a compilation that the HIR does not say.
+///
+/// Strictness is the whole of it today. A directive prologue is not an HIR statement -- the
+/// frontend drops it, as Oxc keeps directives beside the body rather than in it -- so the only
+/// place that knows a Script was run under `"use strict"` is whoever assembled the source.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompileOptions {
+    pub strict: bool,
+}
+
 /// Compile owned HIR into stack bytecode.
 pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
+    compile_with_options(module, CompileOptions::default())
+}
+
+/// Compile owned HIR into stack bytecode, saying what the source text alone cannot.
+pub fn compile_with_options(
+    module: &Module,
+    options: CompileOptions,
+) -> Result<Program, Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
+    compiler.strict = options.strict;
     // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
@@ -689,12 +778,79 @@ pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
     compiler.finish()
 }
 
+/// One binding an eval program borrows from the frame that called it.
+///
+/// The cell itself travels at run time; only its name and whether it may be written are the
+/// compiler's business. Order matters: the *i*th entry binds slot *i* of the produced program,
+/// which is the whole contract between [`compile_eval`] and the machine that installs the cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalOuter {
+    pub name: String,
+    pub declaration: EvalDeclaration,
+}
+
+/// What a run-time `eval` compilation needs beyond the source it was handed.
+#[derive(Debug, Clone, Default)]
+pub struct EvalOptions {
+    /// The calling frame's visible bindings, innermost first. Empty for an indirect eval, which
+    /// sees global scope and nothing else.
+    pub outer: Vec<EvalOuter>,
+    /// Strict either because the caller is, or because the eval'd source says so itself.
+    pub strict: bool,
+}
+
+/// Compile source that arrived at run time, as `eval` and the `Function` constructor do.
+///
+/// Two things separate this from [`compile`]. The program *completes with a value* -- `eval("1")`
+/// is 1 -- where a module body always completes with `undefined`. And its scope 0 may already
+/// hold bindings: a direct eval reads and writes the caller's, through cells the machine installs
+/// in slots 0..`outer.len()` before the first instruction runs.
+pub fn compile_eval(
+    module: &Module,
+    options: &EvalOptions,
+) -> Result<Program, Vec<CompileDiagnostic>> {
+    let mut compiler = Compiler::new(module);
+    compiler.strict = options.strict;
+    compiler.eval_program = true;
+    // Unconditional, unlike an ordinary program, and it is what makes the eval'd code reachable
+    // from itself. A module-scope binding that is *not* boxed is read from a nested function
+    // through `LoadGlobal`, which finds the frame of whichever module is running -- and for an
+    // eval that is the caller's module, holding entirely unrelated slots. Boxing every top-level
+    // binding means every such read is a capture instead, and `LoadGlobal` is never emitted.
+    compiler.cell_everything = true;
+    for outer in &options.outer {
+        let slot = compiler.local_count;
+        compiler.local_count += 1;
+        compiler.outer_names.insert(outer.name.clone());
+        compiler.scopes[0].insert(
+            outer.name.clone(),
+            Local {
+                slot,
+                kind: match outer.declaration {
+                    EvalDeclaration::Var => VariableKind::Var,
+                    EvalDeclaration::Let => VariableKind::Let,
+                    EvalDeclaration::Const => VariableKind::Const,
+                },
+                imported: false,
+                initialized: true,
+                // The caller's cell is installed in the slot before the body runs, so there is
+                // nothing for a prologue to box and every access goes straight through it.
+                celled: true,
+            },
+        );
+    }
+    compiler.compile_eval_body(module);
+    compiler.finish()
+}
+
 /// Compile one module while preserving the scalar linkage needed by a graph linker.
 ///
 /// Named and default value imports are supported. Namespace imports, star/namespace re-exports,
 /// indirect re-exports, default expression exports, and cycles remain explicit unsupported forms.
 pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
+    // A module is strict whatever its text says, so nothing has to pass it in.
+    compiler.strict = true;
     let mut imports = Vec::new();
 
     for import in module.imports.iter().filter(|import| !import.type_only) {
@@ -931,6 +1087,8 @@ struct FunctionState {
     upvalue_names: HashMap<String, u32>,
     /// Names this function's nested functions refer to, so declarations know to box themselves.
     captured: HashSet<String>,
+    /// Whether every binding of this function is boxed, because a direct `eval` can see them.
+    cell_everything: bool,
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
@@ -955,6 +1113,38 @@ struct Compiler {
     upvalues: Vec<Upvalue>,
     upvalue_names: HashMap<String, u32>,
     captured: HashSet<String>,
+    /// Whether the code being compiled is strict.
+    ///
+    /// Recorded rather than derived, because a directive prologue does not survive lowering: the
+    /// goal and the harness variant are what say so, and they are the caller's to pass in. Only
+    /// `eval` reads it -- a direct eval in strict code gets its own scope for its declarations,
+    /// and in sloppy code shares the caller's.
+    strict: bool,
+    /// Whether this compilation is an `eval` program rather than a file.
+    ///
+    /// The one thing it changes is the temporal dead zone. A file's dead-zone read is refused
+    /// where the compiler sees it, because a static answer beats a runtime one; eval code cannot
+    /// afford that, because refusing is a `SyntaxError` and the language promises a
+    /// `ReferenceError` -- `assert.throws(ReferenceError, () => eval("typeof x; let x;"))` is
+    /// exactly the difference, and a program told its source was invalid takes a different
+    /// branch. Every eval binding is boxed, so the runtime check is already there to raise it.
+    eval_program: bool,
+    /// Names of the calling frame's bindings borrowed into scope 0 of an eval program.
+    ///
+    /// Tracked apart from the scope itself because a declaration in the eval'd source has to
+    /// tell a borrowed binding from one of its own: a sloppy `var` takes the caller's over, and
+    /// everything else shadows it.
+    outer_names: HashSet<String>,
+    /// Box every binding of the function being compiled, not only the ones a nested function
+    /// names.
+    ///
+    /// Set when a direct `eval` appears anywhere inside this function, including inside a
+    /// function nested in it. The eval'd source is compiled separately and reaches the caller's
+    /// bindings through shared cells, so a binding it might name has to *be* a cell -- and which
+    /// names it will use is unknowable until it runs. Over-approximating costs one pointer chase
+    /// per access in a function that already contains an eval, and buys the guarantee that every
+    /// name at the call site can be handed over.
+    cell_everything: bool,
     /// Loops currently being compiled, innermost last, holding the jumps their `break` and
     /// `continue` statements still need patched.
     loops: Vec<LoopContext>,
@@ -1017,6 +1207,12 @@ impl Compiler {
             // captured. Computed here rather than in each entry point, because there are two --
             // `compile` and `compile_module` -- and one of them would have been forgotten.
             captured: names_captured_by_nested_functions(&module.body),
+            strict: false,
+            eval_program: false,
+            outer_names: HashSet::new(),
+            // Module scope is boxed too when the module contains a direct eval: a script's
+            // top-level bindings are exactly the ones an eval written there can see.
+            cell_everything: body_contains_direct_eval(&module.body),
             loops: Vec::new(),
             hidden_bindings: 0,
             private_scopes: Vec::new(),
@@ -1048,6 +1244,46 @@ impl Compiler {
     fn compile_body(&mut self, module: &Module) {
         self.statements(&module.body);
         self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::Return);
+    }
+
+    /// The body of an eval program, which returns its completion value.
+    ///
+    /// `eval("1 + 1")` is 2, and a module body is not: it always completes with `undefined`, so
+    /// the ordinary path throws every statement's value away. The completion value is the last
+    /// *expression* statement's, held in a slot of its own so that a statement which produces
+    /// nothing -- a declaration, a loop -- leaves the previous one standing, which is what the
+    /// specification's completion records do.
+    ///
+    /// Only the top level is tracked. A value produced inside an `if` or a block is a completion
+    /// value too, and reporting `undefined` for one is a gap rather than a wrong answer: nothing
+    /// else can claim to be the result.
+    fn compile_eval_body(&mut self, module: &Module) {
+        let completion = self.local_count;
+        self.local_count += 1;
+        self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::StoreLocal(completion));
+        // The same three passes `statements` makes -- names, then hoisted function values, then
+        // the rest -- with the expression statements diverted into the completion slot.
+        for statement in &module.body {
+            self.hoist_names(statement);
+        }
+        for statement in &module.body {
+            if let StatementKind::Function(function) = &statement.kind {
+                self.emit_function_declaration(function, statement.span);
+            }
+        }
+        for statement in &module.body {
+            match &statement.kind {
+                StatementKind::Function(_) => {}
+                StatementKind::Expression(expression) => {
+                    self.expression(expression);
+                    self.code.push(Instruction::StoreLocal(completion));
+                }
+                _ => self.statement(statement),
+            }
+        }
+        self.code.push(Instruction::LoadLocal(completion));
         self.code.push(Instruction::Return);
     }
 
@@ -1567,7 +1803,11 @@ impl Compiler {
         // global read would hand back the cell rather than its contents. A block inside the
         // module body is not module scope, and a closure over it does need a cell.
         let in_module_scope = !self.compiling_function() && scope_index == 0;
-        let celled = self.captured.contains(name) && !in_module_scope;
+        // A direct `eval` overrides the module-scope exemption. The exemption holds only while
+        // module bindings are read through `LoadGlobal`, and a boxed one never is: it resolves
+        // as a cell from the body and as an upvalue from every nested function, exactly as
+        // `predeclare` has already been boxing captured module bindings since ADR 0019.
+        let celled = self.cell_everything || (self.captured.contains(name) && !in_module_scope);
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -1668,6 +1908,20 @@ impl Compiler {
         } else {
             self.scopes.len() - 1
         };
+        // An outer binding is the *caller's*, borrowed into scope 0 so a direct eval can read and
+        // write it. A declaration in the eval'd source either takes it over or shadows it, and
+        // which of the two is the whole difference strictness makes to an eval: a sloppy `var` or
+        // function declaration belongs to the caller's variable environment and so becomes that
+        // binding, while a `let`, a `const`, a class, and every declaration in strict code belong
+        // to the eval's own scope and get a slot of their own.
+        if scope_index == 0 && self.outer_names.remove(name) {
+            if initialized && !self.strict {
+                // `var x;` over an existing binding keeps its value -- which is why this returns
+                // rather than falling through to the `undefined` store below.
+                return;
+            }
+            self.scopes[0].remove(name);
+        }
         if self.scopes[scope_index].contains_key(name) {
             return;
         }
@@ -1679,7 +1933,7 @@ impl Compiler {
         // belongs to whichever module is *running*, not to the one the function was written in.
         // An exported function reading its own module's `const` read the importer's slot of the
         // same number instead, which is a wrong answer rather than a missing one.
-        let captured = self.captured.contains(name);
+        let captured = self.captured.contains(name) || self.cell_everything;
         let celled = captured;
         self.scopes[scope_index].insert(
             name.to_owned(),
@@ -2501,6 +2755,20 @@ impl Compiler {
         self.expression(discriminant);
         self.declare_hidden(&subject, span);
 
+        // Every arm shares the switch's scope, so the hoisting pass spans all of them -- a
+        // function declared in one case is callable from another, which is what one scope means.
+        //
+        // Emitted here, before the dispatch chain, because the chain's jumps land *inside* the
+        // bodies: a prologue placed after them is skipped by every path that reaches an arm.
+        // That is invisible while hoisting only allocates slots, and is a wrong answer the moment
+        // it emits anything -- a `NewCell` for a captured declaration, or the dead-zone marker a
+        // `let` in a case needs.
+        for case in cases {
+            for statement in &case.body {
+                self.hoist_names(statement);
+            }
+        }
+
         let mut entries = Vec::with_capacity(cases.len());
         let mut fallback = None;
         for case in cases {
@@ -2526,13 +2794,6 @@ impl Compiler {
             handler_depth: self.handler_depth,
             ..LoopContext::default()
         });
-        // Every arm shares the switch's scope, so the hoisting pass spans all of them -- a
-        // function declared in one case is callable from another, which is what one scope means.
-        for case in cases {
-            for statement in &case.body {
-                self.hoist_names(statement);
-            }
-        }
         let mut starts = Vec::with_capacity(cases.len());
         for case in cases {
             starts.push(self.code.len() as u32);
@@ -2573,6 +2834,16 @@ impl Compiler {
                 // in a block would otherwise turn a loud mistake into. A nested function reading
                 // the same name resolves as an upvalue and never reaches this arm, which is
                 // correct: it runs later, by which time the declaration has.
+                // Eval code raises this at run time instead. The read is still refused --
+                // the cell holds the uninitialised marker and `LoadCell` throws on it -- but as
+                // the `ReferenceError` the language names rather than as a rejection of the
+                // source, which is what a caller waiting on `assert.throws(ReferenceError, …)`
+                // is entitled to see.
+                Resolution::Local(local)
+                    if !local.initialized && local.celled && self.eval_program =>
+                {
+                    self.code.push(Instruction::LoadCell(local.slot))
+                }
                 Resolution::Local(local) if !local.initialized => self.error(
                     Some(expression.span),
                     format!("cannot access `{name}` before its declaration"),
@@ -3635,6 +3906,9 @@ impl Compiler {
         // the body is compiled because a declaration has to know, at the point it allocates its
         // slot, whether that slot holds a value or a cell.
         let captured = names_captured_by_this_function(function);
+        // A direct `eval` anywhere in this function -- including inside one nested in it -- means
+        // the eval'd source may name any binding here, so every one of them has to be a cell.
+        let cell_everything = function_contains_direct_eval(function);
 
         // Every parameter owns a positional slot, whether or not it binds a name there. A plain
         // identifier binds the slot itself, which keeps the common call free of any prologue; a
@@ -3656,7 +3930,7 @@ impl Compiler {
                 );
                 return None;
             }
-            let celled = captured.contains(name);
+            let celled = captured.contains(name) || cell_everything;
             if celled {
                 celled_parameters.push(slot);
             }
@@ -3685,6 +3959,7 @@ impl Compiler {
             upvalues: std::mem::take(&mut self.upvalues),
             upvalue_names: std::mem::take(&mut self.upvalue_names),
             captured: std::mem::replace(&mut self.captured, captured),
+            cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
         };
         self.enclosing.push(outer);
 
@@ -3767,6 +4042,7 @@ impl Compiler {
         self.handler_depth = outer_handler_depth;
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
+        self.cell_everything = restored.cell_everything;
 
         let index = self.functions.len() as u32;
         self.functions.push(proto);
@@ -4324,6 +4600,30 @@ impl Compiler {
         // spread the receiver has to be kept explicitly instead, because `Apply` takes it as an
         // operand -- so each shape below has a fixed-arity form and a spread form.
         let spreading = Self::has_spread(arguments);
+
+        // `eval(...)`, written as that name, with nothing shadowing it: a *direct* eval, which
+        // evaluates in this scope rather than in the global one. Every other way of reaching the
+        // same function -- `(0, eval)(s)`, `globalThis.eval(s)`, a saved reference -- is indirect
+        // and compiles to an ordinary call of `Builtin::Eval`. The difference is the language's,
+        // not an optimisation: only the direct form can see the names around it.
+        if let ExpressionKind::Identifier(name) = &callee.kind
+            && name == "eval"
+            && self.names_nothing("eval")
+        {
+            let bindings = self.eval_site_bindings(span);
+            let argc = if spreading {
+                self.array_literal(arguments, span);
+                None
+            } else {
+                Some(self.emit_arguments(arguments))
+            };
+            self.code.push(Instruction::DirectEval(Box::new(EvalSite {
+                bindings,
+                strict: self.strict,
+                argc,
+            })));
+            return;
+        }
         match &callee.kind {
             // `super.m(...)` resolves the function on the parent's prototype but runs it against
             // the current `this` -- that is the whole point of it, and an ordinary call would
@@ -4416,6 +4716,79 @@ impl Compiler {
         self.expression(callee);
         let argc = self.emit_arguments(arguments);
         self.code.push(Instruction::Call { argc });
+    }
+
+    /// The bindings a direct `eval` written here can see, innermost first.
+    ///
+    /// Every one is handed over as a *cell*, so the eval'd source shares the binding rather than
+    /// a copy of its value: `function f() { var x = 1; eval("x = 2"); return x; }` is 2, and a
+    /// copy would make it 1. That is what [`Compiler::cell_everything`] guarantees -- a function
+    /// containing an eval boxes all of its bindings, and so does every function around it.
+    ///
+    /// Resolving each name is what *captures* it, so an enclosing function's binding gains its
+    /// upvalue here rather than at a use the eval'd source has not been written yet.
+    fn eval_site_bindings(&mut self, span: Span) -> Vec<EvalBinding> {
+        // Names first: resolving one mutates the upvalue lists, which cannot happen while the
+        // scopes it reads are borrowed. Innermost scope first, so a shadowed name never wins;
+        // sorted within a scope, because two bindings of one scope cannot shadow each other and
+        // a hash map's order would otherwise make compilation non-reproducible.
+        // The declaring `Local` is taken here too. An upvalue cannot say how its binding was
+        // declared -- a capture carries no kind -- and the eval'd source needs to know: `var x`
+        // over a caller's `var` is that binding, and over a caller's `let` it is a SyntaxError.
+        let mut order: Vec<(String, EvalDeclaration)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let levels = self.scopes.iter().rev().chain(
+            self.enclosing
+                .iter()
+                .rev()
+                .flat_map(|level| level.scopes.iter().rev()),
+        );
+        for scope in levels {
+            let mut names: Vec<&String> = scope.keys().collect();
+            names.sort();
+            for name in names {
+                // A compiler-introduced binding carries a character an identifier cannot, so it
+                // is never a name the eval'd source could write.
+                if name.starts_with('%') || !seen.insert(name.clone()) {
+                    continue;
+                }
+                let local = scope[name];
+                // An import is the exporter's binding, and writing one is refused wherever it is
+                // written. `const` is the nearest thing this vocabulary has to that.
+                let declaration = match local.kind {
+                    _ if local.imported => EvalDeclaration::Const,
+                    VariableKind::Var => EvalDeclaration::Var,
+                    VariableKind::Let => EvalDeclaration::Let,
+                    VariableKind::Const => EvalDeclaration::Const,
+                };
+                order.push((name.clone(), declaration));
+            }
+        }
+
+        let mut bindings = Vec::with_capacity(order.len());
+        for (name, declaration) in order {
+            let access = match self.resolve_or_capture(&name) {
+                Resolution::Local(local) if local.celled => EvalAccess::Cell(local.slot),
+                Resolution::Upvalue(index) => EvalAccess::Upvalue(index),
+                // Unreachable: `cell_everything` boxed every binding in every scope that can
+                // reach this call. Refusing rather than dropping the name, because a dropped
+                // binding does not disappear -- the eval'd source would resolve it to a built-in
+                // or to nothing, and answer with something plausible from the wrong scope.
+                _ => {
+                    self.error(
+                        Some(span),
+                        format!("a direct `eval` cannot reach the binding `{name}`"),
+                    );
+                    continue;
+                }
+            };
+            bindings.push(EvalBinding {
+                name,
+                access,
+                declaration,
+            });
+        }
+        bindings
     }
 
     /// Names visible to the function being compiled, and how each is reached.
@@ -4734,6 +5107,282 @@ fn names_captured_by_this_function(function: &Function) -> HashSet<String> {
         collect_pattern_captures(rest, &mut captured);
     }
     captured
+}
+
+/// Whether `body` contains a syntactically direct `eval(...)` call.
+///
+/// This deliberately looks through nested functions. An eval in a nested function can still name
+/// a binding owned by any enclosing function, so every enclosing level has to box its bindings as
+/// well. Shadowing is left to normal resolution when the call itself is compiled; treating a
+/// shadowed `eval` as direct here merely boxes a few extra locals and cannot change their values.
+fn body_contains_direct_eval(body: &[Statement]) -> bool {
+    body.iter().any(statement_contains_direct_eval)
+}
+
+fn function_contains_direct_eval(function: &Function) -> bool {
+    function
+        .parameters
+        .iter()
+        .any(|parameter| pattern_contains_direct_eval(&parameter.pattern))
+        || function
+            .rest
+            .as_ref()
+            .is_some_and(pattern_contains_direct_eval)
+        || body_contains_direct_eval(&function.body)
+}
+
+fn statement_contains_direct_eval(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::Variable { declarations, .. } => declarations.iter().any(|declaration| {
+            pattern_contains_direct_eval(&declaration.pattern)
+                || declaration
+                    .initializer
+                    .as_ref()
+                    .is_some_and(expression_contains_direct_eval)
+        }),
+        StatementKind::Function(function) => function_contains_direct_eval(function),
+        StatementKind::Class(class) => class_contains_direct_eval(class),
+        StatementKind::Expression(expression)
+        | StatementKind::Throw(expression)
+        | StatementKind::ExportDefault(expression) => expression_contains_direct_eval(expression),
+        StatementKind::Return(value) => value.as_ref().is_some_and(expression_contains_direct_eval),
+        StatementKind::Block(body) => body_contains_direct_eval(body),
+        StatementKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            expression_contains_direct_eval(test)
+                || statement_contains_direct_eval(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(statement_contains_direct_eval)
+        }
+        StatementKind::While { test, body } | StatementKind::DoWhile { test, body } => {
+            expression_contains_direct_eval(test) || statement_contains_direct_eval(body)
+        }
+        StatementKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            init.as_deref().is_some_and(statement_contains_direct_eval)
+                || test.as_ref().is_some_and(expression_contains_direct_eval)
+                || update.as_ref().is_some_and(expression_contains_direct_eval)
+                || statement_contains_direct_eval(body)
+        }
+        StatementKind::ForOf { iterable, body, .. } => {
+            expression_contains_direct_eval(iterable) || statement_contains_direct_eval(body)
+        }
+        StatementKind::ForIn { object, body, .. } => {
+            expression_contains_direct_eval(object) || statement_contains_direct_eval(body)
+        }
+        StatementKind::Labelled { body, .. } => statement_contains_direct_eval(body),
+        StatementKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            expression_contains_direct_eval(discriminant)
+                || cases.iter().any(|case| {
+                    case.test
+                        .as_ref()
+                        .is_some_and(expression_contains_direct_eval)
+                        || body_contains_direct_eval(&case.body)
+                })
+        }
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            body_contains_direct_eval(block)
+                || handler
+                    .as_ref()
+                    .is_some_and(|handler| body_contains_direct_eval(&handler.body))
+                || body_contains_direct_eval(finalizer)
+        }
+        StatementKind::Break { .. }
+        | StatementKind::Continue { .. }
+        | StatementKind::Empty
+        | StatementKind::Unsupported { .. } => false,
+    }
+}
+
+fn class_contains_direct_eval(class: &Class) -> bool {
+    class
+        .superclass
+        .as_ref()
+        .is_some_and(expression_contains_direct_eval)
+        || class
+            .constructor
+            .as_ref()
+            .is_some_and(function_contains_direct_eval)
+        || class
+            .methods
+            .iter()
+            .any(|method| function_contains_direct_eval(&method.function))
+        || class.fields.iter().any(|field| {
+            matches!(&field.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+                || field
+                    .value
+                    .as_ref()
+                    .is_some_and(expression_contains_direct_eval)
+        })
+}
+
+fn pattern_contains_direct_eval(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Identifier(_) => false,
+        Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+            expression_contains_direct_eval(object)
+        }
+        Pattern::Computed { object, property } => {
+            expression_contains_direct_eval(object) || expression_contains_direct_eval(property)
+        }
+        Pattern::WithDefault { inner, default } => {
+            pattern_contains_direct_eval(inner) || expression_contains_direct_eval(default)
+        }
+        Pattern::Object { properties, rest } => {
+            properties.iter().any(|property| {
+                matches!(&property.key, PatternKey::Computed(key) if expression_contains_direct_eval(key))
+                    || pattern_contains_direct_eval(&property.value)
+            }) || rest
+                .as_deref()
+                .is_some_and(pattern_contains_direct_eval)
+        }
+        Pattern::Array { elements, rest } => {
+            elements
+                .iter()
+                .flatten()
+                .any(pattern_contains_direct_eval)
+                || rest
+                    .as_deref()
+                    .is_some_and(pattern_contains_direct_eval)
+        }
+    }
+}
+
+fn expression_contains_direct_eval(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Call {
+            callee,
+            arguments,
+            optional,
+        } => {
+            (!optional
+                && matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "eval"))
+                || expression_contains_direct_eval(callee)
+                || arguments.iter().any(list_element_contains_direct_eval)
+        }
+        ExpressionKind::Function(function) => function_contains_direct_eval(function),
+        ExpressionKind::Class(class) => class_contains_direct_eval(class),
+        ExpressionKind::Unary { argument, .. }
+        | ExpressionKind::Chain {
+            expression: argument,
+        }
+        | ExpressionKind::Await(argument)
+        | ExpressionKind::PrivateIn {
+            object: argument, ..
+        }
+        | ExpressionKind::PrivateMember {
+            object: argument, ..
+        }
+        | ExpressionKind::StaticMember {
+            object: argument, ..
+        } => expression_contains_direct_eval(argument),
+        ExpressionKind::Binary { left, right, .. }
+        | ExpressionKind::Logical { left, right, .. } => {
+            expression_contains_direct_eval(left) || expression_contains_direct_eval(right)
+        }
+        ExpressionKind::Assignment { value, .. } => expression_contains_direct_eval(value),
+        ExpressionKind::PatternAssignment { pattern, value } => {
+            pattern_contains_direct_eval(pattern) || expression_contains_direct_eval(value)
+        }
+        ExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            expression_contains_direct_eval(test)
+                || expression_contains_direct_eval(consequent)
+                || expression_contains_direct_eval(alternate)
+        }
+        ExpressionKind::New { callee, arguments } => {
+            expression_contains_direct_eval(callee)
+                || arguments.iter().any(list_element_contains_direct_eval)
+        }
+        ExpressionKind::SuperCall { arguments } => {
+            arguments.iter().any(list_element_contains_direct_eval)
+        }
+        ExpressionKind::Array { elements } => {
+            elements.iter().any(list_element_contains_direct_eval)
+        }
+        ExpressionKind::Sequence { operands } => {
+            operands.iter().any(expression_contains_direct_eval)
+        }
+        ExpressionKind::Yield { value, .. } => value
+            .as_ref()
+            .is_some_and(|value| expression_contains_direct_eval(value)),
+        ExpressionKind::ComputedMember {
+            object, property, ..
+        } => {
+            expression_contains_direct_eval(object) || expression_contains_direct_eval(property)
+        }
+        ExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } => {
+            expression_contains_direct_eval(object)
+                || expression_contains_direct_eval(property)
+                || expression_contains_direct_eval(value)
+        }
+        ExpressionKind::MemberAssignment { object, value, .. }
+        | ExpressionKind::PrivateAssignment { object, value, .. } => {
+            expression_contains_direct_eval(object) || expression_contains_direct_eval(value)
+        }
+        ExpressionKind::UpdateMember {
+            object, property, ..
+        }
+        | ExpressionKind::Delete { object, property } => {
+            expression_contains_direct_eval(object)
+                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+        }
+        ExpressionKind::Template { expressions, .. } => {
+            expressions.iter().any(expression_contains_direct_eval)
+        }
+        ExpressionKind::Object { members } => members.iter().any(|member| match member {
+            ObjectMember::Property(property) => {
+                matches!(&property.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+                    || expression_contains_direct_eval(&property.value)
+            }
+            ObjectMember::Spread(source) => expression_contains_direct_eval(source),
+            ObjectMember::Accessor { key, function, .. } => {
+                matches!(key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+                    || function_contains_direct_eval(function)
+            }
+        }),
+        ExpressionKind::Identifier(_)
+        | ExpressionKind::Update { .. }
+        | ExpressionKind::Literal(_)
+        | ExpressionKind::This
+        | ExpressionKind::NewTarget
+        | ExpressionKind::SuperMember { .. }
+        | ExpressionKind::RegExp { .. }
+        | ExpressionKind::TemplateStrings { .. }
+        | ExpressionKind::Unsupported { .. } => false,
+    }
+}
+
+fn list_element_contains_direct_eval(element: &ListElement) -> bool {
+    match element {
+        ListElement::Item(value) | ListElement::Spread(value) => {
+            expression_contains_direct_eval(value)
+        }
+        ListElement::Hole => false,
+    }
 }
 
 /// Names that nested functions inside a pattern's expressions refer to.
@@ -5397,6 +6046,149 @@ mod tests {
             body,
             span: Span::default(),
         })))
+    }
+
+    fn call(callee: Expression, arguments: Vec<Expression>) -> Expression {
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(callee),
+                arguments: arguments.into_iter().map(ListElement::Item).collect(),
+                optional: false,
+            },
+            span: Span::default(),
+        }
+    }
+
+    fn declaration(kind: VariableKind, name: &str, initializer: Option<Expression>) -> Statement {
+        statement(StatementKind::Variable {
+            kind,
+            declarations: vec![kiln_hir::VariableDeclarator {
+                pattern: Pattern::Identifier(name.to_owned()),
+                initializer,
+                span: Span::default(),
+            }],
+        })
+    }
+
+    fn string(text: &str) -> Expression {
+        Expression {
+            kind: ExpressionKind::Literal(Literal::String(text.to_owned())),
+            span: Span::default(),
+        }
+    }
+
+    /// A direct `eval` hands its caller's bindings over as cells, not as slot numbers.
+    ///
+    /// The eval'd source is compiled separately, so a slot number would mean nothing to it. A
+    /// cell is the one storage two independently compiled programs can share -- and sharing is
+    /// the requirement, because `eval("x = 2")` has to be visible to the caller afterwards.
+    #[test]
+    fn a_direct_eval_carries_the_bindings_around_it() {
+        // function f() { var x = 1; eval("x"); }
+        let program = compile(&module(vec![function(
+            "f",
+            &[],
+            vec![
+                declaration(VariableKind::Var, "x", Some(number(1.0))),
+                statement(StatementKind::Expression(call(
+                    identifier("eval"),
+                    vec![string("x")],
+                ))),
+            ],
+        )]))
+        .expect("the module compiles");
+        let body = &program.functions[0];
+        let site = body
+            .code
+            .iter()
+            .find_map(|instruction| match instruction {
+                Instruction::DirectEval(site) => Some(site),
+                _ => None,
+            })
+            .expect("the call lowered to a direct eval");
+        let binding = site
+            .bindings
+            .iter()
+            .find(|binding| binding.name == "x")
+            .expect("`x` is in scope at the call");
+        assert!(
+            matches!(binding.access, EvalAccess::Cell(_)),
+            "the caller's binding travels as a cell: {:?}",
+            binding.access
+        );
+        assert!(
+            body.code.contains(&Instruction::NewCell(0)),
+            "and the function boxed it, which is what makes the cell exist"
+        );
+    }
+
+    /// The caller's names occupy the eval program's first slots, in the order they were handed
+    /// over. That ordering *is* the contract between the compiler and the machine that installs
+    /// the cells; nothing else records which slot a name landed in.
+    #[test]
+    fn eval_code_binds_the_callers_names_to_its_first_slots() {
+        let program = compile_eval(
+            &module(vec![statement(StatementKind::Expression(identifier("x")))]),
+            &EvalOptions {
+                outer: vec![EvalOuter {
+                    name: "x".to_owned(),
+                    declaration: EvalDeclaration::Var,
+                }],
+                strict: false,
+            },
+        )
+        .expect("the eval source compiles");
+        assert!(
+            program.code.contains(&Instruction::LoadCell(0)),
+            "`x` reads the cell installed in slot 0: {:?}",
+            program.code
+        );
+        assert!(
+            matches!(program.code.last(), Some(Instruction::Return)),
+            "and the program ends by returning its completion value"
+        );
+    }
+
+    /// Strictness decides whose binding a `var` in eval code is.
+    ///
+    /// A sloppy direct eval declares into the caller's variable environment, so `var x` over a
+    /// name the caller already has *is* that binding. Strict eval code gets a scope of its own,
+    /// so the same declaration shadows it -- and writing one must not reach the caller's.
+    #[test]
+    fn a_sloppy_eval_var_takes_the_callers_binding_and_a_strict_one_shadows_it() {
+        let source = || module(vec![declaration(VariableKind::Var, "x", Some(number(2.0)))]);
+        let outer = || {
+            vec![EvalOuter {
+                name: "x".to_owned(),
+                declaration: EvalDeclaration::Var,
+            }]
+        };
+        let sloppy = compile_eval(
+            &source(),
+            &EvalOptions {
+                outer: outer(),
+                strict: false,
+            },
+        )
+        .expect("the sloppy eval compiles");
+        assert!(
+            sloppy.code.contains(&Instruction::StoreCell(0)),
+            "the sloppy `var` writes the caller's cell: {:?}",
+            sloppy.code
+        );
+        let strict = compile_eval(
+            &source(),
+            &EvalOptions {
+                outer: outer(),
+                strict: true,
+            },
+        )
+        .expect("the strict eval compiles");
+        assert!(
+            !strict.code.contains(&Instruction::StoreCell(0)),
+            "the strict `var` gets a slot of its own instead: {:?}",
+            strict.code
+        );
     }
 
     fn errors(body: Vec<Statement>) -> Vec<String> {

@@ -762,7 +762,28 @@ impl Lowerer {
                         expression_span,
                     );
                 };
-                let value = self.expression(&expression.right);
+                let mut value = self.expression(&expression.right);
+                // `fn = function () {}` names the function `fn`, the same named evaluation a
+                // declaration performs. Only the operators that can supply the binding's whole
+                // value qualify: `+=` and its kin combine the function with what the binding
+                // already held, so the source is not naming anything there.
+                if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left
+                    // `(fn) = function () {}` names nothing: the target is a parenthesized
+                    // expression, and the specification asks for an identifier *reference*,
+                    // which a cover grammar is not. Oxc drops the parentheses from an
+                    // assignment target, so the only trace left is that the target starts
+                    // after the assignment does.
+                    && identifier.span.start == expression.span.start
+                    && matches!(
+                        operator,
+                        HirAssignmentOperator::Assign
+                            | HirAssignmentOperator::LogicalAnd
+                            | HirAssignmentOperator::LogicalOr
+                            | HirAssignmentOperator::Nullish
+                    )
+                {
+                    name_anonymous_function(&mut value, &identifier.name);
+                }
                 return self.assign_to(&expression.left, operator, value, expression_span);
             }
             Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
@@ -1203,17 +1224,22 @@ impl Lowerer {
                         ) => {
                             let name = shorthand.binding.name.to_string();
                             let value = kiln_hir::Pattern::Identifier(name.clone());
+                            // `({ a = 1 } = o)`: the default belongs to the value, exactly
+                            // as it does in a declaration.
+                            let value = match &shorthand.init {
+                                Some(default) => {
+                                    let mut default = self.expression(default);
+                                    name_anonymous_default(&value, &mut default);
+                                    kiln_hir::Pattern::WithDefault {
+                                        inner: Box::new(value),
+                                        default: Box::new(default),
+                                    }
+                                }
+                                None => value,
+                            };
                             properties.push(kiln_hir::PatternProperty {
                                 key: kiln_hir::PatternKey::Static(name),
-                                // `({ a = 1 } = o)`: the default belongs to the value, exactly
-                                // as it does in a declaration.
-                                value: match &shorthand.init {
-                                    Some(default) => kiln_hir::Pattern::WithDefault {
-                                        inner: Box::new(value),
-                                        default: Box::new(self.expression(default)),
-                                    },
-                                    None => value,
-                                },
+                                value,
                             });
                         }
                         oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
@@ -1292,9 +1318,18 @@ impl Lowerer {
     ) -> Option<kiln_hir::Pattern> {
         match element {
             oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with) => {
+                let inner = self.assignment_pattern(&with.binding)?;
+                let mut default = self.expression(&with.init);
+                // `[(fn) = function () {}] = []` names nothing, for the reason a parenthesized
+                // assignment target does not: the cover grammar is not an identifier reference.
+                // Oxc drops the parentheses here too, so what is left of them is that the
+                // target starts after the element does.
+                if with.binding.span().start == with.span.start {
+                    name_anonymous_default(&inner, &mut default);
+                }
                 Some(kiln_hir::Pattern::WithDefault {
-                    inner: Box::new(self.assignment_pattern(&with.binding)?),
-                    default: Box::new(self.expression(&with.init)),
+                    inner: Box::new(inner),
+                    default: Box::new(default),
                 })
             }
             other => self.assignment_pattern(other.as_assignment_target()?),
@@ -1345,10 +1380,15 @@ impl Lowerer {
             BindingPattern::BindingIdentifier(identifier) => {
                 kiln_hir::Pattern::Identifier(identifier.name.to_string())
             }
-            BindingPattern::AssignmentPattern(assignment) => kiln_hir::Pattern::WithDefault {
-                inner: Box::new(self.pattern(&assignment.left, span)),
-                default: Box::new(self.expression(&assignment.right)),
-            },
+            BindingPattern::AssignmentPattern(assignment) => {
+                let inner = self.pattern(&assignment.left, span);
+                let mut default = self.expression(&assignment.right);
+                name_anonymous_default(&inner, &mut default);
+                kiln_hir::Pattern::WithDefault {
+                    inner: Box::new(inner),
+                    default: Box::new(default),
+                }
+            }
             BindingPattern::ObjectPattern(object) => {
                 let mut properties = Vec::with_capacity(object.properties.len());
                 for property in &object.properties {
@@ -1445,9 +1485,25 @@ impl Lowerer {
                     let key = self
                         .member_key(&property.key, property.computed)
                         .ok_or("class field name")?;
+                    let mut value = property.value.as_ref().map(|value| self.expression(value));
+                    // `class C { handle = () => {} }` names the function `handle`, for the same
+                    // reason an object property does. A private field's name keeps its `#`,
+                    // which is what the field is called; a computed key names nothing here,
+                    // because the name is whatever the key evaluates to at construction time.
+                    if let Some(value) = &mut value {
+                        match &key {
+                            kiln_hir::ObjectKey::Static(name) => {
+                                name_anonymous_function(value, name);
+                            }
+                            kiln_hir::ObjectKey::Private(name) => {
+                                name_anonymous_function(value, &format!("#{name}"));
+                            }
+                            kiln_hir::ObjectKey::Computed(_) => {}
+                        }
+                    }
                     fields.push(kiln_hir::ClassField {
                         key,
-                        value: property.value.as_ref().map(|value| self.expression(value)),
+                        value,
                         is_static: property.r#static,
                     });
                     continue;
@@ -1517,10 +1573,14 @@ impl Lowerer {
                 let pattern = self.pattern(&item.pattern, item_span);
                 HirParameter {
                     pattern: match &item.initializer {
-                        Some(default) => kiln_hir::Pattern::WithDefault {
-                            inner: Box::new(pattern),
-                            default: Box::new(self.expression(default)),
-                        },
+                        Some(default) => {
+                            let mut default = self.expression(default);
+                            name_anonymous_default(&pattern, &mut default);
+                            kiln_hir::Pattern::WithDefault {
+                                inner: Box::new(pattern),
+                                default: Box::new(default),
+                            }
+                        }
                         None => pattern,
                     },
                     span: item_span,
@@ -1984,11 +2044,29 @@ fn span(value: Span) -> HirSpan {
 /// Only functions: a class expression's name becomes a binding inside its own body, so inventing
 /// one would invent a scope the program did not write. A function expression's name is metadata
 /// -- `f.name` and a stack frame -- which is exactly what is missing without this.
+///
+/// That leaves `var C = class {}` reporting an empty name, which no engine does. Fixing it needs
+/// the two to be told apart below this crate: `kiln_hir::Class` has no counterpart to
+/// [`kiln_hir::Function::binds_own_name`], and `kiln-ir` derives the binding a class expression
+/// scopes itself in from the same `name` field it reports.
 fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
     if let kiln_hir::ExpressionKind::Function(function) = &mut value.kind
         && function.name.is_none()
     {
         function.name = Some(name.to_owned());
+    }
+}
+
+/// Give a pattern's default the name of the binding it is filling in.
+///
+/// `var [fn = function () {}] = []` names the function `fn`, exactly as `var fn = function () {}`
+/// does: when the source supplies nothing, the default *is* the binding's value, and the
+/// specification runs the same named evaluation on it. Only an identifier binding names anything
+/// -- a nested pattern spreads its default over several bindings, none of which is the name of
+/// the whole.
+fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Expression) {
+    if let kiln_hir::Pattern::Identifier(name) = inner {
+        name_anonymous_function(default, name);
     }
 }
 
@@ -2446,6 +2524,122 @@ mod tests {
             panic!("expected one function declaration");
         };
         (function.parameters.clone(), function.rest.clone())
+    }
+
+    /// The name the first default inside a pattern gives its function, if it is one.
+    ///
+    /// `None` distinguishes "no function there" from `Some(None)`, "a function left anonymous".
+    fn defaulted_function_name(pattern: &kiln_hir::Pattern) -> Option<Option<String>> {
+        match pattern {
+            kiln_hir::Pattern::WithDefault { default, .. } => match &default.kind {
+                HirExpressionKind::Function(function) => Some(function.name.clone()),
+                _ => None,
+            },
+            kiln_hir::Pattern::Array { elements, .. } => {
+                elements.iter().flatten().find_map(defaulted_function_name)
+            }
+            kiln_hir::Pattern::Object { properties, .. } => properties
+                .iter()
+                .find_map(|property| defaulted_function_name(&property.value)),
+            _ => None,
+        }
+    }
+
+    /// The name given to the function in the first default of the first statement's pattern.
+    fn defaulted_name(source: &str) -> Option<String> {
+        let module = parse_with_goal("default.js", source, SourceGoal::Script);
+        assert!(
+            module.diagnostics.is_empty(),
+            "{source}: {:?}",
+            module.diagnostics
+        );
+        let pattern = match module.body.last().map(|statement| &statement.kind) {
+            Some(HirStatementKind::Variable { declarations, .. }) => {
+                declarations[0].pattern.clone()
+            }
+            Some(HirStatementKind::Function(function)) => function.parameters[0].pattern.clone(),
+            Some(HirStatementKind::Expression(expression)) => match &expression.kind {
+                HirExpressionKind::PatternAssignment { pattern, .. } => pattern.clone(),
+                other => panic!("{source}: unexpected expression {other:?}"),
+            },
+            other => panic!("{source}: unexpected statement {other:?}"),
+        };
+        defaulted_function_name(&pattern).expect("a function in a default")
+    }
+
+    #[test]
+    fn a_default_names_the_anonymous_function_it_stands_in_for() {
+        // Named evaluation reaches a default, not only an initialiser: when the source supplies
+        // nothing, the default *is* the binding's value, so `var [fn = function () {}] = []`
+        // has to leave `fn.name` as `"fn"`. Every shape below took its own construction site in
+        // this frontend, and each one that was missed read back an empty name -- a value no
+        // engine produces.
+        for (source, expected) in [
+            ("var [fn = function () {}] = [];", Some("fn")),
+            ("var { p: fn = () => {} } = {};", Some("fn")),
+            ("var { fn = function* () {} } = {};", Some("fn")),
+            ("let [fn = async function () {}] = [];", Some("fn")),
+            ("function outer(fn = function () {}) {}", Some("fn")),
+            ("var fn; [fn = function () {}] = [];", Some("fn")),
+            // A parenthesized target is a cover grammar, not the identifier reference the
+            // specification names through.
+            ("var fn; [(fn) = function () {}] = [];", None),
+            ("var fn; ({ p: (fn) = function () {} } = {});", None),
+            ("var fn; ({ fn = function () {} } = {});", Some("fn")),
+            ("var fn; ({ p: fn = function () {} } = {});", Some("fn")),
+            // A written name is the function's own and is visible inside its body, so inferring
+            // over it would rename a function that can call itself.
+            ("var [fn = function named() {}] = [];", Some("named")),
+            // A nested pattern spreads the default across several bindings, and none of them is
+            // the name of the whole.
+            ("var [[a, b] = function () {}] = [];", None),
+        ] {
+            assert_eq!(defaulted_name(source).as_deref(), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn assigning_to_an_identifier_names_the_anonymous_function() {
+        // `fn = function () {}` is a named evaluation just as `var fn = function () {}` is. The
+        // logical forms qualify because they supply the binding's whole value; `+=` does not,
+        // because it combines the function with what the binding already held.
+        for (source, expected) in [
+            ("fn = function () {};", Some("fn")),
+            ("fn = () => {};", Some("fn")),
+            ("fn ||= function () {};", Some("fn")),
+            ("fn &&= function () {};", Some("fn")),
+            ("fn ??= function () {};", Some("fn")),
+            ("fn = function named() {};", Some("named")),
+            // A parenthesized target is a cover grammar rather than an identifier reference,
+            // and the specification names nothing through one.
+            ("(fn) = function () {};", None),
+            ("((fn)) = function () {};", None),
+            ("fn += function () {};", None),
+            // Only an identifier target names anything: a property already has a name of its
+            // own, and the specification does not rename what is stored into it.
+            ("o.fn = function () {};", None),
+        ] {
+            let module = parse_with_goal("assign.js", source, SourceGoal::Script);
+            assert!(
+                module.diagnostics.is_empty(),
+                "{source}: {:?}",
+                module.diagnostics
+            );
+            let Some(HirStatementKind::Expression(expression)) =
+                module.body.first().map(|statement| &statement.kind)
+            else {
+                panic!("{source}: expected one expression statement");
+            };
+            let value = match &expression.kind {
+                HirExpressionKind::Assignment { value, .. } => value,
+                HirExpressionKind::MemberAssignment { value, .. } => value,
+                other => panic!("{source}: unexpected expression {other:?}"),
+            };
+            let HirExpressionKind::Function(function) = &value.kind else {
+                panic!("{source}: expected a function on the right");
+            };
+            assert_eq!(function.name.as_deref(), expected, "{source}");
+        }
     }
 
     #[test]

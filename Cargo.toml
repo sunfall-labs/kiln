@@ -29,6 +29,8 @@ kiln-native-number-ffi = { path = "crates/kiln-native-number-ffi" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-number-core = { path = "crates/kiln-number-core" }
 kiln-runtime = { path = "crates/kiln-runtime" }
+kiln-temporal = { path = "crates/kiln-temporal" }
+kiln-intl = { path = "crates/kiln-intl" }
 kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
 kiln-conformance = { path = "crates/kiln-conformance" }
 kiln-proto = { path = "crates/kiln-proto" }
@@ -50,6 +52,44 @@ dragonbox_ecma = { version = "0.1.12", default-features = false, features = ["ec
 # lookaround, sticky matching -- which `regex` deliberately does not have, and it matches over
 # UTF-16 so indices and `lastIndex` come out in the units the language counts in.
 regress = { version = "0.12", default-features = false, features = ["backend-pikevm", "std", "utf16"] }
+# The calendar and date/time engine behind `Temporal`. Pinned to the version the ECMAScript
+# proposal's own test suite is tracked against upstream, because a calendar is not a page of code
+# and two implementations would disagree in the corners rather than the middle (ADR 0025, 0029).
+# `default` is off on purpose: it turns on `sys-local`, which reads the *host* clock and the
+# *host* zone, and this realm's clock is virtual and its zone is UTC (ADR 0015). `compiled_data`
+# brings the IANA zone database in so a program that names a zone explicitly gets a real answer;
+# nothing here ever asks the host which zone it is in.
+temporal_rs = { version = "0.2.6", default-features = false, features = ["std", "compiled_data"] }
+# The internationalization engine behind `Intl`, linked rather than rewritten for the reason
+# ADR 0025 gives for `regress` and ADR 0029 §4 names ICU4X for: locale negotiation, collation and
+# number spellout are CLDR-shaped, and a second implementation would agree on `en-US` and disagree
+# somewhere in the Serbian plural rules or the Thai grapheme boundaries -- a wrong *answer* rather
+# than a refusal. ICU4X is component-per-crate on purpose; `icu` (the omnibus) is deliberately not
+# used, because it would pull segmentation and calendar data into every build that only wanted to
+# canonicalize a language tag (ADR 0029 adoption rule 3, ADR 0004's rebuild budget).
+#
+# `compiled_data` bakes the CLDR bundle in as a static rather than loading it at runtime: the data
+# a formatter answers from is then fixed at build time, which is what lets it participate in the
+# shipped runtime identity (ADR 0029 adoption rule 4) instead of varying with the host's ICU.
+#
+# `icu_locale_core` carries no data at all -- it is the BCP-47 grammar -- so it stays separate from
+# `icu_locale`, which is the CLDR alias and likely-subtags tables that canonicalization needs.
+icu_locale_core = { version = "2.3", default-features = false, features = ["alloc"] }
+icu_locale = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
+icu_plurals = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_list = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
+icu_collator = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data", "auto"] }
+# The decimal type ICU4X's formatter takes, named directly because ECMAScript's own rounding is
+# implemented over it: `fixed_decimal`'s five unsigned and four signed rounding modes are exactly
+# ECMA-402's nine, and its rounding increments are exactly the {1,2,5,25}x10^k the language allows.
+# `icu_decimal` re-exports the type but not the modes.
+fixed_decimal = { version = "0.7", default-features = false }
+# ICU4X's formatted output is a `Writeable` that annotates its own runs -- integer, group, decimal,
+# fraction, sign -- which is what `formatToParts` has to report. Splitting the finished string back
+# up by searching for separators would be the guess; reading the annotations is not.
+writeable = { version = "0.6", default-features = false, features = ["alloc"] }
 # Arbitrary-precision integers for `BigInt`. The type is arbitrary-precision by definition, so a
 # fixed-width stand-in would be wrong for exactly the programs that reach for it.
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }
