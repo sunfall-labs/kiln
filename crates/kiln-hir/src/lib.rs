@@ -243,6 +243,15 @@ pub enum StatementKind {
         update: Option<Expression>,
         body: Box<Statement>,
     },
+    /// `label: body`.
+    ///
+    /// Kept rather than dropped, because a label is not decoration: it is what lets a `break` or
+    /// `continue` name a loop other than the innermost one, and on a non-loop statement it makes
+    /// a block a `break` can leave.
+    Labelled {
+        label: String,
+        body: Box<Statement>,
+    },
     /// `for (const name in object) body`.
     ///
     /// Enumerates the object's own enumerable string keys. Not lowered to a `for-of` over a key

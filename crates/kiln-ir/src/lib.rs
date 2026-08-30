@@ -571,11 +571,16 @@ enum BreakableKind {
     #[default]
     Loop,
     Switch,
+    /// A labelled statement that is not a loop. `break label` leaves it; `continue label` names
+    /// something that cannot be continued and is refused.
+    Labelled,
 }
 
 #[derive(Default)]
 struct LoopContext {
     kind: BreakableKind,
+    /// The label written on this construct, if any. `break outer` names one of these.
+    label: Option<String>,
     breaks: Vec<usize>,
     continues: Vec<usize>,
     /// How many cleanups were pending when the loop began, so a `break` runs only those entered
@@ -645,6 +650,10 @@ struct Compiler {
     finalizers: Vec<Cleanup>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
+    /// A label written immediately before the statement now being compiled, waiting for that
+    /// statement to claim it. A loop takes it into its own context; anything else gets a
+    /// labelled block around it.
+    pending_label: Option<String>,
     /// Short-circuit jumps of the optional chains being compiled, innermost last.
     ///
     /// A stack rather than a field because a chain can appear inside another chain's arguments,
@@ -692,6 +701,7 @@ impl Compiler {
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
             handler_depth: 0,
+            pending_label: None,
             chains: Vec::new(),
             super_bindings: Vec::new(),
             super_binding_count: 0,
@@ -824,6 +834,7 @@ impl Compiler {
                 body,
                 statement.span,
             ),
+            StatementKind::Labelled { label, body } => self.labelled_statement(label, body),
             StatementKind::ForIn {
                 kind,
                 name,
@@ -1199,6 +1210,43 @@ impl Compiler {
         }
     }
 
+    /// `label: body`.
+    ///
+    /// A label on a loop names that loop, so it is handed to the loop's own context and nothing
+    /// is emitted here. On anything else it names a block, which needs a context of its own for
+    /// `break label` to have somewhere to land.
+    fn labelled_statement(&mut self, label: &str, body: &Statement) {
+        if matches!(
+            body.kind,
+            StatementKind::While { .. }
+                | StatementKind::DoWhile { .. }
+                | StatementKind::For { .. }
+                | StatementKind::ForIn { .. }
+                | StatementKind::ForOf { .. }
+                | StatementKind::Switch { .. }
+        ) {
+            self.pending_label = Some(label.to_owned());
+            self.statement(body);
+            // Cleared in case the statement turned out not to claim it after all.
+            self.pending_label = None;
+            return;
+        }
+
+        self.loops.push(LoopContext {
+            kind: BreakableKind::Labelled,
+            label: Some(label.to_owned()),
+            finalizer_depth: self.finalizers.len(),
+            handler_depth: self.handler_depth,
+            ..LoopContext::default()
+        });
+        self.statement(body);
+        let context = self.loops.pop().expect("this label pushed its own context");
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+    }
+
     /// `for (const name in object) body`.
     ///
     /// Walks a snapshot of the keys by index rather than through the iterator protocol, because
@@ -1260,6 +1308,7 @@ impl Compiler {
         self.declare_bound(kind, name, span);
 
         self.loops.push(LoopContext {
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1350,6 +1399,7 @@ impl Compiler {
         });
         self.handler_depth += 1;
         self.loops.push(LoopContext {
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1554,6 +1604,7 @@ impl Compiler {
         });
 
         self.loops.push(LoopContext {
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1591,27 +1642,34 @@ impl Compiler {
 
     /// `break` or `continue`, recorded for the enclosing loop to patch once its shape is known.
     fn jump_out(&mut self, label: Option<&str>, is_break: bool, span: Span) {
-        if label.is_some() {
-            // A labelled jump can leave several loops at once, which needs the label recorded on
-            // each loop context. Refused rather than treated as unlabelled, which would exit the
-            // wrong loop and look like it worked.
+        // Only the cleanups entered since the target began: an outer `finally` is not left by
+        // this jump, so running it here would run it twice.
+        //
+        // Unlabelled, `break` leaves the innermost breakable and `continue` steps over any
+        // `switch` in the way, because a `switch` is not something a `continue` can continue.
+        // Labelled, both look for that label instead -- which is the point of a label, and is
+        // what lets one `break` leave several loops at once.
+        let target = match label {
+            None if is_break => self.loops.len().checked_sub(1),
+            None => self
+                .loops
+                .iter()
+                .rposition(|context| context.kind == BreakableKind::Loop),
+            Some(label) => self.loops.iter().rposition(|context| {
+                context.label.as_deref() == Some(label)
+                    && (is_break || context.kind == BreakableKind::Loop)
+            }),
+        };
+        if target.is_none()
+            && let Some(label) = label
+        {
+            // The label is not there, or a `continue` named something that is not a loop.
             self.error(
                 Some(span),
-                "labelled break and continue are not supported yet",
+                format!("no enclosing loop or statement labelled `{label}`"),
             );
             return;
         }
-        // Only the cleanups entered since the loop began: an outer `finally` is not left by
-        // this jump, so running it here would run it twice.
-        // `break` leaves the innermost breakable; `continue` steps over any `switch` in the way,
-        // because a `switch` is not something a `continue` can continue.
-        let target = if is_break {
-            self.loops.len().checked_sub(1)
-        } else {
-            self.loops
-                .iter()
-                .rposition(|context| context.kind == BreakableKind::Loop)
-        };
         let (depth, handler_depth) = target.map_or((0, 0), |index| {
             let context = &self.loops[index];
             (context.finalizer_depth, context.handler_depth)
@@ -1662,6 +1720,7 @@ impl Compiler {
         let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
 
         self.loops.push(LoopContext {
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1686,6 +1745,7 @@ impl Compiler {
         let loop_start = self.code.len();
 
         self.loops.push(LoopContext {
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1746,6 +1806,7 @@ impl Compiler {
 
         self.loops.push(LoopContext {
             kind: BreakableKind::Switch,
+            label: self.pending_label.take(),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -3232,6 +3293,9 @@ fn collect_nested_function_names(
         }
         StatementKind::While { test, body } => {
             collect_identifiers(test, names, inside_function);
+            collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::Labelled { body, .. } => {
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::ForIn { object, body, .. } => {

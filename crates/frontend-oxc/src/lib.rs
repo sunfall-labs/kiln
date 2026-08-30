@@ -218,6 +218,10 @@ impl Lowerer {
                 test: self.expression(&statement.test),
                 body: Box::new(self.statement_or_unsupported(&statement.body)),
             },
+            Statement::LabeledStatement(statement) => HirStatementKind::Labelled {
+                label: statement.label.name.to_string(),
+                body: Box::new(self.statement_or_unsupported(&statement.body)),
+            },
             Statement::EmptyStatement(_) => HirStatementKind::Empty,
 
             // Module linkage and erased TypeScript declarations have no local runtime action.
