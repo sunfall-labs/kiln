@@ -505,6 +505,20 @@ pub enum ExpressionKind {
         /// `?.[`, with the same whole-chain short circuit as [`ExpressionKind::StaticMember`].
         optional: bool,
     },
+    /// `new.target`: the constructor a `new` call named, or `undefined` outside one.
+    ///
+    /// Not an identifier -- `new` is a keyword and `target` is not a property of it -- so it
+    /// cannot be resolved like `this` is; it needs a node of its own.
+    NewTarget,
+    /// `[a, b] = pair` and `({ a } = record)`: an assignment whose target is a pattern.
+    ///
+    /// Separate from [`ExpressionKind::Assignment`], whose target is one name, because the shapes
+    /// have nothing in common past the `=`. Only `=` can take a pattern -- `[a] += x` is not a
+    /// thing -- so no operator is carried.
+    PatternAssignment {
+        pattern: Pattern,
+        value: Box<Expression>,
+    },
     /// `object[property] = value`, including the compound forms.
     ComputedAssignment {
         operator: AssignmentOperator,

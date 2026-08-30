@@ -1201,3 +1201,137 @@ Coverage: three module-graph tests for the forms, plus `examples/modules/exports
 `ci-test.sh` (interpreter only — the C backend is scalars-only, so linking it natively would test
 a refusal). Everything green: 44 test binaries, clippy clean, differential 67/0/0, conformance
 39/39, all twelve Effect bundles byte-identical to node.
+
+**2026-08-29, Claude — literature review; 0016 and 0018 revised, and a GC finding you should see
+before touching `kiln-native*`.** Six parallel searches over 2024-2026 work. Full reports are not in
+the repo; the parts that changed a decision are folded into the two ADRs with sources. Three items
+matter for the files you own.
+
+**Roots are nearly free for us, and the design already exists.** Wingo's Whiffle is a Scheme→C
+compiler whose mutator emits a packed side stack of locals and temporaries with compile-time-known
+heights, so a safepoint records only the stack pointer — everything between base and pointer is
+live. That is `kiln_value locals[N]` / `stack[N]` plus `verify`'s live heights, exactly. Julia pays
+this by hand with `JL_GC_PUSH`; our code generator would emit it. The change needed is small and
+worth doing before a collector is chosen: make the frame reachable from a per-thread linked chain
+(`struct kiln_frame { prev; n_locals; live_stack; slots; }`) and poll a safepoint at function entry.
+I withdraw the fancier safepoint-spill scheme I put in this file earlier today — there is no
+published measurement showing a plain frame chain is slow for our shape, and the "shadow stacks cost
+5-10%" numbers people cite are from security shadow stacks that instrument every call and return.
+
+**Do not pick a collector yet.** MMTk's own status page still says it is not ready for production;
+its interesting plans are unmerged forks; Ruby's binding is measurably slower than the GC it
+replaces. Whippet is the better structural fit and is MIT C, but its README lists macOS and AArch64
+as not-yet-supported, which is our dev platform. The sequence that survives all of this is: frame
+chain first (codegen work, collector-agnostic), then a narrow vtable-style GC interface as Ruby 3.4
+did, then BDW-GC behind it for correctness, then re-evaluate.
+
+**A new gate on 0018, from the same sweep.** Where a collected value owns a Rust resource, `Drop`
+and GC meet, and the one published attempt at reusing Rust destructors as finalizers needs three
+separate static analyses to be sound. 0018 proposes exactly that runtime, so I added it as gate 6,
+with the note that the scalar-only first migration is consistent with simply forbidding it. Also
+added to gate 3: CRuby measured negative scaling freeing many small allocations across glibc,
+jemalloc and tcmalloc, and had to move string and array buffers into the collected heap — so
+`malloc`-backed payloads freed from finalizers is a decision to get right before the first payload
+type exists, not after.
+
+**Two things in 0016 for whoever writes the first specialization.** Guard sites should be
+addressable from the emitter — dumpable, provable, countable — because three independent lines of
+recent work all want a stable per-site identity and all had to retrofit it. And guards belong where
+an assumption *enters*, not at each use: one test per value rather than one per operation. Both are
+cheap now and annoying later. The calibration to keep in view is less comfortable: JSC and
+SpiderMonkey both spent their recent object-model effort on making the *megamorphic* path fast,
+because real code is megamorphic at many sites. Monomorphization will not cover as much as I implied
+earlier; the generic path is the common case.
+
+**One thing I did not fold into any ADR, because it is a different architecture rather than an
+amendment.** `weval` (Fallin & Bernstein, PLDI 2025) specializes an almost-unmodified interpreter
+against fixed bytecode by partial evaluation — 2.17x geomean on SpiderMonkey — and Druid derives a
+baseline JIT frontend from annotated interpreter code. Our `emit_instruction` is already a
+hand-written partial evaluator of our own interpreter, and the whole interpreter-vs-native
+divergence class exists because it is hand-written rather than derived. I am not proposing we change
+course; I am flagging that two independent research lines now argue the second implementation is
+avoidable, and that is worth knowing before we write a great deal more of it.
+
+**2026-08-29, Claude — two more ADRs from the literature sweep; 0019 is yours to argue, 0020 is
+mine.** Everything from the review that was actually a decision is now written down, so the reports
+themselves are not needed.
+
+**0021 (Proposed, your files) fixes four properties any object model must have,** on the grounds
+that all four are free while the native backend has no objects and expensive afterwards. Two are
+correctness. (1) The internal value representation becomes one machine word and stops being the same
+type as the embedding ABI — the coupling, not the width, is what currently makes narrowing it look
+like a breaking change; float self-tagging is the scheme to evaluate first. (2) Shape identity must
+be content-derived, link-stable and never recycled: per-TU identities break under separate
+compilation, which is our exact emission model, and recycled ones let a guard accept a stale layout
+after a delete-then-re-add. Both have shipped as bugs in production engines. (3) Frame chain plus a
+safepoint poll at entry, collector-agnostic, done before a collector is picked. (4) Variable-length
+payloads in the collected heap rather than `malloc`-backed and finalizer-freed. It explicitly does
+*not* choose a collector and says why both candidates are blocked today.
+
+**0020 (Accepted, my files) changes what we steer by.** Feature-sensitive specification-step
+coverage replaces pass rate as the primary conformance measure — pass rate saturates and gets
+*better* when coverage narrows, which is why `status.sh` is right to refuse to print one. The metric
+gets extracted rather than the Scala toolchain adopted, `kiln-test-selector` gains uncovered spec
+steps as an ordering input, and the interpreter/native oracle moves from stdout comparison to
+canonical state dumps keyed on bytecode offset. That last one matters to you: the dumps want the
+same stable guard-site identity 0016 wants, so that is now three independent consumers of one
+emitter property.
+
+**What I did not write down.** The six research reports are not in the repo. The positioning
+argument — that our defensible edge is correctness-per-unit-effort plus startup, memory and cold
+start, rather than beating a warm JIT on throughput — is not in an ADR either, because it is a
+judgement about emphasis rather than a decision about the code. It is in this file and in 0016's
+context, where the Porffor and megamorphic calibrations live.
+
+**One process change I would like us both to adopt.** Every performance number I produced today came
+from one compiler on one machine. The CPython tail-call episode is the cautionary case: a headline
+10-15% result that turned out to be mostly an artifact of one LLVM version's inlining behaviour, and
+the honest figure against a correct baseline was 1-5%. We support zig cc, clang, gcc and a generic
+cc, so a single toolchain bump can move or erase a result silently. Benchmarks that inform a decision
+should run on more than one of them before the decision is made.
+
+**2026-08-29, Claude — renumbering note.** My value/heap ADR was written as 0019 and collided with
+your `0019-a-closure-carries-its-module.md`, which landed while I was writing and is already in the
+README index. Yours keeps 0019; mine is now **0021**, renamed on disk and in the reference above.
+Nothing of yours was touched. 0020 is uncontested. Both 0018 and 0021 are `Proposed`, so neither is
+in the README index — that section lists decisions, and those two are positions awaiting your
+argument. 0020 is Accepted and indexed.
+
+**2026-08-29, Claude — destructuring assignment, `new.target`, and three things about
+constructors that were quietly wrong.**
+
+I stopped guessing which refusals matter and probed all of them. That turned up five real gaps;
+this note covers four (async generators and `for await` are next).
+
+**Destructuring assignment** (`[a, b] = pair`, `({ x } = o)`) was `non-identifier assignment`.
+The pattern walk in `kiln-ir` now takes a `PatternLeaf` -- `Declare(kind)` or `Assign` -- because
+every rule about taking a value apart (defaults applying only to `undefined`, holes skipping an
+index, a rest copying what the named keys did not take) is identical either way. Only the leaf
+differed, so it is a parameter rather than a second copy of the walk. `assignment_place` was
+extracted out of `assignment` so both leaves resolve a target the same way, including the const
+and imported-binding diagnostics. A member target inside a pattern -- `[o.a] = xs`, legal
+JavaScript -- is refused distinctly rather than lowered to something else; patterns bind names,
+and teaching them to store through a member would make them a second assignment language.
+
+**`new.target`** is now on the machine beside `this`, saved into the frame with it, and captured
+by arrows for the same reason `this` is. `super()` reinstates the caller's, which is what lets a
+base constructor name the subclass being built. New instruction, **hash tag 59**.
+
+Then three things the `new.target` probe exposed, each of which was a silent wrong answer:
+
+- **`C.prototype.constructor` was never set**, so `x.constructor` was `undefined` for everything
+  except errors. It is set when the prototype object is created. That makes the closure and its
+  prototype point at each other -- a class that is never collected keeps its prototype alive,
+  which I decided is fine for a realm's constructors.
+- **`f.prototype = {...}` was ignored.** The write landed in the closure's ordinary property
+  store while both `f.prototype` and `new f()` read a separate slot, so the assignment appeared
+  to work and did nothing. Classic-prototype code would have been quietly broken.
+- **A class's constructor had no name**, so `new.target.name` was empty for any class with an
+  explicit constructor.
+
+**A console now names the class an instance came from** -- `Point { x: 1 }` rather than
+`{ x: 1 }` -- read off `constructor` on the prototype chain, so it can never disagree with what
+`x.constructor` says. This one is worth knowing about because it changes existing `console.log`
+output for every class instance.
+
+differential 70/0/0, conformance 39/39, all twelve Effect bundles still byte-identical.

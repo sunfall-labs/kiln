@@ -867,6 +867,10 @@ pub struct Closure {
     /// An arrow has no `arguments` of its own; it sees the enclosing function's, from where it
     /// was written. Captured alongside `this` because the rule is the same one.
     pub captured_arguments: Option<Vec<Value>>,
+    /// `new.target` captured where the closure was written, for an arrow function.
+    ///
+    /// An arrow has no `new.target` of its own for the same reason it has no `this`.
+    pub captured_new_target: Option<Value>,
     /// `this` captured where the closure was written, for an arrow function.
     ///
     /// An arrow has no `this` of its own: it uses the one from its defining scope, permanently.
@@ -1559,6 +1563,7 @@ pub fn execute<H: HostOps + ?Sized>(
         arguments: Vec::new(),
         error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
+        new_target: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
         function_names: program
@@ -1666,6 +1671,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         arguments: Vec::new(),
         error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
+        new_target: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
         function_names: module
@@ -1866,6 +1872,8 @@ struct Handler {
 struct Frame {
     /// The program that was running, restored with the frame.
     program: Rc<Program>,
+    /// `new.target` in the caller, restored with the frame.
+    new_target: Value,
     /// The closure that was running, or `None` for the module body.
     function: Option<Rc<Closure>>,
     this_value: Value,
@@ -1909,6 +1917,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
+    /// `new.target` in the running frame: the constructor a `new` call named, or `undefined`.
+    ///
+    /// Held beside `this` and saved with it, because it follows exactly the same rule -- an
+    /// ordinary call has none, and an arrow uses the one from where it was written.
+    new_target: Value,
     frames: Vec<Frame>,
     instruction: usize,
     /// One shared name per proto, so making a closure copies a pointer rather than a string.
@@ -2304,6 +2317,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::LoadThis => {
                     let this_value = self.this_value.clone();
                     self.stack.push(this_value);
+                }
+                Instruction::LoadNewTarget => {
+                    let new_target = self.new_target.clone();
+                    self.stack.push(new_target);
                 }
                 Instruction::GetProperty(name)
                     if matches!(self.stack.last(), Some(Value::Native(Native::Error(_))))
@@ -2822,6 +2839,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.program = frame.program;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
+                    self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
@@ -2872,6 +2890,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.program = frame.program;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
+                self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
                 self.instruction = frame.instruction;
             }
@@ -2885,6 +2904,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.program = frame.program;
             self.function = frame.function;
             self.this_value = frame.this_value;
+            self.new_target = frame.new_target;
             self.arguments = frame.arguments;
             self.instruction = frame.instruction;
         }
@@ -2982,6 +3002,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
+            // A generator resumption is never a `new` call, whatever built the generator.
+            new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
@@ -3082,6 +3104,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.program = frame.program;
         self.function = frame.function;
         self.this_value = frame.this_value;
+        self.new_target = frame.new_target;
         self.arguments = frame.arguments;
         self.instruction = frame.instruction;
     }
@@ -4159,7 +4182,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for argument in arguments {
                     self.stack.push(argument);
                 }
+                // `super()` keeps the `new.target` of the call that is building the instance,
+                // which is how a base constructor can name the subclass it is being built for.
+                // `call_with_this` computes one from `constructing`, so it is put back after.
+                let inherited = self.new_target.clone();
                 self.call_with_this(closure, argc as u16, current, this_value, None)?;
+                self.new_target = inherited;
             }
             // A native parent builds its own object, and `this` *becomes* that object rather
             // than being handed its properties. That is the whole of `class A extends Array`:
@@ -5034,13 +5062,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The prototype object is created on first use rather than with every closure, so an
     /// ordinary function never used as a constructor never allocates one.
     fn instantiate(&mut self, closure: &Rc<Closure>) -> Value {
-        let prototype = closure
-            .prototype
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| Value::Object(Rc::new(RefCell::new(ObjectData::default()))));
-        *closure.prototype.borrow_mut() = Some(prototype.clone());
-
+        let prototype = prototype_object(closure);
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
         Value::Object(Rc::new(RefCell::new(instance)))
@@ -5082,6 +5104,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None
             },
             program: Rc::clone(&self.program),
+            captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments: if proto.arrow {
                 // What `arguments` means *here*, which for an arrow defined inside another
                 // arrow is what that one captured -- not its own call's list, which is its rest
@@ -5360,13 +5383,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Every other callable answers to the same three, and to nothing else: none of them
             // has a property store to shadow them with.
             Value::Callback(_) | Value::Settler(..) => function_property(name),
-            Value::Function(closure) if name == "prototype" => {
-                let mut slot = closure.prototype.borrow_mut();
-                slot.get_or_insert_with(|| {
-                    Value::Object(Rc::new(RefCell::new(ObjectData::default())))
-                })
-                .clone()
-            }
+            Value::Function(closure) if name == "prototype" => prototype_object(closure),
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
@@ -5648,10 +5665,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             Value::Function(closure) => {
-                closure
-                    .properties
-                    .borrow_mut()
-                    .set(&key.property_key(), value);
+                let name = key.property_key();
+                // `f.prototype = {...}` replaces the object `new f()` will link instances to,
+                // which is a slot on the closure rather than an ordinary property -- so a write
+                // that landed in the property store would be read back by `f.prototype` and
+                // ignored by `new`.
+                if name == "prototype" {
+                    *closure.prototype.borrow_mut() = Some(value);
+                    return Ok(());
+                }
+                closure.properties.borrow_mut().set(&name, value);
                 Ok(())
             }
             other => Err(ExecutionError::NotAnObject {
@@ -5767,6 +5790,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(captured) => captured.clone(),
             None => this_value,
         };
+        // `new.target` is the constructor this call named, which is this closure when the call
+        // is a `new` and nothing otherwise. An arrow keeps the one it captured, for the same
+        // reason it keeps `this`.
+        let target = match &closure.captured_new_target {
+            Some(captured) => captured.clone(),
+            None if constructing.is_some() => Value::Function(Rc::clone(&closure)),
+            None => Value::Undefined,
+        };
         // The frame keeps what this call was actually given, whatever the closure is: an arrow's
         // rest parameter needs it, and `LoadArguments` is the one place that substitutes the
         // captured list instead.
@@ -5774,6 +5805,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
+            new_target: std::mem::replace(&mut self.new_target, target),
             arguments: std::mem::replace(&mut self.arguments, received),
             constructing,
             locals: std::mem::replace(&mut self.locals, locals),
@@ -8280,10 +8312,31 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
             format!("{}: {}", inspect_key(key), shown)
         })
         .collect::<Vec<_>>();
+    // Node names the class an instance came from, so a printed object says what it is. A plain
+    // object's prototype is `Object.prototype`, which this realm does not have as an object, so
+    // the absence of a prototype means plain here.
+    let label = match constructor_label(object) {
+        Some(name) => format!("{name} "),
+        None => String::new(),
+    };
     if parts.is_empty() {
-        return "{}".to_owned();
+        return format!("{label}{{}}");
     }
-    format!("{{ {} }}", parts.join(", "))
+    format!("{label}{{ {} }}", parts.join(", "))
+}
+
+/// The name a console puts in front of an object's contents, if it has one.
+///
+/// Read off `constructor` on the prototype chain, which is where `x.constructor` reads it from
+/// too, so the two can never disagree. `Object` is excluded: node prints a plain object bare.
+fn constructor_label(object: &ObjectData) -> Option<String> {
+    let constructor = object.get("constructor")?;
+    let name = match &constructor {
+        Value::Function(closure) => closure.name.as_deref()?.to_owned(),
+        Value::Native(native) => format!("{native:?}"),
+        _ => return None,
+    };
+    (!name.is_empty() && name != "Object").then_some(name)
 }
 
 /// Compile a regular expression, or `None` when the engine rejects the pattern.
@@ -8734,6 +8787,25 @@ fn inherited_object_property(name: &str) -> Value {
         "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" => object_property(name),
         _ => Value::Undefined,
     }
+}
+
+/// The object `new f()` gives instances, created on first use.
+///
+/// Created lazily so an ordinary function never used as a constructor never allocates one, and
+/// carrying `constructor` back to the function -- which is what makes `x.constructor === C` true
+/// and what a console reads to print `C {}` rather than `{}`. The two point at each other, so a
+/// class that is never collected keeps its prototype alive; a realm's constructors outlive the
+/// program anyway.
+fn prototype_object(closure: &Rc<Closure>) -> Value {
+    let mut slot = closure.prototype.borrow_mut();
+    if let Some(existing) = slot.as_ref() {
+        return existing.clone();
+    }
+    let mut data = ObjectData::default();
+    data.set("constructor", Value::Function(Rc::clone(closure)));
+    let prototype = Value::Object(Rc::new(RefCell::new(data)));
+    *slot = Some(prototype.clone());
+    prototype
 }
 
 /// `call`, `apply`, and `bind`, which every callable has and nothing else does.
@@ -9335,6 +9407,7 @@ mod tests {
         let parent = Rc::new(Closure {
             name: None,
             program: no_program(),
+            captured_new_target: None,
             function: 0,
             upvalues: Vec::new(),
             captured_this: None,
@@ -9349,6 +9422,7 @@ mod tests {
         let child = Rc::new(Closure {
             name: None,
             program: no_program(),
+            captured_new_target: None,
             function: 1,
             upvalues: Vec::new(),
             captured_this: None,
@@ -9375,6 +9449,7 @@ mod tests {
         let unrelated = Rc::new(Closure {
             name: None,
             program: no_program(),
+            captured_new_target: None,
             function: 2,
             upvalues: Vec::new(),
             captured_this: None,

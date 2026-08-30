@@ -142,6 +142,9 @@ pub enum Instruction {
     SetComputed,
     /// Push the current `this`.
     LoadThis,
+    /// `new.target`. Follows the same rule as `this`: an ordinary call has none, a `new` call
+    /// has the constructor it named, and an arrow uses the one from where it was written.
+    LoadNewTarget,
     /// Register an exception handler at `target`, active until `PopHandler`.
     PushHandler(u32),
     PopHandler,
@@ -513,6 +516,16 @@ pub struct ModuleProgram {
     pub dependencies: Vec<String>,
     pub imports: Vec<ImportBinding>,
     pub exports: Vec<ExportBinding>,
+}
+
+/// What a pattern walk does when it reaches a name.
+///
+/// Taking a value apart is the same work whether the names are being declared or assigned; only
+/// this differs, so it is a parameter rather than a second copy of the walk.
+#[derive(Debug, Clone, Copy)]
+enum PatternLeaf {
+    Declare(VariableKind),
+    Assign,
 }
 
 /// A source-located compiler failure.
@@ -1092,6 +1105,19 @@ impl Compiler {
 
     /// Bind `pattern` to the value on top of the stack, consuming it.
     fn bind_pattern(&mut self, kind: VariableKind, pattern: &Pattern, span: Span) {
+        self.destructure(PatternLeaf::Declare(kind), pattern, span);
+    }
+
+    /// Assign `pattern` from the value on top of the stack, consuming it.
+    ///
+    /// Every rule about how a pattern takes a value apart -- defaults applying only to
+    /// `undefined`, a hole skipping an index, a rest copying what the named keys did not take --
+    /// is the same whether the names are being declared or assigned. Only the leaf differs.
+    fn assign_pattern(&mut self, pattern: &Pattern, span: Span) {
+        self.destructure(PatternLeaf::Assign, pattern, span);
+    }
+
+    fn destructure(&mut self, leaf: PatternLeaf, pattern: &Pattern, span: Span) {
         match pattern {
             Pattern::Identifier(name) => {
                 if name.is_empty() {
@@ -1100,7 +1126,10 @@ impl Compiler {
                     self.code.push(Instruction::Pop);
                     return;
                 }
-                self.declare_bound(kind, name, span);
+                match leaf {
+                    PatternLeaf::Declare(kind) => self.declare_bound(kind, name, span),
+                    PatternLeaf::Assign => self.store_existing(name, span),
+                }
             }
             Pattern::WithDefault { inner, default } => {
                 // A default applies only to `undefined`, not to every falsy value and not to
@@ -1113,14 +1142,14 @@ impl Compiler {
                 self.code.push(Instruction::Pop);
                 self.expression(default);
                 self.patch_jump(skip);
-                self.bind_pattern(kind, inner, span);
+                self.destructure(leaf, inner, span);
             }
             Pattern::Object { properties, rest } => {
                 for property in properties {
                     self.code.push(Instruction::Dup);
                     let key = self.constant_index(Constant::String(property.key.clone()));
                     self.code.push(Instruction::GetProperty(key));
-                    self.bind_pattern(kind, &property.value, span);
+                    self.destructure(leaf, &property.value, span);
                 }
                 match rest {
                     // Copy everything, then remove what the named properties already took. The
@@ -1142,7 +1171,10 @@ impl Compiler {
                             self.code.push(Instruction::Pop);
                         }
                         self.scopes.pop().expect("rest scope was just pushed");
-                        self.declare_bound(kind, name, span);
+                        match leaf {
+                            PatternLeaf::Declare(kind) => self.declare_bound(kind, name, span),
+                            PatternLeaf::Assign => self.store_existing(name, span),
+                        }
                     }
                     None => self.code.push(Instruction::Pop),
                 }
@@ -1156,7 +1188,7 @@ impl Compiler {
                     self.code.push(Instruction::Dup);
                     self.push_constant(Constant::Number((index as f64).to_bits()));
                     self.code.push(Instruction::GetComputed);
-                    self.bind_pattern(kind, element, span);
+                    self.destructure(leaf, element, span);
                 }
                 if let Some(rest) = rest {
                     self.code.push(Instruction::Dup);
@@ -1166,7 +1198,7 @@ impl Compiler {
                         name: slice,
                         argc: 1,
                     });
-                    self.bind_pattern(kind, rest, span);
+                    self.destructure(leaf, rest, span);
                 }
                 self.code.push(Instruction::Pop);
             }
@@ -2309,6 +2341,13 @@ impl Compiler {
                 target,
                 value,
             } => self.assignment(*operator, target, value, expression.span),
+            ExpressionKind::PatternAssignment { pattern, value } => {
+                // An assignment is an expression whose value is the right-hand side, so a copy
+                // is kept back before the pattern consumes it.
+                self.expression(value);
+                self.code.push(Instruction::Dup);
+                self.assign_pattern(pattern, expression.span);
+            }
             ExpressionKind::Conditional {
                 test,
                 consequent,
@@ -2328,6 +2367,7 @@ impl Compiler {
                 optional,
             } => self.call(callee, arguments, *optional, expression.span),
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::NewTarget => self.code.push(Instruction::LoadNewTarget),
             ExpressionKind::Yield { delegate, value } if !*delegate => {
                 match value {
                     Some(value) => self.expression(value),
@@ -2700,6 +2740,52 @@ impl Compiler {
         value: &Expression,
         span: Span,
     ) {
+        let Some((load, store)) = self.assignment_place(target, span) else {
+            return;
+        };
+        if operator.is_short_circuiting() {
+            // `a ??= b` reads `a`, and assigns only if it is the wrong one -- so `b` may never
+            // be evaluated and the store may never happen. The current value is left on the
+            // stack as the expression's result when the store is skipped.
+            self.code.push(load.clone());
+            let skip = self.emit_jump(short_circuit_jump(operator));
+            self.expression(value);
+            self.code.push(Instruction::Dup);
+            self.code.push(store);
+            let done = self.emit_jump(Instruction::Jump(0));
+            self.patch_jump(skip);
+            self.code.push(load);
+            self.patch_jump(done);
+            return;
+        }
+        if operator == AssignmentOperator::Assign {
+            self.expression(value);
+        } else {
+            self.code.push(load);
+            self.expression(value);
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
+        }
+        self.code.push(Instruction::Dup);
+        self.code.push(store);
+    }
+
+    /// Store the value on top of the stack into an existing binding, consuming it.
+    ///
+    /// The leaf of a destructuring assignment. Unlike [`Compiler::assignment`] there is no
+    /// operator and no result to leave behind: the pattern walk already holds what it needs.
+    fn store_existing(&mut self, name: &str, span: Span) {
+        if let Some((_, store)) = self.assignment_place(name, span) {
+            self.code.push(store);
+        }
+    }
+
+    /// How to read and write `target`, or `None` when it names nothing.
+    ///
+    /// Reports const and imported-binding assignments, and compiles an unresolved name to a
+    /// `ReferenceError` raised where the assignment happens -- so a caller that gets `None` has
+    /// already had its diagnostic or its throw emitted and should emit nothing more.
+    fn assignment_place(&mut self, target: &str, span: Span) -> Option<(Instruction, Instruction)> {
         // Whether the target is a frame local or a module slot decides the store instruction,
         // so it has to be carried alongside the slot rather than assumed.
         enum Place {
@@ -2732,7 +2818,7 @@ impl Compiler {
                 let _ = span;
                 let name = self.constant_index(Constant::String(target.to_owned()));
                 self.code.push(Instruction::ThrowReference(name));
-                return;
+                return None;
             }
         };
         let (load, store): (Instruction, Instruction) = match place {
@@ -2758,31 +2844,7 @@ impl Compiler {
                 format!("assignment to const local `{target}` is not supported"),
             );
         }
-        if operator.is_short_circuiting() {
-            // `a ??= b` reads `a`, and assigns only if it is the wrong one -- so `b` may never
-            // be evaluated and the store may never happen. The current value is left on the
-            // stack as the expression's result when the store is skipped.
-            self.code.push(load.clone());
-            let skip = self.emit_jump(short_circuit_jump(operator));
-            self.expression(value);
-            self.code.push(Instruction::Dup);
-            self.code.push(store);
-            let done = self.emit_jump(Instruction::Jump(0));
-            self.patch_jump(skip);
-            self.code.push(load);
-            self.patch_jump(done);
-            return;
-        }
-        if operator == AssignmentOperator::Assign {
-            self.expression(value);
-        } else {
-            self.code.push(load);
-            self.expression(value);
-            self.code
-                .push(Instruction::Binary(compound_operator(operator)));
-        }
-        self.code.push(Instruction::Dup);
-        self.code.push(store);
+        Some((load, store))
     }
 
     /// Compile a class into a constructor and a prototype.
@@ -2847,7 +2909,12 @@ impl Compiler {
         self.variable(VariableKind::Let, &name, None, class.span);
 
         let constructor = match &class.constructor {
-            Some(constructor) => constructor.clone(),
+            // The constructor *is* the class as a value, so it carries the class's name: that is
+            // what `new.target.name` and a console's `C {}` both read.
+            Some(constructor) => Function {
+                name: Some(name.clone()),
+                ..constructor.clone()
+            },
             // A class with no constructor gets an empty one, so `new` needs no special case for
             // classes that declared none.
             None => Function {
@@ -4351,6 +4418,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
         ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::Unsupported { .. } => {}
         ExpressionKind::SuperCall { arguments } => {
@@ -4368,6 +4436,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             if collecting {
                 names.insert(target.clone());
             }
+            collect_identifiers(value, names, collecting);
+        }
+        // Every name the pattern assigns is written by this function, so each is a capture
+        // candidate for the same reason a plain assignment target is.
+        ExpressionKind::PatternAssignment { pattern, value } => {
+            if collecting {
+                collect_pattern_names(pattern, names);
+            }
+            collect_pattern_default_captures(pattern, names);
             collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Conditional {
@@ -4499,6 +4576,11 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         | ExpressionKind::Logical { left, right, .. } => {
             expression_references(left, name) || expression_references(right, name)
         }
+        ExpressionKind::PatternAssignment { pattern, value } => {
+            let mut names = Vec::new();
+            pattern_names_in_order(pattern, &mut names);
+            names.iter().any(|bound| bound == name) || expression_references(value, name)
+        }
         ExpressionKind::Assignment { target, value, .. } => {
             target == name || expression_references(value, name)
         }
@@ -4592,7 +4674,9 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Update { target, .. } => target == name,
-        ExpressionKind::Literal(_) | ExpressionKind::TemplateStrings { .. } => false,
+        ExpressionKind::Literal(_)
+        | ExpressionKind::TemplateStrings { .. }
+        | ExpressionKind::NewTarget => false,
     }
 }
 
