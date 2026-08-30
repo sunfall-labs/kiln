@@ -494,7 +494,7 @@ impl ModuleGraph {
             }
             let remaining_limits = ExecutionLimits {
                 max_steps: limits.max_steps - total_steps,
-                max_call_depth: limits.max_call_depth,
+                ..limits
             };
             let result = execute_module(&node.program, &imports, host, remaining_limits).map_err(
                 |error| {

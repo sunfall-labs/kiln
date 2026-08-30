@@ -69,6 +69,15 @@ pub struct Module {
 pub struct Function {
     /// `None` for a function expression that was never given one.
     pub name: Option<String>,
+    /// The source wrote that name, rather than it being inferred from what the function was
+    /// assigned to.
+    ///
+    /// The two are not the same thing. A *written* name on a function expression is visible
+    /// inside the body and nowhere else, which is what lets a recursive function expression call
+    /// itself. An inferred one is metadata -- `f.name` and a stack frame -- and binding it would
+    /// invent a scope the program did not write, so that `var f = function () {}; f = 1;` would
+    /// stop seeing the reassignment from inside.
+    pub binds_own_name: bool,
     /// An arrow function. It has no `arguments` of its own and takes `this` lexically, so the
     /// distinction has to survive lowering even while neither is implemented yet.
     pub arrow: bool,

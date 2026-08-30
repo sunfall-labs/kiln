@@ -662,6 +662,13 @@ impl Default for ObjectData {
     }
 }
 
+/// How far a prototype chain is followed before a read gives up.
+///
+/// A chain this long is a program that built a cycle -- `setPrototypeOf` refuses to make one, but
+/// nothing stops an object graph from being deep -- and the alternative to a bound is exhausting
+/// the Rust stack, which aborts the process instead of reporting anything.
+const MAX_PROTOTYPE_DEPTH: usize = 10_000;
+
 impl ObjectData {
     /// An own property slot, ignoring the prototype chain.
     pub fn get_own_property(&self, key: &str) -> Option<&Property> {
@@ -683,14 +690,55 @@ impl ObjectData {
     }
 
     /// A property slot, following the prototype chain.
+    ///
+    /// Iterative and bounded rather than recursive. A chain is built by the program, so its
+    /// length is the program's business -- but the recursion was on the *Rust* stack, where
+    /// running out is an abort rather than an error, and a chain long enough to do that is
+    /// reachable from ordinary code.
     pub fn lookup(&self, key: &str) -> Option<Property> {
         if let Some(own) = self.get_own_property(key) {
             return Some(own.clone());
         }
-        match &self.prototype {
-            Some(Value::Object(parent)) => parent.borrow().lookup(key),
-            Some(Value::Function(parent)) => parent.properties.borrow().lookup(key),
-            _ => None,
+        let mut current = self.prototype.clone();
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            let found = match &current {
+                Some(Value::Object(parent)) => {
+                    let parent = parent.borrow();
+                    parent
+                        .get_own_property(key)
+                        .cloned()
+                        .ok_or_else(|| parent.prototype.clone())
+                }
+                Some(Value::Function(parent)) => {
+                    let parent = parent.properties.borrow();
+                    parent
+                        .get_own_property(key)
+                        .cloned()
+                        .ok_or_else(|| parent.prototype.clone())
+                }
+                _ => return None,
+            };
+            match found {
+                Ok(property) => return Some(property),
+                Err(next) => current = next,
+            }
+        }
+        None
+    }
+
+    /// Define an own data property, replacing whatever was there.
+    ///
+    /// Unlike [`ObjectData::set`] this never consults an inherited accessor: `defineProperty`
+    /// *defines*, where an assignment *assigns*, and the difference is exactly the idiom where a
+    /// prototype getter replaces itself with an own value on first read. Routing that through
+    /// the prototype's setter calls it again, and again.
+    pub fn define_value(&mut self, key: &str, value: Value) {
+        if self.frozen {
+            return;
+        }
+        match self.properties.iter_mut().find(|(name, _)| name == key) {
+            Some((_, slot)) => *slot = Property::Value(value),
+            None => self.set(key, value),
         }
     }
 
@@ -718,15 +766,9 @@ impl ObjectData {
     /// Returns an owned value rather than a reference because the answer may live in another
     /// object behind an `Rc<RefCell<_>>`, whose borrow cannot outlive this call.
     pub fn get(&self, key: &str) -> Option<Value> {
-        if let Some(own) = self.get_own(key) {
-            return Some(own.clone());
-        }
-        match &self.prototype {
-            Some(Value::Object(parent)) => parent.borrow().get(key),
-            // A class's statics are inherited through the constructor, and a constructor is a
-            // function whose own properties live in its own store. Without this arm the chain
-            // would stop at the first function in it.
-            Some(Value::Function(parent)) => parent.properties.borrow().get(key),
+        // Same walk as `lookup`, and data-only: this is what the VM's own reads use.
+        match self.lookup(key) {
+            Some(Property::Value(value)) => Some(value),
             _ => None,
         }
     }
@@ -735,7 +777,25 @@ impl ObjectData {
         self.prototype.as_ref()
     }
 
+    /// Link this object to a prototype, refusing to close a cycle.
+    ///
+    /// The specification makes `Object.setPrototypeOf` a TypeError when it would create one.
+    /// Here the reason is more immediate: a cycle makes every miss walk forever.
     pub fn set_prototype(&mut self, prototype: Value) {
+        let mut current = Some(prototype.clone());
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            let next = match &current {
+                Some(Value::Object(parent)) => {
+                    if std::ptr::eq(parent.as_ptr(), std::ptr::from_ref(self)) {
+                        return;
+                    }
+                    parent.borrow().prototype.clone()
+                }
+                Some(Value::Function(parent)) => parent.properties.borrow().prototype.clone(),
+                _ => break,
+            };
+            current = next;
+        }
         self.prototype = Some(prototype);
     }
 
@@ -1276,6 +1336,11 @@ impl From<HostValue> for Value {
 /// the daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionLimits {
+    /// How deep a built-in may call back into JavaScript before the machine refuses.
+    ///
+    /// Separate from `max_call_depth` because it bounds a different resource: this one is the
+    /// Rust stack, which cannot be grown and whose exhaustion is not catchable.
+    pub max_native_depth: usize,
     pub max_steps: u64,
     /// Frames allowed on the call stack.
     ///
@@ -1289,7 +1354,15 @@ impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {
             max_steps: 1_000_000,
-            max_call_depth: 512,
+            // Roughly what node allows. A JavaScript frame is a `Frame` in a vector rather than
+            // a Rust stack frame, so ordinary recursion costs heap and not stack; 512 refused
+            // programs node runs.
+            max_call_depth: 10_000,
+            // The interpreter *does* recurse in Rust when a built-in calls back into JavaScript
+            // -- `map` running a callback that calls `map` -- and that recursion is bounded by
+            // the real stack rather than by a vector. Overflowing it aborts the process, which
+            // is the one failure a compiler must never have, so it is bounded well below.
+            max_native_depth: 192,
         }
     }
 }
@@ -1591,6 +1664,7 @@ pub fn execute<H: HostOps + ?Sized>(
         suspended_awaiting: false,
         global_object: None,
         process_object: None,
+        native_depth: 0,
         frames: Vec::new(),
         instruction: 0,
         function_names: program
@@ -1713,6 +1787,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         suspended_awaiting: false,
         global_object: None,
         process_object: None,
+        native_depth: 0,
         frames: Vec::new(),
         instruction: 0,
         function_names: module
@@ -1971,6 +2046,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// to find it again. What it does *not* do is back variable lookup: writing
     /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
     global_object: Option<Value>,
+    /// How many built-ins are currently between the running code and the interpreter loop.
+    native_depth: usize,
     /// `process`, built on first use and shared from then on.
     ///
     /// Bundles read `process.env.NODE_ENV` unguarded -- it is the standard way a library ships
@@ -3498,7 +3575,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 } else {
                     let value = self.read_property(&descriptor, "value", instruction)?;
-                    self.set_computed(&target, &Value::String(key), value, instruction)?;
+                    // An own property, not an assignment: see `ObjectData::define_value`.
+                    match &target {
+                        Value::Object(object) => object.borrow_mut().define_value(&key, value),
+                        Value::Function(closure) => {
+                            closure.properties.borrow_mut().define_value(&key, value);
+                        }
+                        Value::Array(items) => match key.parse::<usize>() {
+                            Ok(index) => {
+                                let mut items = items.borrow_mut();
+                                if index >= items.len() {
+                                    items.resize(index + 1, Value::Undefined);
+                                }
+                                items[index] = value;
+                            }
+                            Err(_) => items.properties.borrow_mut().define_value(&key, value),
+                        },
+                        // A primitive has nowhere to put one; the specification throws, and
+                        // there is no more information in doing so here.
+                        _ => {}
+                    }
                 }
                 Ok(target)
             }
@@ -4108,6 +4204,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `forEach` -- need exactly this, and having one place that does it keeps them from each
     /// inventing a way to re-enter the interpreter.
     fn call_value(
+        &mut self,
+        callee: &Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // Every arm below can re-enter the interpreter, and each re-entry is a Rust frame. The
+        // count is taken here, once, rather than at each of them.
+        if self.native_depth >= self.limits.max_native_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_native_depth,
+            });
+        }
+        self.native_depth += 1;
+        let outcome = self.call_value_inner(callee, this_value, arguments, instruction);
+        self.native_depth -= 1;
+        outcome
+    }
+
+    fn call_value_inner(
         &mut self,
         callee: &Value,
         this_value: Value,
@@ -7666,10 +7782,20 @@ fn call_native(
             }
         }
         Native::SetConstructor | Native::MapConstructor => Value::Undefined,
+        // `Array(3)` and `new Array(3)` are the same thing, which is unusual enough among the
+        // constructors to be worth saying: the specification defines the call form as the
+        // construct form, and libraries allocating a sized array reach for the shorter one.
+        Native::ArrayConstructor => construct_array(arguments),
+        // `Object(x)` boxes a primitive and passes an object through; nothing here has boxes, so
+        // an object argument is returned and anything else becomes an empty object.
+        Native::ObjectConstructor => match arguments.first() {
+            Some(value @ (Value::Object(_) | Value::Array(_) | Value::Function(_))) => {
+                value.clone()
+            }
+            _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+        },
         Native::Error(_)
         | Native::SymbolConstructor
-        | Native::ArrayConstructor
-        | Native::ObjectConstructor
         // A namespace, not a function: `Math` has no call behaviour of its own, and reaching
         // here means something called it.
         | Native::Math
