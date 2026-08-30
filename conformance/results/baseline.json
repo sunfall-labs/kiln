@@ -149,14 +149,22 @@
     {
       "id": "regress/r05-object-spread-order",
       "outcome": "pass"
+    },
+    {
+      "id": "regress/r06-parameter-forms",
+      "outcome": "pass"
+    },
+    {
+      "id": "regress/r07-silent-divergences",
+      "outcome": "pass"
     }
   ],
   "totals": {
     "failed": 3,
     "not_yet_runnable": 0,
-    "passed": 22,
+    "passed": 24,
     "skipped": 12,
-    "total": 37,
+    "total": 39,
     "unsupported": 0
   }
 }

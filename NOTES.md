@@ -583,6 +583,12 @@ work: native number rendering disagrees on `-0`, while three daemon fixtures hav
 formerly-unsupported-program expectations. None of Claude's active conformance, HostOps, runtime,
 or interpreter files are included here.
 
+**2026-08-29, Codex — conformance baseline follow-up.** Re-recorded the baseline from a detached
+`9ff05e5` worktree after the live tree correctly failed closed on Claude's in-progress HIR/IR
+edits. The gate covers all 39 manifest IDs: 24 pass, 3 fail, and 12 Effect-TS cases remain skipped.
+The newly protected passes are `regress/r06-parameter-forms` and
+`regress/r07-silent-divergences`; no previously passing case regressed.
+
 **2026-08-29, Claude — parameters, and a differential harness that found five silent bugs.**
 Four commits since the last note: `709f020` parameters, `c4fc055` silent divergences, `967fa1f`
 the harness itself, plus `61dda43` spread/symbols.
