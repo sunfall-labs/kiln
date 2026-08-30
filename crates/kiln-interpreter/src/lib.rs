@@ -175,6 +175,7 @@ pub enum Native {
     Math,
     MathAbs,
     MathFloor,
+    DateToJson,
     MathHypot,
     MathAtan2,
     MathSin,
@@ -3968,8 +3969,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let indent = json_indent(arguments.get(2));
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut seen = Vec::new();
-                let mut resolve = |getter: &Value, receiver: &Value| {
-                    self.call_value(getter, receiver.clone(), Vec::new(), instruction)
+                let mut resolve = |getter: Option<&Value>, receiver: &Value| match getter {
+                    Some(getter) => {
+                        self.call_value(getter, receiver.clone(), Vec::new(), instruction)
+                    }
+                    None => {
+                        // Only a reference value can carry one, and asking a primitive would
+                        // reach the string and number method tables for nothing.
+                        if !matches!(
+                            receiver,
+                            Value::Object(_) | Value::Array(_) | Value::Date(_) | Value::Proxy(_)
+                        ) {
+                            return Ok(receiver.clone());
+                        }
+                        let method = self.read_property(receiver, "toJSON", instruction)?;
+                        if !is_callable(&method) {
+                            return Ok(receiver.clone());
+                        }
+                        self.call_value(&method, receiver.clone(), Vec::new(), instruction)
+                    }
                 };
                 Ok(
                     match json_stringify(&value, &indent, "", &mut seen, &mut resolve)? {
@@ -6843,7 +6861,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "setMilliseconds" | "setUTCMilliseconds" => {
                     Value::Native(Native::DateSet(DateField::Milliseconds))
                 }
-                "toISOString" | "toJSON" => Value::Native(Native::DateToIso),
+                "toISOString" => Value::Native(Native::DateToIso),
+                // Not the same function as `toISOString`, and the difference is exactly the
+                // case JSON cares about: an instant with no ISO spelling makes `toISOString`
+                // throw, where `toJSON` answers null so the enclosing document still serialises.
+                "toJSON" => Value::Native(Native::DateToJson),
                 "toString" | "toUTCString" | "toLocaleString" | "toLocaleDateString"
                 | "toLocaleTimeString" | "toDateString" | "toTimeString" => {
                     Value::Native(Native::DateToString)
@@ -7749,13 +7771,28 @@ fn json_indent(space: Option<&Value>) -> String {
 /// Not supported yet: the `replacer` argument and `toJSON` hooks, both of which call back into
 /// the program at points this signature does not reach. Neither appears in the
 /// corpus; when one does, this grows a `&mut Interpreter` and moves onto the type.
+/// The one callback `json_stringify` needs, doing both jobs it can require of the machine.
+///
+/// With a getter it calls that getter; with `None` it performs the `toJSON` step -- look the name
+/// up on the value, call it if it is callable, and hand back what it produced, or the value
+/// unchanged when there is none. One closure rather than two because both borrow the interpreter
+/// mutably and only one of them can.
+type JsonResolver<'a> = &'a mut dyn FnMut(Option<&Value>, &Value) -> Result<Value, ExecutionError>;
+
+/// Serialise one value, calling back into the interpreter where the specification says to.
+///
 fn json_stringify(
     value: &Value,
     indent: &str,
     current: &str,
     seen: &mut Vec<usize>,
-    resolve: &mut dyn FnMut(&Value, &Value) -> Result<Value, ExecutionError>,
+    resolve: JsonResolver<'_>,
 ) -> Result<Option<String>, ExecutionError> {
+    // `toJSON` runs before anything else is decided about the value, which is how a `Date`
+    // serialises as its ISO string and how a library controls its own JSON form. It is looked
+    // up on the value, prototype chain included, so a class method counts.
+    let replaced = resolve(None, value)?;
+    let value = &replaced;
     let nested = format!("{current}{indent}");
     // With no indent every separator is empty, which collapses the pretty form to the compact
     // one and lets both share this single code path.
@@ -7822,7 +7859,7 @@ fn json_stringify(
                     // The specification reads the property, which for an accessor is a call.
                     // Serialising the getter itself would be a different object entirely.
                     Property::Accessor { get, .. } => match get {
-                        Some(getter) => resolve(&getter, value)?,
+                        Some(getter) => resolve(Some(&getter), value)?,
                         None => continue,
                     },
                 };
@@ -8730,6 +8767,15 @@ fn call_native(
                 Some(text) => Value::String(text),
                 // An instant with no ISO spelling is a RangeError, not a placeholder string.
                 None => return Err(ExecutionError::RadixOutOfRange),
+            }
+        }
+        Native::DateToJson => {
+            let Value::Date(time) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            match iso_string(time.get()) {
+                Some(text) => Value::String(text),
+                None => Value::Null,
             }
         }
         Native::DateToString => {
@@ -12830,8 +12876,11 @@ mod tests {
 
     /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.
     fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionError> {
-        let mut unreachable_getter =
-            |_: &Value, _: &Value| unreachable!("no fixture here defines an accessor");
+        let mut unreachable_getter = |getter: Option<&Value>, receiver: &Value| match getter {
+            // No fixture here defines an accessor, and none carries `toJSON`.
+            Some(_) => unreachable!("no fixture here defines an accessor"),
+            None => Ok(receiver.clone()),
+        };
         json_stringify(value, indent, "", &mut Vec::new(), &mut unreachable_getter)
     }
 
