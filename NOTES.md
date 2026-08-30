@@ -1610,12 +1610,17 @@ running, and none of them was a refusal.
 - **`String.prototype.substring` and `substr` were missing entirely.** Not obscure -- `substring`
   is one of the oldest string methods there is.
 
-**js-yaml does not pass**, and its repro is small enough to hand over: `load("a:\n  b: 1\n")`
-throws "incomplete mapping pair in event stream" where node returns `{a: {b: 1}}`. A *flat*
-mapping and a sequence both parse correctly, so it is specifically the nested block. I probed
-every primitive its scanner uses -- `charCodeAt` past the end, prefix and postfix increment of a
-member expression used as an argument, `Object.create(null)`, `Map` with object keys, optional
-chaining on null -- and all of them agree with node, so whatever diverges is further in than I
-got. Written down rather than left as "js-yaml is broken".
+**js-yaml passes too, and the cause was worth the chase: `array.length = n` did nothing.** It
+was stored as an ordinary property called "length" while the array kept its elements. Writing it
+is how a program empties an array in place, and js-yaml's parser -- which speculates and rewinds
+-- truncates its event list exactly that way, so a nested mapping was composed against a
+duplicated event stream. Only *nested* mappings failed, which is what made it worth chasing
+rather than dismissing.
 
-Corpus now: date-fns, zod, semver, mustache passing; immer and js-yaml not. differential 80/0/0.
+The way in was tracing: the parse traces were identical between node and kiln, which ruled out
+the whole scanner in one step and pointed at the composer. Worth remembering as a technique --
+instrument the bundle, diff the two traces, and the divergence names itself.
+
+Writing an out-of-range length now throws a `RangeError` rather than being ignored.
+
+Corpus now: date-fns, zod, semver, mustache, js-yaml passing; immer not. differential 81/0/0.
