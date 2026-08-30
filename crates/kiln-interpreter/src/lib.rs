@@ -3492,10 +3492,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(thrown, Value::Native(Native::ReturnSignal)) {
                 return Err(ExecutionError::GeneratorReturned);
             }
+            let trace = captured_trace(&thrown);
             return Err(ExecutionError::Uncaught {
                 instruction,
-                message: describe_thrown(&thrown),
-                trace: captured_trace(&thrown),
+                message: self.describe_uncaught(&thrown, instruction),
+                trace,
             });
         };
         if handler.target == HOST_HANDLER {
@@ -5625,9 +5626,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(());
         };
         let trace = captured_trace(&reason);
+        let instruction = self.instruction;
+        let described = self.describe_uncaught(&reason, instruction);
         Err(ExecutionError::Uncaught {
-            instruction: self.instruction,
-            message: format!("(in promise) {}", describe_thrown(&reason)),
+            instruction,
+            message: format!("(in promise) {described}"),
             trace,
         })
     }
@@ -6033,6 +6036,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let array = construct_array(&arguments);
                 self.stack.push(array);
             }
+            // `new Object(v)` and `Object(v)` are the same operation: the specification routes
+            // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
+            // use for.  Sharing the call behaviour keeps them from drifting apart.
+            Value::Native(Native::ObjectConstructor) => {
+                let object = call_native(Native::ObjectConstructor, &Value::Undefined, &arguments)?;
+                self.stack.push(object);
+            }
             Value::Native(
                 native @ (Native::ArrayBufferConstructor | Native::TypedArrayConstructor(_)),
             ) => {
@@ -6362,6 +6372,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Nothing usable, so the built-in conversion stands.
         Ok(Value::String(value.to_display_string()))
+    }
+
+    /// Describe a value that is about to end the run as an uncaught throw.
+    ///
+    /// A host reports an uncaught value the way the program would print it, which for a
+    /// user-defined error type means its own `toString`. Test262's whole assertion library throws
+    /// `Test262Error`, whose `toString` is an ordinary function, so without this every failure in
+    /// the suite reads `uncaught [object Object]` and the assertion message -- the only part that
+    /// says what broke -- is lost.
+    ///
+    /// This runs user code, which is only acceptable because both callers are terminal: the run
+    /// is ending either way. A `toString` that throws, or that answers something other than a
+    /// string, falls back to the built-in description rather than replacing one uncaught error
+    /// with another.
+    fn describe_uncaught(&mut self, thrown: &Value, instruction: usize) -> String {
+        if has_error_to_string(thrown) {
+            return error_to_string(thrown);
+        }
+        if matches!(
+            thrown,
+            Value::Object(_) | Value::Function(_) | Value::Array(_)
+        ) && let Ok(Value::String(text)) = self.as_primitive(thrown, true, instruction)
+        {
+            return text;
+        }
+        describe_thrown(thrown)
     }
 
     /// Read a property, calling a getter when the slot holds one.
@@ -10323,8 +10359,10 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             Some(name) => format!("[Function: {name}]"),
             None => "[Function (anonymous)]".to_owned(),
         },
-        Value::Native(native) => format!("[Function: {native:?}]"),
-        Value::Callback(method) => format!("[Function: {method:?}]"),
+        Value::Native(native) => format!("[Function: {}]", builtin_js_name(&format!("{native:?}"))),
+        Value::Callback(method) => {
+            format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
+        }
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
         Value::Settler(..) => "[Function (anonymous)]".to_owned(),
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
@@ -11317,6 +11355,72 @@ fn empty_items(count: usize) -> String {
 /// `$` is not in the set, which looks like an oversight and is not: node's own rule is
 /// `/^[a-zA-Z_][a-zA-Z_0-9]*$/`, so `{ a$b: 1 }` prints with its key quoted and so does `{ 3: 1 }`.
 /// Matching node exactly is what lets `scripts/differential.sh` diff console output at all.
+/// The name a console shows for a function the runtime supplies rather than the program.
+///
+/// Derived from the variant rather than tabulated. A table of two hundred names would be two
+/// hundred chances to disagree with the property table that actually resolves the name, and it
+/// would go stale one variant at a time. The variants are spelled `<Type><Method>`, so removing
+/// the type and lowering the first letter recovers the JavaScript name --
+/// `conformance/differential/builtin-names.js` checks that against node for every builtin the
+/// corpus can reach.
+fn builtin_js_name(variant: &str) -> String {
+    // A payload is not part of the name: `DateField(Time)` is `getTime`'s implementation, not a
+    // function called `DateField(Time)`.
+    let variant = variant.split('(').next().unwrap_or(variant);
+    // A constructor is named for its type, not for the word "Constructor".
+    if let Some(type_name) = variant.strip_suffix("Constructor")
+        && !type_name.is_empty()
+    {
+        return type_name.to_owned();
+    }
+    // `Object.prototype.toString` is spelled for what it reads, not for what it is called.
+    if variant == "ObjectToStringTag" {
+        return "toString".to_owned();
+    }
+    // Longest first, so `ArrayBuffer` is not read as `Array` followed by `Buffer`.
+    const TYPES: [&str; 26] = [
+        "AsyncGenerator",
+        "ArrayBuffer",
+        "TypedArray",
+        "Collection",
+        "Generator",
+        "Primitive",
+        "Promise",
+        "Boolean",
+        "Reflect",
+        "Console",
+        "Process",
+        "RegExp",
+        "String",
+        "Symbol",
+        "Object",
+        "Number",
+        "BigInt",
+        "Global",
+        "Array",
+        "Proxy",
+        "Date",
+        "Json",
+        "Math",
+        "Weak",
+        "Map",
+        "Set",
+    ];
+    let method = TYPES
+        .iter()
+        .find_map(|type_name| {
+            variant
+                .strip_prefix(type_name)
+                .filter(|rest| !rest.is_empty())
+        })
+        .unwrap_or(variant);
+    let mut characters = method.chars();
+    match characters.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
 fn inspect_key(key: &str) -> String {
     let mut characters = key.chars();
     let identifier = characters
