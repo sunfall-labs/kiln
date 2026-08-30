@@ -45,3 +45,41 @@ console.log(
   words instanceof Uint8Array,
   Array.isArray(words),
 );
+
+function caughtName(operation: () => unknown) {
+  try {
+    operation();
+    return "none";
+  } catch (error) {
+    return error.name;
+  }
+}
+
+console.log(
+  caughtName(() => new ArrayBuffer(-1)),
+  caughtName(() => new Uint8Array(-1)),
+  caughtName(() => new ArrayBuffer(Infinity)),
+  caughtName(() => new Uint8Array(1e300)),
+);
+console.log(
+  caughtName(() => new Uint16Array(buffer, -1)),
+  caughtName(() => new Uint16Array(buffer, 1)),
+  caughtName(() => new Uint16Array(buffer, 0, 5)),
+);
+console.log(
+  new ArrayBuffer(NaN).byteLength,
+  new ArrayBuffer(3.9).byteLength,
+  new Uint8Array(NaN).length,
+  new Uint8Array(buffer, 0, undefined).length,
+  new Uint8Array([5], 1e300).length,
+);
+
+const setBounds = new Uint8Array([1, 2]);
+console.log(
+  caughtName(() => setBounds.set([9], -1)),
+  caughtName(() => setBounds.set([9], Infinity)),
+  caughtName(() => setBounds.set([9, 8, 7])),
+  setBounds.join(","),
+);
+setBounds.set([9], 0.9);
+console.log(setBounds.join(","));
