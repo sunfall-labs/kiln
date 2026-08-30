@@ -63,3 +63,39 @@ console.log(first.next().value, second.next().value);
 // Spreading a string and an array go through the same instruction, and a string iterates as its
 // characters rather than its code units.
 console.log([..."abc"], [...[1, 2]], [..."a\u{1F600}b"].length);
+
+// A `try` inside a generator has to still be catching after the `yield` inside it returns, which
+// means the handler stack is part of the state a suspension survives -- so it lives in the frame
+// beside the locals and the operand stack rather than being automatic.
+function* guarded(): Generator<string> {
+  try {
+    yield "one";
+    throw new Error("inside");
+  } catch (e: any) {
+    yield `caught ${e.message}`;
+  } finally {
+    yield "finally";
+  }
+}
+const g2 = guarded();
+console.log(g2.next(), g2.next(), g2.next(), g2.next());
+
+// The same in an async function, where the suspension is an `await`.
+async function safely(): Promise<string> {
+  try {
+    await Promise.reject(new Error("rejected"));
+    return "unreachable";
+  } catch (e: any) {
+    return `handled ${e.message}`;
+  }
+}
+safely().then((v: string) => console.log(v));
+
+// A handler registered before a suspension and used after one, with a nested generator between.
+function* outerGuard(): Generator<string> {
+  try {
+    for (const value of range(2)) { yield `saw ${value}`; }
+    throw "late";
+  } catch (e: any) { yield `outer ${e}`; }
+}
+console.log([...outerGuard()]);
