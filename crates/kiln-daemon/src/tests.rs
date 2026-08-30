@@ -121,29 +121,24 @@ impl QueryEngine for StubEngine {
     }
 
     fn interface(&mut self, file: FileId) -> Interface {
-        let exports = exports_of(self.text(file));
         self.stats.interface_computed += 1;
-        Interface {
-            interface_hash: hash(exports.join("\n").as_bytes()),
-            exports,
-        }
+        Interface::from_exports(exports_of(self.text(file)))
     }
 
     fn project(&mut self) -> Project {
         let files: Vec<FileId> = self.sources.keys().copied().map(FileId).collect();
-        let mut exports = 0;
-        let mut rolled = 0u64;
+        let mut interfaces = Vec::with_capacity(files.len());
         for file in &files {
+            let path = self.paths[file.0 as usize].clone();
             let interface = self.interface(*file);
-            exports += interface.exports.len();
-            rolled ^= interface.interface_hash;
+            interfaces.push((path, interface));
         }
         self.stats.project_computed += 1;
-        Project {
-            modules: files.len(),
-            exports,
-            interface_hash: rolled,
-        }
+        Project::from_interfaces(
+            interfaces
+                .iter()
+                .map(|(path, interface)| (path.as_str(), interface)),
+        )
     }
 
     fn revision(&self) -> Revision {

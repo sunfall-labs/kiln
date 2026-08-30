@@ -47,11 +47,14 @@ reads at a fixed revision are pure. `Stats` exists so those guarantees are obser
 outside the engine. Recompute counts are a first-class output, not debug logging, because a
 claim about invalidation that nothing asserts on is a claim that quietly stops being true.
 
-`kiln-db` has zero dependencies, and v0 ships `MemoEngine`, a hand-written implementation. It is
-both the thing that works today and the executable specification of what a backend must do. A
-salsa-backed engine, if we adopt one, is a second implementation of the same trait living in its
-own crate behind a feature or a constructor choice; no consumer changes, and the existing tests
-become the acceptance suite for the swap. ADR 0002 records what we require of such a backend.
+`kiln-db` has no parser, procedural-macro, or generic query-framework dependency, and v0 ships
+`MemoEngine`, a hand-written implementation. Its dependencies are the compiler-owned HIR/IR
+values it memoizes and the small concrete `kiln-digest` primitive required by ADR 0010 when a
+query value has no full unhashed value behind it. `MemoEngine` is both the thing that works today
+and the executable specification of what a backend must do. A salsa-backed engine, if we adopt
+one, is a second implementation of the same trait living in its own crate behind a feature or a
+constructor choice; no consumer changes, and the existing tests become the acceptance suite for
+the swap. ADR 0002 records what we require of such a backend.
 
 ## Consequences
 

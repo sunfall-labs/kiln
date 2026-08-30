@@ -10,6 +10,7 @@ mod hash;
 
 pub use engine::MemoEngine;
 pub use hash::content_hash;
+pub use kiln_digest::Digest;
 pub use kiln_hir::Module as HirModule;
 pub use kiln_ir::{CompileDiagnostic, ModuleProgram, Program};
 
@@ -62,19 +63,93 @@ impl Parsed {
 /// which is how design.md §3's "interface hash" is realised without maintaining a second hash
 /// by hand - see docs/adr/0003.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Interface {
     pub interface_hash: u64,
     pub exports: Vec<String>,
+}
+
+impl Interface {
+    /// Build the canonical set-like interface value used for early cutoff.
+    pub fn from_exports(mut exports: Vec<String>) -> Self {
+        exports.sort();
+        exports.dedup();
+        Self {
+            interface_hash: hash::hash_names(&exports),
+            exports,
+        }
+    }
 }
 
 /// Whole-project rollup. Its identity includes every active module's logical path and interface,
 /// so a body-only edit that changes neither does not recompute it. The interface hash is an opaque
 /// deterministic summary for diagnostics and transport, not an artifact-cache authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Project {
     pub modules: usize,
     pub exports: usize,
+    /// Collision-resistant equality identity over full logical paths and normalized exports.
+    pub identity_digest: Digest,
+    /// Compact readable summary retained for diagnostics and protocol compatibility.
     pub interface_hash: u64,
+}
+
+impl Project {
+    /// Build a deterministic project value from `(logical path, interface)` pairs.
+    ///
+    /// Input order is deliberately irrelevant. Logical paths must already use the caller's
+    /// chosen normalization policy; their exact bytes are module identity. [`Interface`] values
+    /// are canonical because external implementations construct them with
+    /// [`Interface::from_exports`].
+    pub fn from_interfaces<'a>(
+        interfaces: impl IntoIterator<Item = (&'a str, &'a Interface)>,
+    ) -> Self {
+        const DOMAIN: &[u8] = b"kiln-project-interface-v1\0";
+
+        fn write_len(output: &mut Vec<u8>, len: usize) {
+            output.extend_from_slice(&(len as u64).to_le_bytes());
+        }
+
+        fn write_framed(output: &mut Vec<u8>, value: &[u8]) {
+            write_len(output, value.len());
+            output.extend_from_slice(value);
+        }
+
+        let mut interfaces: Vec<_> = interfaces.into_iter().collect();
+        interfaces.sort_by(|(left_path, left), (right_path, right)| {
+            left_path
+                .cmp(right_path)
+                .then_with(|| left.exports.cmp(&right.exports))
+                .then_with(|| left.interface_hash.cmp(&right.interface_hash))
+        });
+
+        let mut summary = hash::Fnv1a::new();
+        let mut identity = Vec::new();
+        identity.extend_from_slice(DOMAIN);
+        write_len(&mut identity, interfaces.len());
+
+        let mut exports = 0;
+        for (path, interface) in &interfaces {
+            summary.write_u64(path.len() as u64);
+            summary.write(path.as_bytes());
+            summary.write_u64(interface.interface_hash);
+
+            write_framed(&mut identity, path.as_bytes());
+            write_len(&mut identity, interface.exports.len());
+            for export in &interface.exports {
+                write_framed(&mut identity, export.as_bytes());
+            }
+            exports += interface.exports.len();
+        }
+
+        Self {
+            modules: interfaces.len(),
+            exports,
+            identity_digest: Digest::hash(&identity),
+            interface_hash: summary.finish(),
+        }
+    }
 }
 
 /// Recompute accounting. Not debug output: the tests and the timing harness assert on it.

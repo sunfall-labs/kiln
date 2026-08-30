@@ -33,10 +33,11 @@ grow here as the interpreter is built.
 parse(path: &str, source: &str) -> kiln_hir::Module
 ```
 
-`kiln-db` depends only on `kiln-hir` and accepts that function through the `Frontend` function
-pointer type when `MemoEngine` is constructed. The daemon and timing harness inject
-`frontend_oxc::parse`; database unit tests inject a tiny fixture frontend. This preserves three
-properties simultaneously:
+`kiln-db` depends only on compiler-owned value layers (`kiln-hir` and `kiln-ir`) plus the small
+concrete `kiln-digest` identity primitive required by ADR 0010. It accepts the parse function
+through the `Frontend` function pointer type when `MemoEngine` is constructed. The daemon and
+timing harness inject `frontend_oxc::parse`; database unit tests inject a tiny fixture frontend.
+This preserves three properties simultaneously:
 
 1. Oxc is absent from the database's normal build and test dependency graph.
 2. Production parsing is a memoized query, not a side channel.
