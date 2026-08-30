@@ -42,7 +42,13 @@ are removed and staged paths are added or updated in one transaction. The result
 Every successful commit increments `SourceView`, including a byte-for-byte no-op. That increment
 is intentional: a successful authority boundary must fence concurrent clients even when the
 resulting bytes happen to compare equal. A failed commit leaves the current source view and
-authoritative source set unchanged.
+authoritative source set unchanged when validation fails or its base view is stale.
+
+`MemoEngine` input mutations are non-panicking. The generic daemon test seam nevertheless accepts
+other `QueryEngine` implementations, so an unexpected panic during their input mutation cannot be
+rolled back through that interface. The daemon catches such a panic while the state lock is held
+and advances `SourceView` before reporting an internal error. No observer can see the intermediate
+state under the old token, and the next client must reconcile it with a complete Sync.
 
 ### Queries consume an explicit source view
 
@@ -93,6 +99,8 @@ indefinitely or attempt to infer which paths changed concurrently.
 - A staged file whose SHA-256 digest differs from its manifest entry is rejected and never becomes
   visible.
 - A commit missing any needed path, or whose base view is stale, publishes nothing.
+- An unexpected custom-engine mutation panic invalidates the old source view before another
+  request can observe or consume the partially changed internal state.
 - A successful commit applies removals and updates atomically and returns a strictly newer view,
   including when the resulting source bytes are unchanged.
 - A source-consuming request with an old view returns `StaleSourceView` before preparing a query.
