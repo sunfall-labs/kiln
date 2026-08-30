@@ -235,8 +235,14 @@ enum kiln_value_tag {
      * It *reads* as undefined, which is why the marker must never escape into an expression --
      * but it is not one: `1 in [1, , 3]` is false where `1 in [1, undefined, 3]` is true, a
      * console shows `<1 empty item>`, and every element-walking method skips it. */
-    KILN_VALUE_HOLE = 14
+    KILN_VALUE_HOLE = 14,
+    /* bits holds a kiln_collection*. A Map and a Set are one tag because they are one structure:
+     * a Set is a Map whose values are never read. */
+    KILN_VALUE_COLLECTION = 15
 };
+
+#define KILN_C99_BUILTIN_MAP 8
+#define KILN_C99_BUILTIN_SET 9
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -359,6 +365,21 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_HAS_OWN_PROPERTY 90
 #define KILN_C99_METHOD_OBJECT_TO_STRING 91
 #define KILN_C99_METHOD_OBJECT_VALUE_OF 92
+
+/* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
+#define KILN_C99_METHOD_COLLECTION_GET 93
+#define KILN_C99_METHOD_COLLECTION_SET 94
+#define KILN_C99_METHOD_COLLECTION_ADD 95
+#define KILN_C99_METHOD_COLLECTION_HAS 96
+#define KILN_C99_METHOD_COLLECTION_DELETE 97
+#define KILN_C99_METHOD_COLLECTION_CLEAR 98
+#define KILN_C99_METHOD_COLLECTION_FOR_EACH 99
+#define KILN_C99_METHOD_COLLECTION_KEYS 100
+#define KILN_C99_METHOD_COLLECTION_VALUES 101
+#define KILN_C99_METHOD_COLLECTION_ENTRIES 102
+#define KILN_C99_METHOD_COLLECTION_SELF 103
+#define KILN_C99_METHOD_ITERATOR_NEXT 104
+#define KILN_C99_METHOD_ITERATOR_SELF 105
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -499,6 +520,24 @@ typedef struct kiln_date_parts {
     int valid;
 } kiln_date_parts;
 
+/* A Map or a Set.
+ *
+ * Insertion-ordered and scanned linearly, for the same reason an object's properties are: a hash
+ * needs a hash of a *value*, and the identity half of that is a pointer the collector will one
+ * day move. Order is observable -- iteration is in insertion order and the specification says so
+ * -- so the list is the honest structure and the index is what a hash would accelerate. */
+typedef struct kiln_entry {
+    kiln_value key;
+    kiln_value value;
+} kiln_entry;
+
+typedef struct kiln_collection {
+    kiln_entry *entries;
+    size_t count;
+    size_t capacity;
+    int is_map;
+} kiln_collection;
+
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
     const char *bytes;
@@ -546,6 +585,7 @@ static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 static int kiln_c99_is_callable(kiln_value value);
 static int kiln_c99_is_reference(kiln_value value);
+static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_inspect(kiln_value value);
@@ -575,6 +615,14 @@ static double kiln_c99_instant_from_parts(const double parts[7]);
 static double kiln_c99_parse_date(const char *bytes, size_t len);
 static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
 static int kiln_c99_is_hole(kiln_value value);
+static kiln_collection *kiln_c99_collection_of(kiln_value value);
+static int kiln_c99_new_collection(kiln_value *out, int is_map);
+static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
+static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
+static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
+static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
+static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
+                            kiln_value *thrown);
 static kiln_value kiln_c99_hole(void);
 static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
@@ -977,6 +1025,19 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_HAS_OWN_PROPERTY: return "hasOwnProperty";
     case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
     case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_COLLECTION_GET: return "get";
+    case KILN_C99_METHOD_COLLECTION_SET: return "set";
+    case KILN_C99_METHOD_COLLECTION_ADD: return "add";
+    case KILN_C99_METHOD_COLLECTION_HAS: return "has";
+    case KILN_C99_METHOD_COLLECTION_DELETE: return "delete";
+    case KILN_C99_METHOD_COLLECTION_CLEAR: return "clear";
+    case KILN_C99_METHOD_COLLECTION_FOR_EACH: return "forEach";
+    case KILN_C99_METHOD_COLLECTION_KEYS: return "keys";
+    case KILN_C99_METHOD_COLLECTION_VALUES: return "values";
+    case KILN_C99_METHOD_COLLECTION_ENTRIES: return "entries";
+    case KILN_C99_METHOD_COLLECTION_SELF: return "@@iterator";
+    case KILN_C99_METHOD_ITERATOR_NEXT: return "next";
+    case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
     default: return NULL;
     }
 }
@@ -1055,11 +1116,23 @@ static int kiln_c99_is_callable(kiln_value value) {
  * do it by calling: this backend has no user `valueOf` to reach, because a property holding a
  * function is refused at the point it would be called. So reduction is conversion to text. */
 static int kiln_c99_is_reference(kiln_value value) {
-    /* A Date is a reference, but it is *not* in this set: `as_number` already gives its instant,
-     * which is what `valueOf` would produce, so reducing it to text first would turn every date
-     * subtraction into NaN. */
+    /* What a coercing operator has to reduce to a primitive first. A Date is a reference and is
+     * deliberately *not* here: `as_number` already gives its instant, which is what `valueOf`
+     * would produce, so reducing it to text first would turn every date subtraction into NaN. */
     return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
-           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR;
+           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR ||
+           value.tag == KILN_VALUE_COLLECTION;
+}
+
+/* Whether a value has to be converted before it crosses the embedding boundary.
+ *
+ * A different question from the one above, and asked the other way round on purpose: the
+ * boundary carries the five scalar tags and nothing else, so everything above the last of them
+ * needs converting. Listing what *cannot* cross means a tag added later is covered the day it is
+ * added -- an allowlist of what needs conversion is how `console.log([1])` came to hand the host
+ * a raw array, and a Date would have been next. */
+static int kiln_c99_crosses_boundary(kiln_value value) {
+    return value.tag > KILN_VALUE_STRING;
 }
 
 /* Negative zero compares equal to zero, so the sign is the only thing that tells them apart --
@@ -1251,6 +1324,7 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:
+    case KILN_VALUE_COLLECTION:
         return 1;
     default:
         return 0;
@@ -1737,6 +1811,26 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_COLLECTION: {
+        kiln_collection *collection = kiln_c99_collection_of(target);
+        uint64_t code;
+        if (kiln_c99_same_name(key, key_len, "size")) {
+            *out = kiln_c99_number((double)collection->count);
+            return KILN_C99_OK;
+        }
+        code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+                                      KILN_C99_METHOD_COLLECTION_SELF);
+        /* A Set has no `get` or `set`, and a Map has no `add`: offering one would let a program
+         * call something that has no meaning for the receiver it was reached through. */
+        if (code == 0 ||
+            (collection->is_map && code == KILN_C99_METHOD_COLLECTION_ADD) ||
+            (!collection->is_map && (code == KILN_C99_METHOD_COLLECTION_GET ||
+                                     code == KILN_C99_METHOD_COLLECTION_SET))) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *out = kiln_c99_method(code);
+        return KILN_C99_OK;
+    }
     case KILN_VALUE_DATE: {
         static const struct {
             const char *name;
@@ -2148,8 +2242,43 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         }
         return kiln_c99_text_append(text, iso.ptr, iso.len);
     }
+    case KILN_VALUE_COLLECTION: {
+        /* A console shows what a collection holds rather than the bookkeeping that makes it
+         * work, with the count in front because a Map's contents do not otherwise say how many
+         * there are. */
+        kiln_collection *collection = kiln_c99_collection_of(value);
+        size_t index;
+        if (kiln_c99_text_append_c(text, collection->is_map ? "Map(" : "Set(") != KILN_C99_OK ||
+            kiln_c99_pad_number(text, (int64_t)collection->count, 1) != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, collection->count == 0 ? ") {}" : ") { ") !=
+                KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (collection->count == 0) {
+            return KILN_C99_OK;
+        }
+        for (index = 0; index < collection->count; ++index) {
+            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (collection->is_map) {
+                if (kiln_c99_inspect_into(text, collection->entries[index].key, depth + 1) !=
+                        KILN_C99_OK ||
+                    kiln_c99_text_append_c(text, " => ") != KILN_C99_OK) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            if (kiln_c99_inspect_into(text, collection->entries[index].value, depth + 1) !=
+                KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        return kiln_c99_text_append_c(text, " }");
+    }
     case KILN_VALUE_GENERATOR:
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
+    case KILN_VALUE_HOLE:
+        return kiln_c99_text_append_c(text, "undefined");
     case KILN_VALUE_BUILTIN:
         return kiln_c99_text_append_c(text, "[Function: String]");
     case KILN_VALUE_METHOD: {
@@ -2846,6 +2975,168 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * is why a probe may compare `typeof Date.now()` and nothing more. */
             *result = kiln_c99_number(0.0);
             return KILN_C99_OK;
+        case KILN_C99_METHOD_COLLECTION_GET:
+        case KILN_C99_METHOD_COLLECTION_SET:
+        case KILN_C99_METHOD_COLLECTION_ADD:
+        case KILN_C99_METHOD_COLLECTION_HAS:
+        case KILN_C99_METHOD_COLLECTION_DELETE:
+        case KILN_C99_METHOD_COLLECTION_CLEAR:
+        case KILN_C99_METHOD_COLLECTION_FOR_EACH:
+        case KILN_C99_METHOD_COLLECTION_KEYS:
+        case KILN_C99_METHOD_COLLECTION_VALUES:
+        case KILN_C99_METHOD_COLLECTION_ENTRIES:
+        case KILN_C99_METHOD_COLLECTION_SELF: {
+            kiln_collection *collection;
+            kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+            double at;
+            if (receiver.tag != KILN_VALUE_COLLECTION) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            collection = kiln_c99_collection_of(receiver);
+            switch (code) {
+            case KILN_C99_METHOD_COLLECTION_GET:
+                at = kiln_c99_collection_find(collection, first);
+                *result = at < 0.0 ? kiln_c99_undefined() : collection->entries[(size_t)at].value;
+                return KILN_C99_OK;
+            case KILN_C99_METHOD_COLLECTION_HAS:
+                *result = kiln_c99_boolean(kiln_c99_collection_find(collection, first) >= 0.0);
+                return KILN_C99_OK;
+            case KILN_C99_METHOD_COLLECTION_SET:
+            case KILN_C99_METHOD_COLLECTION_ADD:
+                /* A Set stores each value under itself, which is what makes `has` one lookup
+                 * rather than two shapes. Both answer with the collection, so they chain. */
+                status = kiln_c99_collection_put(receiver, first,
+                                                 code == KILN_C99_METHOD_COLLECTION_SET
+                                                     ? (argc > 1 ? args[1] : kiln_c99_undefined())
+                                                     : first);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                *result = receiver;
+                return KILN_C99_OK;
+            case KILN_C99_METHOD_COLLECTION_DELETE:
+                at = kiln_c99_collection_find(collection, first);
+                if (at < 0.0) {
+                    *result = kiln_c99_boolean(0);
+                    return KILN_C99_OK;
+                }
+                /* Shifted rather than swapped with the last: iteration order is observable, and
+                 * a delete must not reorder what remains. */
+                for (index = (size_t)at; index + 1 < collection->count; ++index) {
+                    collection->entries[index] = collection->entries[index + 1];
+                }
+                collection->count -= 1;
+                *result = kiln_c99_boolean(1);
+                return KILN_C99_OK;
+            case KILN_C99_METHOD_COLLECTION_CLEAR:
+                collection->count = 0;
+                *result = kiln_c99_undefined();
+                return KILN_C99_OK;
+            case KILN_C99_METHOD_COLLECTION_FOR_EACH: {
+                /* The callback takes `(value, key, collection)`. A Set passes its value twice,
+                 * which is the specification's way of giving both one signature. */
+                size_t length = collection->count;
+                for (index = 0; index < length && index < collection->count; ++index) {
+                    kiln_value visit[3];
+                    kiln_value ignored;
+                    visit[0] = collection->entries[index].value;
+                    visit[1] = collection->entries[index].key;
+                    visit[2] = receiver;
+                    status = kiln_c99_call(host, &ignored, first,
+                                           argc > 1 ? args[1] : kiln_c99_undefined(), visit, 3,
+                                           depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+                *result = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            default: {
+                /* `keys`, `values`, `entries` and the default iteration all produce a snapshot
+                 * array, which the iteration protocol then walks. A real engine hands back a
+                 * live iterator; nothing here can observe the difference, because a collection
+                 * changed mid-walk would need a live one to notice. */
+                kiln_value built;
+                int pairs = code == KILN_C99_METHOD_COLLECTION_ENTRIES ||
+                            (code == KILN_C99_METHOD_COLLECTION_SELF && collection->is_map);
+                int wants_keys = code == KILN_C99_METHOD_COLLECTION_KEYS;
+                status = kiln_c99_new_array(&built);
+                for (index = 0; index < collection->count && status == KILN_C99_OK; ++index) {
+                    if (pairs) {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(pair, collection->entries[index].key);
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(pair, collection->entries[index].value);
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(built, pair);
+                        }
+                    } else {
+                        status = kiln_c99_array_push(built, wants_keys
+                                                                ? collection->entries[index].key
+                                                                : collection->entries[index].value);
+                    }
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                return kiln_c99_new_iterator(result, built);
+            }
+            }
+        }
+        case KILN_C99_METHOD_ITERATOR_NEXT: {
+            kiln_value items;
+            kiln_value at;
+            kiln_value step;
+            kiln_array *array;
+            size_t position;
+            int finished;
+            if (receiver.tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_get(host, receiver, "@@iterated", 10, &items, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (items.tag != KILN_VALUE_ARRAY) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            array = kiln_c99_array_of(items);
+            position = (size_t)kiln_c99_as_number(at);
+            finished = position >= array->count;
+            if (!finished) {
+                status = kiln_c99_put(host, receiver, "@@index", 7,
+                                      kiln_c99_number((double)(position + 1)), depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            status = kiln_c99_new_object(&step);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_put(host, step, "value", 5,
+                                  finished ? kiln_c99_undefined() : array->elements[position],
+                                  depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(finished), depth,
+                                  thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = step;
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_HAS_OWN_PROPERTY: {
             kiln_value key = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
             kiln_object *object;
@@ -2966,6 +3257,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_ITERATOR_SELF:
+            *result = receiver;
+            return KILN_C99_OK;
         case KILN_C99_METHOD_GENERATOR_SELF:
             if (receiver.tag != KILN_VALUE_GENERATOR) {
                 return KILN_C99_CONTROL_ERROR;
@@ -3395,6 +3689,32 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         size_t length = array->count;
         for (index = 0; index < length && index < array->count; ++index) {
             status = kiln_c99_array_push(target, array->elements[index]);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_COLLECTION) {
+        /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
+         * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
+        kiln_collection *collection = kiln_c99_collection_of(source);
+        size_t length = collection->count;
+        for (index = 0; index < length && index < collection->count; ++index) {
+            kiln_value produced = collection->entries[index].value;
+            if (collection->is_map) {
+                status = kiln_c99_new_array(&produced);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_array_push(produced, collection->entries[index].key);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_array_push(produced, collection->entries[index].value);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            status = kiln_c99_array_push(target, produced);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -4432,6 +4752,92 @@ static int kiln_c99_date_to_string(kiln_value *out, double time) {
     return KILN_C99_OK;
 }
 
+static kiln_collection *kiln_c99_collection_of(kiln_value value) {
+    return (kiln_collection *)(uintptr_t)value.bits;
+}
+
+static int kiln_c99_new_collection(kiln_value *out, int is_map) {
+    kiln_collection *collection = (kiln_collection *)malloc(sizeof *collection);
+    if (collection == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    collection->entries = NULL;
+    collection->count = 0;
+    collection->capacity = 0;
+    collection->is_map = is_map;
+    *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* The index of a key, or -1. SameValueZero, which is what a collection compares with: NaN finds
+ * itself, where `===` never would, and that is why `new Set([NaN, NaN]).size` is 1. */
+static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
+    size_t index;
+    for (index = 0; index < collection->count; ++index) {
+        if (kiln_c99_same_value_zero(collection->entries[index].key, key)) {
+            return (double)index;
+        }
+    }
+    return -1.0;
+}
+
+static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
+    kiln_collection *collection = kiln_c99_collection_of(target);
+    double at = kiln_c99_collection_find(collection, key);
+    int status;
+    if (at >= 0.0) {
+        /* Re-setting a key keeps its position: insertion order is the order of *first*
+         * appearance, which is what iteration reports. */
+        collection->entries[(size_t)at].value = value;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
+                              collection->count + 1, sizeof *collection->entries);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    collection->entries[collection->count].key = key;
+    collection->entries[collection->count].value = value;
+    collection->count += 1;
+    return KILN_C99_OK;
+}
+
+/* An iterator over a snapshot array.
+ *
+ * `for...of` asks for an iterator and then drives `next`, so a collection's `@@iterator` cannot
+ * hand back the array itself -- an array has no `next`. The state is two reserved properties on
+ * an ordinary object, which is what the interpreter does and for the same reason: an iterator is
+ * an object with a method, and inventing a third kind of value for it would buy nothing. */
+static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
+    kiln_value iterator;
+    int status = kiln_c99_new_object(&iterator);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(NULL, iterator, "@@iterated", 10, items, 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(NULL, iterator, "@@index", 7, kiln_c99_number(0.0), 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_put(NULL, iterator, "next", 4,
+                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_NEXT), 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    /* An iterator is its own iterable, which is what lets `[...m.keys()]` work: spread asks for
+     * an iterator, and asking one for another has to answer with itself. */
+    status = kiln_c99_put(NULL, iterator, "@@iterator", 10,
+                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *out = iterator;
+    return KILN_C99_OK;
+}
+
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
  * unless the body returned an object, which wins. That override is what makes a factory
  * constructor work. */
@@ -4493,6 +4899,51 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value instance;
     kiln_value produced;
     int status;
+    if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_MAP ||
+                                             callee.bits == KILN_C99_BUILTIN_SET)) {
+        int is_map = callee.bits == KILN_C99_BUILTIN_MAP;
+        kiln_value built;
+        status = kiln_c99_new_collection(&built, is_map);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED && args[0].tag != KILN_VALUE_NULL) {
+            /* The argument is anything iterable: a Set takes its values and a Map takes
+             * `[key, value]` pairs, which is why `new Map(map)` copies one. */
+            kiln_value gathered;
+            size_t index;
+            status = kiln_c99_new_array(&gathered);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_iterate(host, gathered, args[0], depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            {
+                kiln_array *given = kiln_c99_array_of(gathered);
+                for (index = 0; index < given->count; ++index) {
+                    kiln_value key = given->elements[index];
+                    kiln_value member = key;
+                    if (is_map) {
+                        kiln_array *pair;
+                        if (key.tag != KILN_VALUE_ARRAY) {
+                            return KILN_C99_CONTROL_ERROR;
+                        }
+                        pair = kiln_c99_array_of(key);
+                        key = pair->count > 0 ? pair->elements[0] : kiln_c99_undefined();
+                        member = pair->count > 1 ? pair->elements[1] : kiln_c99_undefined();
+                    }
+                    status = kiln_c99_collection_put(built, key, member);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+            }
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_DATE) {
         /* `new Date()` is the current instant, which is virtual here and never advances; one
          * argument is either milliseconds or an instant written down; more than one is the field
@@ -4550,9 +5001,17 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         switch (constructor.bits) {
         case KILN_C99_BUILTIN_DATE: *answer = value.tag == KILN_VALUE_DATE; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_MAP:
+            *answer = value.tag == KILN_VALUE_COLLECTION &&
+                      kiln_c99_collection_of(value)->is_map;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_SET:
+            *answer = value.tag == KILN_VALUE_COLLECTION &&
+                      !kiln_c99_collection_of(value)->is_map;
+            return KILN_C99_OK;
         case KILN_C99_BUILTIN_OBJECT:
             *answer = value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_ARRAY ||
-                      value.tag == KILN_VALUE_DATE;
+                      value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_COLLECTION;
             return KILN_C99_OK;
         default: return KILN_C99_CONTROL_ERROR;
         }
@@ -4609,6 +5068,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:
+    case KILN_VALUE_COLLECTION:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -5012,6 +5472,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Array
             | kiln_ir::Builtin::Json
             | kiln_ir::Builtin::Date
+            | kiln_ir::Builtin::Map
+            | kiln_ir::Builtin::Set
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity,
         ) => Ok(()),
@@ -6368,6 +6830,8 @@ fn emit_instruction(
                 kiln_ir::Builtin::Array => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)",
                 kiln_ir::Builtin::Json => "kiln_c99_builtin(KILN_C99_BUILTIN_JSON)",
                 kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
+                kiln_ir::Builtin::Map => "kiln_c99_builtin(KILN_C99_BUILTIN_MAP)",
+                kiln_ir::Builtin::Set => "kiln_c99_builtin(KILN_C99_BUILTIN_SET)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -6397,7 +6861,7 @@ fn emit_instruction(
             // is reduced to its text before the host sees it -- which is also what the
             // interpreter prints for one.
             if *argc > 0 && *callables {
-                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_is_reference(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
+                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_crosses_boundary(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
             }
             writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
         }
@@ -6409,7 +6873,7 @@ fn emit_instruction(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry { exports: None } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_is_reference(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
@@ -6419,7 +6883,7 @@ fn emit_instruction(
                 );
                 if *callables {
                     output.push_str(
-                        "    if (kiln_c99_is_reference(*result)) *result = kiln_c99_text(*result);\n",
+                        "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
                     );
                 }
                 for (index, binding) in exports.iter().enumerate() {

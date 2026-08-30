@@ -2283,8 +2283,31 @@ accumulator, turning every sum over a sparse array into `NaN`, and its seed was 
 rather than the first element that is there; and `a[3] = 4` on a one-element array extended with
 undefined rather than holes.
 
-**Still refused, and this is the queue in order:** `NewRegExp` (5), `Map`/`Set` (5), `async` (4),
-`BigInt` (2), `SuperCall` (2). `async` is the only one with a real design question
+**`Map` and `Set` followed**, 56 to 58. They are one structure -- a Set is a Map whose values are
+never read -- and both are insertion-ordered lists scanned linearly, for the same reason an
+object's properties are: a hash needs a hash of a *value*, and the identity half of that is a
+pointer a collector will one day move. Order is observable, so the list is the honest structure
+and an index is what a hash would accelerate later.
+
+**The boundary predicate bit a second time, exactly as predicted.** `console.log(map)` handed the
+host a raw collection. The fix from the last entry was right in shape but I had applied it only
+to the *emitter* side; the runtime still asked `is_reference`, an allowlist. There are now two
+predicates because they answer two different questions: `is_reference` is what a coercing
+operator reduces (a Date is deliberately *not* in it -- `as_number` already gives its instant, and
+reducing to text first would turn every date subtraction into NaN), and `crosses_boundary` is
+simply `tag > KILN_VALUE_STRING`. The second one cannot go stale.
+
+**`for...of` needed a real iterator object.** Spread goes through one code path that knows how to
+walk a collection directly; `for...of` asks for `@@iterator` and then drives `next`, so a
+snapshot array was not enough -- an array has no `next`. There is an iterator object now, two
+reserved properties and a method, which is what the interpreter does and for the same reason.
+
+**And the interpreter had no `Map.prototype.clear`** -- found by writing the probe. Clearing
+tombstones every entry rather than emptying the vector, for the same reason a delete does: a live
+iterator holds an index into it.
+
+**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Promise` (2),
+`Error` (2), `BigInt` (2). `async` is the only one with a real design question
 left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
 live in a program that just returns from `main`.
 
@@ -2293,7 +2316,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 16/16, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 17/17, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
