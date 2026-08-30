@@ -660,13 +660,16 @@ fn sync_project_sources_with_override(
             hash: source_digest(text),
         })
         .collect::<Vec<_>>();
+    // The resolver and every synchronized source use the canonical project root. Pin that same
+    // spelling in the resolution map: on macOS `/var` names `/private/var`, and retaining the
+    // caller's alias would make the daemon reject its own otherwise-identical authority root.
+    let resolution_root = canonical_path(root)?;
     // A stale commit means another writer published while this transaction was uploading.
     // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
     // never re-walk the filesystem or mix snapshots.
     for attempt in 0..=1 {
-        let resolutions =
-            ResolutionMap::new(root.to_string_lossy().as_ref(), resolution_entries.clone())
-                .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
+        let resolutions = ResolutionMap::new(resolution_root.clone(), resolution_entries.clone())
+            .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
         let plan = backend.begin_sync(files.clone(), resolutions)?;
         let needed = plan.paths.into_iter().collect::<HashSet<_>>();
         for (path, text) in &texts {
