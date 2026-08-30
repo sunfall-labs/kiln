@@ -2240,18 +2240,43 @@ because a builtin constructor has no prototype object here; and `JSON.stringify`
 0015), which is the same answer the interpreter gives -- so a probe may compare `typeof
 Date.now()` and nothing more, exactly as the differential corpus already says.
 
-**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Map`/`Set` (3),
-`in` (3), `delete` (3), `Apply` (3), `BigInt` (2), then `EnumerateKeys` and
-`SuperCall`/`SuperForward` (so `class D extends C` still refuses). `async` is the only one with a
-real design question left: it needs promises and a microtask queue, and the queue is the part
-with nowhere obvious to live in a program that just returns from `main`.
+**Then a batch of small ones together** -- `in`, `delete`, `for...in`, the spread call and rest
+parameters -- which took the count 44 to 53. Individually they are twenty lines each now that
+objects exist; the interesting part is what writing probes for them turned up.
+
+**Three more interpreter bugs, all in the same corner.**
+
+`"toString" in x` was **false**. `in` answered from the own store and the recorded chain, and
+never reached the `Object.prototype` members every object actually has -- so the
+`"hasOwnProperty" in x` that half the feature-detects in the wild are written as said no. Same
+for `x.constructor === Object` on a plain object, which is how `isPlainObject` is written.
+
+And `delete a[1]` wrote **undefined where the comment beside it said hole**. That is the one
+place the difference is directly observable: `1 in a` is false for a hole and true for an
+undefined, a console shows `<1 empty item>`, and every element-walking method skips it. The code
+and its own comment had disagreed since it was written. Fixing it exposed two more: `map` has to
+*leave* a hole where it found one, because its result has an entry per input position and
+skipping would shift everything after it; and `includes` sees a hole as undefined where `indexOf`
+skips it, which is the only place those two disagree.
+
+`conformance/differential/delete-leaves-a-hole.js` covers all of it.
+
+**The native backend cannot represent a hole**, so `delete` on an array element is the one thing
+in this batch it does not do -- `conformance/native/properties.ts` deletes an object property
+instead and says why. A hole would need its own tag and a console that groups runs of them; it is
+not worth that until something needs it.
+
+**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Map`/`Set` (5),
+`PushHole` (3), `BigInt` (2), `SuperCall` (2). `async` is the only one with a real design question
+left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
+live in a program that just returns from `main`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 14/14, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 15/15, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked

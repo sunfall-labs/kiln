@@ -4720,8 +4720,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let Some(item) = items.borrow().get(index).cloned() else {
                 break;
             };
-            // Every element-walking method skips a hole and visits an undefined.
+            // Every element-walking method skips a hole and visits an undefined. `map` still
+            // has to *leave* one: its result has an entry per input position, so a skipped hole
+            // that produced nothing would shorten the array and shift everything after it.
             if Self::is_hole(&item) {
+                if matches!(method, CallbackMethod::Map) {
+                    collected.push(Value::Native(Native::Hole));
+                }
                 index += 1;
                 continue;
             }
@@ -6742,6 +6747,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // handing it `hasOwnProperty` would defeat the point.
                     if matches!(object.prototype(), Some(Value::Null)) {
                         Value::Undefined
+                    } else if name == "constructor" {
+                        // The end of the chain is `Object.prototype`, whose `constructor` is
+                        // `Object`. Answered here rather than beside the other intrinsics
+                        // because a class instance finds its own on the way down, and this must
+                        // not shadow it: `x.constructor === Object` is how a library asks
+                        // whether something is a *plain* object.
+                        Value::Native(Native::ObjectConstructor)
                     } else {
                         inherited_object_property(name)
                     }
@@ -8653,12 +8665,26 @@ fn call_native(
         },
         Native::ArrayIndexOf | Native::ArrayIncludes => {
             let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let includes = matches!(native, Native::ArrayIncludes);
             let found = match receiver {
-                // `indexOf` uses strict equality, so NaN is never found and `-0` matches `0`.
-                Value::Array(items) => items
-                    .borrow()
-                    .iter()
-                    .position(|item| strict_equal(item, &needle)),
+                Value::Array(items) => items.borrow().iter().position(|item| match item {
+                    // A hole is skipped by `indexOf` and *seen* by `includes`, which reads it as
+                    // the undefined it behaves like everywhere else. The two disagree here and
+                    // nowhere else, which is the whole difference between strict equality and
+                    // SameValueZero plus this one rule.
+                    Value::Native(Native::Hole) => {
+                        includes && matches!(needle, Value::Undefined)
+                    }
+                    // `indexOf` uses strict equality, so NaN is never found and `-0` matches
+                    // `0`; `includes` uses SameValueZero, where NaN finds itself.
+                    item if includes
+                        && matches!((item, &needle), (Value::Number(a), Value::Number(b))
+                            if a.is_nan() && b.is_nan()) =>
+                    {
+                        true
+                    }
+                    item => strict_equal(item, &needle),
+                }),
                 _ => None,
             };
             if matches!(native, Native::ArrayIncludes) {
@@ -9818,15 +9844,31 @@ fn has_property(target: &Value, key: &Value) -> bool {
             .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
     }
     let name = key.property_key();
+    // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
+    // agree with the read rather than only with the property store.
+    if name == "constructor"
+        && (intrinsic_constructor(target).is_some() || matches!(target, Value::Object(_)))
+    {
+        return true;
+    }
     match target {
-        Value::Object(object) => object.borrow().get(&name).is_some(),
+        // The chain ends at `Object.prototype`, whose methods every object has -- so
+        // `"toString" in x` is true, and so is the `"hasOwnProperty" in x` that half the
+        // feature-detects in the wild are written as. Answering from the own store alone made
+        // both false, which is a wrong answer that reads like a deliberate one.
+        Value::Object(object) => {
+            object.borrow().lookup(&name).is_some()
+                || !matches!(inherited_object_property(&name), Value::Undefined)
+        }
         Value::Array(items) => {
             if let Some(index) = array_index(key) {
                 return index < items.borrow().len();
             }
             // Methods and `length` live on the prototype in a real engine; here the property
             // lookup answers for both, so `in` has to agree with it.
-            name == "length" || !matches!(array_property(&name), Value::Undefined)
+            name == "length"
+                || !matches!(array_property(&name), Value::Undefined)
+                || !matches!(inherited_object_property(&name), Value::Undefined)
         }
         Value::Native(native) => native.property(&name).is_some(),
         _ => false,
@@ -10101,13 +10143,15 @@ fn delete_property(target: &Value, key: &Value) -> bool {
             object.borrow_mut().remove(&key.property_key());
             true
         }
-        // Removing an element leaves a hole rather than shortening the array: the slot reads as
-        // undefined and `length` is unchanged.
+        // Removing an element leaves a *hole* rather than shortening the array: the slot reads
+        // as undefined and `length` is unchanged, but `1 in a` is false and a console shows
+        // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the
+        // one place the difference between the two is directly observable.
         Value::Array(items) => {
             if let Some(index) = array_index(key)
                 && let Some(slot) = items.borrow_mut().get_mut(index)
             {
-                *slot = Value::Undefined;
+                *slot = Value::Native(Native::Hole);
             }
             true
         }
