@@ -17,9 +17,19 @@
 //!    that keeps a differential run off the memory cliff; loosen `LOOP_BOUND` and the growth is
 //!    exponential in the wrong exponent.
 //! 3. **Determinism.** No `Date`, no `Math.random`, no `globalThis` mutation, no timers with a
-//!    magnitude anyone could observe. ADR 0012 and ADR 0015 already make the realm deterministic;
-//!    this keeps the generator from reaching outside it, which is what makes any difference in
-//!    output a real divergence rather than ambient noise.
+//!    magnitude anyone could observe, and no `Map` or `Set` whose iteration order could be keyed
+//!    on object identity. ADR 0012 and ADR 0015 already make the realm deterministic; this keeps
+//!    the generator from reaching outside it, which is what makes any difference in output a real
+//!    divergence rather than ambient noise. It matters twice over now that `node` is a reference
+//!    (`src/node.rs`): node has a real clock, real entropy and a real heap, and anything ambient
+//!    would arrive as a finding.
+//!
+//!    The coercion objects added for [`Coercion`] do not weaken this. Their methods are single
+//!    expressions from this same grammar, so they terminate, and the only side effect anything
+//!    here has is an assignment inside `f0`/`f1` -- which a conversion may reach, but reaches the
+//!    same number of times in any engine that implements ToPrimitive correctly. An engine that
+//!    called `valueOf` twice where the specification calls it once would be *reported*, which is
+//!    the intended behaviour and not noise.
 //! 4. **Resolvability.** Every identifier a program mentions is one it declared. ADR 0017 makes
 //!    an unresolved identifier a runtime error, and a corpus of programs that all die on their
 //!    first line measures the error path and nothing else.
@@ -199,6 +209,211 @@ pub enum Expression {
     Template(Sub),
     /// A method on one of the built-ins the language subset already has.
     Builtin(BuiltinCall, Sub),
+    /// An object carrying user coercion methods, together with something that forces it through
+    /// ToPrimitive. See [`Coercion`] for why the two are generated as one node.
+    Coerce(Sink, Coercion, Sub, Sub),
+}
+
+/// An object with user-written conversion methods.
+///
+/// WHY THESE ARE IN THE GRAMMAR. The generator produced arrays and plain objects and nothing that
+/// *answers back* during conversion, and that gap is precisely why the differential run found
+/// `Math.abs([0])` and did not find `Math.abs({valueOf: () => 42})` -- the more general bug, and
+/// the one that was broken for longer. An array converts through the same ToPrimitive machinery,
+/// but it converts through the *built-in* `Array.prototype.toString`, so a path that skips
+/// ToPrimitive and reads an internal slot instead still gets an array right often enough to look
+/// correct. A user method cannot be skipped and then guessed: either it was called or it was not.
+///
+/// Each variant is a place ToPrimitive is decided, and the reason it is a separate variant is that
+/// each one fails differently:
+///
+/// * which method the *hint* selects, when the two disagree;
+/// * whether a method returning a non-primitive falls through to the next step;
+/// * whether a non-callable `valueOf` is skipped rather than called;
+/// * whether `Symbol.toPrimitive` takes precedence over both, and is handed the hint;
+/// * whether a conversion with no primitive available raises a TypeError rather than inventing
+///   `[object Object]`.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum Coercion {
+    /// `{ valueOf: () => A }` -- the number hint's own path.
+    ValueOf,
+    /// `{ toString: () => A }` -- the string hint's, and the number hint's fallback.
+    ToStringOnly,
+    /// Both, disagreeing. **The interesting one**: which answer comes out is the hint, and
+    /// `Number(o)` and `String(o)` must give different ones.
+    Disagree,
+    /// `valueOf` returns an object, so the number hint has to fall through to `toString`.
+    ValueOfFallsThrough,
+    /// `toString` returns an object, so the string hint has to fall back to `valueOf`.
+    ToStringFallsThrough,
+    /// Neither returns a primitive. ToPrimitive must raise a TypeError, not invent a value.
+    NeitherIsPrimitive,
+    /// `valueOf` is present and not callable, so OrdinaryToPrimitive must skip past it.
+    ValueOfNotCallable,
+    /// `Symbol.toPrimitive`, handed the hint, answering differently for each.
+    ToPrimitiveHinted,
+    /// `Symbol.toPrimitive` ignoring the hint, which must still win over `valueOf` and `toString`.
+    ToPrimitiveWins,
+    /// A `Symbol.toPrimitive` returning an object: a TypeError, and never a fall back to
+    /// `toString`, because the exotic path has no fallback.
+    ToPrimitiveNotPrimitive,
+}
+
+impl Coercion {
+    pub const ALL: [Self; 10] = [
+        Self::ValueOf,
+        Self::ToStringOnly,
+        Self::Disagree,
+        Self::ValueOfFallsThrough,
+        Self::ToStringFallsThrough,
+        Self::NeitherIsPrimitive,
+        Self::ValueOfNotCallable,
+        Self::ToPrimitiveHinted,
+        Self::ToPrimitiveWins,
+        Self::ToPrimitiveNotPrimitive,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ValueOf => "valueOf",
+            Self::ToStringOnly => "toString",
+            Self::Disagree => "valueOf+toString disagreeing",
+            Self::ValueOfFallsThrough => "valueOf returns an object",
+            Self::ToStringFallsThrough => "toString returns an object",
+            Self::NeitherIsPrimitive => "neither returns a primitive",
+            Self::ValueOfNotCallable => "valueOf is not callable",
+            Self::ToPrimitiveHinted => "Symbol.toPrimitive, hinted",
+            Self::ToPrimitiveWins => "Symbol.toPrimitive over both",
+            Self::ToPrimitiveNotPrimitive => "Symbol.toPrimitive returns an object",
+        }
+    }
+}
+
+/// What the coercion object is fed to.
+///
+/// Generated as part of the same node rather than left to chance. A `Coercion` that is merely an
+/// expression like any other reaches `Number(...)` only when the tree happens to put it there, and
+/// "happens to" is how a shape ends up appearing once in ten thousand cases -- which is not
+/// coverage. Pairing the value with its consumer makes every interesting combination reachable in
+/// one draw, and `tests/generator_health.rs` asserts the rate.
+///
+/// The last three take no primitive at all. They are controls: a `ToPrimitive` that runs where the
+/// specification says it should not is as much a defect as one that fails to run.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum Sink {
+    Bare,
+    Number,
+    String,
+    MathAbs,
+    MathFloor,
+    MathTrunc,
+    MathRound,
+    MathSign,
+    ParseInt,
+    ParseFloat,
+    Template,
+    AddNumber,
+    AddString,
+    Multiply,
+    Subtract,
+    Less,
+    GreaterOrEqual,
+    LooseEqualNumber,
+    LooseEqualString,
+    BitwiseOr,
+    Negate,
+    Boolean,
+    JsonStringify,
+    ObjectKeys,
+}
+
+impl Sink {
+    pub const ALL: [Self; 24] = [
+        Self::Bare,
+        Self::Number,
+        Self::String,
+        Self::MathAbs,
+        Self::MathFloor,
+        Self::MathTrunc,
+        Self::MathRound,
+        Self::MathSign,
+        Self::ParseInt,
+        Self::ParseFloat,
+        Self::Template,
+        Self::AddNumber,
+        Self::AddString,
+        Self::Multiply,
+        Self::Subtract,
+        Self::Less,
+        Self::GreaterOrEqual,
+        Self::LooseEqualNumber,
+        Self::LooseEqualString,
+        Self::BitwiseOr,
+        Self::Negate,
+        Self::Boolean,
+        Self::JsonStringify,
+        Self::ObjectKeys,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bare => "bare",
+            Self::Number => "Number(o)",
+            Self::String => "String(o)",
+            Self::MathAbs => "Math.abs(o)",
+            Self::MathFloor => "Math.floor(o)",
+            Self::MathTrunc => "Math.trunc(o)",
+            Self::MathRound => "Math.round(o)",
+            Self::MathSign => "Math.sign(o)",
+            Self::ParseInt => "parseInt(o)",
+            Self::ParseFloat => "parseFloat(o)",
+            Self::Template => "`t${o}`",
+            Self::AddNumber => "o + 1",
+            Self::AddString => "o + \"s\"",
+            Self::Multiply => "o * 2",
+            Self::Subtract => "o - 0",
+            Self::Less => "o < 1",
+            Self::GreaterOrEqual => "o >= \"1\"",
+            Self::LooseEqualNumber => "o == 1",
+            Self::LooseEqualString => "o == \"1\"",
+            Self::BitwiseOr => "o | 0",
+            Self::Negate => "-o",
+            Self::Boolean => "Boolean(o)",
+            Self::JsonStringify => "JSON.stringify(o)",
+            Self::ObjectKeys => "Object.keys(o)",
+        }
+    }
+}
+
+/// What one rendered program turned out to contain, counted while it was rendered.
+///
+/// EXISTS FOR `tests/generator_health.rs`. That file is in this crate because two earlier
+/// generator bugs made the whole fuzzing effort worthless while every target stayed green, and the
+/// only defence against a third is to measure what comes out. Measuring it by grepping the
+/// rendered text does not work here: `Coercion::ValueOf` and `Coercion::Disagree` both render
+/// `valueOf: () => (`, so a substring search cannot tell them apart, and a health test that cannot
+/// tell two shapes apart cannot assert that both appear. Counting at the point of decision can.
+#[derive(Debug, Clone, Default)]
+pub struct Census {
+    pub bytes: usize,
+    pub coercions: [u32; Coercion::ALL.len()],
+    pub sinks: [u32; Sink::ALL.len()],
+    pub builtins: [u32; BuiltinCall::ALL.len()],
+}
+
+impl Census {
+    pub fn absorb(&mut self, other: &Self) {
+        self.bytes += other.bytes;
+        for (total, one) in self.coercions.iter_mut().zip(other.coercions) {
+            *total += one;
+        }
+        for (total, one) in self.sinks.iter_mut().zip(other.sinks) {
+            *total += one;
+        }
+        for (total, one) in self.builtins.iter_mut().zip(other.builtins) {
+            *total += one;
+        }
+    }
 }
 
 /// Built-in entry points reached with exactly one argument. Kept to conversions and formatting
@@ -214,11 +429,44 @@ pub enum BuiltinCall {
     MathAbs,
     MathFloor,
     MathTrunc,
+    MathRound,
+    MathSign,
     ObjectKeys,
     ArrayIsArray,
+    /// `parseInt` and `parseFloat` take the *string* hint, and they are here because that is one
+    /// step more than the other conversions ask for: the argument is coerced with ToString and
+    /// only then parsed. A builtin path that reaches its C string routine without running
+    /// ToPrimitive first gets `NaN` for every object, which is what both engines do today.
+    ParseInt,
+    ParseFloat,
 }
 
 impl BuiltinCall {
+    /// Every variant, so a census can be an array rather than a map. Kept next to the enum
+    /// because the compiler checks nothing about it: a variant added above and forgotten here is
+    /// a variant `tests/generator_health.rs` silently stops asserting on.
+    pub const ALL: [Self; 13] = [
+        Self::String,
+        Self::Number,
+        Self::Boolean,
+        Self::JsonStringify,
+        Self::MathAbs,
+        Self::MathFloor,
+        Self::MathTrunc,
+        Self::MathRound,
+        Self::MathSign,
+        Self::ObjectKeys,
+        Self::ArrayIsArray,
+        Self::ParseInt,
+        Self::ParseFloat,
+    ];
+
+    /// The name this reports itself under. Also the source text it renders to, which is the
+    /// point: a census entry names something you can grep the corpus for.
+    pub const fn name(self) -> &'static str {
+        self.spelling()
+    }
+
     const fn spelling(self) -> &'static str {
         match self {
             Self::String => "String",
@@ -228,8 +476,12 @@ impl BuiltinCall {
             Self::MathAbs => "Math.abs",
             Self::MathFloor => "Math.floor",
             Self::MathTrunc => "Math.trunc",
+            Self::MathRound => "Math.round",
+            Self::MathSign => "Math.sign",
             Self::ObjectKeys => "Object.keys",
             Self::ArrayIsArray => "Array.isArray",
+            Self::ParseInt => "parseInt",
+            Self::ParseFloat => "parseFloat",
         }
     }
 }
@@ -280,6 +532,8 @@ struct Renderer {
     out: String,
     /// `Some(name)` inside a loop body.
     induction: Option<&'static str>,
+    /// What has been emitted so far. See [`Census`].
+    census: Census,
     /// True while rendering a function body.
     ///
     /// Calls are erased there, and that is a termination guarantee rather than a simplification:
@@ -420,11 +674,137 @@ impl Renderer {
                 self.out.push_str("}`");
             }
             Expression::Builtin(call, argument) => {
+                self.census.builtins[*call as usize] += 1;
                 let _ = write!(self.out, "{}(", call.spelling());
                 self.expression(argument, depth + 1);
                 self.out.push(')');
             }
+            Expression::Coerce(sink, coercion, first, second) => {
+                self.coerced(*sink, *coercion, first, second, depth + 1);
+            }
         }
+    }
+
+    /// Render a coercion object wrapped in whatever forces it through ToPrimitive.
+    fn coerced(
+        &mut self,
+        sink: Sink,
+        coercion: Coercion,
+        first: &Expression,
+        second: &Expression,
+        depth: u32,
+    ) {
+        // Prefix and suffix rather than a format call, because the object goes in the middle and
+        // the two halves are what differ. Everything is parenthesised: a sink that changed how the
+        // surrounding operator binds would be measuring precedence and not conversion.
+        self.census.sinks[sink as usize] += 1;
+        self.census.coercions[coercion as usize] += 1;
+        let (before, after) = match sink {
+            Sink::Bare => ("(", ")"),
+            Sink::Number => ("Number(", ")"),
+            Sink::String => ("String(", ")"),
+            Sink::MathAbs => ("Math.abs(", ")"),
+            Sink::MathFloor => ("Math.floor(", ")"),
+            Sink::MathTrunc => ("Math.trunc(", ")"),
+            Sink::MathRound => ("Math.round(", ")"),
+            Sink::MathSign => ("Math.sign(", ")"),
+            Sink::ParseInt => ("parseInt(", ")"),
+            Sink::ParseFloat => ("parseFloat(", ")"),
+            Sink::Template => ("`t${", "}`"),
+            Sink::AddNumber => ("(", " + 1)"),
+            Sink::AddString => ("(", " + \"s\")"),
+            Sink::Multiply => ("(", " * 2)"),
+            Sink::Subtract => ("(", " - 0)"),
+            Sink::Less => ("(", " < 1)"),
+            Sink::GreaterOrEqual => ("(", " >= \"1\")"),
+            Sink::LooseEqualNumber => ("(", " == 1)"),
+            Sink::LooseEqualString => ("(", " == \"1\")"),
+            Sink::BitwiseOr => ("(", " | 0)"),
+            Sink::Negate => ("(-", ")"),
+            Sink::Boolean => ("Boolean(", ")"),
+            Sink::JsonStringify => ("JSON.stringify(", ")"),
+            Sink::ObjectKeys => ("Object.keys(", ")"),
+        };
+        self.out.push_str(before);
+        self.coercion_object(coercion, first, second, depth);
+        self.out.push_str(after);
+    }
+
+    fn coercion_object(
+        &mut self,
+        coercion: Coercion,
+        first: &Expression,
+        second: &Expression,
+        depth: u32,
+    ) {
+        // An arrow body is always parenthesised. `() => {p0: 1}` is a function with a labelled
+        // statement in it, not a function returning an object, and a generator that emitted one
+        // would be reporting a syntax error as a divergence.
+        let arrow = |renderer: &mut Self, expression: &Expression| {
+            renderer.out.push_str("() => (");
+            renderer.expression(expression, depth + 1);
+            renderer.out.push(')');
+        };
+        self.out.push_str("({");
+        match coercion {
+            Coercion::ValueOf => {
+                self.out.push_str("valueOf: ");
+                arrow(self, first);
+            }
+            Coercion::ToStringOnly => {
+                self.out.push_str("toString: ");
+                arrow(self, first);
+            }
+            Coercion::Disagree => {
+                self.out.push_str("valueOf: ");
+                arrow(self, first);
+                self.out.push_str(", toString: ");
+                arrow(self, second);
+            }
+            Coercion::ValueOfFallsThrough => {
+                self.out.push_str("valueOf: () => ({}), toString: ");
+                arrow(self, second);
+            }
+            Coercion::ToStringFallsThrough => {
+                self.out.push_str("valueOf: ");
+                arrow(self, first);
+                self.out.push_str(", toString: () => ({})");
+            }
+            Coercion::NeitherIsPrimitive => {
+                self.out
+                    .push_str("valueOf: () => ({}), toString: () => ({})");
+            }
+            Coercion::ValueOfNotCallable => {
+                // `first` is an ordinary expression, and this grammar has no way to write a
+                // function value, so whatever it renders to is not callable.
+                self.out.push_str("valueOf: ");
+                self.expression(first, depth + 1);
+                self.out.push_str(", toString: ");
+                arrow(self, second);
+            }
+            Coercion::ToPrimitiveHinted => {
+                self.out
+                    .push_str("[Symbol.toPrimitive]: (h) => (h === \"string\" ? (");
+                self.expression(second, depth + 1);
+                self.out.push_str(") : (");
+                self.expression(first, depth + 1);
+                self.out.push_str("))");
+            }
+            Coercion::ToPrimitiveWins => {
+                self.out.push_str("[Symbol.toPrimitive]: ");
+                arrow(self, first);
+                self.out.push_str(", valueOf: ");
+                arrow(self, second);
+                self.out.push_str(", toString: ");
+                arrow(self, second);
+            }
+            Coercion::ToPrimitiveNotPrimitive => {
+                self.out
+                    .push_str("[Symbol.toPrimitive]: () => ({}), toString: ");
+                arrow(self, second);
+            }
+        }
+        self.out.push_str("})");
     }
 
     fn literal(&mut self, literal: &Literal) {
@@ -527,8 +907,14 @@ impl JsProgram {
     /// nothing, and two engines that print nothing agree trivially; logging the final state
     /// turns every generated program into an observation.
     pub fn render(&self) -> String {
+        self.render_counted().0
+    }
+
+    /// [`Self::render`], with a census of what it turned out to contain.
+    pub fn render_counted(&self) -> (String, Census) {
         let mut renderer = Renderer {
             out: String::new(),
+            census: Census::default(),
             induction: None,
             in_function: false,
         };
@@ -558,6 +944,7 @@ impl JsProgram {
         for name in VARIABLES {
             let _ = writeln!(renderer.out, "console.log({name});");
         }
-        renderer.out
+        renderer.census.bytes = renderer.out.len();
+        (renderer.out, renderer.census)
     }
 }
