@@ -83,3 +83,31 @@ console.log(
 );
 setBounds.set([9], 0.9);
 console.log(setBounds.join(","));
+
+// Integer-indexed elements are own enumerable properties. Metadata and methods are inherited,
+// so every reflective path must draw the boundary in the same place.
+const reflected = new Uint8Array([4, 5]);
+console.log(Object.keys(reflected).join(","));
+console.log(Object.getOwnPropertyNames(reflected).join(","));
+console.log(
+  Object.hasOwn(reflected, "0"),
+  Object.hasOwn(reflected, "2"),
+  Object.hasOwn(reflected, "length"),
+  Object.prototype.hasOwnProperty.call(reflected, "1"),
+  reflected.hasOwnProperty("0"),
+  reflected.hasOwnProperty("01"),
+);
+console.log(
+  Object.prototype.propertyIsEnumerable.call(reflected, "0"),
+  Object.prototype.propertyIsEnumerable.call(reflected, "2"),
+  reflected.propertyIsEnumerable("1"),
+);
+console.log(
+  0 in reflected,
+  2 in reflected,
+  "01" in reflected,
+  reflected["01"],
+  "length" in reflected,
+  "set" in reflected,
+  "push" in reflected,
+);

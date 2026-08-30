@@ -1175,6 +1175,8 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
 static kiln_value kiln_c99_hole(void);
 static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
+static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
+                               int *found, int *enumerable);
 static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
@@ -3410,18 +3412,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return KILN_C99_OK;
         }
         case KILN_C99_BUILTIN_ARRAY_BUFFER: {
-            size_t length;
-            int status;
-            if (new_target.tag == KILN_VALUE_UNDEFINED) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "ArrayBuffer constructor requires 'new'");
-            }
-            status = kiln_c99_to_index(argc > 0 ? args[0] : kiln_c99_undefined(), &length,
-                                       thrown);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            return kiln_c99_new_typed_buffer(result, length);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "ArrayBuffer constructor requires 'new'");
         }
         case KILN_C99_BUILTIN_INT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_ARRAY:
@@ -3432,37 +3424,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
-            kiln_typed_kind kind;
-            kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
-            size_t byte_offset = 0;
-            size_t length = 0;
-            int has_length = 0;
-            int status;
-            if (new_target.tag == KILN_VALUE_UNDEFINED) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "typed array constructor requires 'new'");
-            }
-            if (!kiln_c99_builtin_typed_kind(callee.bits, &kind)) {
-                return KILN_C99_CONTROL_ERROR;
-            }
-            /* Offset and length are meaningful only for a backing buffer. Extra arguments to
-             * array-like and numeric-length constructors are ignored without coercion. */
-            if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
-                status = kiln_c99_to_index(argc > 1 ? args[1] : kiln_c99_undefined(),
-                                           &byte_offset, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                has_length = argc > 2 && args[2].tag != KILN_VALUE_UNDEFINED;
-                if (has_length) {
-                    status = kiln_c99_to_index(args[2], &length, thrown);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
-                }
-            }
-            return kiln_c99_new_typed_array(result, kind, source, byte_offset, length,
-                                            has_length, thrown);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "typed array constructor requires 'new'");
         }
         case KILN_C99_BUILTIN_SYMBOL:
             return kiln_c99_new_symbol(result, argc > 0 ? args[0] : kiln_c99_undefined());
@@ -4277,11 +4240,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_ARRAY_BUFFER:
-        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "byteLength")) {
+        if (kiln_c99_same_name(key, key_len, "byteLength")) {
             *out = kiln_c99_number((double)kiln_c99_typed_buffer_of(target)->byte_length);
             return KILN_C99_OK;
         }
-        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "constructor")) {
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
             return KILN_C99_OK;
         }
@@ -4289,16 +4252,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_OK;
     case KILN_VALUE_TYPED_ARRAY: {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
-        if (kind == KILN_PROPERTY_SYMBOL) {
-            *out = kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)
-                       ? kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES)
-                       : kiln_c99_undefined();
-            return KILN_C99_OK;
-        }
-        if (kind != KILN_PROPERTY_STRING) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
-        }
         if (kiln_c99_same_name(key, key_len, "length")) {
             *out = kiln_c99_number((double)view->length);
             return KILN_C99_OK;
@@ -4338,7 +4291,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         if (kiln_c99_same_name(key, key_len, "join")) {
             *out = kiln_c99_method(KILN_C99_METHOD_JOIN);
-        } else if (kiln_c99_same_name(key, key_len, "values")) {
+        } else if (kiln_c99_same_name(key, key_len, "values") ||
+                   kiln_c99_same_name(key, key_len, "@@iterator")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
         } else if (kiln_c99_same_name(key, key_len, "entries")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_ENTRIES);
@@ -4353,7 +4307,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         } else if (kiln_c99_same_name(key, key_len, "fill")) {
             *out = kiln_c99_method(KILN_C99_METHOD_TYPED_FILL);
         } else {
-            *out = kiln_c99_undefined();
+            uint64_t inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                                     ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                                 : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                                     ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                                     : kiln_c99_lookup_method(key, key_len,
+                                                              KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                                              KILN_C99_METHOD_OBJECT_VALUE_OF);
+            *out = inherited == 0 ? kiln_c99_undefined() : kiln_c99_method(inherited);
         }
         return KILN_C99_OK;
     }
@@ -4655,8 +4616,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         {
             kiln_typed_kind typed_kind;
-            if (kind == KILN_PROPERTY_STRING &&
-                kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
+            if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
                 kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
                 *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                 return KILN_C99_OK;
@@ -6890,6 +6850,27 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 *result = built;
                 return status;
             }
+            if (args[0].tag == KILN_VALUE_TYPED_ARRAY) {
+                kiln_typed_array *view = kiln_c99_typed_array_of(args[0]);
+                status = kiln_c99_new_array(&built);
+                for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
+                    kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                    kiln_value value = kiln_c99_number(kiln_c99_typed_get(view, index));
+                    if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                        status = kiln_c99_array_push(built, key);
+                    } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, value);
+                    } else {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, value);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                    }
+                }
+                *result = built;
+                return status;
+            }
             if (args[0].tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -7549,8 +7530,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 finished = position >= array->count;
             }
             if (items.tag == KILN_VALUE_TYPED_ARRAY &&
-                kiln_c99_get_internal(host, receiver, "@@iterpart", 10, &part_value, depth,
-                                      thrown) == KILN_C99_OK) {
+                kiln_c99_get(host, receiver, "@@iterpart", 10, &part_value, depth, thrown) ==
+                    KILN_C99_OK) {
                 part = (int)kiln_c99_as_number(part_value);
             }
             if (!finished) {
@@ -7603,6 +7584,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value key = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
             kiln_object *object;
             int found = 0;
+            if (receiver.tag == KILN_VALUE_TYPED_ARRAY && key.tag == KILN_VALUE_STRING) {
+                int enumerable;
+                kiln_c99_typed_own(receiver, key.ptr, key.len, &found, &enumerable);
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
             if (receiver.tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -8072,6 +8059,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
+            if (subject.tag == KILN_VALUE_TYPED_ARRAY) {
+                kiln_typed_array *view = kiln_c99_typed_array_of(subject);
+                for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
+                    status = kiln_c99_array_push(
+                        built, kiln_c99_text(kiln_c99_number((double)index)));
+                }
+                *result = built;
+                return status;
+            }
             if (subject.tag != KILN_VALUE_OBJECT) {
                 *result = built;
                 return KILN_C99_OK;
@@ -8204,6 +8200,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_object *object;
             size_t slot;
             *result = kiln_c99_boolean(0);
+            if (receiver.tag == KILN_VALUE_TYPED_ARRAY && name.tag == KILN_VALUE_STRING) {
+                int found;
+                int enumerable;
+                kiln_c99_typed_own(receiver, name.ptr, name.len, &found, &enumerable);
+                *result = kiln_c99_boolean(found && enumerable);
+                return KILN_C99_OK;
+            }
             if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OK;
             }
@@ -8298,6 +8301,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value key = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
             kiln_object *object;
             int found = 0;
+            if (argc > 0 && args[0].tag == KILN_VALUE_TYPED_ARRAY &&
+                key.tag == KILN_VALUE_STRING) {
+                int enumerable;
+                kiln_c99_typed_own(args[0], key.ptr, key.len, &found, &enumerable);
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
             if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -9328,9 +9338,14 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
                       kiln_c99_same_name(key, key_len, "entries") ||
                       kiln_c99_same_name(key, key_len, "keys") ||
                       kiln_c99_same_name(key, key_len, "subarray") ||
+                      kiln_c99_same_name(key, key_len, "slice") ||
                       kiln_c99_same_name(key, key_len, "set") ||
                       kiln_c99_same_name(key, key_len, "fill") ||
-                      kiln_c99_same_name(key, key_len, "@@iterator");
+                      kiln_c99_same_name(key, key_len, "@@iterator") ||
+                      kiln_c99_same_name(key, key_len, "isPrototypeOf") ||
+                      kiln_c99_same_name(key, key_len, "propertyIsEnumerable") ||
+                      kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                             KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
         }
         return KILN_C99_OK;
     }
@@ -9374,6 +9389,16 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
     return KILN_C99_OK;
 }
 
+/* A typed array's own properties are exactly its live integer indices. Length, buffer metadata
+ * and methods live on its intrinsic prototype even though an ordinary read reaches them. */
+static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
+                               int *found, int *enumerable) {
+    double index = kiln_c99_key_index(key, key_len);
+    kiln_typed_array *view = kiln_c99_typed_array_of(target);
+    *found = index >= 0.0 && (size_t)index < view->length;
+    *enumerable = *found;
+}
+
 /* `delete target[key]`: remove an own property, answering whether the name is gone afterwards.
  *
  * A name that was never there deletes successfully, which is what makes `delete` almost always
@@ -9400,6 +9425,13 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         if (slot >= 0.0 && (size_t)slot < array->count) {
             array->elements[(size_t)slot] = kiln_c99_hole();
         }
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        int found;
+        int enumerable;
+        kiln_c99_typed_own(target, key, key_len, &found, &enumerable);
+        *answer = !found;
         return KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT) {
@@ -9455,6 +9487,14 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
             if (kiln_c99_is_hole(array->elements[index])) {
                 continue;
             }
+            status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        for (index = 0; index < view->length; ++index) {
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
             if (status != KILN_C99_OK) {
                 return status;
@@ -11291,11 +11331,42 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_new_error(result, callee.bits,
                                   argc > 0 ? args[0] : kiln_c99_undefined());
     }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER) {
+        size_t length;
+        status = kiln_c99_to_index(argc > 0 ? args[0] : kiln_c99_undefined(), &length, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        return kiln_c99_new_typed_buffer(result, length);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN &&
-        (callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
-         kiln_c99_builtin_typed_kind(callee.bits, &(kiln_typed_kind){0}))) {
-        return kiln_c99_call_with_target(host, result, callee, kiln_c99_undefined(), callee,
-                                         args, argc, depth, thrown);
+        kiln_c99_builtin_typed_kind(callee.bits, &(kiln_typed_kind){0})) {
+        kiln_typed_kind kind;
+        kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+        size_t byte_offset = 0;
+        size_t length = 0;
+        int has_length = 0;
+        if (!kiln_c99_builtin_typed_kind(callee.bits, &kind)) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        /* Offset and length are meaningful only for a backing buffer. Extra arguments to
+         * array-like and numeric-length constructors are ignored without coercion. */
+        if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
+            status = kiln_c99_to_index(argc > 1 ? args[1] : kiln_c99_undefined(), &byte_offset,
+                                       thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            has_length = argc > 2 && args[2].tag != KILN_VALUE_UNDEFINED;
+            if (has_length) {
+                status = kiln_c99_to_index(args[2], &length, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+        }
+        return kiln_c99_new_typed_array(result, kind, source, byte_offset, length, has_length,
+                                        thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_MAP ||
                                              callee.bits == KILN_C99_BUILTIN_SET)) {
@@ -16207,6 +16278,7 @@ int main(void) {{
     kiln_value sub;
     kiln_value iterator;
     kiln_value step;
+    kiln_value keys;
     kiln_value value;
     kiln_value args[3];
     kiln_value thrown = kiln_c99_undefined();
@@ -16218,6 +16290,8 @@ int main(void) {{
     double expected[] = {{-56.0, 0.0, 255.0, 4464.0, 4464.0, 1.0,
         4294967295.0, 1.1, 1.1}};
     size_t index;
+    int found;
+    int enumerable;
     if (kiln_c99_new_typed_buffer(&buffer, 8) != KILN_C99_OK) return 2;
     if (kiln_c99_new_typed_array(&bytes, KILN_TYPED_UINT8, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 3;
     if (kiln_c99_new_typed_array(&words, KILN_TYPED_UINT32, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 4;
@@ -16264,6 +16338,13 @@ int main(void) {{
     args[0] = kiln_c99_number(-1.0);
     if (kiln_c99_construct(NULL, &value, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
                            args, 1, 0, &thrown) != KILN_C99_THROWN) return 18;
+    /* The view's indices are own and enumerable. Metadata and methods are inherited. */
+    kiln_c99_typed_own(bytes, "0", 1, &found, &enumerable);
+    if (!found || !enumerable) return 19;
+    kiln_c99_typed_own(bytes, "length", 6, &found, &enumerable);
+    if (found || enumerable) return 20;
+    if (kiln_c99_own_keys(bytes, &keys) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 8) return 21;
     return 0;
 }}
 /* {} */
