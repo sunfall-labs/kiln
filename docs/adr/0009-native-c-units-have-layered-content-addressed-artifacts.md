@@ -86,6 +86,14 @@ remain independently reusable, while the wrapper source/object keys include grap
 final shared-link key includes the ordered module objects, wrapper object, and platform library
 identity.
 
+The private graph-module ABI is also private at dynamic-loader scope. Graph module objects compile
+with hidden symbol visibility while the public wrapper retains default visibility. Two loaded
+libraries may contain the same logical module path with different bodies; hiding the path-derived
+six-argument entries prevents ELF interposition (and keeps the same invariant on macOS) without
+changing generated C or relying on a platform-specific symbolic-binding linker option. The
+visibility policy is part of each graph module object's cache identity. Scalar shared entries stay
+public because their content-derived two-argument symbol is the scalar embedding API.
+
 The HostOps contract permits a callback-produced string to remain valid only until the current
 module entry returns. A provider can export that value for a later consumer, so the graph wrapper
 interposes a private HostOps proxy and copies each successful callback string before the upstream
@@ -109,6 +117,8 @@ caller ownership require a future versioned ownership/dispose or caller-buffer d
   computation, while every external effect still crosses the same numeric HostOps callback.
 - Multi-module embedding preserves dependency order without process-global import/export storage,
   so repeated and concurrent calls do not share graph execution state.
+- Multiple graph libraries can be loaded into one process without one library's path-derived
+  module entries replacing another's; only each graph's documented wrapper is externally visible.
 - Embedders consume the header emitted by the same build as the library, so a content-derived
   symbol change cannot silently leave a hand-written declaration stale.
 - The platform compiler is a process boundary with captured diagnostics, while all source and

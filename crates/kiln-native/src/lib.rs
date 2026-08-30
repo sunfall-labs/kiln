@@ -803,7 +803,15 @@ impl NativeBuilder {
         let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
             self.cached_payload(&wrapper_source_key, wrapper.as_bytes())?;
 
-        let object_options = Digest::hash(
+        let module_object_options = Digest::hash(
+            format!(
+                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
+        let wrapper_object_options = Digest::hash(
             format!(
                 "shared-graph\0pic\0c11\0{}\0{}",
                 identity.kind,
@@ -811,7 +819,19 @@ impl NativeBuilder {
             )
             .as_bytes(),
         );
-        let compile_options = CompileOptions {
+        // Graph module symbols are an internal link protocol. Different shared libraries can
+        // contain the same logical path with different bytecode, so exporting those symbols lets
+        // a dynamic loader interpose one library's module into another library's wrapper. Keep
+        // the six-argument entries externally linkable inside this DSO but hidden outside it.
+        let mut module_compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            position_independent: true,
+            ..CompileOptions::default()
+        };
+        module_compile_options
+            .extra_args
+            .push("-fvisibility=hidden".into());
+        let wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
@@ -826,7 +846,7 @@ impl NativeBuilder {
                 &embedding_abi,
                 &target,
                 profile.cache(),
-                object_options,
+                module_object_options,
                 [*source_digest],
             ));
         }
@@ -837,7 +857,7 @@ impl NativeBuilder {
             &embedding_abi,
             &target,
             profile.cache(),
-            object_options,
+            wrapper_object_options,
             [wrapper_source_digest, topology],
         );
         let compile_started = Instant::now();
@@ -857,7 +877,8 @@ impl NativeBuilder {
             let module_o_ref = &paths.module_o;
             let wrapper_c_ref = &paths.wrapper_c;
             let wrapper_o_ref = &paths.wrapper_o;
-            let compile_options_ref = &compile_options;
+            let module_compile_options_ref = &module_compile_options;
+            let wrapper_compile_options_ref = &wrapper_compile_options;
             let wrapper_bytes_ref = &wrapper_bytes;
             let module_handles = index_chunks
                 .into_iter()
@@ -871,7 +892,7 @@ impl NativeBuilder {
                                     &module_sources_ref[index].0,
                                     &module_c_ref[index],
                                     &module_o_ref[index],
-                                    compile_options_ref,
+                                    module_compile_options_ref,
                                 );
                                 (
                                     index,
@@ -890,7 +911,7 @@ impl NativeBuilder {
                     wrapper_bytes_ref,
                     wrapper_c_ref,
                     wrapper_o_ref,
-                    compile_options_ref,
+                    wrapper_compile_options_ref,
                 )
             });
             let modules = (|| {
@@ -2301,6 +2322,37 @@ mod tests {
         }
     }
 
+    fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
+        fs::create_dir_all(project).expect("create one-module graph project");
+        fs::write(
+            project.join("main.js"),
+            format!("export const {export} = {value};\n"),
+        )
+        .expect("write one-module graph entry");
+        let module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(value.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::LoadLocal(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: export.to_owned(),
+                local_slot: 0,
+            }],
+        };
+        ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
+            .expect("construct one-module graph")
+    }
+
     #[test]
     fn a_second_build_reuses_every_material_artifact_and_runs() {
         let Some(toolchain) = Toolchain::discover().ok() else {
@@ -3248,6 +3300,177 @@ int main(void) {{
         assert!(
             output.status.success(),
             "shared graph host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn shared_graph_libraries_hide_path_symbols_and_cannot_interpose_each_other() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping shared graph visibility integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping shared graph visibility integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-visibility-test");
+        let first_graph = one_module_graph(&root.path.join("first-project"), 11.0, "first");
+        let second_graph = one_module_graph(&root.path.join("second-project"), 22.0, "second");
+        let first_internal = emit_module_with_logical_path(
+            &first_graph
+                .modules()
+                .next()
+                .expect("first graph module")
+                .program,
+            "main.js",
+        )
+        .expect("first module emits")
+        .symbol;
+        let second_internal = emit_module_with_logical_path(
+            &second_graph
+                .modules()
+                .next()
+                .expect("second graph module")
+                .program,
+            "main.js",
+        )
+        .expect("second module emits")
+        .symbol;
+        assert_eq!(
+            first_internal, second_internal,
+            "logical-path entries must collide for this interposition regression"
+        );
+
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let first = builder
+            .build_shared_graph(
+                &first_graph,
+                &NativeBuildOptions {
+                    output: root.path.join(if cfg!(target_os = "macos") {
+                        "first.dylib"
+                    } else {
+                        "first.so"
+                    }),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build first graph library");
+        let second = builder
+            .build_shared_graph(
+                &second_graph,
+                &NativeBuildOptions {
+                    output: root.path.join(if cfg!(target_os = "macos") {
+                        "second.dylib"
+                    } else {
+                        "second.so"
+                    }),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build second graph library");
+        assert_ne!(
+            first.module_symbol, second.module_symbol,
+            "the host must be able to address both public wrappers independently"
+        );
+
+        let first_header = first
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("first header name");
+        let second_header = second
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("second header name");
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{first_header}"
+#include "{second_header}"
+#include <dlfcn.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef int (*kiln_entry_fn)(kiln_host *, kiln_value *);
+
+static kiln_entry_fn load_entry(void *handle, const char *name) {{
+    void *address = dlsym(handle, name);
+    kiln_entry_fn entry = NULL;
+    if (address == NULL) return NULL;
+    _Static_assert(sizeof(entry) == sizeof(address), "dlsym function pointer size");
+    memcpy(&entry, &address, sizeof(entry));
+    return entry;
+}}
+
+int main(int argc, char **argv) {{
+    void *first;
+    void *second;
+    kiln_entry_fn first_entry;
+    kiln_entry_fn second_entry;
+    kiln_value result;
+    if (argc != 3) return 1;
+    first = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+    if (first == NULL) return 2;
+    second = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
+    if (second == NULL) return 3;
+    if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL)
+        return 4;
+    first_entry = load_entry(first, "{first_symbol}");
+    second_entry = load_entry(second, "{second_symbol}");
+    if (first_entry == NULL || second_entry == NULL) return 5;
+    if (first_entry(NULL, &result) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits}))
+        return 6;
+    if (second_entry(NULL, &result) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits}))
+        return 7;
+    dlclose(second);
+    dlclose(first);
+    return 0;
+}}
+"#,
+                internal = first_internal,
+                first_symbol = first.module_symbol,
+                second_symbol = second.module_symbol,
+                first_bits = 11.0_f64.to_bits(),
+                second_bits = 22.0_f64.to_bits(),
+            ),
+        )
+        .expect("write visibility host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile visibility host");
+        let host_executable = root.path.join("host");
+        let link_options = LinkOptions {
+            libraries: if cfg!(target_os = "linux") {
+                vec!["dl".to_owned()]
+            } else {
+                Vec::new()
+            },
+            ..LinkOptions::default()
+        };
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link visibility host");
+        let output = Command::new(&host_executable)
+            .arg(&first.output)
+            .arg(&second.output)
+            .output()
+            .expect("run visibility host");
+        assert!(
+            output.status.success(),
+            "shared graph visibility host failed with {:?}: {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
