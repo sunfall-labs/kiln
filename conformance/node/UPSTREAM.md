@@ -30,3 +30,15 @@ mbx run -p kiln-cli -- --one-shot test conformance/node --node
 ```
 
 Ordinary deterministic conformance continues to omit `--node`, so it never observes ambient I/O.
+
+## Compatibility inventory
+
+`node-compat.json` is the Deno-style compatibility inventory. It pins the upstream repository,
+tag, commit, and suite directory, then assigns every selected upstream path an explicit
+expectation. Passing entries are CI claims; expected failures and skips require reasons. Platform
+exclusions also require reasons. Every selected file carries its SHA-256, so validation fails closed
+if a path disappears or its bytes differ from the pinned Node revision.
+
+The initial inventory intentionally follows the real-server dependency chain: filesystem cases
+already passing, then Buffer, EventEmitter, streams, TCP resources, and HTTP. It records cluster as
+out of the current scope rather than allowing the absence of a test to look like compatibility.

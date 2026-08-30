@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "https://github.com/nodejs/node",
+    "tag": "v24.7.0",
+    "commit": "d795edb56765d4ec743bcda5a0c1452bed74de0c",
+    "suite_path": "upstream"
+  },
+  "tests": {
+    "parallel/test-fs-promises-readfile-empty.js": {
+      "expectation": "pass",
+      "sha256": "10247f1876bcae623c792ea78f890f6ba2682299636e3075c468c52e7d1e2870",
+      "features": ["node:fs/promises", "buffer", "promise-jobs"]
+    },
+    "parallel/test-fs-promises-writefile-typedarray.js": {
+      "expectation": "pass",
+      "sha256": "a8cb5228c030b21dd560feb7362391fa217a3f9c06ecb2bd624103ce73151395",
+      "features": ["node:fs/promises", "typed-arrays", "promise-jobs"]
+    },
+    "parallel/test-http-server.js": {
+      "expectation": "expected-failure",
+      "sha256": "e62450f338b93c15eab588fc70c91db638d35f30cb35c4da283f838f054cfb05",
+      "reason": "node:http, EventEmitter, streams, and Tokio socket resources are the next vertical slice",
+      "features": ["node:http", "events", "streams", "tokio-net"]
+    },
+    "parallel/test-http-request-end.js": {
+      "expectation": "expected-failure",
+      "sha256": "e1d116dcde1119994cbe2c13e452526150821c199f73c4c763aeaaa4d370df44",
+      "reason": "HTTP client requests and writable stream shutdown are not implemented yet",
+      "features": ["node:http", "streams", "tokio-net"]
+    },
+    "parallel/test-buffer-concat.js": {
+      "expectation": "expected-failure",
+      "sha256": "d320b87463a06e6d65691118f26e96bcd93c771ffdf3287afe84974a9204e169",
+      "reason": "Buffer is currently represented only by Uint8Array results; the Node Buffer surface is not installed",
+      "features": ["buffer", "typed-arrays"]
+    },
+    "parallel/test-event-emitter-add-listeners.js": {
+      "expectation": "expected-failure",
+      "sha256": "03746da964b9490e004015a55d0692c51161fe11058273053ad9dcd8a86c42a3",
+      "reason": "node:events and EventEmitter listener semantics are not implemented yet",
+      "features": ["node:events", "event-emitter"]
+    },
+    "parallel/test-net-listen-close-server.js": {
+      "expectation": "expected-failure",
+      "sha256": "e7c0bf96be8619c6357aca1a11d0898fd9ed5ccc03778093d5d059d4185342a7",
+      "reason": "realm-owned TCP listener resources and referenced liveness are not implemented yet",
+      "features": ["node:net", "tokio-net", "resource-lifecycle"]
+    },
+    "parallel/test-stream-readable-event.js": {
+      "expectation": "expected-failure",
+      "sha256": "72b1bcab948132734959152c08b6c1565bc8de84eaa56103a0d075863ef9b5a4",
+      "reason": "Node readable stream state and EventEmitter integration are not implemented yet",
+      "features": ["node:stream", "event-emitter"]
+    },
+    "parallel/test-cluster-basic.js": {
+      "expectation": "skip",
+      "sha256": "375714e07de0981abf330d9f80423fdffae77629576fab1e59f13f6234c4e3a4",
+      "reason": "cluster process orchestration is outside the server compatibility scope until child_process and IPC land",
+      "features": ["node:cluster", "child-process", "ipc"]
+    }
+  }
+}

@@ -28,6 +28,7 @@ mod case;
 mod discovery;
 mod harness;
 mod manifest;
+pub mod node_compat;
 mod program;
 mod reasons;
 mod source_compiler;
