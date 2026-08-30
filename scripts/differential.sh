@@ -25,6 +25,11 @@
 #
 # Probes are ordinary JavaScript that prints to stdout and exits 0 under node. Add one whenever
 # you want to know what kiln does with a piece of the language; it costs nothing to be refused.
+#
+# ONE TRAP. node sleeps for real and kiln's clock is virtual, so a probe that schedules something
+# an hour out finishes instantly here and hangs the reference implementation there. Keep timer
+# delays to a few milliseconds and assert *ordering*; the fact that the delay's magnitude is free
+# is covered by unit tests, where there is no node to wait for. See ADR 0012.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
