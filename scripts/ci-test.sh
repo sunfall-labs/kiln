@@ -26,6 +26,10 @@ else
 	cargo test --workspace --locked
 fi
 
+# The number provider is an rlib during ordinary workspace tests and a no-std, panic-abort static
+# archive in shipped artifacts. Exercise that distinct packaging/link contract from a C caller.
+scripts/check-native-number-ffi.sh
+
 # Exercise the public conformance workflow, not only its component crates. The local corpus is
 # intentionally tiny; the full upstream suite remains an external, separately pinned input.
 cargo run -p kiln-cli --locked -- --one-shot test tests/conformance/smoke

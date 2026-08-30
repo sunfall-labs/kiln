@@ -1,0 +1,15 @@
+[package]
+name = "kiln-native-number-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Workspace tests and Clippy consume the ordinary no-std library. Packaging overrides this with
+# `cargo rustc --crate-type staticlib` under one explicit panic-abort target build, so Cargo applies
+# the policy to this crate and its complete dependency graph without changing workspace profiles.
+crate-type = ["rlib"]
+
+[dependencies]
+kiln-number-core = { workspace = true }
