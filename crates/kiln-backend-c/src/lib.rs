@@ -664,6 +664,11 @@ typedef struct kiln_property {
     /* A symbol retains its original value, so equal-looking reserved strings cannot alias it. */
     int kind;
     kiln_value symbol_value;
+    /* Internal properties normally use their reserved spelling (runtime bookkeeping), but
+     * private names use a translation-unit-local token instead.  Keeping the identity separate
+     * from `key` is what prevents a forged string or an unrelated class's same spelling from
+     * acquiring the brand. */
+    const void *internal_identity;
     /* The enumerable bit is shared by string enumeration, spread and JSON; symbol properties are
      * additionally filtered from the string-only walks below. Every own property of an error is
      * readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
@@ -1027,9 +1032,22 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
-static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
-static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+static kiln_property *kiln_c99_own_private(kiln_value target, const void *identity);
+static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_t display_len,
                                   int writing);
+static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
+                               size_t display_len, kiln_value *out, kiln_value *thrown);
+static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value *out,
+                                int depth, kiln_value *thrown);
+static int kiln_c99_private_set(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value value,
+                                int depth, kiln_value *thrown);
+static int kiln_c99_private_init(kiln_value target, const void *identity, const char *display,
+                                 size_t display_len, kiln_value value);
+static int kiln_c99_define_private_accessor(kiln_value target, const void *identity,
+                                             const char *display, size_t display_len,
+                                             kiln_value getter, kiln_value setter);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);
@@ -1202,8 +1220,16 @@ static int kiln_c99_same_symbol_key(const kiln_property *property, kiln_value sy
 
 static int kiln_c99_same_internal_key(const kiln_property *property, const char *key,
                                       size_t key_len) {
-    return property->kind == KILN_PROPERTY_INTERNAL && property->key_len == key_len &&
+    /* A private slot has the same physical kind but a non-null identity token.  Runtime
+     * bookkeeping is the only user of this spelling-based helper; keeping the namespaces
+     * disjoint prevents an internal lookup from accidentally finding a private member. */
+    return property->kind == KILN_PROPERTY_INTERNAL && property->internal_identity == NULL &&
+           property->key_len == key_len &&
            (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+}
+
+static int kiln_c99_same_private_key(const kiln_property *property, const void *identity) {
+    return property->kind == KILN_PROPERTY_INTERNAL && property->internal_identity == identity;
 }
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
@@ -1338,6 +1364,7 @@ static int kiln_c99_put_kind(kiln_host *host, kiln_value target, const char *key
         object->properties[position].key_len = key_len;
         object->properties[position].kind = kind;
         object->properties[position].symbol_value = symbol;
+        object->properties[position].internal_identity = NULL;
         /* Internal slots are hidden; ordinary strings beginning with `@@` remain ordinary user
          * properties, and symbols are enumerable even though their storage spelling is reserved. */
         object->properties[position].enumerable =
@@ -7839,10 +7866,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
 /* Append everything `source` yields to `target`, which is what array spread, `for...of` and
  * destructuring all reduce to.
  *
- * An array and a string are walked directly rather than through their iterators. That is a
- * shortcut the specification does not take, and it is visible to a program that replaces
- * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
- * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+ * An array and a string are walked directly rather than through their iterators only while their
+ * intrinsic protocol is intact. An own Symbol.iterator override is observable and must go through
+ * the protocol below; this also keeps hand-written IR fixtures honest. Anything else must hand
+ * back an iterator and is driven by `next`. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
@@ -7850,6 +7877,18 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
     int status;
     if (source.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(source);
+        int overridden;
+        int enumerable;
+        status = kiln_c99_array_own_kind(source, "@@iterator", 10,
+                                         kiln_c99_well_known_value("@@iterator", 10),
+                                         KILN_PROPERTY_SYMBOL, &overridden, &enumerable);
+        (void)enumerable;
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (overridden) {
+            goto protocol;
+        }
         size_t length = array->count;
         for (index = 0; index < length && index < array->count; ++index) {
             /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
@@ -7915,7 +7954,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         free(units);
         return KILN_C99_OK;
     }
-    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
+protocol:
+    /* Everything else (including an array with an own override) goes through the protocol: ask
+     * for an iterator, then drive it. */
     if (source.tag == KILN_VALUE_GENERATOR) {
         iterator = source;
     } else {
@@ -9308,59 +9349,84 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
     return KILN_C99_OK;
 }
 
+/* Return the backing object store for values that can carry an internal/private property.  Arrays
+ * use their named-property side store; this is useful for direct IR fixtures and keeps all
+ * object-like values on one descriptor path. */
+static int kiln_c99_private_store(kiln_value target, int create, kiln_value *store) {
+    int status;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        if (!create && kiln_c99_closure_of(target)->properties.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        return kiln_c99_function_store(target, store);
+    }
+    if (target.tag == KILN_VALUE_OBJECT) {
+        *store = target;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        if (array->properties.tag != KILN_VALUE_OBJECT) {
+            if (!create) {
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_new_object(&array->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        *store = array->properties;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
 /* The own slot a private name occupies, or NULL.
  *
  * Own-only, and that own-only rule *is* the brand check: an object of another class does not carry
- * the name, however much of the rest of the shape it shares. Nothing walks the prototype chain
- * here for the same reason -- inheriting a private name would be inheriting somebody else's
+ * the identity, however much of the rest of the shape it shares. Nothing walks the prototype
+ * chain here for the same reason -- inheriting a private name would be inheriting somebody else's
  * identity. A static private member lives on the constructor, whose properties are in its own
  * store rather than in an object. */
-static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
+static kiln_property *kiln_c99_own_private(kiln_value target, const void *identity) {
+    kiln_value store = kiln_c99_undefined();
     kiln_object *object;
     size_t index;
-    if (target.tag == KILN_VALUE_FUNCTION) {
-        kiln_value store = kiln_c99_closure_of(target)->properties;
-        if (store.tag != KILN_VALUE_OBJECT) {
-            return NULL;
-        }
-        object = kiln_c99_object_of(store);
-    } else if (target.tag == KILN_VALUE_OBJECT) {
-        object = kiln_c99_object_of(target);
-    } else {
+    if (kiln_c99_private_store(target, 0, &store) != KILN_C99_OK ||
+        store.tag != KILN_VALUE_OBJECT) {
         return NULL;
     }
+    object = kiln_c99_object_of(store);
     for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        if (kiln_c99_same_private_key(&object->properties[index], identity)) {
             return &object->properties[index];
         }
     }
     return NULL;
 }
 
-/* A private name on an object that does not carry it: a TypeError naming the member.
- *
- * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
- * properties can see it and no computed access can spell it -- and the message wants the `<name>`
- * half, spelled the way the program spells it. */
-static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+/* A private name on an object that does not carry it: a TypeError naming the member. The display
+ * spelling is deliberately passed separately from the identity token, so diagnostics never become
+ * part of storage lookup. */
+static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_t display_len,
                                   int writing) {
     kiln_text text = {NULL, 0, 0};
     kiln_value error;
-    size_t at = 0;
+    size_t shown_at = 0;
     size_t colons = 0;
+    size_t index;
     int status;
-    while (at < key_len && colons < 2) {
-        if (key[at] == ':') {
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
             colons += 1;
         }
-        at += 1;
     }
-    if (colons < 2) {
-        at = 0;
+    if (colons == 2) {
+        shown_at = index;
     }
     if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
                                               : "Cannot read private member #") != KILN_C99_OK ||
-        kiln_c99_text_append(&text, key + at, key_len - at) != KILN_C99_OK ||
+        kiln_c99_text_append(&text, display + shown_at, display_len - shown_at) != KILN_C99_OK ||
         kiln_c99_text_append_c(&text,
                                writing ? " to an object whose class did not declare it"
                                        : " from an object whose class did not declare it") !=
@@ -9375,6 +9441,187 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
     }
     *thrown = error;
     return KILN_C99_THROWN;
+}
+
+static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
+                               size_t display_len, kiln_value *out, kiln_value *thrown) {
+    static const char primitive[] = "right-hand side of `#";
+    kiln_property *slot;
+    size_t shown_at = 0;
+    size_t colons = 0;
+    size_t index;
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
+            colons += 1;
+        }
+    }
+    if (colons == 2) {
+        shown_at = index;
+    }
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
+        target.tag != KILN_VALUE_ARRAY) {
+        kiln_text message = {NULL, 0, 0};
+        const char *type = target.tag == KILN_VALUE_NULL       ? "null"
+                           : target.tag == KILN_VALUE_UNDEFINED ? "undefined"
+                           : target.tag == KILN_VALUE_BOOLEAN   ? "boolean"
+                           : target.tag == KILN_VALUE_NUMBER    ? "number"
+                           : target.tag == KILN_VALUE_STRING    ? "string"
+                                                                  : "value";
+        int status = kiln_c99_text_append_c(&message, primitive);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append(&message, display + shown_at,
+                                          display_len - shown_at);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append_c(&message, " in must be an object, got ");
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append_c(&message, type);
+        }
+        if (status != KILN_C99_OK) {
+            free(message.bytes);
+            return status;
+        }
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, message.bytes);
+        free(message.bytes);
+        return status;
+    }
+    slot = kiln_c99_own_private(target, identity);
+    *out = kiln_c99_boolean(slot != NULL);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value *out,
+                                int depth, kiln_value *thrown) {
+    kiln_property *slot = kiln_c99_own_private(target, identity);
+    if (slot == NULL) {
+        return kiln_c99_private_error(thrown, display, display_len, 0);
+    }
+    if (!slot->accessor) {
+        *out = slot->value;
+        return KILN_C99_OK;
+    }
+    if (slot->getter.tag == KILN_VALUE_UNDEFINED) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    return kiln_c99_call(host, out, slot->getter, target, NULL, 0, depth, thrown);
+}
+
+static int kiln_c99_private_set(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value value,
+                                int depth, kiln_value *thrown) {
+    kiln_property *slot = kiln_c99_own_private(target, identity);
+    if (slot == NULL) {
+        return kiln_c99_private_error(thrown, display, display_len, 1);
+    }
+    if (!slot->accessor) {
+        slot->value = value;
+        return KILN_C99_OK;
+    }
+    if (slot->setter.tag == KILN_VALUE_UNDEFINED) {
+        return KILN_C99_OK;
+    }
+    {
+        kiln_value ignored;
+        return kiln_c99_call(host, &ignored, slot->setter, target, &value, 1, depth, thrown);
+    }
+}
+
+/* Private initialization is define-like: it creates/replaces an own data slot and never walks a
+ * prototype or invokes a setter. */
+static int kiln_c99_private_init(kiln_value target, const void *identity, const char *display,
+                                 size_t display_len, kiln_value value) {
+    kiln_value store = kiln_c99_undefined();
+    kiln_object *object;
+    size_t index;
+    int status = kiln_c99_private_store(target, 1, &store);
+    (void)display;
+    (void)display_len;
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(store);
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_private_key(&object->properties[index], identity)) {
+            object->properties[index].accessor = 0;
+            object->properties[index].value = value;
+            object->properties[index].getter = kiln_c99_undefined();
+            object->properties[index].setter = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
+                              sizeof *object->properties);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object->properties[object->count].key = display;
+    object->properties[object->count].key_len = display_len;
+    object->properties[object->count].kind = KILN_PROPERTY_INTERNAL;
+    object->properties[object->count].symbol_value = kiln_c99_undefined();
+    object->properties[object->count].internal_identity = identity;
+    object->properties[object->count].enumerable = 0;
+    object->properties[object->count].accessor = 0;
+    object->properties[object->count].value = value;
+    object->properties[object->count].getter = kiln_c99_undefined();
+    object->properties[object->count].setter = kiln_c99_undefined();
+    object->count += 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_define_private_accessor(kiln_value target, const void *identity,
+                                             const char *display, size_t display_len,
+                                             kiln_value getter, kiln_value setter) {
+    kiln_value store = kiln_c99_undefined();
+    kiln_object *object;
+    size_t index;
+    int status = kiln_c99_private_store(target, 1, &store);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(store);
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_private_key(&object->properties[index], identity)) {
+            continue;
+        }
+        if (!object->properties[index].accessor) {
+            object->properties[index].accessor = 1;
+            object->properties[index].getter = kiln_c99_undefined();
+            object->properties[index].setter = kiln_c99_undefined();
+        }
+        if (getter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].getter = getter;
+        }
+        if (setter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].setter = setter;
+        }
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
+                              sizeof *object->properties);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object->properties[object->count].key = display;
+    object->properties[object->count].key_len = display_len;
+    object->properties[object->count].kind = KILN_PROPERTY_INTERNAL;
+    object->properties[object->count].symbol_value = kiln_c99_undefined();
+    object->properties[object->count].internal_identity = identity;
+    object->properties[object->count].enumerable = 0;
+    object->properties[object->count].accessor = 1;
+    object->properties[object->count].value = kiln_c99_undefined();
+    object->properties[object->count].getter = getter;
+    object->properties[object->count].setter = setter;
+    object->count += 1;
+    return KILN_C99_OK;
 }
 
 /* Raise a language-level error: build it, hand it to the caller as the thrown value, and report
@@ -10302,6 +10549,27 @@ fn validate_code(
                     ));
                 }
             },
+            Instruction::PrivateIn(name)
+            | Instruction::GetPrivate(name)
+            | Instruction::SetPrivate(name)
+            | Instruction::InitPrivate(name)
+            | Instruction::DefinePrivateAccessor { name, .. } => {
+                match program.constants.get(*name as usize) {
+                    Some(Constant::String(_)) => {}
+                    Some(_) => {
+                        return Err(invalid(
+                            index,
+                            format!("private name constant {name} is not a string"),
+                        ));
+                    }
+                    None => {
+                        return Err(invalid(
+                            index,
+                            format!("private name constant {name} is out of bounds"),
+                        ));
+                    }
+                }
+            }
             Instruction::LoadLocal(local)
             | Instruction::StoreLocal(local)
             | Instruction::NewCell(local)
@@ -10472,9 +10740,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::InitPrivate(_)
-        | Instruction::DefinePrivateAccessor { .. } => Err(EmitError::Unsupported {
-            feature: "private fields and methods in the native backend".to_owned(),
-        }),
+        | Instruction::DefinePrivateAccessor { .. } => Ok(()),
         Instruction::Const(_)
         | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
@@ -11063,6 +11329,46 @@ fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
         .collect()
 }
 
+/// Constant operands used by private instructions get a TU-local identity object.  The text
+/// remains available for diagnostics, but it is never consulted to decide whether a brand is
+/// present.  Sorting keeps generated source stable regardless of traversal details.
+fn private_constant_indices(program: &Program) -> Vec<u32> {
+    let mut indices = HashSet::new();
+    let mut collect = |code: &[Instruction]| {
+        for instruction in code {
+            match instruction {
+                Instruction::PrivateIn(index)
+                | Instruction::GetPrivate(index)
+                | Instruction::SetPrivate(index)
+                | Instruction::InitPrivate(index) => {
+                    indices.insert(*index);
+                }
+                Instruction::DefinePrivateAccessor { name, .. } => {
+                    indices.insert(*name);
+                }
+                _ => {}
+            }
+        }
+    };
+    collect(&program.code);
+    for function in &program.functions {
+        collect(&function.code);
+    }
+    let mut indices: Vec<_> = indices.into_iter().collect();
+    indices.sort_unstable();
+    indices
+}
+
+fn render_private_tokens(output: &mut String, program: &Program, symbol: &str) {
+    for index in private_constant_indices(program) {
+        writeln!(
+            output,
+            "static const unsigned char {symbol}_private_token_{index} = 0;"
+        )
+        .unwrap();
+    }
+}
+
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
 fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
@@ -11288,6 +11594,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
             .unwrap();
         }
     }
+    render_private_tokens(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -11382,6 +11689,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
             .unwrap();
         }
     }
+    render_private_tokens(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -11588,10 +11896,17 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::PrivateIn(_)
-        | Instruction::InitPrivate(_)
-        | Instruction::DefinePrivateAccessor { .. } => {
-            unreachable!("unsupported typed-key instruction was validated before emission")
+        Instruction::PrivateIn(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value brand; int status = kiln_c99_private_in(stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, &brand, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = brand; }}",
+                text.len()
+            )
+            .unwrap();
         }
         Instruction::GetPrivate(name) => {
             let Constant::String(text) = &constants[*name as usize] else {
@@ -11600,9 +11915,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 0); {unwind} }} stack[sp - 1] = slot->value; }}",
+                "    {{ kiln_value read; int status = kiln_c99_private_get(host, stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len(),
-                text.len()
             )
             .unwrap();
         }
@@ -11613,8 +11927,34 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 1); {unwind} }} slot->value = member; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_private_set(host, stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len(),
+            )
+            .unwrap();
+        }
+        Instruction::InitPrivate(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_private_init(stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::DefinePrivateAccessor { name, setter } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let (getter, setter_value) = if *setter {
+                ("kiln_c99_undefined()", "function")
+            } else {
+                ("function", "kiln_c99_undefined()")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value function = stack[--sp]; kiln_value target = stack[sp - 1]; int status = kiln_c99_define_private_accessor(target, &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, {getter}, {setter_value}); if (status != KILN_C99_OK) return status; stack[sp - 1] = target; }}",
                 text.len()
             )
             .unwrap();
@@ -13626,22 +13966,91 @@ int main(void) {{
     }
 
     #[test]
-    fn typed_key_instructions_are_refused_by_the_native_backend() {
-        let cases = [(
-            vec![Instruction::Const(0), Instruction::GetPrivate(0)],
-            "private fields",
-        )];
-        for (code, feature) in cases {
-            let result = emit(&program(
-                vec![Constant::String("@@private:0:x".into())],
-                code,
-                0,
-            ));
-            assert!(
-                matches!(result, Err(EmitError::Unsupported { feature: actual }) if actual.contains(feature)),
-                "typed-key instruction must be rejected by native emission"
-            );
-        }
+    fn private_operands_must_be_string_constants() {
+        let result = emit(&program(
+            vec![Constant::Number(1.0f64.to_bits())],
+            vec![
+                Instruction::Const(0),
+                Instruction::GetPrivate(0),
+                Instruction::Return,
+            ],
+            0,
+        ));
+        assert!(
+            matches!(result, Err(EmitError::InvalidProgram { message }) if message.contains("private name constant 0") && message.contains("not a string")),
+            "private instructions must validate their typed operand"
+        );
+    }
+
+    #[test]
+    fn executable_private_init_and_get_use_a_hidden_brand_slot() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("@@private:7:secret".into()),
+                Constant::Number(42.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::Dup,
+                Instruction::Const(1),
+                Instruction::InitPrivate(0),
+                Instruction::Pop,
+                Instruction::GetPrivate(0),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("private instructions emit");
+        let executable = std::env::temp_dir().join(format!("kiln-private-{}", std::process::id()));
+        let wrapper = format!(
+            r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    double number;
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_NUMBER) return 1;
+    memcpy(&number, &arguments[0].bits, sizeof number);
+    if (number != 42.0) return 2;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 3;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(&executable)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+            .expect("private source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated private C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated private executable runs");
+        let _ = std::fs::remove_file(&executable);
+        assert!(run.status.success(), "private init/get failed");
     }
 
     #[test]
