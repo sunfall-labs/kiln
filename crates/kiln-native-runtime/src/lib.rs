@@ -9,7 +9,160 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 4;
+pub const NATIVE_RUNTIME_VERSION: u32 = 5;
+
+/// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
+pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
+
+/// Magic prefix for the private scalar-result sidecar format.
+pub const NATIVE_RESULT_MAGIC: [u8; 8] = *b"KILNRES1";
+
+const NATIVE_RESULT_HEADER_LEN: usize = NATIVE_RESULT_MAGIC.len() + 1 + 8;
+
+/// A malformed private scalar-result sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeResultError {
+    Truncated { needed: usize, available: usize },
+    InvalidMagic,
+    UnknownTag(u8),
+    InvalidLength { tag: u8, expected: u64, actual: u64 },
+    InvalidBoolean(u8),
+    LengthOverflow(u64),
+    InvalidUtf8,
+    TrailingBytes(usize),
+}
+
+impl std::fmt::Display for NativeResultError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { needed, available } => {
+                write!(
+                    formatter,
+                    "truncated native result (need {needed} bytes, have {available})"
+                )
+            }
+            Self::InvalidMagic => formatter.write_str("invalid native result magic"),
+            Self::UnknownTag(tag) => write!(formatter, "unknown native result tag {tag}"),
+            Self::InvalidLength {
+                tag,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "invalid native result length for tag {tag} (expected {expected}, got {actual})"
+            ),
+            Self::InvalidBoolean(value) => {
+                write!(formatter, "invalid native result boolean {value}")
+            }
+            Self::LengthOverflow(length) => {
+                write!(formatter, "native result length {length} overflows usize")
+            }
+            Self::InvalidUtf8 => formatter.write_str("native result string is not UTF-8"),
+            Self::TrailingBytes(count) => {
+                write!(formatter, "native result has {count} trailing bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NativeResultError {}
+
+/// Decode one complete `KILNRES1` sidecar record into the shared host scalar type.
+pub fn decode_native_result(bytes: &[u8]) -> Result<kiln_host_abi::HostValue, NativeResultError> {
+    if bytes.len() < NATIVE_RESULT_HEADER_LEN {
+        return Err(NativeResultError::Truncated {
+            needed: NATIVE_RESULT_HEADER_LEN,
+            available: bytes.len(),
+        });
+    }
+    if bytes[..NATIVE_RESULT_MAGIC.len()] != NATIVE_RESULT_MAGIC {
+        return Err(NativeResultError::InvalidMagic);
+    }
+
+    let tag_offset = NATIVE_RESULT_MAGIC.len();
+    let tag = bytes[tag_offset];
+    let length_offset = tag_offset + 1;
+    let mut length_bytes = [0_u8; 8];
+    length_bytes.copy_from_slice(&bytes[length_offset..NATIVE_RESULT_HEADER_LEN]);
+    let length = u64::from_le_bytes(length_bytes);
+
+    let expected_length = match tag {
+        0 | 1 => 0,
+        2 => 1,
+        3 => 8,
+        4 => {
+            let length =
+                usize::try_from(length).map_err(|_| NativeResultError::LengthOverflow(length))?;
+            let payload_end = NATIVE_RESULT_HEADER_LEN
+                .checked_add(length)
+                .ok_or(NativeResultError::LengthOverflow(length as u64))?;
+            if bytes.len() < payload_end {
+                return Err(NativeResultError::Truncated {
+                    needed: payload_end,
+                    available: bytes.len(),
+                });
+            }
+            if bytes.len() != payload_end {
+                return Err(NativeResultError::TrailingBytes(bytes.len() - payload_end));
+            }
+            let value = String::from_utf8(bytes[NATIVE_RESULT_HEADER_LEN..payload_end].to_vec())
+                .map_err(|_| NativeResultError::InvalidUtf8)?;
+            return Ok(kiln_host_abi::HostValue::String(value));
+        }
+        other => return Err(NativeResultError::UnknownTag(other)),
+    };
+    if length != expected_length {
+        return Err(NativeResultError::InvalidLength {
+            tag,
+            expected: expected_length,
+            actual: length,
+        });
+    }
+
+    let payload_end = NATIVE_RESULT_HEADER_LEN + expected_length as usize;
+    if bytes.len() < payload_end {
+        return Err(NativeResultError::Truncated {
+            needed: payload_end,
+            available: bytes.len(),
+        });
+    }
+    if bytes.len() != payload_end {
+        return Err(NativeResultError::TrailingBytes(bytes.len() - payload_end));
+    }
+
+    Ok(match tag {
+        0 => kiln_host_abi::HostValue::Undefined,
+        1 => kiln_host_abi::HostValue::Null,
+        2 => match bytes[NATIVE_RESULT_HEADER_LEN] {
+            0 => kiln_host_abi::HostValue::Boolean(false),
+            1 => kiln_host_abi::HostValue::Boolean(true),
+            value => return Err(NativeResultError::InvalidBoolean(value)),
+        },
+        3 => {
+            let mut bits = [0_u8; 8];
+            bits.copy_from_slice(&bytes[NATIVE_RESULT_HEADER_LEN..payload_end]);
+            kiln_host_abi::HostValue::Number(u64::from_le_bytes(bits))
+        }
+        _ => unreachable!("all native result tags handled above"),
+    })
+}
+
+/// Encode one sidecar record from the shared host scalar type.
+pub fn encode_native_result(value: &kiln_host_abi::HostValue) -> Vec<u8> {
+    let (tag, payload): (u8, Vec<u8>) = match value {
+        kiln_host_abi::HostValue::Undefined => (0, Vec::new()),
+        kiln_host_abi::HostValue::Null => (1, Vec::new()),
+        kiln_host_abi::HostValue::Boolean(value) => (2, vec![u8::from(*value)]),
+        kiln_host_abi::HostValue::Number(bits) => (3, bits.to_le_bytes().to_vec()),
+        kiln_host_abi::HostValue::String(value) => (4, value.as_bytes().to_vec()),
+    };
+    let mut encoded = Vec::with_capacity(NATIVE_RESULT_HEADER_LEN + payload.len());
+    encoded.extend_from_slice(&NATIVE_RESULT_MAGIC);
+    encoded.push(tag);
+    encoded.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(&payload);
+    encoded
+}
 
 /// C entry-point ABI version declared by [`embedding_header`].
 pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
@@ -152,7 +305,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 4
+#define KILN_NATIVE_RUNTIME_VERSION 5
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -236,6 +389,7 @@ static RUNTIME_SOURCE: OnceLock<String> = OnceLock::new();
 const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 "#;
@@ -254,6 +408,91 @@ static int kiln_cli_write_bytes(const char *bytes, size_t length) {
         return KILN_C99_HOST_ERROR;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_cli_write_result_u64(FILE *file, uint64_t value) {
+    unsigned char bytes[8];
+    size_t index;
+    for (index = 0; index < sizeof(bytes); ++index) {
+        bytes[index] = (unsigned char)((value >> (index * 8)) & 0xffu);
+    }
+    return fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes)
+        ? KILN_C99_OK
+        : KILN_C99_HOST_ERROR;
+}
+
+/* Private KILNRES1 scalar-result writer. The explicit-path form is used by focused C tests;
+ * the environment wrapper below is the only launcher-facing entry point. */
+int kiln_cli_write_result_file(const char *path, kiln_value value) {
+    static const unsigned char magic[] = {'K', 'I', 'L', 'N', 'R', 'E', 'S', '1'};
+    FILE *file;
+    uint8_t tag;
+    uint64_t length;
+    int status = KILN_C99_OK;
+    if (path == NULL || path[0] == '\0') {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_NULL:
+        tag = (uint8_t)value.tag;
+        length = 0;
+        break;
+    case KILN_VALUE_BOOLEAN:
+        if (value.bits > 1) {
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        tag = (uint8_t)value.tag;
+        length = 1;
+        break;
+    case KILN_VALUE_NUMBER:
+        tag = (uint8_t)value.tag;
+        length = 8;
+        break;
+    case KILN_VALUE_STRING:
+        if (value.len != 0 && value.ptr == NULL) {
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        if ((uintmax_t)value.len > UINT64_MAX) {
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        tag = (uint8_t)value.tag;
+        length = (uint64_t)value.len;
+        break;
+    default:
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return KILN_C99_HOST_ERROR;
+    }
+    if (fwrite(magic, 1, sizeof(magic), file) != sizeof(magic)
+        || fwrite(&tag, 1, sizeof(tag), file) != sizeof(tag)
+        || kiln_cli_write_result_u64(file, length) != KILN_C99_OK) {
+        status = KILN_C99_HOST_ERROR;
+    } else if (value.tag == KILN_VALUE_BOOLEAN) {
+        unsigned char boolean_value = (unsigned char)value.bits;
+        if (fwrite(&boolean_value, 1, sizeof(boolean_value), file) != sizeof(boolean_value)) {
+            status = KILN_C99_HOST_ERROR;
+        }
+    } else if (value.tag == KILN_VALUE_NUMBER) {
+        status = kiln_cli_write_result_u64(file, value.bits);
+    } else if (value.tag == KILN_VALUE_STRING && value.len != 0
+               && fwrite(value.ptr, 1, value.len, file) != value.len) {
+        status = KILN_C99_HOST_ERROR;
+    }
+    if (fclose(file) != 0) {
+        status = KILN_C99_HOST_ERROR;
+    }
+    return status;
+}
+
+int kiln_cli_write_result(kiln_value value) {
+    const char *path = getenv("KILN_NATIVE_RESULT_PATH_V1");
+    if (path == NULL || path[0] == '\0') {
+        return KILN_C99_OK;
+    }
+    return kiln_cli_write_result_file(path, value);
 }
 
 static int kiln_cli_write_value(kiln_value value) {
@@ -345,6 +584,7 @@ const LAUNCHER_PREFIX: &str = r#"/* Kiln native CLI launcher. */
 const LAUNCHER_DECL_PREFIX: &str = r#"
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
+extern int kiln_cli_write_result(kiln_value value);
 extern int 
 "#;
 
@@ -363,7 +603,10 @@ int main(void) {
 "#;
 
 const LAUNCHER_BODY: &str = r#"(&host, &result);
-    return status == 0 ? 0 : 1;
+    if (status != 0) {
+        return 1;
+    }
+    return kiln_cli_write_result(result) == KILN_C99_OK ? 0 : 1;
 }
 "#;
 
@@ -399,10 +642,96 @@ mod tests {
 
     #[test]
     fn runtime_identity_is_separate_from_the_private_number_provider() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 4);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 5);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
+    }
+
+    #[test]
+    fn native_result_round_trips_all_scalar_tags_and_display() {
+        let values = [
+            kiln_host_abi::HostValue::Undefined,
+            kiln_host_abi::HostValue::Null,
+            kiln_host_abi::HostValue::Boolean(false),
+            kiln_host_abi::HostValue::Boolean(true),
+            kiln_host_abi::HostValue::Number((-0.0_f64).to_bits()),
+            kiln_host_abi::HostValue::Number(f64::NAN.to_bits()),
+            kiln_host_abi::HostValue::String("a\0b".to_owned()),
+        ];
+        let displays = ["undefined", "null", "false", "true", "0", "NaN", "a\0b"];
+        for (value, display) in values.iter().zip(displays) {
+            assert_eq!(
+                decode_native_result(&encode_native_result(value)),
+                Ok(value.clone())
+            );
+            assert_eq!(value.to_js_string(), display);
+        }
+    }
+
+    #[test]
+    fn native_result_rejects_malformed_records() {
+        let fixture = encode_native_result(&kiln_host_abi::HostValue::Boolean(true));
+
+        let mut bad_magic = fixture.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            decode_native_result(&bad_magic),
+            Err(NativeResultError::InvalidMagic)
+        );
+
+        let mut unknown_tag = fixture.clone();
+        unknown_tag[NATIVE_RESULT_MAGIC.len()] = 99;
+        assert_eq!(
+            decode_native_result(&unknown_tag),
+            Err(NativeResultError::UnknownTag(99))
+        );
+
+        let mut invalid_length = fixture.clone();
+        invalid_length[NATIVE_RESULT_MAGIC.len() + 1] = 2;
+        assert!(matches!(
+            decode_native_result(&invalid_length),
+            Err(NativeResultError::InvalidLength {
+                tag: 2,
+                expected: 1,
+                actual: 2
+            })
+        ));
+
+        let mut invalid_boolean = fixture.clone();
+        invalid_boolean[NATIVE_RESULT_HEADER_LEN] = 2;
+        assert_eq!(
+            decode_native_result(&invalid_boolean),
+            Err(NativeResultError::InvalidBoolean(2))
+        );
+
+        assert!(matches!(
+            decode_native_result(&fixture[..fixture.len() - 1]),
+            Err(NativeResultError::Truncated { .. })
+        ));
+
+        let mut trailing = fixture;
+        trailing.push(0);
+        assert_eq!(
+            decode_native_result(&trailing),
+            Err(NativeResultError::TrailingBytes(1))
+        );
+
+        let mut invalid_utf8 =
+            encode_native_result(&kiln_host_abi::HostValue::String("ok".to_owned()));
+        invalid_utf8[NATIVE_RESULT_HEADER_LEN] = 0xff;
+        assert_eq!(
+            decode_native_result(&invalid_utf8),
+            Err(NativeResultError::InvalidUtf8)
+        );
+
+        let mut huge_string = Vec::from(NATIVE_RESULT_MAGIC);
+        huge_string.push(4);
+        huge_string.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            decode_native_result(&huge_string),
+            Err(NativeResultError::LengthOverflow(u64::MAX))
+        );
     }
 
     #[test]
@@ -606,6 +935,7 @@ int main(void) {
         let stub = root.join("stub.c");
         let number_provider = root.join("number-provider.c");
         let executable = root.join("kiln-test");
+        let result_path = root.join("result.bin");
         std::fs::write(&runtime, runtime_source()).expect("write runtime");
         std::fs::write(
             &launcher,
@@ -641,14 +971,95 @@ int main(void) {
             "C runtime failed to compile/link:\n{}",
             String::from_utf8_lossy(&compile.stderr)
         );
+        let compatibility_run = Command::new(&executable)
+            .output()
+            .expect("run linked launcher without sidecar");
+        assert!(compatibility_run.status.success());
+        assert!(compatibility_run.stderr.is_empty());
+        assert!(!result_path.exists());
+
         let run = Command::new(&executable)
+            .env(NATIVE_RESULT_PATH_ENV, &result_path)
             .output()
             .expect("run linked launcher");
         assert!(run.status.success());
+        assert!(run.stderr.is_empty());
         assert_eq!(
             String::from_utf8(run.stdout).expect("UTF-8 stdout"),
             "undefined null true false -0 NaN Infinity -Infinity 100000000000000000000 1e+21 1e-7 hello\n"
         );
+        assert_eq!(
+            decode_native_result(&std::fs::read(&result_path).expect("read sidecar")),
+            Ok(kiln_host_abi::HostValue::Undefined)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn c_result_writer_emits_every_scalar_tag() {
+        let Some(cc) = find_cc() else {
+            return;
+        };
+        let root = test_directory();
+        std::fs::create_dir(&root).expect("create test directory");
+        let runtime = root.join("runtime.c");
+        let harness = root.join("harness.c");
+        let header = root.join("kiln_host.h");
+        let number_provider = root.join("number-provider.c");
+        let executable = root.join("kiln-result-writer-test");
+        std::fs::write(&runtime, runtime_source()).expect("write runtime");
+        std::fs::write(&harness, RESULT_WRITER_SOURCE).expect("write result writer harness");
+        std::fs::write(&header, embedding_header()).expect("write header");
+        std::fs::write(&number_provider, kiln_native_number::runtime_source())
+            .expect("write test number provider");
+        let compile = Command::new(cc)
+            .args([
+                "-std=c11",
+                "-pedantic",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-Wno-unused-function",
+            ])
+            .args([
+                runtime.as_os_str(),
+                harness.as_os_str(),
+                number_provider.as_os_str(),
+            ])
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .expect("invoke C compiler");
+        assert!(
+            compile.status.success(),
+            "C result writer failed to compile/link:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let paths: Vec<_> = ["undefined", "null", "boolean", "number", "string"]
+            .iter()
+            .map(|name| root.join(format!("{name}.bin")))
+            .collect();
+        let run = Command::new(&executable)
+            .args(&paths)
+            .output()
+            .expect("run result writer harness");
+        assert!(run.status.success());
+        assert!(run.stdout.is_empty());
+        assert!(run.stderr.is_empty());
+        let expected = [
+            kiln_host_abi::HostValue::Undefined,
+            kiln_host_abi::HostValue::Null,
+            kiln_host_abi::HostValue::Boolean(true),
+            kiln_host_abi::HostValue::Number((-0.0_f64).to_bits()),
+            kiln_host_abi::HostValue::String("a\0b".to_owned()),
+        ];
+        for (path, value) in paths.iter().zip(expected.iter()) {
+            assert_eq!(
+                decode_native_result(&std::fs::read(path).expect("read sidecar")),
+                Ok(value.clone())
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -722,6 +1133,45 @@ int kiln_module_test(kiln_host *host, kiln_value *result) {
     arguments[11].ptr = text;
     arguments[11].len = sizeof(text) - 1;
     return host->call(host->context, 1, 12, arguments, result);
+}
+"#;
+
+    const RESULT_WRITER_SOURCE: &str = r#"
+#include <string.h>
+#include "kiln_host.h"
+
+extern int kiln_cli_write_result_file(const char *path, kiln_value value);
+
+int main(int argc, char **argv) {
+    static const char text[] = {'a', '\0', 'b'};
+    double negative_zero = -0.0;
+    kiln_value value;
+    if (argc != 6) {
+        return 1;
+    }
+    memset(&value, 0, sizeof(value));
+    value.tag = KILN_VALUE_UNDEFINED;
+    if (kiln_cli_write_result_file(argv[1], value) != KILN_C99_OK) {
+        return 1;
+    }
+    value.tag = KILN_VALUE_NULL;
+    if (kiln_cli_write_result_file(argv[2], value) != KILN_C99_OK) {
+        return 1;
+    }
+    value.tag = KILN_VALUE_BOOLEAN;
+    value.bits = 1;
+    if (kiln_cli_write_result_file(argv[3], value) != KILN_C99_OK) {
+        return 1;
+    }
+    value.tag = KILN_VALUE_NUMBER;
+    memcpy(&value.bits, &negative_zero, sizeof(negative_zero));
+    if (kiln_cli_write_result_file(argv[4], value) != KILN_C99_OK) {
+        return 1;
+    }
+    value.tag = KILN_VALUE_STRING;
+    value.ptr = text;
+    value.len = sizeof(text);
+    return kiln_cli_write_result_file(argv[5], value) == KILN_C99_OK ? 0 : 1;
 }
 "#;
 }

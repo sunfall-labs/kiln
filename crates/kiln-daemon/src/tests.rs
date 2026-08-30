@@ -387,6 +387,10 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     };
     assert_eq!(first.exit_code, Some(0));
     assert_eq!(first.stdout, "native daemon 42\n");
+    assert_eq!(
+        first.scalar_value,
+        Some(kiln_proto::ScalarValueSummary::Undefined)
+    );
     assert!(!first.build.app_object_cache_hit);
 
     let Response::NativeRan(second) = client.request(&request).expect("cached native request")
@@ -1144,6 +1148,10 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     };
     assert!(first.succeeded, "{:?}", first.diagnostics);
     assert_eq!(first.stdout, "inner 9\nshadow 7\nkiln 3\n");
+    assert_eq!(
+        first.scalar_value,
+        Some(kiln_proto::ScalarValueSummary::Undefined)
+    );
     assert!(first.instructions > 0);
 
     client
@@ -1492,6 +1500,10 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
     };
     assert_eq!(first.exit_code, Some(0));
     assert_eq!(first.stdout, "native dependency\n42\n");
+    assert_eq!(
+        first.scalar_value,
+        Some(kiln_proto::ScalarValueSummary::Undefined)
+    );
 
     let Response::NativeRan(second) = client.request(&request).expect("cached native graph run")
     else {

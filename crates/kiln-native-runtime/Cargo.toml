@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+kiln-host-abi = { workspace = true }
+
 [dev-dependencies]
 kiln-native-number = { workspace = true }
