@@ -3531,9 +3531,12 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
         /* `for...of` asks for this and then drives `next`, where spread walks the array
          * directly. Both have to work, and they are different code paths, so an array needs the
          * protocol spelled out even though nothing else about it is unusual. */
-        if (kiln_c99_same_name(key, key_len, "@@iterator") ||
-            kiln_c99_same_name(key, key_len, "values")) {
+        if (kiln_c99_same_name(key, key_len, "values")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
         code = kiln_c99_array_method(key, key_len);
@@ -4135,10 +4138,11 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                                  ? kiln_c99_object_of(array->properties)
                                  : NULL;
         size_t visible_extra = 0;
+        size_t emitted = 0;
         if (extra != NULL) {
             for (index = 0; index < extra->count; ++index) {
                 visible_extra += extra->properties[index].enumerable &&
-                                 extra->properties[index].kind != KILN_PROPERTY_SYMBOL;
+                                 extra->properties[index].kind == KILN_PROPERTY_STRING;
             }
         }
         if (array->count == 0 && visible_extra == 0) {
@@ -4148,7 +4152,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < array->count; ++index) {
-            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+            if (emitted != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_is_hole(array->elements[index])) {
@@ -4166,20 +4170,22 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 index += run - 1;
+                emitted += 1;
                 continue;
             }
             if (kiln_c99_inspect_into(text, array->elements[index], depth + 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         /* A property that is not an element is shown after the elements, which is where a console
          * puts the `index` and `input` a match result carries. */
         for (index = 0; extra != NULL && index < extra->count; ++index) {
             if (!extra->properties[index].enumerable ||
-                extra->properties[index].kind == KILN_PROPERTY_SYMBOL) {
+                extra->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
-            if ((array->count != 0 || index != 0) &&
+            if (emitted != 0 &&
                 kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -4190,12 +4196,20 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                     KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         return kiln_c99_text_append_c(text, " ]");
     }
     {
         kiln_object *object = kiln_c99_object_of(value);
-        if (object->count == 0) {
+        size_t emitted = 0;
+        for (index = 0; index < object->count; ++index) {
+            if (object->properties[index].enumerable &&
+                object->properties[index].kind == KILN_PROPERTY_STRING) {
+                break;
+            }
+        }
+        if (index == object->count) {
             return kiln_c99_text_append_c(text, "{}");
         }
         if (kiln_c99_text_append_c(text, "{ ") != KILN_C99_OK) {
@@ -4203,10 +4217,10 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         }
         for (index = 0; index < object->count; ++index) {
             if (!object->properties[index].enumerable ||
-                object->properties[index].kind == KILN_PROPERTY_SYMBOL) {
+                object->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
-            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+            if (emitted != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_inspect_key(text, object->properties[index].key,
@@ -4226,12 +4240,14 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                 if (kiln_c99_text_append_c(text, shown) != KILN_C99_OK) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
+                emitted += 1;
                 continue;
             }
             if (kiln_c99_inspect_into(text, object->properties[index].value, depth + 1) !=
                 KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         return kiln_c99_text_append_c(text, " }");
     }
@@ -5924,6 +5940,42 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                         }
                     }
                 }
+                if (array->properties.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *properties = kiln_c99_object_of(array->properties);
+                    for (index = 0; index < properties->count && status == KILN_C99_OK; ++index) {
+                        kiln_property *property = &properties->properties[index];
+                        kiln_value key;
+                        if (!property->enumerable || property->kind != KILN_PROPERTY_STRING) {
+                            continue;
+                        }
+                        key = kiln_c99_copy_text(property->key, property->key_len);
+                        kiln_value value;
+                        if (property->accessor) {
+                            if (property->getter.tag == KILN_VALUE_UNDEFINED) {
+                                value = kiln_c99_undefined();
+                            } else {
+                                status = kiln_c99_call(host, &value, property->getter, args[0],
+                                                       NULL, 0, depth, thrown);
+                                if (status != KILN_C99_OK) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            value = property->value;
+                        }
+                        if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                            status = kiln_c99_array_push(built, key);
+                        } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                            status = kiln_c99_array_push(built, value);
+                        } else {
+                            kiln_value pair;
+                            status = kiln_c99_new_array(&pair);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, value);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                }
                 *result = built;
                 return status;
             }
@@ -5935,7 +5987,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
                 kiln_value key;
                 if (!object->properties[index].enumerable ||
-                    object->properties[index].kind == KILN_PROPERTY_SYMBOL) {
+                    object->properties[index].kind != KILN_PROPERTY_STRING) {
                     continue;
                 }
                 key = kiln_c99_copy_text(object->properties[index].key,
@@ -8137,7 +8189,7 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
         kiln_object *object = kiln_c99_object_of(target);
         for (index = 0; index < object->count; ++index) {
             if (!object->properties[index].enumerable ||
-                object->properties[index].kind == KILN_PROPERTY_SYMBOL) {
+                object->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
             status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
@@ -8148,7 +8200,8 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
         }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
-         * gives "0" and "1", not 0 and 1. */
+         * gives "0" and "1", not 0 and 1. Named enumerable string properties follow the
+         * indices; symbol and internal properties never enter this string-only walk. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
             if (kiln_c99_is_hole(array->elements[index])) {
@@ -8157,6 +8210,21 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
             if (status != KILN_C99_OK) {
                 return status;
+            }
+        }
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(array->properties);
+            for (index = 0; index < properties->count; ++index) {
+                if (!properties->properties[index].enumerable ||
+                    properties->properties[index].kind != KILN_PROPERTY_STRING) {
+                    continue;
+                }
+                status = kiln_c99_array_push(
+                    built, kiln_c99_copy_text(properties->properties[index].key,
+                                               properties->properties[index].key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
         }
     }
@@ -13823,6 +13891,158 @@ int main(void) {
         assert!(
             run.status.success(),
             "UTF-16 relational comparison returned the wrong result"
+        );
+    }
+
+    #[test]
+    fn executable_array_string_iterator_and_named_enumeration_are_distinct() {
+        let generated = emit(&program(
+            vec![Constant::String("@@iterator".into())],
+            vec![
+                Instruction::NewArray { count: 0 },
+                Instruction::Const(0),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("array string iterator probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_UNDEFINED ? 0 : 1;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-string-iterator");
+        assert!(
+            run.status.success(),
+            "an absent ordinary @@iterator key must not expose Symbol.iterator"
+        );
+
+        let constants = vec![
+            Constant::Number(0.0f64.to_bits()),
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+            Constant::Number(3.0f64.to_bits()),
+            Constant::String("a".into()),
+            Constant::String("b".into()),
+            Constant::String("keys".into()),
+            Constant::String("values".into()),
+            Constant::String("entries".into()),
+        ];
+        let array = |code: &mut Vec<Instruction>| {
+            code.extend([
+                Instruction::Const(1),
+                Instruction::NewArray { count: 1 },
+                Instruction::Dup,
+                Instruction::Const(5),
+                Instruction::Const(2),
+                Instruction::SetComputed,
+                Instruction::Pop,
+                Instruction::Dup,
+                Instruction::Const(4),
+                Instruction::Const(3),
+                Instruction::SetComputed,
+                Instruction::Pop,
+            ]);
+        };
+        let probes = [
+            (6, 2, 4, "keys"),    // Object.keys(array)[2] == "a".
+            (7, 2, 3, "values"),  // Object.values(array)[2] == 3.
+            (8, 1, 5, "entries"), // Object.entries(array)[1][0] == "b".
+        ];
+        for (method, index, expected, label) in probes {
+            let mut code = vec![Instruction::LoadBuiltin(kiln_ir::Builtin::Object)];
+            array(&mut code);
+            code.push(Instruction::CallMethod { name: method, argc: 1 });
+            code.push(Instruction::Const(index));
+            code.push(Instruction::GetComputed);
+            if method == 8 {
+                code.push(Instruction::Const(0));
+                code.push(Instruction::GetComputed);
+                code.push(Instruction::Const(5));
+            } else {
+                code.push(Instruction::Const(expected));
+            }
+            code.extend([Instruction::Binary(BinaryOp::StrictEqual), Instruction::Return]);
+            let generated = emit(&program(constants.clone(), code, 0))
+                .expect("array enumeration probe emits");
+            let wrapper = format!(
+                "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+                generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, label);
+            assert!(run.status.success(), "array {label} omitted named string properties");
+        }
+
+        let mut code = Vec::new();
+        array(&mut code);
+        code.push(Instruction::EnumerateKeys);
+        code.push(Instruction::Const(2));
+        code.push(Instruction::GetComputed);
+        code.push(Instruction::Const(4));
+        code.extend([Instruction::Binary(BinaryOp::StrictEqual), Instruction::Return]);
+        let generated = emit(&program(constants, code, 0)).expect("for-in probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-for-in");
+        assert!(run.status.success(), "for-in omitted named string properties");
+    }
+
+    #[test]
+    fn executable_inspection_skips_symbol_properties_without_separators() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("iterator".into()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("a".into()),
+                Constant::Number(2.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::Const(3),
+                Instruction::NewObject { count: 2 },
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("symbol inspection probe emits");
+        let wrapper = format!(
+            r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
+        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "symbol-inspection");
+        assert!(
+            run.status.success(),
+            "symbol-only properties must not leave malformed inspection separators"
         );
     }
 }
