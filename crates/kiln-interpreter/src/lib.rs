@@ -1247,6 +1247,9 @@ enum Sink {
     /// something rejected. `finally` waits on its handler's result and then restores the outcome
     /// it was passing through.
     Replay(Rc<RefCell<PromiseState>>, Settled),
+    /// An `await` inside an async function: resume its body with whatever the awaited promise
+    /// produced, and settle the function's own promise when the body finishes.
+    Async(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
 }
 
 /// The shared state of one `Promise.all`, `allSettled`, `race` or `any`.
@@ -1289,6 +1292,21 @@ enum Job {
     /// handler settles one turn later than returning a plain value. That is observable, and
     /// programs order themselves around it.
     Adopt(Rc<RefCell<PromiseState>>, Rc<RefCell<PromiseState>>),
+}
+
+/// How a suspended generator is resumed.
+///
+/// One enum rather than a pair of flags, because the three are mutually exclusive and each is a
+/// different thing to do at the suspension point: hand a value back, raise one there, or unwind.
+#[derive(Clone, Debug)]
+enum Resume {
+    /// `next(v)`: the value becomes the result of the `yield`.
+    Send(Value),
+    /// `throw(e)`, and an `await` whose promise rejected. Raised *at* the suspension point, so
+    /// the generator's own `try` blocks see it.
+    Throw(Value),
+    /// `return(v)`: unwinds through every `finally` without resuming the `yield` at all.
+    Return(Value),
 }
 
 /// The `target` of a handler the host installed, which no compiler-emitted handler can have.
@@ -2171,17 +2189,20 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
-        self.resume_generator_with(generator, sent, instruction, false)
+        self.resume_generator_with(generator, Resume::Send(sent), instruction)
     }
 
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     fn resume_generator_with(
         &mut self,
         generator: &Rc<RefCell<GeneratorState>>,
-        sent: Value,
+        resume: Resume,
         instruction: usize,
-        returning: bool,
     ) -> Result<(Value, bool), ExecutionError> {
+        let sent = match &resume {
+            Resume::Send(value) | Resume::Throw(value) | Resume::Return(value) => value.clone(),
+        };
+        let raising = !matches!(resume, Resume::Send(_));
         if generator.borrow().done {
             return Ok((Value::Undefined, true));
         }
@@ -2230,18 +2251,27 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 stack_height: stack_base + stack_offset,
             });
         }
-        if started && !returning {
+        if started && !raising {
             // The value the caller sent becomes the result of the `yield` that suspended. A
             // `.return()` does not resume the yield at all, so it pushes nothing.
             self.stack.push(sent.clone());
         }
 
         self.suspended = false;
-        let outcome = if returning {
+        let outcome = if raising {
             // Throwing at the suspension point runs every `finally` between there and the top of
             // the generator, then arrives as `GeneratorReturned`.
+            let raised = match &resume {
+                Resume::Return(_) => Value::Native(Native::ReturnSignal),
+                // A rejection is raised as itself, so the generator's own `catch` can see it.
+                other => match other {
+                    Resume::Throw(value) => value.clone(),
+                    Resume::Send(_) => unreachable!("checked by `raising`"),
+                    Resume::Return(_) => unreachable!("matched above"),
+                },
+            };
             match self
-                .unwind(Value::Native(Native::ReturnSignal), instruction)
+                .unwind(raised, instruction)
                 .and_then(|()| self.run_frames(depth))
             {
                 Err(ExecutionError::GeneratorReturned) => {
@@ -2968,6 +2998,70 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         prototype
     }
 
+    /// Run an async function's body until it awaits or finishes.
+    ///
+    /// The body is a generator: each `await` is a suspension, and this is what resumes it. The
+    /// promise the caller holds is settled when the body returns or throws, so the whole of
+    /// `async`/`await` is a generator plus this loop.
+    fn drive_async(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        promise: &Rc<RefCell<PromiseState>>,
+        resume: Resume,
+    ) -> Result<(), ExecutionError> {
+        let instruction = self.instruction;
+        match self.resume_catching(generator, resume, instruction)? {
+            // The body threw and nothing in it caught: that is the function's rejection.
+            Err(thrown) => self.settle(promise, &Settled::Rejected(thrown)),
+            Ok((value, true)) => self.resolve_promise(promise, value),
+            Ok((awaited, false)) => {
+                // The same fast path `Promise.resolve` takes: an awaited promise is waited on
+                // directly rather than wrapped in another. Wrapping would cost two extra ticks,
+                // and `await` is one of the places where a tick is plainly observable.
+                let target = match awaited {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::Async(Rc::clone(generator), Rc::clone(promise)),
+                    false,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Resume a generator, recovering what it threw rather than unwinding past this point.
+    fn resume_catching(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        resume: Resume,
+        instruction: usize,
+    ) -> Result<Result<(Value, bool), Value>, ExecutionError> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+        });
+        let outcome = self.resume_generator_with(generator, resume, instruction);
+        self.handlers.truncate(installed);
+        match outcome {
+            Ok(value) => Ok(Ok(value)),
+            Err(ExecutionError::CaughtByHost) => {
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Settle a promise, queueing whatever was waiting on it.
     ///
     /// Only the first settlement counts: a promise is a value that arrives once, and both
@@ -3075,6 +3169,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 };
                 self.settle(&promise, &outcome);
                 return Ok(());
+            }
+            Sink::Async(generator, promise) => {
+                let (generator, promise) = (Rc::clone(generator), Rc::clone(promise));
+                let resume = match outcome {
+                    // The awaited value arrives as the result of the `await`.
+                    Settled::Fulfilled(value) => Resume::Send(value),
+                    // A rejection is raised at the `await`, so a `try` around it catches it --
+                    // which is the entire reason `await` reads like synchronous code.
+                    Settled::Rejected(reason) => Resume::Throw(reason),
+                };
+                return self.drive_async(&generator, &promise, resume);
             }
             Sink::Promise(_) => {}
         }
@@ -3688,7 +3793,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     if started {
                         // A started generator has to unwind: every `finally` between the
                         // suspension point and the top runs before it is done.
-                        self.resume_generator_with(&generator, sent, instruction, true)?
+                        self.resume_generator_with(&generator, Resume::Return(sent), instruction)?
                     } else {
                         // Never entered, so there is nothing to unwind.
                         generator.borrow_mut().done = true;
@@ -3869,8 +3974,20 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         if proto.generator {
             // Calling a generator function does not run it: it captures the arguments and hands
             // back an object whose `next` runs the body up to each `yield`.
+            let asynchronous = proto.asynchronous;
             let generator = self.build_generator(&closure, argc, instruction)?;
-            self.stack.push(generator);
+            if !asynchronous {
+                self.stack.push(generator);
+                return Ok(());
+            }
+            // An async function *does* run, up to its first `await`, and hands back a promise
+            // rather than the generator -- which is the only difference the caller sees.
+            let Value::Generator(generator) = generator else {
+                unreachable!("`build_generator` produces a generator");
+            };
+            let promise = PromiseState::pending();
+            self.drive_async(&generator, &promise, Resume::Send(Value::Undefined))?;
+            self.stack.push(Value::Promise(promise));
             return Ok(());
         }
         if self.frames.len() >= self.limits.max_call_depth {
@@ -5077,6 +5194,11 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             Some(prototype) => prototype.clone(),
             None => return false,
         },
+        // A promise has no prototype object to walk -- it is its own value kind -- so the test
+        // is what the chain would have answered.
+        Value::Native(Native::PromiseConstructor) => {
+            return matches!(value, Value::Promise(_));
+        }
         _ => return false,
     };
 
@@ -6067,6 +6189,7 @@ mod tests {
             code,
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                asynchronous: false,
                 name: Some("second".to_owned()),
                 arrow: false,
                 generator: false,
@@ -6588,6 +6711,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("outer".to_owned()),
                     arrow: false,
                     generator: false,
@@ -6603,6 +6727,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("inner".to_owned()),
                     arrow: false,
                     generator: false,
@@ -6640,6 +6765,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("outer".to_owned()),
                     arrow: false,
                     generator: false,
@@ -6655,6 +6781,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("read".to_owned()),
                     arrow: false,
                     generator: false,
@@ -6676,6 +6803,7 @@ mod tests {
             code: vec![Instruction::MakeFunction(0), Instruction::Return],
             local_count: 1,
             functions: vec![kiln_ir::FunctionProto {
+                asynchronous: false,
                 name: None,
                 arrow: false,
                 generator: false,
@@ -6766,6 +6894,7 @@ mod tests {
             ],
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                asynchronous: false,
                 name: Some("forever".to_owned()),
                 arrow: false,
                 generator: false,
@@ -6808,6 +6937,7 @@ mod tests {
             local_count: 1,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("write".to_owned()),
                     arrow: false,
                     generator: false,
@@ -6822,6 +6952,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    asynchronous: false,
                     name: Some("read".to_owned()),
                     arrow: false,
                     generator: false,
@@ -7570,6 +7701,7 @@ mod tests {
             code.push(Instruction::Call { argc: 2 });
             code.push(Instruction::Pop);
             functions.push(kiln_ir::FunctionProto {
+                asynchronous: false,
                 name: None,
                 arrow: false,
                 generator: false,

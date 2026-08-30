@@ -443,10 +443,11 @@ mod tests {
     #[test]
     fn unsupported_hir_is_not_a_negative_runtime_pass() {
         // Whatever construct stands in here has to be one the frontend still refuses, so this
-        // test moves as the language coverage grows -- it has already been `function f() {}` and
-        // `switch (0) {}`, both of which stopped refusing. That churn is the signal working: a
-        // refused construct must never be scored as a negative test's expected failure.
-        let mut negative = case("async function f() {}\n");
+        // test moves as the language coverage grows -- it has already been `function f() {}`,
+        // `switch (0) {}` and `async function f() {}`, all of which stopped refusing. That churn
+        // is the signal working: a refused construct must never be scored as a negative test's
+        // expected failure.
+        let mut negative = case("class Probe { #hidden = 1; }\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,

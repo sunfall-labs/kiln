@@ -726,6 +726,10 @@ impl Lowerer {
             Expression::TaggedTemplateExpression(_) => {
                 return self.unsupported_expression("tagged template literal", expression_span);
             }
+            Expression::AwaitExpression(expression) => {
+                HirExpressionKind::Await(Box::new(self.expression(&expression.argument)))
+            }
+            #[expect(unreachable_patterns, reason = "the arm above now covers this")]
             Expression::AwaitExpression(_) => {
                 return self.unsupported_expression("await expression", expression_span);
             }
@@ -1043,10 +1047,6 @@ impl Lowerer {
         arrow: &ArrowFunctionExpression<'_>,
         expression_span: HirSpan,
     ) -> Option<HirFunction> {
-        if arrow.r#async {
-            self.unsupported("async arrow function", expression_span);
-            return None;
-        }
         let (parameters, rest) = self.parameters(&arrow.params);
 
         let body = match &arrow.body {
@@ -1073,6 +1073,7 @@ impl Lowerer {
             name: None,
             arrow: true,
             generator: false,
+            asynchronous: arrow.r#async,
             parameters,
             rest,
             body,
@@ -1086,10 +1087,6 @@ impl Lowerer {
         declaration: &Function<'_>,
         statement_span: HirSpan,
     ) -> Option<HirFunction> {
-        if declaration.r#async {
-            self.unsupported("async function", statement_span);
-            return None;
-        }
         let (parameters, rest) = self.parameters(&declaration.params);
 
         let body = declaration.body.as_ref()?;
@@ -1103,6 +1100,7 @@ impl Lowerer {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
             arrow: false,
             generator: declaration.generator,
+            asynchronous: declaration.r#async,
             parameters,
             rest,
             body: statements,
