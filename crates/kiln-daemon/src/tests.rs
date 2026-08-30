@@ -2250,7 +2250,10 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         ));
     }
 
-    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let project_root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical project root")
+        .to_string_lossy()
+        .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
             source_view: SourceView(0),
@@ -2270,7 +2273,8 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
                 path: entry_path.clone(),
                 hash: kiln_proto::source_digest(&entry_source),
             }],
-            resolutions: empty_resolutions(),
+            resolutions: kiln_proto::ResolutionMap::new(project_root.clone(), Vec::new())
+                .expect("canonical empty resolution map"),
         })
         .expect("sync authoritative view");
     let Response::Needed { sync_id, paths } = sync else {

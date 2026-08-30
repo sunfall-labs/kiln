@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use crate::dispatch::{
     Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
     native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
-    native_program, native_run_graph, native_run_program, prepare_run,
+    native_program, native_run_graph, native_run_program, prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 use crate::graph_cache::GraphCache;
@@ -858,7 +858,18 @@ fn handle_run<E: QueryEngine>(
         let revision = guard.engine.revision().0;
         let resolutions = guard.resolutions.clone();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_run(&mut guard.engine, resolutions.as_ref(), path, project_root)
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            prepare_run_with_cache(
+                engine,
+                Some(graph_cache),
+                path,
+                project_root,
+                resolutions.as_ref(),
+            )
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
                 match next_source_view(guard.source_view) {
