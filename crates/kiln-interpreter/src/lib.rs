@@ -9003,17 +9003,21 @@ fn call_native(
                 // undefined -- three spellings of "the character there" that differ only at the
                 // edges, which is exactly where they get used.
                 Native::StringAt => {
-                    let characters: Vec<char> = text.chars().collect();
+                    // Code units, like `charAt` and `[i]` and `length`: three spellings of "the
+                    // character there" that differ only at the edges, and a fourth unit would
+                    // make them differ in the middle as well.
+                    let units: Vec<u16> = text.encode_utf16().collect();
                     let index = arguments.first().map_or(0.0, Value::as_number);
                     let index = if index < 0.0 {
-                        characters.len() as f64 + index
+                        units.len() as f64 + index
                     } else {
                         index
                     };
-                    if index < 0.0 || index >= characters.len() as f64 {
+                    if index < 0.0 || index >= units.len() as f64 {
                         Value::Undefined
                     } else {
-                        Value::String(characters[index as usize].to_string())
+                        let index = index as usize;
+                        Value::String(utf16_slice(&units, index..index + 1))
                     }
                 }
                 Native::StringCharAt => {
@@ -9145,9 +9149,10 @@ fn call_native(
                     let needle = arguments
                         .first()
                         .map_or_else(String::new, Value::to_display_string);
-                    // The index counts characters, not bytes, so the byte offset is converted.
+                    // The index counts what `length` counts, which is UTF-16 code units --
+                    // not bytes, and not characters either.
                     Value::Number(text.rfind(&needle).map_or(-1.0, |offset| {
-                        text[..offset].chars().count() as f64
+                        text[..offset].encode_utf16().count() as f64
                     }))
                 }
                 // `substring` clamps both ends into range and swaps them if they are the wrong
@@ -9232,20 +9237,25 @@ fn call_native(
                     Value::String(joined)
                 }
                 Native::StringSlice => {
-                    let characters: Vec<char> = text.chars().collect();
+                    // Code units, because `length` reports code units and a program that slices
+                    // to `length` has to get the whole string back. Counting characters here
+                    // made `s.slice(0, s.length)` shorter than `s` for any string holding an
+                    // astral character, and made `slice` disagree with `[i]` about where a
+                    // position is -- silently, in both cases.
+                    let units: Vec<u16> = text.encode_utf16().collect();
                     let resolve = |value: f64| -> usize {
                         if value < 0.0 {
-                            (characters.len() as f64 + value).max(0.0) as usize
+                            (units.len() as f64 + value).max(0.0) as usize
                         } else {
-                            (value as usize).min(characters.len())
+                            (value as usize).min(units.len())
                         }
                     };
                     let start = resolve(arguments.first().map_or(0.0, Value::as_number));
                     let end = match arguments.get(1) {
-                        None | Some(Value::Undefined) => characters.len(),
+                        None | Some(Value::Undefined) => units.len(),
                         Some(value) => resolve(value.as_number()),
                     };
-                    Value::String(characters[start.min(end)..end].iter().collect())
+                    Value::String(utf16_slice(&units, start.min(end)..end))
                 }
                 _ => unreachable!("matched by the arm above"),
             }
