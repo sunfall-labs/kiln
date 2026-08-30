@@ -5,6 +5,7 @@
 //! `index` file, and verifies the canonical target remains inside the canonical project root.
 //! [`NodePackageResolver`] is a separate package-policy adapter behind [`ResolutionPolicy`].
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -44,6 +45,17 @@ pub struct ResolvedModule {
     /// The symlink-normalized, absolute source path.
     pub path: PathBuf,
     pub kind: ResolutionKind,
+}
+
+/// A resolved request plus the package manifest that selected it, when package policy applied.
+///
+/// Clients use this metadata to pin Oxc's decision into an authoritative source snapshot. Graph
+/// consumers use only [`module`](Self::module), so Oxc-specific types never cross the resolver
+/// seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRequest {
+    pub module: ResolvedModule,
+    pub package_json: Option<PathBuf>,
 }
 
 impl ResolvedModule {
@@ -141,9 +153,6 @@ pub enum ResolveError {
         package: String,
         importer: PathBuf,
     },
-    PackageManifestMissing {
-        path: PathBuf,
-    },
     InvalidPackageManifest {
         path: PathBuf,
     },
@@ -151,16 +160,14 @@ pub enum ResolveError {
         package: String,
         subpath: String,
     },
-    PackageExportBlocked {
-        package: String,
-        subpath: String,
-    },
-    PackageEntryMissing {
-        package: String,
-    },
     InvalidPackageTarget {
         package: String,
         target: String,
+    },
+    PackageResolution {
+        specifier: String,
+        importer: PathBuf,
+        message: String,
     },
 }
 
@@ -221,11 +228,6 @@ impl fmt::Display for ResolveError {
                 "could not find package `{package}` from {}",
                 display_path(importer)
             ),
-            Self::PackageManifestMissing { path } => write!(
-                formatter,
-                "package manifest is missing: {}",
-                display_path(path)
-            ),
             Self::InvalidPackageManifest { path } => write!(
                 formatter,
                 "invalid package manifest: {}",
@@ -234,16 +236,18 @@ impl fmt::Display for ResolveError {
             Self::PackageSubpathNotExported { package, subpath } => {
                 write!(formatter, "package `{package}` does not export `{subpath}`")
             }
-            Self::PackageExportBlocked { package, subpath } => write!(
-                formatter,
-                "package `{package}` blocks access to `{subpath}`"
-            ),
-            Self::PackageEntryMissing { package } => {
-                write!(formatter, "package `{package}` has no entry point")
-            }
             Self::InvalidPackageTarget { package, target } => write!(
                 formatter,
                 "package `{package}` has invalid export target `{target}`"
+            ),
+            Self::PackageResolution {
+                specifier,
+                importer,
+                message,
+            } => write!(
+                formatter,
+                "could not resolve package request `{specifier}` from {}: {message}",
+                display_path(importer)
             ),
         }
     }
@@ -315,20 +319,137 @@ impl ResolutionPolicy for ModuleResolver {
 
 /// Node-style package resolution layered over the exact filesystem resolver.
 ///
-/// This intentionally implements a bounded package policy: nearest `node_modules`, package
-/// `exports` exact keys (including explicit `null` blocking), and `main` fallback. It does not
-/// evaluate conditional exports or wildcard keys, and it never guesses an extension or index
-/// file. Every selected target still goes through canonical containment and supported-extension
-/// checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Oxc owns the Node resolution state machine: nearest `node_modules`, conditional and wildcard
+/// exports, package imports, self-references and `main` fallback. Kiln retains only its project
+/// containment and supported-source checks.
+#[derive(Debug)]
 pub struct NodePackageResolver {
     explicit: ModuleResolver,
+    packages: oxc_resolver::Resolver,
 }
 
 impl NodePackageResolver {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
+        let explicit = ModuleResolver::new(project_root)?;
+        let options = oxc_resolver::ResolveOptions {
+            condition_names: vec!["node".to_owned(), "import".to_owned()],
+            extensions: SUPPORTED_EXTENSIONS
+                .iter()
+                .map(|extension| format!(".{extension}"))
+                .collect(),
+            main_files: Vec::new(),
+            node_path: false,
+            builtin_modules: true,
+            ..oxc_resolver::ResolveOptions::default()
+        };
+        Ok(Self {
+            explicit,
+            packages: oxc_resolver::Resolver::new(options),
+        })
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.explicit.project_root()
+    }
+
+    pub fn resolve(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+    ) -> Result<ResolvedModule, ResolveError> {
+        self.resolve_with_metadata(specifier, importer)
+            .map(|resolved| resolved.module)
+    }
+
+    /// Resolve one request and retain the exact package manifest Oxc consulted.
+    pub fn resolve_with_metadata(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+    ) -> Result<ResolvedRequest, ResolveError> {
+        let importer = importer.as_ref();
+        if !matches!(
+            classify_specifier(specifier),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::BarePackage,
+                ..
+            })
+        ) {
+            return self
+                .explicit
+                .resolve(specifier, importer)
+                .map(|module| ResolvedRequest {
+                    module,
+                    package_json: None,
+                });
+        }
+
+        let canonical_importer = canonical_importer(importer, self.project_root())?;
+        let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
+        let resolution = self
+            .packages
+            .resolve(importer_directory, specifier)
+            .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
+        let package_json = resolution
+            .package_json()
+            .map(|manifest| manifest.path().to_path_buf());
+        let canonical_target = resolution.into_path_buf();
+        ensure_utf8(&canonical_target, PathRole::Target)?;
+        if !canonical_target.starts_with(self.project_root()) {
+            return Err(ResolveError::OutsideProject {
+                path: canonical_target,
+                project_root: self.project_root().to_path_buf(),
+            });
+        }
+        if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
+            return Err(ResolveError::NotRegularFile {
+                role: PathRole::Target,
+                path: canonical_target,
+            });
+        }
+        if !has_supported_extension(&canonical_target) {
+            return Err(ResolveError::UnsupportedExtension {
+                path: canonical_target,
+            });
+        }
+        Ok(ResolvedRequest {
+            module: ResolvedModule::new(canonical_target, ResolutionKind::Package),
+            package_json,
+        })
+    }
+}
+
+impl ResolutionPolicy for NodePackageResolver {
+    fn project_root(&self) -> &Path {
+        self.project_root()
+    }
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
+        NodePackageResolver::resolve(self, specifier, importer)
+    }
+}
+
+/// Replays package decisions captured by a client-side [`NodePackageResolver`].
+///
+/// Explicit paths retain [`ModuleResolver`]'s exact filesystem policy. Bare package requests are
+/// pure lookups: graph construction never rereads `package.json` or reruns Node resolution.
+#[derive(Debug, Clone)]
+pub struct PinnedPackageResolver {
+    explicit: ModuleResolver,
+    packages: HashMap<(PathBuf, String), PathBuf>,
+}
+
+impl PinnedPackageResolver {
+    pub fn new<I>(project_root: impl AsRef<Path>, entries: I) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, PathBuf)>,
+    {
         Ok(Self {
             explicit: ModuleResolver::new(project_root)?,
+            packages: entries
+                .into_iter()
+                .map(|(importer, specifier, target)| ((importer, specifier), target))
+                .collect(),
         })
     }
 
@@ -353,233 +474,82 @@ impl NodePackageResolver {
         }
 
         let canonical_importer = canonical_importer(importer, self.project_root())?;
-        let (package, subpath) = parse_package_specifier(specifier)?;
-        let package_dir = self.find_package(&package, &canonical_importer)?;
-        let manifest_path = package_dir.join("package.json");
-        if !manifest_path.is_file() {
-            return Err(ResolveError::PackageManifestMissing {
-                path: manifest_path,
-            });
-        }
-        let manifest_text = fs::read_to_string(&manifest_path).map_err(|_| {
-            ResolveError::InvalidPackageManifest {
-                path: manifest_path.clone(),
-            }
-        })?;
-        let manifest: PackageManifest = serde_json::from_str(&manifest_text).map_err(|_| {
-            ResolveError::InvalidPackageManifest {
-                path: manifest_path.clone(),
-            }
-        })?;
-
-        let target = match manifest.exports {
-            Some(exports) => select_export(&package, &subpath, exports, &manifest_path)?,
-            None if subpath.is_empty() => {
-                manifest
-                    .main
-                    .ok_or_else(|| ResolveError::PackageEntryMissing {
-                        package: package.clone(),
-                    })?
-            }
-            None => subpath.clone(),
-        };
-        self.resolve_package_target(&package, &package_dir, &target)
-    }
-
-    fn find_package(&self, package: &str, importer: &Path) -> Result<PathBuf, ResolveError> {
-        let mut ancestor = importer.parent();
-        while let Some(directory) = ancestor {
-            let candidate = directory.join("node_modules").join(package);
-            match fs::metadata(&candidate) {
-                Ok(metadata) if metadata.is_dir() => {
-                    let canonical = canonical_path(&candidate, PathRole::Target)?;
-                    if !canonical.starts_with(self.project_root()) {
-                        return Err(ResolveError::OutsideProject {
-                            path: canonical,
-                            project_root: self.project_root().to_path_buf(),
-                        });
-                    }
-                    return Ok(canonical);
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(ResolveError::Io {
-                        role: PathRole::Target,
-                        path: candidate,
-                        kind: error.kind(),
-                    });
-                }
-            }
-            if directory == self.project_root() {
-                break;
-            }
-            ancestor = directory.parent();
-        }
-        Err(ResolveError::PackageNotFound {
-            package: package.to_owned(),
-            importer: importer.to_path_buf(),
-        })
-    }
-
-    fn resolve_package_target(
-        &self,
-        package: &str,
-        package_dir: &Path,
-        target: &str,
-    ) -> Result<ResolvedModule, ResolveError> {
-        if target.is_empty() || target.contains(['?', '#']) || target.as_bytes().contains(&0) {
-            return Err(ResolveError::InvalidPackageTarget {
-                package: package.to_owned(),
-                target: target.to_owned(),
-            });
-        }
-        let candidate = package_dir.join(target);
-        let canonical_target = canonical_path(&candidate, PathRole::Target)?;
-        ensure_utf8(&canonical_target, PathRole::Target)?;
-        if !canonical_target.starts_with(self.project_root()) {
+        let target = self
+            .packages
+            .get(&(canonical_importer.clone(), specifier.to_owned()))
+            .cloned()
+            .ok_or_else(|| ResolveError::PackageResolution {
+                specifier: specifier.to_owned(),
+                importer: canonical_importer,
+                message: "request is absent from the synchronized resolution map".to_owned(),
+            })?;
+        ensure_utf8(&target, PathRole::Target)?;
+        if !target.starts_with(self.project_root()) {
             return Err(ResolveError::OutsideProject {
-                path: canonical_target,
+                path: target,
                 project_root: self.project_root().to_path_buf(),
             });
         }
-        if !canonical_target.starts_with(package_dir) {
-            return Err(ResolveError::InvalidPackageTarget {
-                package: package.to_owned(),
-                target: target.to_owned(),
-            });
+        if !has_supported_extension(&target) {
+            return Err(ResolveError::UnsupportedExtension { path: target });
         }
-        if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
-            return Err(ResolveError::NotRegularFile {
-                role: PathRole::Target,
-                path: canonical_target,
-            });
-        }
-        if !has_supported_extension(&canonical_target) {
-            return Err(ResolveError::UnsupportedExtension {
-                path: canonical_target,
-            });
-        }
-        Ok(ResolvedModule::new(
-            canonical_target,
-            ResolutionKind::Package,
-        ))
+        Ok(ResolvedModule::new(target, ResolutionKind::Package))
     }
 }
 
-impl ResolutionPolicy for NodePackageResolver {
+impl ResolutionPolicy for PinnedPackageResolver {
     fn project_root(&self) -> &Path {
         self.project_root()
     }
 
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
-        NodePackageResolver::resolve(self, specifier, importer)
+        PinnedPackageResolver::resolve(self, specifier, importer)
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct PackageManifest {
-    exports: Option<serde_json::Value>,
-    main: Option<String>,
-}
-
-fn select_export(
-    package: &str,
-    subpath: &str,
-    exports: serde_json::Value,
-    manifest_path: &Path,
-) -> Result<String, ResolveError> {
-    let key = if subpath.is_empty() {
-        ".".to_owned()
-    } else {
-        format!("./{subpath}")
-    };
-    let value = match exports {
-        serde_json::Value::Null => {
-            return Err(ResolveError::PackageExportBlocked {
-                package: package.to_owned(),
-                subpath: key,
-            });
-        }
-        serde_json::Value::String(target) if key == "." => target,
-        serde_json::Value::String(_) => {
-            return Err(ResolveError::PackageSubpathNotExported {
-                package: package.to_owned(),
-                subpath: key,
-            });
-        }
-        serde_json::Value::Object(exports) => match exports.get(&key) {
-            None => {
-                return Err(ResolveError::PackageSubpathNotExported {
-                    package: package.to_owned(),
-                    subpath: key,
-                });
-            }
-            Some(serde_json::Value::Null) => {
-                return Err(ResolveError::PackageExportBlocked {
-                    package: package.to_owned(),
-                    subpath: key,
-                });
-            }
-            Some(serde_json::Value::String(target)) => target.clone(),
-            Some(_) => {
-                return Err(ResolveError::InvalidPackageManifest {
-                    path: manifest_path.to_path_buf(),
-                });
-            }
+fn map_package_error(
+    specifier: &str,
+    importer: &Path,
+    error: oxc_resolver::ResolveError,
+) -> ResolveError {
+    let package = package_name(specifier);
+    match error {
+        oxc_resolver::ResolveError::NotFound(_) => ResolveError::PackageNotFound {
+            package,
+            importer: importer.to_path_buf(),
         },
-        _ => {
-            return Err(ResolveError::InvalidPackageManifest {
-                path: manifest_path.to_path_buf(),
-            });
+        oxc_resolver::ResolveError::PackagePathNotExported { subpath, .. } => {
+            ResolveError::PackageSubpathNotExported { package, subpath }
         }
-    };
-    if !value.starts_with("./") {
-        return Err(ResolveError::InvalidPackageTarget {
-            package: package.to_owned(),
-            target: value,
-        });
+        oxc_resolver::ResolveError::InvalidPackageTarget(target, _, _) => {
+            ResolveError::InvalidPackageTarget { package, target }
+        }
+        oxc_resolver::ResolveError::Json(error) => {
+            ResolveError::InvalidPackageManifest { path: error.path }
+        }
+        oxc_resolver::ResolveError::InvalidPackageConfig(path)
+        | oxc_resolver::ResolveError::InvalidPackageConfigDefault(path)
+        | oxc_resolver::ResolveError::InvalidPackageConfigDirectory(path) => {
+            ResolveError::InvalidPackageManifest { path }
+        }
+        error => ResolveError::PackageResolution {
+            specifier: specifier.to_owned(),
+            importer: importer.to_path_buf(),
+            message: error.to_string(),
+        },
     }
-    Ok(value)
 }
 
-fn parse_package_specifier(specifier: &str) -> Result<(String, String), ResolveError> {
+fn package_name(specifier: &str) -> String {
     let mut parts = specifier.split('/');
-    let package = if specifier.starts_with('@') {
-        let scope = parts.next().unwrap_or_default();
-        let name = parts.next().unwrap_or_default();
-        if scope.len() < 2 || name.is_empty() {
-            return Err(ResolveError::InvalidSpecifier {
-                specifier: specifier.to_owned(),
-                reason: InvalidSpecifierReason::BarePackage,
-            });
-        }
-        format!("{scope}/{name}")
+    let first = parts.next().unwrap_or_default();
+    if first.starts_with('@') {
+        parts
+            .next()
+            .map_or_else(|| first.to_owned(), |name| format!("{first}/{name}"))
     } else {
-        parts.next().unwrap_or_default().to_owned()
-    };
-    if package.is_empty() || package == "." || package == ".." {
-        return Err(ResolveError::InvalidSpecifier {
-            specifier: specifier.to_owned(),
-            reason: InvalidSpecifierReason::BarePackage,
-        });
+        first.to_owned()
     }
-    let subpath = if specifier.len() == package.len() {
-        String::new()
-    } else {
-        specifier[package.len() + 1..].to_owned()
-    };
-    if !subpath.is_empty()
-        && subpath
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(ResolveError::InvalidSpecifier {
-            specifier: specifier.to_owned(),
-            reason: InvalidSpecifierReason::BarePackage,
-        });
-    }
-    Ok((package, subpath))
 }
 
 /// Resolve one explicit module specifier against a project root.
@@ -982,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn package_exports_block_unlisted_and_null_subpaths() {
+    fn package_exports_reject_unlisted_and_null_subpaths() {
         let project = TempProject::new();
         let importer = project.write("main.js", "");
         project.write("node_modules/pkg/main.js", "");
@@ -994,11 +964,75 @@ mod tests {
         let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
         assert!(matches!(
             resolver.resolve("pkg/private", &importer),
-            Err(ResolveError::PackageExportBlocked { .. })
+            Err(ResolveError::PackageSubpathNotExported { .. })
         ));
         assert!(matches!(
             resolver.resolve("pkg/missing", &importer),
             Err(ResolveError::PackageSubpathNotExported { .. })
+        ));
+    }
+
+    #[test]
+    fn package_policy_inherits_conditions_and_wildcards_from_oxc() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let imported = project.write("node_modules/pkg/esm.js", "");
+        let feature = project.write("node_modules/pkg/features/one.js", "");
+        project.write("node_modules/pkg/fallback.js", "");
+        write_package(
+            &project,
+            "pkg",
+            r#"{"exports":{".":{"import":"./esm.js","default":"./fallback.js"},"./features/*":"./features/*.js"}}"#,
+        );
+
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        assert_eq!(
+            resolver.resolve("pkg", &importer).unwrap().path,
+            fs::canonicalize(imported).unwrap()
+        );
+        assert_eq!(
+            resolver
+                .resolve("pkg/features/one", &importer)
+                .unwrap()
+                .path,
+            fs::canonicalize(feature).unwrap()
+        );
+    }
+
+    #[test]
+    fn package_decisions_can_be_pinned_and_replayed_without_the_manifest() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let target = project.write("node_modules/pkg/index.js", "");
+        write_package(&project, "pkg", r#"{"exports":"./index.js"}"#);
+
+        let live = NodePackageResolver::new(&project.root)
+            .expect("valid project root")
+            .resolve_with_metadata("pkg", &importer)
+            .expect("resolve package with metadata");
+        assert_eq!(
+            live.package_json,
+            Some(
+                fs::canonicalize(project.root.join("node_modules/pkg/package.json"))
+                    .expect("canonical manifest"),
+            )
+        );
+        fs::remove_file(project.root.join("node_modules/pkg/package.json"))
+            .expect("remove manifest after pinning");
+
+        let pinned = PinnedPackageResolver::new(
+            &project.root,
+            [(
+                fs::canonicalize(&importer).unwrap(),
+                "pkg".to_owned(),
+                fs::canonicalize(&target).unwrap(),
+            )],
+        )
+        .expect("construct pinned resolver");
+        assert_eq!(pinned.resolve("pkg", &importer).unwrap(), live.module);
+        assert!(matches!(
+            pinned.resolve("other", &importer),
+            Err(ResolveError::PackageResolution { .. })
         ));
     }
 

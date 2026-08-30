@@ -271,6 +271,7 @@ KILN_VALUE_BIGINT = 21
 #define KILN_C99_METHOD_REGEXP_EXEC 173
 #define KILN_C99_METHOD_REGEXP_TO_STRING 174
 #define KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT 175
+#define KILN_C99_METHOD_PRIMITIVE_TO_STRING 176
 typedef struct kiln_value {
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
 typedef struct kiln_host {
@@ -297,16 +298,23 @@ typedef struct kiln_symbol {
 typedef struct kiln_bound {
 typedef struct kiln_microtask {
 typedef struct kiln_timer {
-static kiln_timer *kiln_c99_timers;
-static size_t kiln_c99_timer_count;
-static size_t kiln_c99_timer_capacity;
-static double kiln_c99_now;
-static double kiln_c99_next_timer_id = 1.0;
-static uint64_t kiln_c99_next_sequence;
 typedef struct kiln_json_reader {
 typedef struct kiln_text {
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
+typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
+typedef void (*kiln_realm_drop_fn)(void *work);
+typedef int (*kiln_realm_entry_fn)(void *context);
+int kiln_realm_create(uint64_t *out_realm);
+int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+int kiln_realm_destroy(uint64_t realm);
+int kiln_realm_is_active(void);
+int kiln_realm_now(double *out_milliseconds);
+int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
+int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
+int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
+int kiln_realm_clear_timer(uint64_t id);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
@@ -335,6 +343,7 @@ static kiln_value *kiln_c99_cell_of(kiln_value value);
 static kiln_object *kiln_c99_object_of(kiln_value value);
 static kiln_array *kiln_c99_array_of(kiln_value value);
 static double kiln_c99_as_number(kiln_value value);
+static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_truthy(kiln_value value);
 static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
@@ -407,9 +416,11 @@ static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
-static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
-static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
+static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
+static void kiln_c99_drop_microtask(void *work);
+static int kiln_c99_run_timer(void *work, void *host, void *thrown);
+static void kiln_c99_drop_timer(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
@@ -418,7 +429,9 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
-static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
+static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
@@ -463,6 +476,11 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
 static kiln_value kiln_c99_new_target;
 static int kiln_c99_inheriting_new_target;
+static const kiln_value *kiln_c99_frame_args;
+static size_t kiln_c99_frame_argc;
+static kiln_value kiln_c99_captured_arguments;
+static int kiln_c99_frame_is_arrow;
+static int kiln_c99_visible_arguments(kiln_value *out) {
 static kiln_value kiln_c99_globals;
 static int kiln_c99_global_object(kiln_value *out) {
 static kiln_value kiln_c99_bigint_text(kiln_value value, uint32_t radix) {
@@ -549,6 +567,7 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
 static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 #define KILN_JSON_OPEN(bracket)                                                                   \
@@ -581,10 +600,6 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
-static kiln_microtask *kiln_c99_queue;
-static size_t kiln_c99_queue_head;
-static size_t kiln_c99_queue_count;
-static size_t kiln_c99_queue_capacity;
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
 static int kiln_c99_new_promise(kiln_value *out) {
 static kiln_promise *kiln_c99_promise_of(kiln_value value) {
@@ -595,8 +610,10 @@ static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reactio
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
-static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown) {
-static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
+static void kiln_c99_drop_microtask(void *work) {
+static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_pointer) {
+static void kiln_c99_drop_timer(void *work) {
+static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
@@ -608,4 +625,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
 static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right) {
-static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
+static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
+static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,

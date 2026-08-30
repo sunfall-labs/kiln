@@ -6,31 +6,35 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# Workspace tests and Clippy consume the ordinary no-std library. Packaging overrides this with
-# `cargo rustc --crate-type staticlib` under one explicit panic-abort target build, so Cargo applies
-# the policy to this crate and its complete dependency graph without changing workspace profiles.
+# Workspace tests consume the ordinary Rust library. Packaging overrides this with
+# `cargo rustc --crate-type staticlib`, applying the native runtime's unwind, PIC, and generic-CPU
+# policy to this crate and its complete dependency graph without changing workspace profiles.
 crate-type = ["rlib"]
 
 [features]
-# The regexp engine is wanted only in the packaged static archive, and the packaging build asks
-# for it by name. Off by default because a workspace build unifies features across packages: the
-# interpreter takes `regress` with `std`, and unifying that into a `no_std` crate gives it two
-# panic handlers and no way to compile.
-default = []
+# Realm entry is always present: this archive is the private Rust implementation package shipped
+# with native artifacts. The larger semantic engines remain opt-in so ordinary workspace tests do
+# not compile code used only by generated native programs.
+default = ["realm"]
+realm = ["dep:kiln-runtime"]
 regexp = ["dep:regress"]
 bigint = ["dep:num-bigint", "dep:num-traits"]
 
 [dependencies]
 kiln-number-core = { workspace = true }
-# The regexp engine, in its `no_std` shape. The interpreter links the same crate, which is the
+kiln-runtime = { workspace = true, optional = true }
+# The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.
 regress = { version = "0.12", default-features = false, features = [
 	"backend-pikevm",
 	"alloc",
 	"utf16",
 ], optional = true }
-# The arbitrary-precision integers, in their `no_std` shape -- the same crate the interpreter
-# links, for the same reason `regress` is: two implementations of one exactly-specified thing
-# agree until one of them has a bug, and then nothing can tell which.
+# The arbitrary-precision integers in their allocation-only shape -- the same crate the interpreter
+# links, for the same reason `regress` is: two implementations of one exactly-specified thing agree
+# until one of them has a bug, and then nothing can tell which.
 num-bigint = { version = "0.4", default-features = false, optional = true }
 num-traits = { version = "0.2", default-features = false, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

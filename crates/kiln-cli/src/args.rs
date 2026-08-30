@@ -76,6 +76,16 @@ pub enum Command {
         interval: Duration,
     },
     Daemon(DaemonAction),
+    Cache(CacheAction),
+}
+
+/// What `kiln cache` was asked to do. One action today, spelled as an action rather than as a
+/// `kiln gc` command because the cache is the noun a later `cache size` or `cache path` would
+/// also belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAction {
+    /// Sweep the project's artifact cache back under its byte budget.
+    Gc { dry_run: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +112,7 @@ where
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut shared = false;
+    let mut dry_run = false;
     let mut only_positional = false;
 
     let mut args = args.into_iter();
@@ -145,6 +156,10 @@ where
                 reject_inline_value(&flag, &inline)?;
                 shared = true;
             }
+            "--dry-run" => {
+                reject_inline_value(&flag, &inline)?;
+                dry_run = true;
+            }
             "--output" => {
                 output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
@@ -171,6 +186,9 @@ where
     }
     if shared && name != "build" {
         return Err(Error::usage("--shared only applies to `kiln build`"));
+    }
+    if dry_run && name != "cache" {
+        return Err(Error::usage("--dry-run only applies to `kiln cache gc`"));
     }
     if output.is_some() && name != "build" {
         return Err(Error::usage("--output only applies to `kiln build`"));
@@ -241,6 +259,18 @@ where
                 }
             };
             Command::Daemon(action)
+        }
+        "cache" => {
+            let action = one_operand(&name, &mut positional)?;
+            let action = match action.as_str() {
+                "gc" => CacheAction::Gc { dry_run },
+                other => {
+                    return Err(Error::usage(format!(
+                        "unknown cache action `{other}` (expected gc)"
+                    )));
+                }
+            };
+            Command::Cache(action)
         }
         other => {
             return Err(Error::usage(format!("unknown command `{other}`")));
@@ -353,6 +383,7 @@ commands:
     stats              print the daemon's recompute counters
     watch <file>       run <file> now and rerun it whenever its bytes change on disk
     daemon <action>    start | stop | status | serve
+    cache <action>     gc
 
 options:
     --one-shot         run the pipeline in this process; never contact a daemon.
@@ -369,14 +400,15 @@ options:
     --parse-only       with `test`, classify parser outcomes without interpreting
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
+    --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
     --out <path>       with `test`, write schema-1 conformance results here
     --profile <name>   native-dev, native-check, or native-release
     -h, --help         show this help
     -V, --version      show version and protocol information
 
-run, check, test, project, stats and watch start the daemon if it is not already running:
-the everyday loop should not need a separate step.
+run, check, test, project, stats, watch and cache gc start the daemon if it is not already
+running: the everyday loop should not need a separate step.
 
 exit status:
     0    success; for `daemon status`, the daemon is running
@@ -522,6 +554,33 @@ mod tests {
             usage_error(&["test", "test262", "--parse-only", "--out", "result.json"])
                 .contains("interpreter run")
         );
+    }
+
+    #[test]
+    fn cache_gc_parses_its_one_action_and_its_one_flag() {
+        assert_eq!(
+            run(&["cache", "gc"]).command,
+            Command::Cache(CacheAction::Gc { dry_run: false })
+        );
+        assert_eq!(
+            run(&["cache", "gc", "--dry-run"]).command,
+            Command::Cache(CacheAction::Gc { dry_run: true })
+        );
+        assert_eq!(
+            run(&["--dry-run", "cache", "gc"]).command,
+            Command::Cache(CacheAction::Gc { dry_run: true })
+        );
+    }
+
+    #[test]
+    fn cache_misuse_is_rejected_rather_than_ignored() {
+        assert!(usage_error(&["cache"]).contains("needs an argument"));
+        assert!(usage_error(&["cache", "clear"]).contains("unknown cache action"));
+        assert!(usage_error(&["cache", "gc", "extra"]).contains("no extra argument"));
+        // A `--dry-run` that quietly did nothing on `build` would be the worst possible
+        // reading of the flag: the user would believe a destructive command was rehearsed.
+        assert!(usage_error(&["build", "a.js", "--dry-run"]).contains("--dry-run only applies"));
+        assert!(usage_error(&["cache", "gc", "--dry-run=yes"]).contains("does not take a value"));
     }
 
     #[test]

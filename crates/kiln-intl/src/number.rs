@@ -568,14 +568,28 @@ impl NumberFormat {
 
         let decimal = match value {
             Numeric::Double(number) if number.is_nan() => {
-                return Ok(vec![("nan", nan_text().to_string())]);
+                // `NaN` has no sign for this purpose -- `format(-NaN)` is `format(NaN)` -- so the
+                // only mark that can precede it is an unconditional `+`.
+                let mut out = Vec::new();
+                if self.options.sign_display == "always" {
+                    out.push(("plusSign", "+".to_string()));
+                }
+                out.push(("nan", nan_text().to_string()));
+                return Ok(out);
             }
             Numeric::Double(number) if number.is_infinite() => {
+                let negative = number.is_sign_negative();
                 let mut out = Vec::new();
-                if number.is_sign_negative() {
-                    out.push(("minusSign", "-".to_string()));
-                } else if self.options.sign_display == "always" {
-                    out.push(("plusSign", "+".to_string()));
+                match self.options.sign_display.as_str() {
+                    "never" => {}
+                    // An infinity is not zero, so `exceptZero` marks it exactly as `always` does.
+                    "always" | "exceptZero" => out.push(if negative {
+                        ("minusSign", "-".to_string())
+                    } else {
+                        ("plusSign", "+".to_string())
+                    }),
+                    _ if negative => out.push(("minusSign", "-".to_string())),
+                    _ => {}
                 }
                 out.push(("infinity", "\u{221e}".to_string()));
                 return Ok(out);
@@ -962,6 +976,31 @@ mod tests {
             f.format(&Numeric::Double(f64::NEG_INFINITY)).unwrap(),
             "-\u{221e}"
         );
+    }
+
+    #[test]
+    fn sign_display_still_applies_to_a_value_with_no_digits() {
+        // Every expectation here is `node`'s. The asymmetry is real: `NaN` takes a `+` under
+        // `always` and nothing under `exceptZero`, while an infinity takes one under both.
+        let with = |sign: &str, value: f64| {
+            format(
+                "en-US",
+                Options {
+                    sign_display: sign.into(),
+                    ..Options::default()
+                },
+                value,
+            )
+        };
+        assert_eq!(with("always", f64::NAN), "+NaN");
+        assert_eq!(with("always", -f64::NAN), "+NaN");
+        assert_eq!(with("exceptZero", f64::NAN), "NaN");
+        assert_eq!(with("always", f64::INFINITY), "+\u{221e}");
+        assert_eq!(with("always", f64::NEG_INFINITY), "-\u{221e}");
+        assert_eq!(with("never", f64::NEG_INFINITY), "\u{221e}");
+        assert_eq!(with("exceptZero", f64::INFINITY), "+\u{221e}");
+        assert_eq!(with("negative", f64::INFINITY), "\u{221e}");
+        assert_eq!(with("negative", f64::NEG_INFINITY), "-\u{221e}");
     }
 
     #[test]

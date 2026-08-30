@@ -344,7 +344,7 @@ proptest! {
                 ops
             );
 
-            // The rollup reads the file set and every interface and nothing else, so if neither
+            // The rollup reads the file set, every interface, and runtime linkage, so if none
             // moved, no amount of editing underneath them may reach it. Activating an
             // interned-but-unset path changes the file set even if its interface is empty.
             let active_after: Vec<bool> = inputs

@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 6;
+pub const NATIVE_RUNTIME_VERSION: u32 = 8;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -305,7 +305,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 6
+#define KILN_NATIVE_RUNTIME_VERSION 8
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -609,24 +609,56 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure(int status, kiln_value value);
+typedef int (*kiln_realm_entry_fn)(void *context);
+extern int kiln_realm_create(uint64_t *out_realm);
+extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+extern int kiln_realm_destroy(uint64_t realm);
 extern int 
 "#;
 
 const LAUNCHER_DECL_SUFFIX: &str = r#"(kiln_host *host, kiln_value *result);
 
+typedef struct kiln_cli_entry_context {
+    kiln_host *host;
+    kiln_value *result;
+} kiln_cli_entry_context;
+
+static int kiln_cli_enter_module(void *opaque) {
+    kiln_cli_entry_context *context = (kiln_cli_entry_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return
+"#;
+
+const LAUNCHER_BODY: &str = r#"(context->host, context->result);
+}
+
 int main(void) {
     kiln_host host;
     kiln_value result;
+    kiln_cli_entry_context context;
+    uint64_t realm = 0;
     int status;
+    int destroy_status;
     if (setlocale(LC_NUMERIC, "C") == NULL) {
         return 1;
     }
     host.call = kiln_cli_host_call;
     host.context = NULL;
-    status = 
-"#;
-
-const LAUNCHER_BODY: &str = r#"(&host, &result);
+    result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    context.host = &host;
+    context.result = &result;
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK) {
+        status = kiln_realm_enter(realm, kiln_cli_enter_module, &context);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_realm_drive(realm, &host, &result);
+    }
+    if (realm != 0) {
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }
     if (status != 0) {
         kiln_cli_report_failure(status, result);
         return 1;
@@ -635,8 +667,8 @@ const LAUNCHER_BODY: &str = r#"(&host, &result);
 }
 "#;
 
-// The suffix above intentionally leaves the call expression open so the validated symbol is the
-// only program-specific part of the launcher source.
+// The two source gaps above put the validated symbol in its declaration and in the callback that
+// Tokio enters. No generated module or Tokio type crosses the private Realm ABI.
 const _: () = {
     // Compile-time assertion that the source fragments remain nonempty and deterministic.
 };
@@ -666,8 +698,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_identity_is_separate_from_the_private_number_provider() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 6);
+    fn runtime_identity_tracks_native_launcher_changes() {
+        assert_eq!(NATIVE_RUNTIME_VERSION, 8);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
@@ -939,11 +971,16 @@ int main(void) {
         let locale = source
             .find("setlocale(LC_NUMERIC, \"C\")")
             .expect("launcher sets C numeric locale");
-        let module_call = source
-            .find("status = \nkiln_module_locale")
-            .expect("launcher calls module");
-        assert!(locale < module_call);
+        let realm_enter = source
+            .find("kiln_realm_enter(realm, kiln_cli_enter_module, &context)")
+            .expect("launcher enters realm");
+        assert!(locale < realm_enter);
         assert!(source.contains("#include <locale.h>"));
+        assert!(source.contains("return\nkiln_module_locale"));
+        assert!(source.contains("kiln_realm_create(&realm)"));
+        assert!(source.contains("kiln_realm_enter(realm, kiln_cli_enter_module, &context)"));
+        assert!(source.contains("kiln_realm_drive(realm, &host, &result)"));
+        assert!(source.contains("kiln_realm_destroy(realm)"));
         assert!(source.contains("return 1;"));
     }
 
@@ -1123,6 +1160,29 @@ int main(void) {
     const STUB_SOURCE: &str = r#"
 #include <string.h>
 #include "kiln_host.h"
+
+typedef int (*kiln_realm_entry_fn)(void *context);
+
+int kiln_realm_create(uint64_t *out_realm) {
+    if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_realm = 1;
+    return KILN_C99_OK;
+}
+
+int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context) {
+    if (realm != 1 || entry == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return entry(context);
+}
+
+int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
+    (void)host;
+    (void)thrown;
+    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
+
+int kiln_realm_destroy(uint64_t realm) {
+    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
 
 int kiln_module_test(kiln_host *host, kiln_value *result) {
     static const char text[] = "hello";

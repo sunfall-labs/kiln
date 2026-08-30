@@ -5,9 +5,9 @@
 //! special case, and so the tests can drive them without either.
 
 use kiln_proto::{
-    ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary, NativeSharedLibrarySummary,
-    ProjectSummary, Request, ResolutionMap, Response, RunSummary, SourceHash, SourceView, Stats,
-    SyncId, TestMode, TestSummary,
+    CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
+    NativeSharedLibrarySummary, ProjectSummary, Request, ResolutionMap, Response, RunSummary,
+    SourceHash, SourceView, Stats, SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -220,6 +220,18 @@ pub trait Backend: Send {
         }
     }
 
+    /// Sweep the project's artifact cache. Carries no source view: cache records are addressed
+    /// by content, so no edit can make this request stale.
+    fn cache_gc(&mut self, project_root: String, dry_run: bool) -> Result<CacheGcSummary> {
+        match self.request(Request::CacheGc {
+            project_root,
+            dry_run,
+        })? {
+            Response::CacheSwept(summary) => Ok(summary),
+            other => Err(mismatch("CacheGc", &other)),
+        }
+    }
+
     fn stats(&mut self) -> Result<Stats> {
         match self.request(Request::Stats)? {
             Response::Stats(stats) => Ok(stats),
@@ -281,6 +293,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::Tested(_) => "Tested",
         Response::Project(_) => "Project",
         Response::Stats(_) => "Stats",
+        Response::CacheSwept(_) => "CacheSwept",
         Response::Needed { .. } => "Needed",
         Response::Synced { .. } => "Synced",
         Response::SourceUpdated { .. } => "SourceUpdated",

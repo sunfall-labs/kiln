@@ -7,11 +7,14 @@
 //! sorted depth-first traversal so even a bounded result - and therefore every `FileId` - is
 //! reproducible.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
-use kiln_module_resolver::{NodePackageResolver, ResolutionPolicy};
+use kiln_module_resolver::{NodePackageResolver, ResolutionKind};
+use kiln_proto::{PackageResolution, source_digest};
+use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
 
@@ -22,6 +25,24 @@ const SKIP_DIRS: [&str; 5] = ["node_modules", "target", "dist", "build", "covera
 /// multi-minute walk. Hitting it is reported, never silently truncated.
 const MAX_FILES: usize = 10_000;
 
+/// The ceiling on how many sources are read at once.
+///
+/// Reading one is an `open` and a `read`, so the cost is kernel round trips rather than
+/// arithmetic and threads past a handful only shorten the tail. Measured on the 320-module
+/// `medium` workload, warm `kiln project`, 18 cores under concurrent load: 4 threads 20.6 ms,
+/// 8 threads 16.7 ms, 18 threads 15.4 ms. The step from 4 to 8 is worth having; the one from 8
+/// to the whole machine is not worth what it costs. That cost is the reason for a private pool
+/// at all: `mbx` gives concurrent cargo invocations a single CPU budget (NOTES.md,
+/// Conventions), and rayon's global pool sizes itself to the machine, so it would spend that
+/// budget from inside every `kiln` invocation without being asked.
+const MAX_READ_THREADS: usize = 8;
+
+fn read_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(MAX_READ_THREADS, |cores| cores.get())
+        .min(MAX_READ_THREADS)
+}
+
 pub struct Walk {
     pub files: Vec<PathBuf>,
     /// True when [`MAX_FILES`] cut the walk short.
@@ -30,6 +51,74 @@ pub struct Walk {
 
 pub fn collect(root: &Path) -> Result<Walk> {
     collect_with_limit(root, MAX_FILES)
+}
+
+/// The reading pool, or `None` when the OS would not give us its threads - in which case the
+/// caller reads serially rather than failing a whole command over a thread limit.
+fn read_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(read_threads())
+            .thread_name(|index| format!("kiln-source-read-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Read every walked source, paired with the absolute, symlink-free path that names its
+/// `FileId`, optionally substituting one already-read snapshot.
+///
+/// Two properties are load-bearing here and both are easy to lose.
+///
+/// The paths come from one `realpath` of the project root joined with each walked suffix,
+/// rather than a `realpath` per file. That is only sound because [`collect_with_limit`] refuses
+/// to follow symlinks: it descends entries whose `DirEntry::file_type` - an `lstat`, not a
+/// `stat` - says directory, and collects only ones it says are regular files, so no walked path
+/// can contain a symlinked component below the root and resolving each again is a no-op. A walk
+/// that ever started following links would have to go back to resolving per file.
+///
+/// The reads run on [`read_threads`] threads, and `FileId` assignment must not come to depend on
+/// which read finishes first. `par_iter` is indexed: every text is placed at its own position,
+/// so the result is in the walk's sorted order however the threads interleave.
+pub(crate) fn read_all(
+    root: &Path,
+    files: &[PathBuf],
+    source_override: Option<(&str, &str)>,
+) -> Result<Vec<(String, String)>> {
+    let canonical_root = PathBuf::from(crate::commands::canonical_path(root)?);
+    let paths = files
+        .iter()
+        .map(|file| {
+            let relative = file.strip_prefix(root).map_err(|_| {
+                Error::BadInput(format!(
+                    "{} is not under the project root {}",
+                    file.display(),
+                    root.display()
+                ))
+            })?;
+            let path = canonical_root.join(relative);
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                Error::BadInput(format!("path is not valid UTF-8: {}", path.display()))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let read = |(path, file): (&String, &PathBuf)| -> Result<(String, String)> {
+        let text = match source_override {
+            Some((override_path, override_text)) if path == override_path => {
+                override_text.to_owned()
+            }
+            _ => crate::commands::read_source(file)?,
+        };
+        Ok((path.clone(), text))
+    };
+
+    match read_pool() {
+        Some(pool) => pool.install(|| paths.par_iter().zip(files).map(read).collect()),
+        None => paths.iter().zip(files).map(read).collect(),
+    }
 }
 
 /// Add the entry-rooted runtime dependency closure to an already-read project snapshot.
@@ -43,12 +132,12 @@ pub(crate) fn include_reachable_dependencies(
     root: &Path,
     entry: &str,
     texts: &mut Vec<(String, String)>,
-) -> Result<()> {
+) -> Result<Vec<PackageResolution>> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut indexes = texts
@@ -58,6 +147,7 @@ pub(crate) fn include_reachable_dependencies(
         .collect::<HashMap<_, _>>();
     let mut pending = vec![entry];
     let mut visited = HashSet::new();
+    let mut resolutions = BTreeMap::new();
 
     while let Some(importer) = pending.pop() {
         if !visited.insert(importer.clone()) {
@@ -76,9 +166,38 @@ pub(crate) fn include_reachable_dependencies(
         let module = frontend_oxc::parse(importer_path, importer_text);
 
         for request in module.runtime_requested_modules() {
-            let resolved = ResolutionPolicy::resolve(&resolver, &request.specifier, &importer)
+            let resolved = resolver
+                .resolve_with_metadata(&request.specifier, &importer)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
-            let target = resolved.path;
+            let target = resolved.module.path;
+            if resolved.module.kind == ResolutionKind::Package {
+                let package_json = resolved.package_json.ok_or_else(|| {
+                    Error::BadInput(format!(
+                        "package request `{}` resolved without a package manifest",
+                        request.specifier
+                    ))
+                })?;
+                let package_json_text =
+                    std::fs::read_to_string(&package_json).map_err(|source| {
+                        Error::io(format!("cannot read {}", package_json.display()), source)
+                    })?;
+                let package_json = package_json.to_str().ok_or_else(|| {
+                    Error::BadInput(format!(
+                        "path is not valid UTF-8: {}",
+                        package_json.display()
+                    ))
+                })?;
+                resolutions.insert(
+                    (importer_path.to_owned(), request.specifier.clone()),
+                    PackageResolution {
+                        importer: importer_path.to_owned(),
+                        specifier: request.specifier.clone(),
+                        target: target.to_string_lossy().into_owned(),
+                        package_json: package_json.to_owned(),
+                        package_json_hash: source_digest(&package_json_text),
+                    },
+                );
+            }
             if !indexes.contains_key(&target) {
                 let target_text = std::fs::read_to_string(&target).map_err(|source| {
                     Error::io(format!("cannot read {}", target.display()), source)
@@ -94,7 +213,7 @@ pub(crate) fn include_reachable_dependencies(
     }
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(())
+    Ok(resolutions.into_values().collect())
 }
 
 fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
@@ -321,8 +440,12 @@ mod tests {
             .canonicalize()
             .expect("canonical entry");
 
-        include_reachable_dependencies(&tree.0, entry.to_str().expect("UTF-8 entry"), &mut texts)
-            .expect("include reachable package closure");
+        let resolutions = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+        )
+        .expect("include reachable package closure");
 
         let canonical_root = tree.0.canonicalize().expect("canonical root");
         let paths = texts
@@ -344,6 +467,106 @@ mod tests {
                 "src/unrelated.ts",
             ]
         );
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].importer, entry.to_string_lossy());
+        assert_eq!(resolutions[0].specifier, "pkg");
+        assert_eq!(
+            resolutions[0].package_json,
+            canonical_root
+                .join("node_modules/pkg/package.json")
+                .to_string_lossy()
+        );
+    }
+
+    /// The loop `read_all` replaced: one `realpath` and one read per file.
+    fn read_each_file_separately(files: &[PathBuf]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|file| {
+                (
+                    crate::commands::canonical_path(file).expect("canonical source"),
+                    crate::commands::read_source(file).expect("read source"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reading_from_the_canonical_root_matches_a_realpath_per_file() {
+        let tree = Tree::new("read-all-paths");
+        tree.file("src/b.ts");
+        tree.file("src/a.js");
+        tree.file("src/nested/deep/c.tsx");
+        tree.file("z.mjs");
+
+        let walk = collect(&tree.0).expect("walk succeeds");
+        assert_eq!(
+            read_all(&tree.0, &walk.files, None).expect("read every source"),
+            read_each_file_separately(&walk.files)
+        );
+    }
+
+    /// A root reached through a symlink is the case a per-file `realpath` was really paying for.
+    /// Resolving the root once has to answer the same thing.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_resolves_exactly_as_a_realpath_per_file_did() {
+        let tree = Tree::new("read-all-symlinked-root");
+        tree.file("src/a.ts");
+        tree.file("src/b.ts");
+        let link = tree.0.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&tree.0, &link).expect("link the project root");
+
+        let walk = collect(&link).expect("walk succeeds");
+        assert_eq!(
+            read_all(&link, &walk.files, None).expect("read every source"),
+            read_each_file_separately(&walk.files)
+        );
+        std::fs::remove_file(&link).expect("remove the root symlink");
+    }
+
+    /// Parallel reads must not let completion order reach `FileId` assignment. A tree of files
+    /// whose sizes differ by two orders of magnitude makes the reads finish out of order.
+    #[test]
+    fn parallel_reads_stay_in_walk_order_however_they_interleave() {
+        let tree = Tree::new("read-all-order");
+        for index in 0..64 {
+            let path = tree.0.join(format!("src/{index:04}.ts"));
+            std::fs::create_dir_all(path.parent().expect("has a parent")).expect("create dirs");
+            let body = "x".repeat(if index % 8 == 0 { 200_000 } else { 20 });
+            std::fs::write(&path, format!("export const v = \"{body}\";\n")).expect("write");
+        }
+
+        let walk = collect(&tree.0).expect("walk succeeds");
+        let expected = read_each_file_separately(&walk.files);
+        for _ in 0..8 {
+            let texts = read_all(&tree.0, &walk.files, None).expect("read every source");
+            assert!(
+                texts.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "paths came back out of order"
+            );
+            assert_eq!(texts, expected);
+        }
+    }
+
+    #[test]
+    fn an_override_replaces_only_its_own_file() {
+        let tree = Tree::new("read-all-override");
+        tree.file("a.ts");
+        tree.file("b.ts");
+
+        let walk = collect(&tree.0).expect("walk succeeds");
+        let overridden = crate::commands::canonical_path(&tree.0.join("a.ts")).expect("canonical");
+        let texts = read_all(
+            &tree.0,
+            &walk.files,
+            Some((&overridden, "export const x = 2;\n")),
+        )
+        .expect("read every source");
+
+        assert_eq!(texts[0], (overridden, "export const x = 2;\n".to_owned()));
+        assert_eq!(texts[1].1, "export const x = 1;\n");
     }
 
     #[test]

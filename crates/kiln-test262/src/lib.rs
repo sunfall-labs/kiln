@@ -205,6 +205,38 @@ pub fn discover(root: impl AsRef<Path>) -> Result<Vec<TestCase>, DiscoveryError>
         .collect()
 }
 
+/// Discover every test, reporting per-file metadata failures instead of abandoning the run.
+///
+/// [`discover`] stops at the first unreadable frontmatter, which is right for a small corpus the
+/// project owns and wrong for an external suite: one malformed file out of fifty thousand ends a
+/// whole run and hides every other result, so each fix reveals exactly one more problem. This
+/// returns what it could read alongside what it could not, leaving the caller to decide how to
+/// report the difference. A directory that cannot be walked is still an error, because that is a
+/// broken invocation rather than a broken test.
+pub fn discover_reporting(
+    root: impl AsRef<Path>,
+) -> Result<(Vec<TestCase>, Vec<ParseError>), DiscoveryError> {
+    let root = root.as_ref();
+    let mut paths = Vec::new();
+    collect_js_paths(root, &mut paths)
+        .map_err(|(path, source)| DiscoveryError::Io { path, source })?;
+    paths.sort_by_key(|path| path_sort_key(path));
+
+    let mut cases = Vec::with_capacity(paths.len());
+    let mut failures = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path).map_err(|source| DiscoveryError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        match parse(path, source) {
+            Ok(case) => cases.push(case),
+            Err(error) => failures.push(error),
+        }
+    }
+    Ok((cases, failures))
+}
+
 fn path_sort_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -239,9 +271,25 @@ fn parse_frontmatter(source: &str) -> Result<Metadata, ParseError> {
             "missing Test262 frontmatter opening marker /*---",
         ));
     };
-    if !without_bom[..open_offset].trim().is_empty() {
+    // The marker must begin a line. "First construct in the file" was the wrong rule: it rejected
+    // the entire suite this crate exists to read, because every upstream test opens with a
+    // copyright header. Requiring only comments before it is closer but still rejects the twenty
+    // hashbang negative tests, whose deliberately invalid source precedes their metadata.
+    //
+    // Every one of the suite's 53,580 frontmatter blocks starts a line, and none appears anywhere
+    // else, so this admits all of them while still refusing a `/*---` embedded inside an
+    // expression or a string. It is also how the suite's own runners locate the block.
+    // Both terminators count: the line-terminator-normalisation tests use a bare carriage return
+    // throughout, so looking only for `\n` would place the whole file on one line.
+    let line_start = without_bom[..open_offset]
+        .rfind(['\n', '\r'])
+        .map_or(0, |terminator| terminator + 1);
+    if without_bom[line_start..open_offset]
+        .chars()
+        .any(|character| !character.is_whitespace())
+    {
         return Err(ParseError::new(
-            "Test262 frontmatter must be the first non-whitespace source construct",
+            "Test262 frontmatter marker /*--- must begin a line",
         ));
     }
     let body_start = open_offset + "/*---".len();
@@ -254,11 +302,77 @@ fn parse_frontmatter(source: &str) -> Result<Metadata, ParseError> {
     parse_body(&without_bom[body_start..body_end])
 }
 
+/// Split a frontmatter body on any JavaScript line terminator, counting `\r\n` as one.
+///
+/// `str::lines` splits only on `\n`, so the tests that deliberately use a bare carriage return —
+/// the line-terminator-normalisation cases, among others — arrive as a single line whose
+/// continuation then looks like stray indentation. Line numbers stay exact, which is why this
+/// does not simply split on both characters and drop the empty pieces.
+fn split_frontmatter_lines(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\n' => {
+                lines.push(&body[start..index]);
+                index += 1;
+                start = index;
+            }
+            b'\r' => {
+                lines.push(&body[start..index]);
+                index += if bytes.get(index + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    if start < bytes.len() {
+        lines.push(&body[start..]);
+    }
+    lines
+}
+
+/// Remove the indentation shared by every content line of a frontmatter block.
+///
+/// One upstream test indents its whole block by a space. YAML reads that as an ordinary mapping,
+/// so this parser should too: measuring indentation relative to the block rather than to column
+/// zero costs nothing on the other 53,579 files, whose common indent is already zero.
+fn strip_common_indent(lines: Vec<&str>) -> Vec<&str> {
+    let common = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    if common == 0 {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .map(|line| line.get(common..).unwrap_or(""))
+        .collect()
+}
+
+/// Whether a mapping value is a YAML block-scalar header — `|` or `>`, with optional chomping
+/// (`-`, `+`) and explicit-indent digits — meaning the value lives on the following indented
+/// lines rather than on this one.
+fn is_block_scalar(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed.strip_prefix(['|', '>']) else {
+        return false;
+    };
+    rest.chars()
+        .all(|character| character == '-' || character == '+' || character.is_ascii_digit())
+}
+
 fn parse_body(body: &str) -> Result<Metadata, ParseError> {
-    let lines: Vec<&str> = body
-        .lines()
-        .map(|line| line.trim_end_matches('\r'))
-        .collect();
+    let lines: Vec<&str> = strip_common_indent(split_frontmatter_lines(body));
     let mut metadata = Metadata::default();
     let mut seen_description = false;
     let mut seen_flags = false;
@@ -350,7 +464,10 @@ fn parse_body(body: &str) -> Result<Metadata, ParseError> {
             // scalar extension keys while still rejecting malformed structure
             // in fields that this parser owns.
             _ => {
-                if value.trim().is_empty() {
+                // `info: |` is the common shape upstream: a block scalar puts the value on the
+                // following indented lines, so the key line is not the whole entry and the
+                // continuation must be skipped rather than met as a stray indented line.
+                if value.trim().is_empty() || is_block_scalar(value) {
                     index = skip_indented_block(&lines, index + 1);
                 } else {
                     index += 1;
@@ -379,7 +496,7 @@ fn parse_description(
     index: usize,
 ) -> Result<(String, usize), ParseError> {
     let value = strip_inline_comment(value).trim();
-    let Some(indicator) = value.chars().next() else {
+    if value.is_empty() {
         let (continuation, next) = consume_indented_text(lines, index + 1);
         if continuation.is_empty() {
             return Err(ParseError::at_line(
@@ -388,32 +505,19 @@ fn parse_description(
             ));
         }
         return Ok((continuation.join(" "), next));
-    };
-    if indicator == '|' || indicator == '>' {
-        let (text, next) = consume_block_scalar(lines, index + 1, indicator == '|');
-        if text.is_empty() {
-            return Err(ParseError::at_line(
-                "description block must not be empty",
-                index + 1,
-            ));
-        }
-        return Ok((text, next));
     }
-    if value.ends_with('|') || value.ends_with('>') {
-        let literal = value.ends_with('|');
-        let prefix = value[..value.len() - 1].trim();
-        let (text, next) = consume_block_scalar(lines, index + 1, literal);
+    // A YAML block scalar is the *whole* value -- `|` or `>` plus chomping and indent modifiers --
+    // never a suffix. Reading a trailing `>` as an indicator misparsed descriptions that
+    // legitimately end in one, such as "don't replace $<>", as an empty block: a wrong answer
+    // about a real test rather than an unimplemented case.
+    if is_block_scalar(value) {
+        let (text, next) = consume_block_scalar(lines, index + 1, value.starts_with('|'));
         if text.is_empty() {
             return Err(ParseError::at_line(
                 "description block must not be empty",
                 index + 1,
             ));
         }
-        let text = if prefix.is_empty() {
-            text
-        } else {
-            format!("{}\n{text}", parse_scalar(prefix, "description")?)
-        };
         return Ok((text, next));
     }
     let mut description = parse_scalar(value, "description")?;
@@ -902,6 +1006,51 @@ localeCompare:
         )
         .unwrap_err();
         assert!(missing_negative_type.message.contains("missing type"));
+    }
+
+    #[test]
+    fn accepts_the_copyright_header_every_upstream_test_actually_has() {
+        // Byte-for-byte the opening of test/language/types/boolean/S8.3_A1_T1.js. Every file in
+        // the upstream suite has this shape, and requiring the frontmatter to come first
+        // rejected all 53,580 of them, so this case is the whole suite's admission ticket.
+        let upstream = concat!(
+            "// Copyright 2009 the Sputnik authors.  All rights reserved.\n",
+            "// This code is governed by the BSD license found in the LICENSE file.\n",
+            "\n",
+            "/*---\n",
+            "info: The Boolean type have two values, called true and false\n",
+            "es5id: 8.3_A1_T1\n",
+            "description: Assign true and false to variables\n",
+            "---*/\n",
+            "\n",
+            "var x = true;\n",
+        );
+        let case = parse("S8.3_A1_T1.js", upstream).expect("upstream header parses");
+        assert_eq!(
+            case.metadata.description.as_deref(),
+            Some("Assign true and false to variables")
+        );
+
+        // A block-comment header, and a header carrying both forms, are equally inert.
+        assert!(parse("block.js", "/* c */\n/*---\ndescription: d\n---*/\n").is_ok());
+        assert!(parse("both.js", "// a\n/* b */\n/*---\ndescription: d\n---*/\n").is_ok());
+    }
+
+    #[test]
+    fn requires_the_marker_to_begin_a_line_but_allows_invalid_source_before_it() {
+        // The rule the old check was protecting: a `/*---` after executable source is not this
+        // file's metadata.
+        let embedded =
+            parse("embedded.js", "var x = 1; /*---\ndescription: d\n---*/\n").unwrap_err();
+        assert!(embedded.message.contains("must begin a line"));
+
+        // A hashbang negative test opens with deliberately invalid source and still declares
+        // metadata. Twenty of those exist upstream and every one must be readable.
+        let hashbang = parse(
+            "escaped-bang.js",
+            "#\\041\n\n/*---\ndescription: d\n---*/\n",
+        );
+        assert!(hashbang.is_ok());
     }
 
     #[test]

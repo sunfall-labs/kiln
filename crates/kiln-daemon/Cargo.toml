@@ -20,3 +20,4 @@ kiln-runtime = { workspace = true }
 kiln-conformance = { workspace = true }
 kiln-test-selector = { workspace = true }
 kiln-test262 = { workspace = true }
+rayon = { workspace = true }

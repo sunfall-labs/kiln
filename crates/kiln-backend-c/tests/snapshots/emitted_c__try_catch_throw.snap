@@ -4,7 +4,7 @@ expression: body(&unit)
 ---
 /* Program hash: 67b30828fdcce115; bytecode version: 1. */
 static const char kiln_module_67b30828fdcce1152f7f668f44a1d4fa_constant_1[] = "boom";
-int kiln_module_67b30828fdcce1152f7f668f44a1d4fa(kiln_host *host, kiln_value *result) {
+static int kiln_module_67b30828fdcce1152f7f668f44a1d4fa_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -41,7 +41,6 @@ kiln_label_10:;
     stack[sp++] = locals[0];
 kiln_label_11:;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
-    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
 kiln_unwind:;
@@ -58,4 +57,38 @@ kiln_uncaught:;
     return KILN_C99_THROWN;
     *result = kiln_c99_undefined();
     return KILN_C99_CONTROL_ERROR;
+}
+
+typedef struct kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_context {
+    kiln_host *host;
+    kiln_value *result;
+} kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_context;
+
+static int kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_entry(void *opaque) {
+    kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_context *context = (kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_module_67b30828fdcce1152f7f668f44a1d4fa_body(context->host, context->result);
+}
+
+int kiln_module_67b30828fdcce1152f7f668f44a1d4fa(kiln_host *host, kiln_value *result) {
+    kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_context context;
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_is_active()) return kiln_module_67b30828fdcce1152f7f668f44a1d4fa_body(host, result);
+    context.host = host;
+    context.result = result;
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_67b30828fdcce1152f7f668f44a1d4fa_realm_entry, &context);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_drive(realm, host, result);
+    if (realm != 0) {
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }
+    if (status != KILN_C99_OK && kiln_c99_crosses_boundary(*result))
+        *result = kiln_c99_text(*result);
+    return status;
 }

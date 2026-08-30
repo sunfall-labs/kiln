@@ -1486,6 +1486,25 @@ impl Compiler {
     /// computed one -- to be sitting under that value already: [`Compiler::destructure_element`]
     /// puts them there before the value exists, because that is the order the language evaluates
     /// them in. Only that method reaches such a leaf, which is why nothing here re-derives them.
+    /// `RequireObjectCoercible` on the value an object pattern is about to take apart.
+    ///
+    /// Part of the pattern rather than a side effect of reading it: `var {} = null` throws even
+    /// though the pattern names nothing to read. A pattern *with* properties only appeared to
+    /// obey the rule, because reading its first key off `null` threw for an unrelated reason --
+    /// which left `var {} = null`, `({} = null)` and `var { ...rest } = null` accepting a value
+    /// no object pattern may take.
+    fn require_object_coercible(&mut self) {
+        self.code.push(Instruction::Dup);
+        let coercible = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "Cannot destructure 'null' or 'undefined'".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+        self.patch_jump(coercible);
+    }
+
     fn destructure(&mut self, leaf: PatternLeaf, pattern: &Pattern, span: Span) {
         match pattern {
             Pattern::Identifier(name) => {
@@ -1525,6 +1544,7 @@ impl Compiler {
                 self.destructure(leaf, inner, span);
             }
             Pattern::Object { properties, rest } => {
+                self.require_object_coercible();
                 let spilled = rest.is_some()
                     || properties.iter().any(|property| {
                         stores_through_reference(&property.value)

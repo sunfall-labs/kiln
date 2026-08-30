@@ -12,13 +12,13 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 1;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 3;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
 /// 8.4 MiB, multiplied by every cached build. Nobody debugs through a private ABI adapter.
 const PROVIDER_RUSTFLAGS: &str =
-    "-C panic=abort -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
+    "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// What a packaged archive has to define.
@@ -26,7 +26,17 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
 /// 0025). The list is part of the identity below, so an archive built before them is rejected
 /// rather than linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 16] = [
+const REQUIRED_EXPORTS: [&str; 26] = [
+    "kiln_realm_create",
+    "kiln_realm_enter",
+    "kiln_realm_is_active",
+    "kiln_realm_now",
+    "kiln_realm_queue_microtask",
+    "kiln_realm_set_timeout",
+    "kiln_realm_set_interval",
+    "kiln_realm_clear_timer",
+    "kiln_realm_drive",
+    "kiln_realm_destroy",
     "kiln_number_to_js_string",
     "kiln_string_to_number",
     "kiln_regexp_compile",
@@ -376,9 +386,8 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         OsString::from("--locked"),
         OsString::from("-p"),
         OsString::from(PROVIDER_NAME),
-        // The semantic cores are off by default so a workspace build does not unify their `std`
-        // features into a `no_std` crate; the packaged archive is the one place that wants them,
-        // and this is that place.
+        // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
+        // runtime that now owns native entry as well as interpreted entry.
         OsString::from("--features"),
         OsString::from("regexp,bigint"),
         OsString::from("--release"),
@@ -449,6 +458,8 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-number-core/src/lib.rs",
         "crates/kiln-native-number-ffi/Cargo.toml",
         "crates/kiln-native-number-ffi/src/lib.rs",
+        "crates/kiln-runtime/Cargo.toml",
+        "crates/kiln-runtime/src/lib.rs",
     ];
     let mut identity = Vec::new();
     for relative in paths {
@@ -670,6 +681,8 @@ mod tests {
                 "crates/kiln-native-number-ffi/src/lib.rs",
                 b"ffi\n".as_slice(),
             ),
+            ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-runtime/src/lib.rs", b"runtime\n"),
         ] {
             let path = root.0.join(relative);
             fs::create_dir_all(path.parent().expect("fixture path has parent"))
@@ -679,7 +692,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("c2e718c392784bcd2cb366769fc9ec4312141a5cebaeade4116f4910b385d238")
+            Digest::from_hex("b6aed0411d52b0be489c9c565d8d51a23be1d4f77fdc53787aea1ca686926fe1")
                 .expect("fixture digest")
         );
     }

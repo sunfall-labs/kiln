@@ -2,10 +2,7 @@
 
 ## Status
 
-Proposed.
-
-The policy and entry-rooted source-discovery tracer bullet are implemented. Acceptance remains
-blocked on pinning the package metadata used for resolution into the authoritative source view.
+Accepted.
 
 ## Context
 
@@ -33,11 +30,10 @@ entry-rooted and must synchronize only the sources selected by the same policy a
 The Module graph owns traversal and linking and accepts either policy; it does not parse package
 metadata.
 
-The first Node Adapter is intentionally bounded. It supports nearest-ancestor `node_modules`,
-scoped and unscoped names, exact `exports` keys with explicit `null` blocking, and `main` when no
-`exports` field exists. It does not guess extensions or index files and does not yet interpret
-conditional or wildcard exports. Targets must be regular supported source files, remain inside the
-canonical project root, and remain inside the selected package directory after symlink resolution.
+`NodePackageResolver` delegates Node's resolution state machine to `oxc_resolver`, including
+conditional and wildcard exports, package imports, self-references and `main` fallback. Kiln
+retains only its supported-source and project-containment policy. It does not guess extensions or
+index files.
 
 ### Synchronization follows the entry-rooted dependency closure
 
@@ -51,18 +47,17 @@ An active package source remains a watch dependency because it is present in the
 even though an unrelated file under `node_modules` is not discoverable. Package-source changes use
 the same compare-and-swap update path as project dependencies.
 
-### Package metadata must become part of source authority
+### Package decisions are part of source authority
 
-The selected `package.json` files influence graph identity even though they are not JavaScript
-sources. Before this proposal becomes Accepted, the client and daemon must pin the exact package
-metadata or an equivalent canonical resolution map into the staged source view. Both graph
-construction and cache identity must consume that pinned value. Merely reading the manifest twice
-from the filesystem leaves a race in which client discovery and daemon linking can choose different
-targets.
+The client records every package edge selected by `oxc_resolver`, the exact `package.json` path and
+its content digest in the staged `ResolutionMap`. Commit publishes that map atomically with source
+bytes and `SourceView`. Daemon graph construction uses `PinnedPackageResolver`: explicit paths keep
+the exact filesystem policy, while package requests are pure `(importer, specifier)` lookups. The
+daemon therefore cannot observe a different manifest generation from the client that produced the
+view. Resolution-map identity includes the manifest digest.
 
-Conditional exports, wildcard exports, package self-references, workspace protocols, Plug'n'Play,
-and packages outside the canonical project root require later explicit policy additions; they are
-not guessed by the first Adapter.
+Alternative install layouts such as Plug'n'Play and packages outside the canonical project root
+still require explicit policy additions.
 
 ## Consequences
 
@@ -71,14 +66,14 @@ not guessed by the first Adapter.
   Interface instead of spreading through graph, daemon, and native consumers.
 - Synchronization cost follows reachable package sources, not installed package count.
 - The same graph result continues to feed interpreter and native execution.
-- Until metadata pinning lands, the tracer bullet is useful for simple packages but is not yet a
-  complete authoritative package-resolution contract.
+- Rich Node rules are inherited from a maintained Rust implementation without allowing its types
+  to cross Kiln's resolver Interface.
 
 ## Acceptance checks
 
 - Explicit relative/absolute resolution retains all ADR 0011 behavior.
 - Scoped and unscoped packages use the nearest eligible `node_modules` directory.
-- Exact package roots and subpaths resolve; absent and `null` exports remain distinct failures.
+- Package roots, conditional exports and wildcard subpaths resolve; blocked exports remain failures.
 - Traversal and symlink targets cannot escape the selected package or project root.
 - A one-shot command synchronizes only the reachable package sources, executes a named import, and
   observes a package-source edit on the next authoritative Sync.

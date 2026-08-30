@@ -38,11 +38,30 @@ pub fn start(socket: &Path) -> Result<Output> {
 
 pub fn stop(socket: &Path) -> Result<Output> {
     match DaemonClient::connect(socket) {
-        Ok(mut client) => {
-            let pid = client.handshake()?;
-            client.shutdown()?;
-            Ok(Output::new(format!("stopped  pid {pid}\n")))
-        }
+        Ok(mut client) => match client.handshake() {
+            Ok(pid) => {
+                client.shutdown()?;
+                Ok(Output::new(format!("stopped  pid {pid}\n")))
+            }
+            // A daemon speaking a protocol this binary does not is the one most in need of
+            // stopping, and it is exactly the one the handshake refuses to talk to. Refusing to
+            // stop it leaves `kill` as the only way out of an ordinary version bump, which is
+            // the opposite of what this command is for.
+            //
+            // The daemon hangs up on a mismatched greeting, so this needs a fresh connection and
+            // no greeting on it. That is safe for `Shutdown` specifically and for nothing else:
+            // it carries no payload, so there is no shape to disagree about, and the daemon
+            // answers it without requiring a prior `Ping`. The pid is not reported because
+            // learning it *is* the greeting that just failed.
+            Err(Error::Protocol(mismatch)) => {
+                DaemonClient::connect(socket)?.shutdown()?;
+                Ok(Output::new(format!(
+                    "stopped  {}\n  the daemon spoke another protocol: {mismatch}\n",
+                    socket.display()
+                )))
+            }
+            Err(other) => Err(other),
+        },
         // Stopping something that is not running is the outcome the caller wanted, so it is
         // not a failure - the same reasoning as `rm -f`.
         Err(Error::NotRunning) => Ok(Output::new(format!("not running  {}\n", socket.display()))),
@@ -119,7 +138,10 @@ mod tests {
         let fixture = Fixture::new("status");
         let daemon = Daemon::bind(&fixture.socket).expect("bind");
         let stop_handle = daemon.shutdown_handle();
-        let serving = std::thread::spawn(move || daemon.serve());
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .expect("spawn the in-process daemon");
 
         let (output, code) = status(&fixture.socket).expect("status succeeds");
         assert_eq!(code, 0);
@@ -146,7 +168,10 @@ mod tests {
     fn stop_shuts_a_daemon_down_and_is_harmless_when_repeated() {
         let fixture = Fixture::new("stop");
         let daemon = Daemon::bind(&fixture.socket).expect("bind");
-        let serving = std::thread::spawn(move || daemon.serve());
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .expect("spawn the in-process daemon");
 
         let output = stop(&fixture.socket).expect("stop succeeds");
         assert!(output.text.starts_with("stopped  pid "), "{}", output.text);

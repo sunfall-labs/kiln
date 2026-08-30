@@ -3,7 +3,7 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Module hash: 805cdfbf67596de5; bytecode version: 1; imports: 1; exports: 1. */
-int kiln_module_805cdfbf67596de5f97c591d2fe9eab6(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
+static int kiln_module_805cdfbf67596de5f97c591d2fe9eab6_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
     size_t sp = 0;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -32,7 +32,6 @@ kiln_label_5:;
     stack[sp++] = locals[2];
 kiln_label_6:;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
-    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     exports[0] = locals[2];
     return KILN_C99_OK;
@@ -41,4 +40,49 @@ kiln_uncaught:;
     return KILN_C99_THROWN;
     *result = kiln_c99_undefined();
     return KILN_C99_CONTROL_ERROR;
+}
+
+typedef struct kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_context {
+    kiln_host *host;
+    kiln_value *result;
+    const kiln_value *imports;
+    size_t import_count;
+    kiln_value *exports;
+    size_t export_count;
+} kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_context;
+
+static int kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_entry(void *opaque) {
+    kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_context *context = (kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_module_805cdfbf67596de5f97c591d2fe9eab6_body(context->host, context->result, context->imports,
+                         context->import_count, context->exports, context->export_count);
+}
+
+int kiln_module_805cdfbf67596de5f97c591d2fe9eab6(kiln_host *host, kiln_value *result, const kiln_value *imports,
+             size_t import_count, kiln_value *exports, size_t export_count) {
+    kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_context context;
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_is_active())
+        return kiln_module_805cdfbf67596de5f97c591d2fe9eab6_body(host, result, imports, import_count, exports, export_count);
+    context.host = host;
+    context.result = result;
+    context.imports = imports;
+    context.import_count = import_count;
+    context.exports = exports;
+    context.export_count = export_count;
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_805cdfbf67596de5f97c591d2fe9eab6_realm_entry, &context);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_drive(realm, host, result);
+    if (realm != 0) {
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }
+    if (status != KILN_C99_OK && kiln_c99_crosses_boundary(*result))
+        *result = kiln_c99_text(*result);
+    return status;
 }

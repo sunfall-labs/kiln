@@ -22,6 +22,11 @@ setTimeout(() => {
 setTimeout(() => order.push("second timer"), 20);
 setTimeout(() => console.log(order.join(",")), 30);
 
+// Observable time is the same paused Realm clock that orders timers. Advancing to this callback
+// must advance `Date.now()` by exactly its virtual delay, without sleeping in wall-clock time.
+const clockStart = Date.now();
+setTimeout(() => console.log("clock", Date.now() - clockStart), 25);
+
 // A microtask that queues another still drains before anything else.
 const chain: number[] = [];
 queueMicrotask(() => { chain.push(1); queueMicrotask(() => chain.push(2)); });

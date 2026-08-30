@@ -175,6 +175,15 @@ is visible next to the reasoning for it.
 - [0019](docs/adr/0019-a-closure-carries-its-module.md) — a closure holds its own program and its
   module-scope bindings are ordinary captures, so a function value survives the module boundary
   it was exported across.
+- [0020](docs/adr/0020-conformance-is-measured-by-specification-coverage.md) — conformance
+  is steered by feature-sensitive specification-step coverage; pass rate is an outcome, not a
+  target.
+- [0028](docs/adr/0028-one-tokio-runtime-owns-interpreted-and-native-execution.md) — one shipped
+  Tokio-backed Rust runtime owns asynchronous execution for the interpreter and native artifacts,
+  while each realm retains only the queues and checkpoints ECMAScript makes observable.
+- [0029](docs/adr/0029-use-mature-rust-implementations-at-existing-seams.md) — mature Rust Modules
+  own general-purpose scheduling, resolution, concurrency testing and standards engines behind
+  existing Kiln Seams; heap and query-engine choices remain gated, and Cranelift is not planned.
 
 ## License
 

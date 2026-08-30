@@ -370,7 +370,24 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let kind = self
                     .intl_option(&bag, "type", engine::plurals::TYPES, instruction)?
                     .unwrap_or_else(|| "cardinal".to_owned());
-                let options = self.intl_digit_options(&bag, instruction)?;
+                // Read between `type` and the digit options, which is where the specification
+                // puts them and where the option-order tests expect the getters to fire. They are
+                // not idle: `notation: "compact"` changes which digit defaults apply, and the
+                // rounded digits are what the plural rules run over.
+                let notation = self
+                    .intl_option(&bag, "notation", engine::number::NOTATIONS, instruction)?
+                    .unwrap_or_else(|| "standard".to_owned());
+                let compact_display = self
+                    .intl_option(
+                        &bag,
+                        "compactDisplay",
+                        engine::number::COMPACT_DISPLAYS,
+                        instruction,
+                    )?
+                    .unwrap_or_else(|| "short".to_owned());
+                let mut options = self.intl_digit_options(&bag, instruction)?;
+                options.notation = notation;
+                options.compact_display = compact_display;
                 IntlValue::PluralRules(
                     engine::plurals::PluralRules::new(&locales, &kind, options).map_err(failure)?,
                 )
