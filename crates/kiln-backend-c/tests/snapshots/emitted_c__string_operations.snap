@@ -22,7 +22,7 @@ kiln_label_0:;
 kiln_label_1:;
     stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_578d43dfcb717b9350f84611917a170c_constant_3, 7);
 kiln_label_2:;
-    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked(1, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; stack[sp++] = answer; }
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked(1, left, right, &answer, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; stack[sp++] = answer; }
 kiln_label_3:;
     locals[0] = stack[--sp];
 kiln_label_4:;
