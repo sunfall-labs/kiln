@@ -226,6 +226,10 @@ enum kiln_value_tag {
 /* `String(x)`.  A template's `${x}` lowers to a call to it rather than to `+`, because the two
  * use different hints: `${x}` asks `toString` first and `+` asks `valueOf` first. */
 #define KILN_C99_BUILTIN_STRING 1
+#define KILN_C99_BUILTIN_MATH 2
+#define KILN_C99_BUILTIN_NUMBER 3
+#define KILN_C99_BUILTIN_OBJECT 4
+#define KILN_C99_BUILTIN_ARRAY 5
 
 /* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
  * tags, none of these reaches a cache key. */
@@ -265,6 +269,43 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_REPLACE 31
 #define KILN_C99_METHOD_REPLACE_ALL 32
 #define KILN_C99_METHOD_STRING_CONCAT 33
+
+/* Namespace methods.  Unlike the array and string tables these take no receiver: `Math.floor` is
+ * reached through `Math`, but `Math` contributes nothing to the answer. */
+#define KILN_C99_METHOD_MATH_FLOOR 34
+#define KILN_C99_METHOD_MATH_CEIL 35
+#define KILN_C99_METHOD_MATH_ROUND 36
+#define KILN_C99_METHOD_MATH_TRUNC 37
+#define KILN_C99_METHOD_MATH_ABS 38
+#define KILN_C99_METHOD_MATH_SIGN 39
+#define KILN_C99_METHOD_MATH_SQRT 40
+#define KILN_C99_METHOD_MATH_CBRT 41
+#define KILN_C99_METHOD_MATH_POW 42
+#define KILN_C99_METHOD_MATH_MIN 43
+#define KILN_C99_METHOD_MATH_MAX 44
+#define KILN_C99_METHOD_MATH_LOG 45
+#define KILN_C99_METHOD_MATH_LOG2 46
+#define KILN_C99_METHOD_MATH_LOG10 47
+#define KILN_C99_METHOD_MATH_EXP 48
+#define KILN_C99_METHOD_MATH_HYPOT 49
+#define KILN_C99_METHOD_MATH_ATAN2 50
+#define KILN_C99_METHOD_MATH_SIN 51
+#define KILN_C99_METHOD_MATH_COS 52
+#define KILN_C99_METHOD_MATH_TAN 53
+#define KILN_C99_METHOD_MATH_ASIN 54
+#define KILN_C99_METHOD_MATH_ACOS 55
+#define KILN_C99_METHOD_MATH_ATAN 56
+#define KILN_C99_METHOD_IS_INTEGER 57
+#define KILN_C99_METHOD_IS_SAFE_INTEGER 58
+#define KILN_C99_METHOD_IS_NAN 59
+#define KILN_C99_METHOD_IS_FINITE 60
+#define KILN_C99_METHOD_OBJECT_KEYS 61
+#define KILN_C99_METHOD_OBJECT_VALUES 62
+#define KILN_C99_METHOD_OBJECT_ENTRIES 63
+#define KILN_C99_METHOD_OBJECT_ASSIGN 64
+#define KILN_C99_METHOD_HAS_OWN 65
+#define KILN_C99_METHOD_IS_ARRAY 66
+#define KILN_C99_METHOD_ARRAY_OF 67
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -432,6 +473,11 @@ static double kiln_c99_key_index(const char *key, size_t key_len) {
     return number;
 }
 
+static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
+    size_t len = strlen(name);
+    return len == key_len && memcmp(key, name, len) == 0;
+}
+
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
     return property->key_len == key_len &&
            (key_len == 0 || memcmp(property->key, key, key_len) == 0);
@@ -527,6 +573,40 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REPLACE: return "replace";
     case KILN_C99_METHOD_REPLACE_ALL: return "replaceAll";
     case KILN_C99_METHOD_STRING_CONCAT: return "concat";
+    case KILN_C99_METHOD_MATH_FLOOR: return "floor";
+    case KILN_C99_METHOD_MATH_CEIL: return "ceil";
+    case KILN_C99_METHOD_MATH_ROUND: return "round";
+    case KILN_C99_METHOD_MATH_TRUNC: return "trunc";
+    case KILN_C99_METHOD_MATH_ABS: return "abs";
+    case KILN_C99_METHOD_MATH_SIGN: return "sign";
+    case KILN_C99_METHOD_MATH_SQRT: return "sqrt";
+    case KILN_C99_METHOD_MATH_CBRT: return "cbrt";
+    case KILN_C99_METHOD_MATH_POW: return "pow";
+    case KILN_C99_METHOD_MATH_MIN: return "min";
+    case KILN_C99_METHOD_MATH_MAX: return "max";
+    case KILN_C99_METHOD_MATH_LOG: return "log";
+    case KILN_C99_METHOD_MATH_LOG2: return "log2";
+    case KILN_C99_METHOD_MATH_LOG10: return "log10";
+    case KILN_C99_METHOD_MATH_EXP: return "exp";
+    case KILN_C99_METHOD_MATH_HYPOT: return "hypot";
+    case KILN_C99_METHOD_MATH_ATAN2: return "atan2";
+    case KILN_C99_METHOD_MATH_SIN: return "sin";
+    case KILN_C99_METHOD_MATH_COS: return "cos";
+    case KILN_C99_METHOD_MATH_TAN: return "tan";
+    case KILN_C99_METHOD_MATH_ASIN: return "asin";
+    case KILN_C99_METHOD_MATH_ACOS: return "acos";
+    case KILN_C99_METHOD_MATH_ATAN: return "atan";
+    case KILN_C99_METHOD_IS_INTEGER: return "isInteger";
+    case KILN_C99_METHOD_IS_SAFE_INTEGER: return "isSafeInteger";
+    case KILN_C99_METHOD_IS_NAN: return "isNaN";
+    case KILN_C99_METHOD_IS_FINITE: return "isFinite";
+    case KILN_C99_METHOD_OBJECT_KEYS: return "keys";
+    case KILN_C99_METHOD_OBJECT_VALUES: return "values";
+    case KILN_C99_METHOD_OBJECT_ENTRIES: return "entries";
+    case KILN_C99_METHOD_OBJECT_ASSIGN: return "assign";
+    case KILN_C99_METHOD_HAS_OWN: return "hasOwn";
+    case KILN_C99_METHOD_IS_ARRAY: return "isArray";
+    case KILN_C99_METHOD_ARRAY_OF: return "of";
     default: return NULL;
     }
 }
@@ -558,6 +638,27 @@ static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
     return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_STRING_SLICE,
                                   KILN_C99_METHOD_STRING_CONCAT);
+}
+
+/* A namespace's own methods, by which namespace it is: `Math.min` and `Number.isNaN` are
+ * different functions and the ranges keep them apart. */
+static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_MATH:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_MATH_FLOOR,
+                                      KILN_C99_METHOD_MATH_ATAN);
+    case KILN_C99_BUILTIN_NUMBER:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_INTEGER,
+                                      KILN_C99_METHOD_IS_FINITE);
+    case KILN_C99_BUILTIN_OBJECT:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_OBJECT_KEYS,
+                                      KILN_C99_METHOD_HAS_OWN);
+    case KILN_C99_BUILTIN_ARRAY:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_ARRAY,
+                                      KILN_C99_METHOD_ARRAY_OF);
+    default:
+        return 0;
+    }
 }
 
 static kiln_value kiln_c99_builtin(uint64_t code) {
@@ -1132,6 +1233,56 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
         code = kiln_c99_string_method(key, key_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
+    }
+    case KILN_VALUE_BUILTIN: {
+        uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        /* A namespace's constants are values rather than methods, so they are answered here
+         * instead of through a call. */
+        if (target.bits == KILN_C99_BUILTIN_MATH) {
+            if (kiln_c99_same_name(key, key_len, "PI")) {
+                *out = kiln_c99_number(3.14159265358979311600);
+            } else if (kiln_c99_same_name(key, key_len, "E")) {
+                *out = kiln_c99_number(2.71828182845904509080);
+            } else if (kiln_c99_same_name(key, key_len, "LN2")) {
+                *out = kiln_c99_number(0.69314718055994530942);
+            } else if (kiln_c99_same_name(key, key_len, "LN10")) {
+                *out = kiln_c99_number(2.30258509299404568402);
+            } else if (kiln_c99_same_name(key, key_len, "SQRT2")) {
+                *out = kiln_c99_number(1.41421356237309504880);
+            } else if (kiln_c99_same_name(key, key_len, "SQRT1_2")) {
+                *out = kiln_c99_number(0.70710678118654752440);
+            } else if (kiln_c99_same_name(key, key_len, "LOG2E")) {
+                *out = kiln_c99_number(1.44269504088896340736);
+            } else if (kiln_c99_same_name(key, key_len, "LOG10E")) {
+                *out = kiln_c99_number(0.43429448190325182765);
+            } else {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            return KILN_C99_OK;
+        }
+        if (target.bits == KILN_C99_BUILTIN_NUMBER) {
+            if (kiln_c99_same_name(key, key_len, "MAX_SAFE_INTEGER")) {
+                *out = kiln_c99_number(9007199254740991.0);
+            } else if (kiln_c99_same_name(key, key_len, "MIN_SAFE_INTEGER")) {
+                *out = kiln_c99_number(-9007199254740991.0);
+            } else if (kiln_c99_same_name(key, key_len, "EPSILON")) {
+                *out = kiln_c99_number(2.220446049250313e-16);
+            } else if (kiln_c99_same_name(key, key_len, "POSITIVE_INFINITY")) {
+                *out = kiln_c99_number(1.0 / 0.0);
+            } else if (kiln_c99_same_name(key, key_len, "NEGATIVE_INFINITY")) {
+                *out = kiln_c99_number(-1.0 / 0.0);
+            } else if (kiln_c99_same_name(key, key_len, "NaN")) {
+                *out = kiln_c99_number(0.0 / 0.0);
+            } else {
+                return KILN_C99_CONTROL_ERROR;
+            }
             return KILN_C99_OK;
         }
         return KILN_C99_CONTROL_ERROR;
@@ -1902,6 +2053,185 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_array *array;
     size_t index;
     int status;
+    if (code >= KILN_C99_METHOD_MATH_FLOOR) {
+        /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
+         * the way the function was reached. */
+        double first = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
+        double second = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
+        switch (code) {
+        case KILN_C99_METHOD_MATH_FLOOR: *result = kiln_c99_number(floor(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_CEIL: *result = kiln_c99_number(ceil(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ROUND: {
+            /* Half rounds *up*, not away from zero, so `floor(x + 0.5)` is the definition. It
+             * loses the sign of `Math.round(-0.5)`, which is -0 and not 0 -- a difference a
+             * console shows and `Object.is` can see. */
+            double rounded = isfinite(first) ? floor(first + 0.5) : first;
+            if (rounded == 0.0 && kiln_c99_signbit(first)) {
+                rounded = -0.0;
+            }
+            *result = kiln_c99_number(rounded);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_MATH_TRUNC: *result = kiln_c99_number(trunc(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ABS: *result = kiln_c99_number(fabs(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_SIGN:
+            *result = kiln_c99_number(isnan(first) || first == 0.0 ? first
+                                      : first < 0.0                ? -1.0
+                                                                   : 1.0);
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_SQRT: *result = kiln_c99_number(sqrt(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_CBRT: *result = kiln_c99_number(cbrt(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number(pow(first, second)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_LOG: *result = kiln_c99_number(log(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_LOG2: *result = kiln_c99_number(log2(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_LOG10: *result = kiln_c99_number(log10(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_EXP: *result = kiln_c99_number(exp(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ATAN2: *result = kiln_c99_number(atan2(first, second)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_SIN: *result = kiln_c99_number(sin(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_COS: *result = kiln_c99_number(cos(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_TAN: *result = kiln_c99_number(tan(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ASIN: *result = kiln_c99_number(asin(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ACOS: *result = kiln_c99_number(acos(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_ATAN: *result = kiln_c99_number(atan(first)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_HYPOT: {
+            /* A fold of `hypot` rather than `sqrt(x*x + y*y)`: squaring overflows for arguments
+             * whose result is perfectly representable, which is the whole reason it exists. */
+            double total = 0.0;
+            for (index = 0; index < argc; ++index) {
+                total = hypot(total, kiln_c99_as_number(args[index]));
+            }
+            *result = kiln_c99_number(total);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_MATH_MIN:
+        case KILN_C99_METHOD_MATH_MAX: {
+            /* No arguments is the identity for the comparison, which is the infinity that loses
+             * every one of them. */
+            double best = code == KILN_C99_METHOD_MATH_MIN ? 1.0 / 0.0 : -1.0 / 0.0;
+            for (index = 0; index < argc; ++index) {
+                double value = kiln_c99_as_number(args[index]);
+                if (isnan(value)) {
+                    best = value;
+                    break;
+                }
+                if (code == KILN_C99_METHOD_MATH_MIN ? value < best : value > best) {
+                    best = value;
+                }
+            }
+            *result = kiln_c99_number(best);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_IS_INTEGER:
+        case KILN_C99_METHOD_IS_SAFE_INTEGER:
+            /* `Number.isInteger` does not coerce, unlike the global `isNaN` and friends: a
+             * string is simply not an integer. Same code with coercion would be a different
+             * function, so it is a different function. */
+            *result = kiln_c99_boolean(
+                argc > 0 && args[0].tag == KILN_VALUE_NUMBER && isfinite(first) &&
+                floor(first) == first &&
+                (code == KILN_C99_METHOD_IS_INTEGER || fabs(first) <= 9007199254740991.0));
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_IS_NAN:
+            *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_NUMBER &&
+                                       isnan(first));
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_IS_FINITE:
+            *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_NUMBER &&
+                                       isfinite(first));
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_IS_ARRAY:
+            *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_ARRAY);
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_ARRAY_OF: {
+            kiln_value built;
+            status = kiln_c99_new_array(&built);
+            for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
+                status = kiln_c99_array_push(built, args[index]);
+            }
+            *result = built;
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_KEYS:
+        case KILN_C99_METHOD_OBJECT_VALUES:
+        case KILN_C99_METHOD_OBJECT_ENTRIES: {
+            kiln_value built;
+            kiln_object *object;
+            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            object = kiln_c99_object_of(args[0]);
+            status = kiln_c99_new_array(&built);
+            for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
+                kiln_value key = kiln_c99_copy_text(object->properties[index].key,
+                                                    object->properties[index].key_len);
+                if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                    status = kiln_c99_array_push(built, key);
+                } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                    status = kiln_c99_array_push(built, object->properties[index].value);
+                } else {
+                    kiln_value pair;
+                    status = kiln_c99_new_array(&pair);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_array_push(pair, key);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_array_push(pair, object->properties[index].value);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_array_push(built, pair);
+                    }
+                }
+            }
+            *result = built;
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_ASSIGN: {
+            kiln_value target;
+            size_t argument;
+            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            target = args[0];
+            for (argument = 1; argument < argc; ++argument) {
+                kiln_object *source;
+                if (args[argument].tag == KILN_VALUE_UNDEFINED ||
+                    args[argument].tag == KILN_VALUE_NULL) {
+                    continue;
+                }
+                if (args[argument].tag != KILN_VALUE_OBJECT) {
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                source = kiln_c99_object_of(args[argument]);
+                for (index = 0; index < source->count; ++index) {
+                    status = kiln_c99_put(target, source->properties[index].key,
+                                          source->properties[index].key_len,
+                                          source->properties[index].value);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+            }
+            *result = target;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_HAS_OWN: {
+            kiln_value key = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
+            kiln_object *object;
+            int found = 0;
+            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            object = kiln_c99_object_of(args[0]);
+            for (index = 0; index < object->count && !found; ++index) {
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+            }
+            *result = kiln_c99_boolean(found);
+            return KILN_C99_OK;
+        }
+        default:
+            return KILN_C99_CONTROL_ERROR;
+        }
+    }
     if (code >= KILN_C99_METHOD_STRING_SLICE) {
         if (receiver.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
@@ -2133,8 +2463,14 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
     case KILN_VALUE_STRING:
         return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
-    case KILN_VALUE_FUNCTION:
     case KILN_VALUE_BUILTIN:
+        /* A namespace is an object holding functions and cannot be called; a constructor is a
+         * function. `typeof Math === "object"` is what a library feature-detects on. */
+        if (value.bits == KILN_C99_BUILTIN_MATH) {
+            return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
+    case KILN_VALUE_FUNCTION:
     case KILN_VALUE_METHOD:
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
@@ -2501,7 +2837,15 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
     match instruction {
         // A template's `${x}` lowers to a call to `String`, so this is not an optional extra:
         // without it the backend loses every program containing a template literal.
-        Instruction::LoadBuiltin(kiln_ir::Builtin::String) => Ok(()),
+        Instruction::LoadBuiltin(
+            kiln_ir::Builtin::String
+            | kiln_ir::Builtin::Math
+            | kiln_ir::Builtin::Number
+            | kiln_ir::Builtin::Object
+            | kiln_ir::Builtin::Array
+            | kiln_ir::Builtin::NotANumber
+            | kiln_ir::Builtin::Infinity,
+        ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
@@ -3374,9 +3718,20 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::LoadBuiltin(_) => {
-            // Verification admits only `String`, so this needs no discrimination.
-            output.push_str("    stack[sp++] = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);\n");
+        Instruction::LoadBuiltin(builtin) => {
+            // `NaN` and `Infinity` are values rather than callables, but they reach the program
+            // the same way -- as a name the compiler resolves to something the runtime supplies.
+            let pushed = match builtin {
+                kiln_ir::Builtin::String => "kiln_c99_builtin(KILN_C99_BUILTIN_STRING)",
+                kiln_ir::Builtin::Math => "kiln_c99_builtin(KILN_C99_BUILTIN_MATH)",
+                kiln_ir::Builtin::Number => "kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER)",
+                kiln_ir::Builtin::Object => "kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT)",
+                kiln_ir::Builtin::Array => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY)",
+                kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
+                kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
+                _ => unreachable!("verification rejects every other builtin before emission"),
+            };
+            writeln!(output, "    stack[sp++] = {pushed};").unwrap();
         }
         Instruction::Pop => output.push_str("    --sp;\n"),
         Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
