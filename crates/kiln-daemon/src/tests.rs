@@ -33,6 +33,7 @@ struct StubEngine {
     paths: Vec<String>,
     interned: HashMap<String, FileId>,
     sources: HashMap<u32, String>,
+    source_revisions: HashMap<u32, Revision>,
     revision: u64,
     stats: Stats,
 }
@@ -68,13 +69,22 @@ impl QueryEngine for StubEngine {
     }
 
     fn set_source(&mut self, file: FileId, text: String) {
+        if self.sources.get(&file.0) == Some(&text) {
+            return;
+        }
         self.sources.insert(file.0, text);
         self.revision += 1;
         self.stats.revision = self.revision;
+        self.source_revisions
+            .insert(file.0, Revision(self.revision));
     }
 
     fn source(&self, file: FileId) -> Option<&str> {
         self.sources.get(&file.0).map(String::as_str)
+    }
+
+    fn source_revision(&self, file: FileId) -> Option<Revision> {
+        self.source_revisions.get(&file.0).copied()
     }
 
     fn source_files(&self) -> Vec<(FileId, String)> {
@@ -93,6 +103,7 @@ impl QueryEngine for StubEngine {
 
     fn remove_source(&mut self, file: FileId) {
         if self.sources.remove(&file.0).is_some() {
+            self.source_revisions.remove(&file.0);
             self.revision += 1;
             self.stats.revision = self.revision;
         }
@@ -1620,11 +1631,19 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("canonical root")
         .to_string_lossy()
         .into_owned();
+    let canonical_entry = std::fs::canonicalize(&entry)
+        .expect("canonical entry")
+        .to_string_lossy()
+        .into_owned();
+    let mut stable_file = None;
 
-    for (source, expected) in [
+    for ((source, expected), expected_revision) in [
         ("console.log('first');\n", "first\n"),
         ("console.log('second');\n", "second\n"),
-    ] {
+    ]
+    .into_iter()
+    .zip([3, 6])
+    {
         client
             .request(&Request::SetSource {
                 path: "overlay.js".into(),
@@ -1633,7 +1652,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .expect("set relative overlay");
         let Response::Ran(result) = client
             .request(&Request::Run {
-                path: "overlay.js".into(),
+                path: canonical_entry.clone(),
                 project_root: root.clone(),
             })
             .expect("run overlay")
@@ -1642,10 +1661,137 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         };
         assert!(result.succeeded, "{:?}", result.diagnostics);
         assert_eq!(result.stdout, expected);
+        assert_eq!(result.revision, expected_revision);
+        if let Some(file) = stable_file {
+            assert_eq!(result.file, file, "the canonical FileId must stay stable");
+        } else {
+            stable_file = Some(result.file);
+        }
+
+        let Response::Project(project) = client
+            .request(&Request::Project)
+            .expect("read canonical project")
+        else {
+            panic!("expected project response");
+        };
+        assert_eq!(
+            project.modules, 1,
+            "one physical module must not remain active under two spellings"
+        );
+
+        let Response::Ran(repeated) = client
+            .request(&Request::Run {
+                path: "overlay.js".into(),
+                project_root: root.clone(),
+            })
+            .expect("repeat run without another upload")
+        else {
+            panic!("expected repeated run response");
+        };
+        assert_eq!(repeated.stdout, expected);
+        assert_eq!(repeated.file, result.file);
+        assert_eq!(
+            repeated.revision, result.revision,
+            "identity normalization must settle after one preparation"
+        );
     }
+    client
+        .request(&Request::SetSource {
+            path: "missing/../overlay.js".into(),
+            text: "console.log('lexical overlay');\n".into(),
+        })
+        .expect("set unresolved lexical overlay");
+    let Response::Ran(lexical) = client
+        .request(&Request::Run {
+            path: canonical_entry.clone(),
+            project_root: root.clone(),
+        })
+        .expect("run lexical overlay")
+    else {
+        panic!("expected lexical overlay response");
+    };
+    assert_eq!(lexical.stdout, "lexical overlay\n");
+    let Response::Project(project) = client.request(&Request::Project).expect("read project")
+    else {
+        panic!("expected project response");
+    };
+    assert_eq!(project.modules, 1);
+
+    client
+        .request(&Request::SetSource {
+            path: "overlay.js".into(),
+            text: "console.log('older alias');\n".into(),
+        })
+        .expect("set older relative overlay");
+    client
+        .request(&Request::SetSource {
+            path: canonical_entry,
+            text: "console.log('newer canonical');\n".into(),
+        })
+        .expect("set newer canonical overlay");
+    let Response::Ran(newest) = client
+        .request(&Request::Run {
+            path: "overlay.js".into(),
+            project_root: root,
+        })
+        .expect("run newest alias")
+    else {
+        panic!("expected newest run response");
+    };
+    assert_eq!(newest.stdout, "newer canonical\n");
+    assert_eq!(Some(newest.file), stable_file);
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
+    let fixture = Fixture::started();
+    let source = fixture.dir.join("relative-snapshot.js");
+    std::fs::write(&source, "console.log('disk');\n").expect("write disk source");
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            path: "relative-snapshot.js".into(),
+            text: "console.log('overlay');\n".into(),
+        })
+        .expect("set relative snapshot");
+    let Response::Stats(before) = client.request(&Request::Stats).expect("read revision") else {
+        panic!("expected stats response");
+    };
+
+    let response = client
+        .request(&Request::NativeBuildAtRevision {
+            path: "relative-snapshot.js".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            output: Some(
+                fixture
+                    .dir
+                    .join("relative-snapshot")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            profile: NativeProfile::Dev,
+            expected_revision: before.revision,
+        })
+        .expect("revision-pinned relative build");
+    match response {
+        Response::NativeBuilt(_) => {}
+        Response::Error { message } if message.contains("no supported C compiler") => {}
+        Response::Stale { current_revision } => panic!(
+            "alias reconciliation advanced to {current_revision} while holding the preparation \
+             lock and must become the build snapshot"
+        ),
+        other => panic!("unexpected relative native build response: {other:?}"),
+    }
+
+    let Response::Project(project) = client.request(&Request::Project).expect("read project")
+    else {
+        panic!("expected project response");
+    };
+    assert_eq!(project.modules, 1);
 }
 
 #[test]
