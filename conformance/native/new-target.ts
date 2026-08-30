@@ -35,6 +35,13 @@ async function asyncTarget(): Promise<boolean> {
   return new.target === undefined;
 }
 
+function AsyncConstructed() {
+  this.arrow = async () => {
+    await Promise.resolve(0);
+    return new.target === AsyncConstructed;
+  };
+}
+
 const instance = new Constructed();
 const derived = new Derived();
 console.log(
@@ -47,3 +54,4 @@ console.log(
   generator().next().value,
 );
 asyncTarget().then((value: boolean) => console.log(value));
+new AsyncConstructed().arrow().then((value: boolean) => console.log(value));

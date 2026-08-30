@@ -1393,6 +1393,7 @@ pub struct GeneratorState {
     stack: Vec<Value>,
     instruction: usize,
     this_value: Value,
+    new_target: Value,
     arguments: Vec<Value>,
     /// Handlers registered inside the generator, held while it is suspended.
     ///
@@ -4133,6 +4134,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         closure: &Rc<Closure>,
         argc: u16,
         instruction: usize,
+        this_value: Value,
+        new_target: Value,
     ) -> Result<Value, ExecutionError> {
         let proto = &closure.program.functions[closure.function as usize];
         let argc = argc as usize;
@@ -4155,7 +4158,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack: Vec::new(),
             handlers: Vec::new(),
             instruction: 0,
-            this_value: Value::Undefined,
+            this_value,
+            new_target,
             arguments: received,
             started: false,
             done: false,
@@ -4196,6 +4200,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             saved_handlers,
             instruction_pointer,
             this_value,
+            new_target,
             arguments,
             started,
         ) = {
@@ -4207,6 +4212,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 state.handlers.clone(),
                 state.instruction,
                 state.this_value.clone(),
+                state.new_target.clone(),
                 state.arguments.clone(),
                 state.started,
             )
@@ -4216,8 +4222,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
-            // A generator resumption is never a `new` call, whatever built the generator.
-            new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
+            new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
@@ -8445,13 +8450,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Some(proto) = closure.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
+        // Resolve the effective lexical call state before splitting ordinary and suspended
+        // functions. Async functions use the generator machinery, but an async arrow still has
+        // exactly the same captured `this` and `new.target` as an ordinary arrow.
+        let entering = match &closure.captured_this {
+            Some(captured) => captured.clone(),
+            None => this_value,
+        };
+        let target = match &closure.captured_new_target {
+            Some(captured) => captured.clone(),
+            None if constructing.is_some() => Value::Function(Rc::clone(&closure)),
+            None => Value::Undefined,
+        };
         if proto.generator {
             // Calling a generator function does not run it: it captures the arguments and hands
             // back an object whose `next` runs the body up to each `yield`.
             // An async generator is called like a plain one: it hands back an object, and
             // nothing runs until the consumer asks for a step.
             let asynchronous = proto.asynchronous && !proto.async_generator;
-            let generator = self.build_generator(&closure, argc, instruction)?;
+            let generator = self.build_generator(&closure, argc, instruction, entering, target)?;
             if !asynchronous {
                 self.stack.push(generator);
                 return Ok(());
@@ -8488,20 +8505,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             locals[slot] = argument;
         }
 
-        // An arrow ignores the receiver entirely and uses what it captured, and the same holds
-        // for `arguments`.
-        let entering = match &closure.captured_this {
-            Some(captured) => captured.clone(),
-            None => this_value,
-        };
-        // `new.target` is the constructor this call named, which is this closure when the call
-        // is a `new` and nothing otherwise. An arrow keeps the one it captured, for the same
-        // reason it keeps `this`.
-        let target = match &closure.captured_new_target {
-            Some(captured) => captured.clone(),
-            None if constructing.is_some() => Value::Function(Rc::clone(&closure)),
-            None => Value::Undefined,
-        };
         // The frame keeps what this call was actually given, whatever the closure is: an arrow's
         // rest parameter needs it, and `LoadArguments` is the one place that substitutes the
         // captured list instead.
@@ -15572,5 +15575,94 @@ mod tests {
         // Returning at the end of the module body would make every timer unobservable.
         let program = timer_program(&[("scheduled", 5.0)]);
         assert_eq!(stdout_of(&program), "scheduled");
+    }
+
+    #[test]
+    fn an_async_arrow_captures_its_defining_receiver() {
+        let maker = kiln_ir::FunctionProto {
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![Instruction::MakeFunction(1), Instruction::Return],
+            upvalues: Vec::new(),
+        };
+        let arrow = kiln_ir::FunctionProto {
+            asynchronous: true,
+            name: None,
+            arrow: true,
+            generator: true,
+            async_generator: false,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![
+                Instruction::LoadThis,
+                Instruction::GetProperty(1),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+        };
+        let report = kiln_ir::FunctionProto {
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            parameter_count: 1,
+            local_count: 1,
+            code: vec![
+                Instruction::LoadLocal(0),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+        };
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("make".into()),
+                Constant::String("tag".into()),
+                Constant::String("owner".into()),
+                Constant::String("wrong".into()),
+                Constant::String("call".into()),
+                Constant::String("then".into()),
+            ],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::NewObject { count: 1 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::SetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::StoreLocal(2),
+                Instruction::Const(1),
+                Instruction::Const(3),
+                Instruction::NewObject { count: 1 },
+                Instruction::StoreLocal(3),
+                Instruction::LoadLocal(2),
+                Instruction::LoadLocal(3),
+                Instruction::CallMethod { name: 4, argc: 1 },
+                Instruction::MakeFunction(2),
+                Instruction::CallMethod { name: 5, argc: 1 },
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            local_count: 4,
+            functions: vec![maker, arrow, report],
+        };
+
+        assert_eq!(stdout_of(&program), "owner");
     }
 }
