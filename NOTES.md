@@ -2148,3 +2148,30 @@ this is the fifth and I would rather it be the last before a collector.
 
 native 6/6, differential 90/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
+
+### A string position was two different things, and no probe had asked
+
+**2026-08-30, Claude — `kiln-interpreter`, three natives. ADR 0022.**
+
+I went to implement string methods natively and checked what the interpreter does first, which is
+how I found this. `length`, `charAt`, `substring`, `indexOf` and `[i]` counted UTF-16 code units.
+`slice`, `at` and `lastIndexOf` counted **characters**. For any string holding an astral
+character the two disagreed:
+
+```js
+const s = "a😀b";
+s.length   // 4
+s[1]       // one code unit
+s.at(1)    // one *character* -- a different position with the same index
+s.slice(0, s.length)  // walked past what `length` had promised
+```
+
+All three now count code units. `s.slice(0, s.length) === s` holds again, and `[i]`, `charAt` and
+`at` name the same position. The corpus never caught it because no probe had sliced a string with
+an emoji in it -- `conformance/differential/string-positions.js` does now.
+
+**What this exposes and does not fix:** a kiln string is a Rust `String`, so it cannot hold a lone
+surrogate at all, and a cut inside a pair yields U+FFFD where node yields the half. That is a real
+divergence, it is now the *only* one in the string surface, and ADR 0022 records it along with the
+escape route -- WTF-8, which keeps the common case free, versus `Vec<u16>`, which makes every
+byte-oriented boundary pay. Not a slice to take alongside string methods.
