@@ -7,8 +7,8 @@
 
 use kiln_db::{MemoEngine, QueryEngine};
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{Request, Response};
-use std::collections::HashMap;
+use kiln_proto::{Request, Response, SourceDigest, SourceView, SyncId};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{self, BufReader, ErrorKind};
 use std::net::Shutdown as SocketShutdown;
@@ -21,11 +21,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, execute_prepared_run, native_build_graph, native_build_output,
-    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
-    native_program, native_run_graph, native_run_program, prepare_run,
+    dispatch, execute_prepared_run, native_build_graph, native_build_output, native_build_program,
+    native_build_shared_graph, native_build_shared_program, native_graph, native_program,
+    native_run_graph, native_run_program, prepare_run, Next,
 };
-use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
+use crate::framing::{read_frame, write_frame, MAX_MESSAGE_BYTES};
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -35,6 +35,24 @@ pub enum DaemonError {
     /// The socket could not be made ready to accept on - preparing its directory, clearing a
     /// stale path, or the `bind` itself.
     Listen { socket: PathBuf, source: io::Error },
+}
+
+/// The authoritative source set and its coherence identity move together. Every request that
+/// consumes source bytes checks `source_view` while holding this same mutex through preparation;
+/// this prevents a query from observing a source set that changes between its check and parse.
+pub(crate) struct DaemonState<E> {
+    pub(crate) engine: E,
+    pub(crate) source_view: SourceView,
+}
+
+/// Connection-local synchronization state. Staged text is private until CommitSync obtains the
+/// daemon-state lock and publishes the complete manifest in one critical section.
+struct PendingSync {
+    id: SyncId,
+    base_view: SourceView,
+    manifest: BTreeMap<String, SourceDigest>,
+    needed: BTreeSet<String>,
+    staged: BTreeMap<String, String>,
 }
 
 impl fmt::Display for DaemonError {
@@ -143,7 +161,7 @@ impl Drop for SocketGuard {
 pub struct Daemon<E: QueryEngine = MemoEngine> {
     listener: UnixListener,
     shared: Arc<Shared>,
-    engine: Arc<Mutex<E>>,
+    state: Arc<Mutex<DaemonState<E>>>,
     _socket: SocketGuard,
 }
 
@@ -184,7 +202,10 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 live: Mutex::new(HashMap::new()),
                 next_connection: AtomicU64::new(0),
             }),
-            engine: Arc::new(Mutex::new(engine)),
+            state: Arc::new(Mutex::new(DaemonState {
+                engine,
+                source_view: SourceView(0),
+            })),
             _socket: SocketGuard(socket.to_path_buf()),
         })
     }
@@ -234,7 +255,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
     }
 
     fn spawn_connection(&self, stream: UnixStream) -> JoinHandle<()> {
-        let engine = Arc::clone(&self.engine);
+        let state = Arc::clone(&self.state);
         let shared = Arc::clone(&self.shared);
 
         thread::spawn(move || {
@@ -252,7 +273,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
             // Backstop for a panic outside the per-request guard - in the framing layer, say.
             // It costs one connection; the alternative is a dead daemon.
             let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                serve_connection(stream, &engine, &shared)
+                serve_connection(stream, &state, &shared)
             }));
             shared.deregister(id);
 
@@ -313,11 +334,13 @@ fn bind_listener(socket: &Path) -> Result<UnixListener, DaemonError> {
 /// stops. Socket I/O happens here, deliberately outside the engine lock.
 fn serve_connection<E: QueryEngine>(
     stream: UnixStream,
-    engine: &Mutex<E>,
+    state: &Mutex<DaemonState<E>>,
     shared: &Arc<Shared>,
 ) -> io::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
+    let mut pending = None;
+    let mut next_sync_id = 0u64;
 
     // Checked before every read as well as after every response: `shutdown` may have hung this
     // socket up before the thread ever reached its first read.
@@ -339,7 +362,7 @@ fn serve_connection<E: QueryEngine>(
         };
 
         let (response, next) = match serde_json::from_str::<Request>(&frame) {
-            Ok(request) => handle(engine, request),
+            Ok(request) => handle(state, &mut pending, &mut next_sync_id, request),
             // Line framing resynchronises on its own, so a garbled request costs one response,
             // not the connection.
             Err(error) => (
@@ -373,6 +396,187 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
     write_frame(writer, &json)
 }
 
+fn begin_sync<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    id: SyncId,
+    files: Vec<kiln_proto::SourceHash>,
+) -> (Response, Option<PendingSync>) {
+    let mut manifest = BTreeMap::new();
+    let mut duplicates = BTreeSet::new();
+    for file in files {
+        if manifest.insert(file.path.clone(), file.hash).is_some() {
+            duplicates.insert(file.path);
+        }
+    }
+    if !duplicates.is_empty() {
+        return (
+            Response::Error {
+                message: format!(
+                    "Sync request contains duplicate paths: {}",
+                    duplicates.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            },
+            None,
+        );
+    }
+
+    let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    let held = guard
+        .engine
+        .source_files()
+        .into_iter()
+        .filter_map(|(file, path)| {
+            guard
+                .engine
+                .source(file)
+                .map(|text| (path, kiln_proto::source_digest(text)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let needed = manifest
+        .iter()
+        .filter_map(|(path, expected)| match held.get(path) {
+            Some(actual) if *actual == *expected => None,
+            _ => Some(path.clone()),
+        })
+        .collect::<BTreeSet<_>>();
+    let response = Response::Needed {
+        sync_id: id,
+        paths: needed.iter().cloned().collect(),
+    };
+    (
+        response,
+        Some(PendingSync {
+            id,
+            base_view: guard.source_view,
+            manifest,
+            needed,
+            staged: BTreeMap::new(),
+        }),
+    )
+}
+
+fn stage_source(
+    pending: Option<&mut PendingSync>,
+    sync_id: SyncId,
+    path: String,
+    text: String,
+) -> Response {
+    let Some(pending) = pending else {
+        return Response::Error {
+            message: "StageSource requires an active Sync".into(),
+        };
+    };
+    if pending.id != sync_id {
+        return Response::Error {
+            message: format!("unknown sync id {}", sync_id.0),
+        };
+    }
+    if !pending.needed.contains(&path) {
+        return Response::Error {
+            message: format!("path is not needed by sync: {path}"),
+        };
+    }
+    let expected = pending.manifest[&path];
+    if kiln_proto::source_digest(&text) != expected {
+        return Response::Error {
+            message: format!("staged source digest does not match manifest for {path}"),
+        };
+    }
+    pending.staged.insert(path, text);
+    Response::Ok
+}
+
+fn commit_sync<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    pending: &mut Option<PendingSync>,
+    sync_id: SyncId,
+) -> Response {
+    let Some(transaction) = pending.as_ref() else {
+        return Response::Error {
+            message: "CommitSync requires an active Sync".into(),
+        };
+    };
+    if transaction.id != sync_id {
+        return Response::Error {
+            message: format!("unknown sync id {}", sync_id.0),
+        };
+    }
+    let Some(missing) = transaction
+        .needed
+        .iter()
+        .find(|path| !transaction.staged.contains_key(*path))
+    else {
+        // A stale transaction is consumed deliberately: the caller must begin a fresh snapshot
+        // rather than retrying against a source view that has already lost its authority.
+        let transaction = pending.take().expect("transaction checked above");
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.source_view != transaction.base_view {
+            return Response::StaleSourceView {
+                current: guard.source_view,
+            };
+        }
+        let active = guard.engine.source_files();
+        for (file, path) in active {
+            if !transaction.manifest.contains_key(&path) {
+                guard.engine.remove_source(file);
+            }
+        }
+        for (path, text) in transaction.staged {
+            let file = guard.engine.intern(&path);
+            guard.engine.set_source(file, text);
+        }
+        guard.source_view = SourceView(guard.source_view.0.wrapping_add(1));
+        return Response::Synced {
+            source_view: guard.source_view,
+        };
+    };
+    Response::Error {
+        message: format!("sync is missing staged source: {missing}"),
+    }
+}
+
+fn set_source<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    path: String,
+    text: String,
+    source_view: SourceView,
+) -> Response {
+    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.source_view != source_view {
+        return Response::StaleSourceView {
+            current: guard.source_view,
+        };
+    }
+    let file = guard.engine.intern(&path);
+    guard.engine.set_source(file, text);
+    // Direct updates are authority events even when bytes are identical, matching CommitSync's
+    // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
+    guard.source_view = SourceView(guard.source_view.0.wrapping_add(1));
+    Response::SourceUpdated {
+        source_view: guard.source_view,
+    }
+}
+
+fn handle_source_request<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    source_view: SourceView,
+    operation: impl FnOnce(&mut E) -> Response,
+) -> (Response, Next) {
+    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.source_view != source_view {
+        return (
+            Response::StaleSourceView {
+                current: guard.source_view,
+            },
+            Next::Continue,
+        );
+    }
+    match panic::catch_unwind(AssertUnwindSafe(|| operation(&mut guard.engine))) {
+        Ok(response) => (response, Next::Continue),
+        Err(payload) => (internal_error(&*payload), Next::Continue),
+    }
+}
+
 /// Run one request, holding the engine lock only while a query actually needs it.
 ///
 /// The engine's methods take `&mut self`, so query preparation is serialized. Interpreter runs,
@@ -387,9 +591,61 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
 /// one bad request would turn into a daemon that answers every later request with a lock error.
 /// The engine can still be left mid-update by the panic, but its values are all derived and
 /// recomputable, so the next query rebuilds them.
-fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
+fn handle<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    pending: &mut Option<PendingSync>,
+    next_sync_id: &mut u64,
+    request: Request,
+) -> (Response, Next) {
     match request {
-        Request::Run { path, project_root } => handle_run(engine, path, project_root),
+        Request::Sync { files } => {
+            let id = SyncId(*next_sync_id);
+            *next_sync_id = next_sync_id.wrapping_add(1);
+            let (response, transaction) = begin_sync(state, id, files);
+            if let Some(transaction) = transaction {
+                *pending = Some(transaction);
+            }
+            (response, Next::Continue)
+        }
+        Request::StageSource {
+            sync_id,
+            path,
+            text,
+        } => (
+            stage_source(pending.as_mut(), sync_id, path, text),
+            Next::Continue,
+        ),
+        Request::CommitSync { sync_id } => {
+            (commit_sync(state, pending, sync_id), Next::Continue)
+        }
+        Request::SetSource {
+            path,
+            text,
+            source_view,
+        } => (set_source(state, path, text, source_view), Next::Continue),
+        Request::Check {
+            path,
+            project_root,
+            source_view,
+        } => handle_source_request(state, source_view, |engine| {
+            dispatch(
+                engine,
+                Request::Check {
+                    path,
+                    project_root,
+                    source_view,
+                },
+            )
+            .0
+        }),
+        Request::Project { source_view } => handle_source_request(state, source_view, |engine| {
+            dispatch(engine, Request::Project { source_view }).0
+        }),
+        Request::Run {
+            path,
+            project_root,
+            source_view,
+        } => handle_run(state, path, project_root, source_view),
         Request::Test {
             root,
             mode,
@@ -408,13 +664,15 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
             project_root,
             output,
             profile,
+            source_view,
             expected_revision,
         } => handle_native_build_at_revision(
-            engine,
+            state,
             path,
             project_root,
             output,
             profile,
+            source_view,
             expected_revision,
         ),
         Request::NativeBuild {
@@ -422,24 +680,20 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
             project_root,
             output,
             profile,
+            source_view,
         } => {
-            let graph = match prepare_native_graph(engine, &path, &project_root) {
-                Ok(graph) => graph,
-                Err(message) => return (Response::Error { message }, Next::Continue),
-            };
-            match graph {
-                Some(graph) => run_without_engine_lock(|| {
+            let prepared =
+                match prepare_native_snapshot(state, &path, &project_root, source_view, false) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return (response, Next::Continue),
+                };
+            match prepared {
+                PreparedNative::Graph(graph) => run_without_engine_lock(|| {
                     native_build_graph(graph, path, project_root, output, profile)
                 }),
-                None => {
-                    let program = match prepare_native(engine, &path) {
-                        Ok(program) => program,
-                        Err(message) => return (Response::Error { message }, Next::Continue),
-                    };
-                    run_without_engine_lock(|| {
-                        native_build_program(program, path, project_root, output, profile)
-                    })
-                }
+                PreparedNative::Program(program) => run_without_engine_lock(|| {
+                    native_build_program(program, path, project_root, output, profile)
+                }),
             }
         }
         Request::NativeSharedBuild {
@@ -447,63 +701,64 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
             project_root,
             output,
             profile,
+            source_view,
         } => {
-            let graph = match prepare_native_graph(engine, &path, &project_root) {
-                Ok(graph) => graph,
-                Err(message) => return (Response::Error { message }, Next::Continue),
-            };
-            match graph {
-                Some(graph) if graph.module_count() > 1 => run_without_engine_lock(|| {
+            let prepared =
+                match prepare_native_snapshot(state, &path, &project_root, source_view, true) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return (response, Next::Continue),
+                };
+            match prepared {
+                PreparedNative::Graph(graph) => run_without_engine_lock(|| {
                     native_build_shared_graph(graph, path, project_root, output, profile)
                 }),
-                Some(_) | None => {
-                    let program = match prepare_native(engine, &path) {
-                        Ok(program) => program,
-                        Err(message) => return (Response::Error { message }, Next::Continue),
-                    };
-                    run_without_engine_lock(|| {
-                        native_build_shared_program(program, path, project_root, output, profile)
-                    })
-                }
+                PreparedNative::Program(program) => run_without_engine_lock(|| {
+                    native_build_shared_program(program, path, project_root, output, profile)
+                }),
             }
         }
         Request::NativeRun {
             path,
             project_root,
             profile,
+            source_view,
         } => {
-            let graph = match prepare_native_graph(engine, &path, &project_root) {
-                Ok(graph) => graph,
-                Err(message) => return (Response::Error { message }, Next::Continue),
-            };
-            match graph {
-                Some(graph) => {
+            let prepared =
+                match prepare_native_snapshot(state, &path, &project_root, source_view, false) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return (response, Next::Continue),
+                };
+            match prepared {
+                PreparedNative::Graph(graph) => {
                     run_without_engine_lock(|| native_run_graph(graph, path, project_root, profile))
                 }
-                None => {
-                    let program = match prepare_native(engine, &path) {
-                        Ok(program) => program,
-                        Err(message) => return (Response::Error { message }, Next::Continue),
-                    };
-                    run_without_engine_lock(|| {
-                        native_run_program(program, path, project_root, profile)
-                    })
-                }
+                PreparedNative::Program(program) => run_without_engine_lock(|| {
+                    native_run_program(program, path, project_root, profile)
+                }),
             }
         }
-        request => handle_engine_request(engine, request),
+        request => handle_engine_request(state, request),
     }
 }
 
 fn handle_run<E: QueryEngine>(
-    engine: &Mutex<E>,
+    state: &Mutex<DaemonState<E>>,
     path: String,
     project_root: String,
+    source_view: SourceView,
 ) -> (Response, Next) {
     let prepared = {
-        let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.source_view != source_view {
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_run(&mut *guard, path, project_root)
+            prepare_run(&mut guard.engine, path, project_root)
         })) {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
@@ -516,24 +771,33 @@ fn handle_run<E: QueryEngine>(
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and
 /// publish atomically only if no source edit occurred while the toolchain was running.
 fn handle_native_build_at_revision<E: QueryEngine>(
-    engine: &Mutex<E>,
+    state: &Mutex<DaemonState<E>>,
     path: String,
     project_root: String,
     output: Option<String>,
     profile: kiln_proto::NativeProfile,
+    source_view: SourceView,
     expected_revision: u64,
 ) -> (Response, Next) {
     let (revision, prepared) = {
-        let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-        let current_revision = guard.revision().0;
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.source_view != source_view {
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
+        let current_revision = guard.engine.revision().0;
         if current_revision != expected_revision {
             return (Response::Stale { current_revision }, Next::Continue);
         }
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
-            let graph = native_graph(&mut *guard, &path, &project_root)?;
+            let graph = native_graph(&mut guard.engine, &path, &project_root)?;
             match graph {
                 Some(graph) => Ok(PreparedNative::Graph(graph)),
-                None => native_program(&mut *guard, &path).map(PreparedNative::Program),
+                None => native_program(&mut guard.engine, &path).map(PreparedNative::Program),
             }
         })) {
             Ok(Ok(prepared)) => prepared,
@@ -545,7 +809,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         // Canonicalizing a legacy relative overlay is itself an input reconciliation and may
         // advance the revision while the lock is held. Pin publication to the reconciled
         // snapshot, while the check above still rejects a genuinely stale caller revision.
-        (guard.revision().0, prepared)
+        (guard.engine.revision().0, prepared)
     };
 
     let final_output = native_build_output(&project_root, &path, output);
@@ -589,10 +853,18 @@ fn handle_native_build_at_revision<E: QueryEngine>(
     })
     .0;
 
-    let guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-    let current_revision = guard.revision().0;
-    if current_revision != revision {
+    let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    let current_revision = guard.engine.revision().0;
+    if current_revision != revision || guard.source_view != source_view {
         let _ = std::fs::remove_file(&temp_output);
+        if guard.source_view != source_view {
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
         return (Response::Stale { current_revision }, Next::Continue);
     }
     let Response::NativeBuilt(mut summary) = response else {
@@ -627,29 +899,31 @@ fn snapshot_temp_output(final_output: &Path) -> PathBuf {
     final_output.with_file_name(format!(".kiln-{name}-{}-{id}.tmp", std::process::id()))
 }
 
-fn prepare_native_graph<E: QueryEngine>(
-    engine: &Mutex<E>,
+fn prepare_native_snapshot<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
     path: &str,
     project_root: &str,
-) -> Result<Option<ModuleGraph>, String> {
-    let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-    match panic::catch_unwind(AssertUnwindSafe(|| {
-        native_graph(&mut *guard, path, project_root)
-    })) {
-        Ok(result) => result,
-        Err(payload) => Err(format!("internal error: {}", panic_message(&*payload))),
+    source_view: SourceView,
+    prefer_program_for_small_graph: bool,
+) -> Result<PreparedNative, Response> {
+    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.source_view != source_view {
+        return Err(Response::StaleSourceView {
+            current: guard.source_view,
+        });
     }
-}
-
-fn prepare_native<E: QueryEngine>(
-    engine: &Mutex<E>,
-    path: &str,
-) -> Result<kiln_ir::Program, String> {
-    let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-    match panic::catch_unwind(AssertUnwindSafe(|| native_program(&mut *guard, path))) {
-        Ok(Ok(program)) => Ok(program),
-        Ok(Err(message)) => Err(message),
-        Err(payload) => Err(format!("internal error: {}", panic_message(&*payload))),
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        let graph = native_graph(&mut guard.engine, path, project_root)?;
+        match graph {
+            Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
+                Ok(PreparedNative::Graph(graph))
+            }
+            Some(_) | None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
+        }
+    })) {
+        Ok(Ok(prepared)) => Ok(prepared),
+        Ok(Err(message)) => Err(Response::Error { message }),
+        Err(payload) => Err(internal_error(&*payload)),
     }
 }
 
@@ -660,9 +934,12 @@ fn run_without_engine_lock(operation: impl FnOnce() -> Response) -> (Response, N
     }
 }
 
-fn handle_engine_request<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
-    let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
-    match panic::catch_unwind(AssertUnwindSafe(|| dispatch(&mut *guard, request))) {
+fn handle_engine_request<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    request: Request,
+) -> (Response, Next) {
+    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    match panic::catch_unwind(AssertUnwindSafe(|| dispatch(&mut guard.engine, request))) {
         Ok(outcome) => outcome,
         Err(payload) => (internal_error(&*payload), Next::Continue),
     }
