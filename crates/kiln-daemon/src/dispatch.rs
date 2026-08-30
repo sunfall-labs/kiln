@@ -909,7 +909,7 @@ pub(crate) fn native_build_shared_graph(
             Ok(build) => build,
             Err(message) => return Response::Error { message },
         };
-    match builder.build_shared_graph(&graph, &options) {
+    match builder.build_shared_graph(graph, &options) {
         Ok(report) => native_shared_built(Path::new(&project_root), report),
         Err(error) => Response::Error {
             message: error.to_string(),
