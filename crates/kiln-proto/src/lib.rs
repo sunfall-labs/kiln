@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -87,6 +87,187 @@ pub struct SourceHash {
     pub hash: SourceDigest,
 }
 
+/// One package import resolved against a pinned package manifest.
+///
+/// All paths are canonical spellings supplied by the package resolver. The manifest digest is
+/// included so a daemon can distinguish two resolutions that happen to have the same paths but
+/// came from different package metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageResolution {
+    pub importer: String,
+    pub specifier: String,
+    pub target: String,
+    pub package_json: String,
+    pub package_json_hash: SourceDigest,
+}
+
+/// The package-resolution snapshot belonging to one [`Request::Sync`].
+///
+/// Entries are canonicalized by `(importer, specifier)`. Construct maps through [`Self::new`],
+/// which sorts entries and rejects duplicate import keys. Wire deserialization is stricter: it
+/// rejects a map that is not already sorted and unique, so every accepted map has one stable
+/// representation and identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolutionMap {
+    pub project_root: String,
+    pub entries: Vec<PackageResolution>,
+}
+
+/// A malformed package-resolution snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionMapError {
+    EmptyField { field: &'static str, index: usize },
+    EntriesNotSorted { previous: String, current: String },
+    DuplicateEntry { importer: String, specifier: String },
+}
+
+impl fmt::Display for ResolutionMapError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyField { field, index } => {
+                write!(formatter, "resolution entry {index} has an empty {field}")
+            }
+            Self::EntriesNotSorted { previous, current } => write!(
+                formatter,
+                "resolution entries are not sorted: {previous:?} appears before {current:?}"
+            ),
+            Self::DuplicateEntry {
+                importer,
+                specifier,
+            } => write!(
+                formatter,
+                "duplicate package resolution for {importer:?} and {specifier:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolutionMapError {}
+
+#[derive(Deserialize)]
+struct ResolutionMapWire {
+    project_root: String,
+    entries: Vec<PackageResolution>,
+}
+
+impl<'de> Deserialize<'de> for ResolutionMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ResolutionMapWire::deserialize(deserializer)?;
+        Self::from_sorted(wire.project_root, wire.entries).map_err(de::Error::custom)
+    }
+}
+
+impl ResolutionMap {
+    /// Construct a map, sorting entries into canonical order and rejecting duplicate imports.
+    pub fn new(
+        project_root: impl Into<String>,
+        mut entries: Vec<PackageResolution>,
+    ) -> Result<Self, ResolutionMapError> {
+        entries.sort_by(Self::compare_entries);
+        let map = Self {
+            project_root: project_root.into(),
+            entries,
+        };
+        map.validate()?;
+        Ok(map)
+    }
+
+    /// Check that this map is a valid canonical snapshot.
+    pub fn validate(&self) -> Result<(), ResolutionMapError> {
+        if self.project_root.is_empty() {
+            return Err(ResolutionMapError::EmptyField {
+                field: "project_root",
+                index: 0,
+            });
+        }
+        for (index, entry) in self.entries.iter().enumerate() {
+            for (field, value) in [
+                ("importer", &entry.importer),
+                ("specifier", &entry.specifier),
+                ("target", &entry.target),
+                ("package_json", &entry.package_json),
+            ] {
+                if value.is_empty() {
+                    return Err(ResolutionMapError::EmptyField { field, index });
+                }
+            }
+        }
+        for pair in self.entries.windows(2) {
+            match Self::compare_entries(&pair[0], &pair[1]) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    return Err(ResolutionMapError::DuplicateEntry {
+                        importer: pair[0].importer.clone(),
+                        specifier: pair[0].specifier.clone(),
+                    });
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(ResolutionMapError::EntriesNotSorted {
+                        previous: Self::entry_key(&pair[0]),
+                        current: Self::entry_key(&pair[1]),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the full-width SHA-256 identity of this canonical resolution snapshot.
+    ///
+    /// The identity uses a versioned domain and length-prefixed UTF-8 fields, including the
+    /// package manifest digest. This prevents concatenation and prefix ambiguities from turning
+    /// distinct resolution maps into the same cache key.
+    pub fn identity(&self) -> Digest {
+        debug_assert!(self.validate().is_ok());
+        let mut bytes = Vec::new();
+        frame(&mut bytes, b"kiln-resolution-map\0v1");
+        frame(&mut bytes, self.project_root.as_bytes());
+        frame_u64(&mut bytes, self.entries.len() as u64);
+        for entry in &self.entries {
+            frame(&mut bytes, entry.importer.as_bytes());
+            frame(&mut bytes, entry.specifier.as_bytes());
+            frame(&mut bytes, entry.target.as_bytes());
+            frame(&mut bytes, entry.package_json.as_bytes());
+            frame(&mut bytes, entry.package_json_hash.0.as_bytes());
+        }
+        Digest::hash(&bytes)
+    }
+
+    fn from_sorted(
+        project_root: String,
+        entries: Vec<PackageResolution>,
+    ) -> Result<Self, ResolutionMapError> {
+        let map = Self {
+            project_root,
+            entries,
+        };
+        map.validate()?;
+        Ok(map)
+    }
+
+    fn compare_entries(left: &PackageResolution, right: &PackageResolution) -> std::cmp::Ordering {
+        left.importer
+            .cmp(&right.importer)
+            .then_with(|| left.specifier.cmp(&right.specifier))
+    }
+
+    fn entry_key(entry: &PackageResolution) -> String {
+        format!("({}, {})", entry.importer, entry.specifier)
+    }
+}
+
+fn frame(output: &mut Vec<u8>, value: &[u8]) {
+    frame_u64(output, value.len() as u64);
+    output.extend_from_slice(value);
+}
+
+fn frame_u64(output: &mut Vec<u8>, value: u64) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
 /// Connection-local identity for one staged source synchronization.
 ///
 /// A sync is deliberately split into begin, stage, and commit messages so a stateless client can
@@ -120,14 +301,16 @@ pub enum Request {
         text: String,
         source_view: SourceView,
     },
-    /// Begin a complete synchronization of the client's source manifest.
+    /// Begin a complete synchronization of the client's source and package-resolution manifests.
     ///
     /// This request is begin-only and does not mutate the authoritative source set. It is
     /// answered with [`Response::Needed`] containing a connection-local [`SyncId`] and the subset
     /// whose contents the daemon does not already hold. The client stages those files and then
-    /// commits the complete snapshot with [`Request::CommitSync`].
+    /// commits the complete snapshot with [`Request::CommitSync`]. The resolution map is required
+    /// so the daemon never has to reread mutable package metadata while linking the snapshot.
     Sync {
         files: Vec<SourceHash>,
+        resolutions: ResolutionMap,
     },
     /// Stage one digest-checked file for an in-flight synchronization.
     StageSource {
@@ -458,8 +641,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v16_sync_and_source_view_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 16);
+    fn protocol_v17_sync_and_source_view_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 17);
 
         let requests = [
             (
@@ -468,12 +651,16 @@ mod tests {
                         path: "main.js".to_owned(),
                         hash: source_digest("hello"),
                     }],
+                    resolutions: empty_resolution_map(),
                 },
                 serde_json::json!({
-                    "Sync": {"files": [{
-                        "path": "main.js",
-                        "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                    }]}
+                    "Sync": {
+                        "files": [{
+                            "path": "main.js",
+                            "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        }],
+                        "resolutions": {"project_root": "/project", "entries": []}
+                    }
                 }),
             ),
             (
@@ -575,6 +762,7 @@ mod tests {
                 path: "main.js".to_owned(),
                 hash: source_digest("hello"),
             }],
+            resolutions: empty_resolution_map(),
         };
         let encoded = serde_json::to_value(&request).expect("serialize strong source digest");
         assert_eq!(
@@ -584,16 +772,114 @@ mod tests {
                     "files": [{
                         "path": "main.js",
                         "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                    }]
+                    }],
+                    "resolutions": {"project_root": "/project", "entries": []}
                 }
             })
         );
         let decoded: Request =
             serde_json::from_value(encoded).expect("round trip strong source digest");
-        let Request::Sync { files } = decoded else {
+        let Request::Sync { files, resolutions } = decoded else {
             panic!("decoded request must remain Sync");
         };
         assert_eq!(files[0].hash, source_digest("hello"));
+        assert_eq!(resolutions, empty_resolution_map());
+    }
+
+    fn empty_resolution_map() -> ResolutionMap {
+        ResolutionMap::new("/project", Vec::new()).expect("empty resolution map is valid")
+    }
+
+    fn package_resolution(importer: &str, specifier: &str, target: &str) -> PackageResolution {
+        PackageResolution {
+            importer: importer.to_owned(),
+            specifier: specifier.to_owned(),
+            target: target.to_owned(),
+            package_json: "/project/node_modules/pkg/package.json".to_owned(),
+            package_json_hash: source_digest("package metadata"),
+        }
+    }
+
+    #[test]
+    fn resolution_map_sorts_entries_and_identity_is_order_independent() {
+        let first = package_resolution(
+            "/project/src/main.ts",
+            "z",
+            "/project/node_modules/z/index.js",
+        );
+        let second = package_resolution(
+            "/project/src/main.ts",
+            "a",
+            "/project/node_modules/a/index.js",
+        );
+        let reversed = ResolutionMap::new("/project", vec![first.clone(), second.clone()])
+            .expect("entries with distinct keys are valid");
+        let sorted = ResolutionMap::new("/project", vec![second, first])
+            .expect("entries with distinct keys are valid");
+
+        assert_eq!(reversed.entries[0].specifier, "a");
+        assert_eq!(reversed.entries, sorted.entries);
+        assert_eq!(reversed.identity(), sorted.identity());
+    }
+
+    #[test]
+    fn resolution_map_rejects_duplicate_import_keys() {
+        let entry = package_resolution(
+            "/project/src/main.ts",
+            "pkg",
+            "/project/node_modules/pkg/a.js",
+        );
+        let error = ResolutionMap::new("/project", vec![entry.clone(), entry])
+            .expect_err("one importer/specifier key must have one target");
+        assert!(matches!(error, ResolutionMapError::DuplicateEntry { .. }));
+    }
+
+    #[test]
+    fn resolution_map_wire_requires_canonical_sorted_unique_entries() {
+        let first = package_resolution(
+            "/project/src/main.ts",
+            "a",
+            "/project/node_modules/a/index.js",
+        );
+        let second = package_resolution(
+            "/project/src/main.ts",
+            "z",
+            "/project/node_modules/z/index.js",
+        );
+        let unsorted = serde_json::json!({
+            "project_root": "/project",
+            "entries": [second, first]
+        });
+        assert!(serde_json::from_value::<ResolutionMap>(unsorted).is_err());
+
+        let duplicate = package_resolution(
+            "/project/src/main.ts",
+            "pkg",
+            "/project/node_modules/pkg/index.js",
+        );
+        let duplicate_wire = serde_json::json!({
+            "project_root": "/project",
+            "entries": [duplicate.clone(), duplicate]
+        });
+        assert!(serde_json::from_value::<ResolutionMap>(duplicate_wire).is_err());
+    }
+
+    #[test]
+    fn resolution_identity_is_length_framed_and_includes_manifest_digest() {
+        let left = package_resolution("a", "bc", "/project/node_modules/pkg/index.js");
+        let right = package_resolution("ab", "c", "/project/node_modules/pkg/index.js");
+        let left_map = ResolutionMap::new("/project", vec![left]).expect("valid map");
+        let right_map = ResolutionMap::new("/project", vec![right]).expect("valid map");
+        assert_ne!(left_map.identity(), right_map.identity());
+
+        let mut changed_hash = package_resolution(
+            "/project/src/main.ts",
+            "ab",
+            "/project/node_modules/pkg/index.js",
+        );
+        changed_hash.package_json_hash = source_digest("different package metadata");
+        let changed_map = ResolutionMap::new("/project", vec![changed_hash]).expect("valid map");
+        assert_ne!(left_map.identity(), changed_map.identity());
     }
 
     #[test]
