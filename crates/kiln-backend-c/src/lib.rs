@@ -368,10 +368,16 @@ typedef struct kiln_closure {
  *
  * Keys point at the generated constant table or at heap bytes from a computed key, and are
  * compared by content, never by pointer -- two spellings of one name must be one property. */
+/* A property is a value, or a pair of functions.  Reading an accessor *calls* one, which is why
+ * every program-visible read has to go through the runtime rather than being a struct field
+ * access -- and why `kiln_c99_get` takes a host and a depth. */
 typedef struct kiln_property {
     const char *key;
     size_t key_len;
+    int accessor;
     kiln_value value;
+    kiln_value getter;
+    kiln_value setter;
 } kiln_property;
 
 typedef struct kiln_object {
@@ -448,8 +454,10 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_array(kiln_value *out);
-static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln_value value);
-static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln_value *out);
+static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
@@ -564,7 +572,8 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
-static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln_value value) {
+static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown) {
     kiln_object *object;
     size_t index;
     int status;
@@ -583,16 +592,53 @@ static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln
                 return status;
             }
         }
-        return kiln_c99_put(closure->properties, key, key_len, value);
+        return kiln_c99_put(host, closure->properties, key, key_len, value, depth, thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            object->properties[index].value = value;
-            return KILN_C99_OK;
+    /* A setter found anywhere on the chain takes the write; only when there is none does the
+     * assignment create an own data property. That asymmetry is what makes `obj.x = 1` on a
+     * class with `set x()` run the setter rather than shadow it. */
+    {
+        kiln_value current = target;
+        size_t steps;
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_object *walked;
+            if (current.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            walked = kiln_c99_object_of(current);
+            for (index = 0; index < walked->count; ++index) {
+                if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
+                    continue;
+                }
+                if (!walked->properties[index].accessor) {
+                    /* A data property on the *prototype* is shadowed by an own one, not
+                     * written through, so only an own hit assigns here. */
+                    if (steps == 0) {
+                        walked->properties[index].value = value;
+                        return KILN_C99_OK;
+                    }
+                    steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                    break;
+                }
+                if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+                    /* Getter-only: the write is discarded in sloppy mode and a TypeError in
+                     * strict. Modules are strict, but a script is not, and this is shared. */
+                    return KILN_C99_OK;
+                }
+                {
+                    kiln_value ignored;
+                    return kiln_c99_call(host, &ignored, walked->properties[index].setter, target,
+                                         &value, 1, depth, thrown);
+                }
+            }
+            if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
+                break;
+            }
+            current = walked->prototype;
         }
     }
     status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
@@ -622,7 +668,10 @@ static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln
         }
         object->properties[position].key = key;
         object->properties[position].key_len = key_len;
+        object->properties[position].accessor = 0;
         object->properties[position].value = value;
+        object->properties[position].getter = kiln_c99_undefined();
+        object->properties[position].setter = kiln_c99_undefined();
     }
     object->count += 1;
     return KILN_C99_OK;
@@ -1297,7 +1346,7 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        status = kiln_c99_put(closure->prototype, "constructor", 11, function);
+        status = kiln_c99_put(NULL, closure->prototype, "constructor", 11, function, 0, NULL);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -1322,7 +1371,8 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
-static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln_value *out) {
+static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown) {
     static const char length_key[] = "length";
     size_t index;
     int is_length = key_len == sizeof(length_key) - 1 &&
@@ -1341,10 +1391,21 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
             }
             object = kiln_c99_object_of(current);
             for (index = 0; index < object->count; ++index) {
-                if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                    continue;
+                }
+                if (!object->properties[index].accessor) {
                     *out = object->properties[index].value;
                     return KILN_C99_OK;
                 }
+                /* Reading an accessor is a call, and the receiver is the object the read
+                 * started from -- not the one the accessor was found on. */
+                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    *out = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
+                                     depth, thrown);
             }
             current = object->prototype;
         }
@@ -1365,7 +1426,7 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        return kiln_c99_get(closure->properties, key, key_len, out);
+        return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
@@ -1454,13 +1515,14 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
     }
 }
 
-static int kiln_c99_get_computed(kiln_value target, kiln_value key, kiln_value *out) {
+static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                 kiln_value *out, int depth, kiln_value *thrown) {
     double index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (index < 0.0) {
-            return kiln_c99_get(target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
-                                key.tag == KILN_VALUE_STRING ? key.len : 0, out);
+            return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
+                                key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
         }
         *out = (size_t)index < array->count ? array->elements[(size_t)index]
                                             : kiln_c99_undefined();
@@ -1498,11 +1560,12 @@ static int kiln_c99_get_computed(kiln_value target, kiln_value key, kiln_value *
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
-        return kiln_c99_get(target, text.ptr, text.len, out);
+        return kiln_c99_get(host, target, text.ptr, text.len, out, depth, thrown);
     }
 }
 
-static int kiln_c99_set_computed(kiln_value target, kiln_value key, kiln_value value) {
+static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                 kiln_value value, int depth, kiln_value *thrown) {
     double index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY && index >= 0.0) {
         kiln_array *array = kiln_c99_array_of(target);
@@ -1533,7 +1596,7 @@ static int kiln_c99_set_computed(kiln_value target, kiln_value key, kiln_value v
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
-        return kiln_c99_put(target, text.ptr, text.len, value);
+        return kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
     }
 }
 
@@ -1683,6 +1746,18 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             }
             if (kiln_c99_text_append_c(text, ": ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (object->properties[index].accessor) {
+                /* Named rather than called: showing a value here would run the program's code
+                 * because something was printed. */
+                const char *shown =
+                    object->properties[index].getter.tag == KILN_VALUE_UNDEFINED  ? "[Setter]"
+                    : object->properties[index].setter.tag == KILN_VALUE_UNDEFINED ? "[Getter]"
+                                                                                   : "[Getter/Setter]";
+                if (kiln_c99_text_append_c(text, shown) != KILN_C99_OK) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                continue;
             }
             if (kiln_c99_inspect_into(text, object->properties[index].value, depth + 1) !=
                 KILN_C99_OK) {
@@ -2361,9 +2436,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 }
                 source = kiln_c99_object_of(args[argument]);
                 for (index = 0; index < source->count; ++index) {
-                    status = kiln_c99_put(target, source->properties[index].key,
+                    status = kiln_c99_put(host, target, source->properties[index].key,
                                           source->properties[index].key_len,
-                                          source->properties[index].value);
+                                          source->properties[index].value, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -2625,6 +2700,106 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     default:
         return KILN_C99_CONTROL_ERROR;
     }
+}
+
+/* `{ ...source }`: copy every own property of the source into the target.
+ *
+ * A spread copies *values*, which for an accessor means calling its getter and storing what it
+ * produced -- the target gets a plain data property, not the accessor. A setter-only property
+ * has nothing to read, so it contributes nothing. Spreading nullish contributes nothing rather
+ * than throwing, which is the one place object spread is more forgiving than array spread. */
+static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+                                  int depth, kiln_value *thrown) {
+    kiln_object *object;
+    size_t index;
+    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+        return KILN_C99_OK;
+    }
+    if (target.tag != KILN_VALUE_OBJECT || source.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(source);
+    /* The count is read each time round because a getter can add a property to the source; the
+     * bound is the source's *original* length, so a property the getter appends is not copied,
+     * which is what stops an appending getter from looping. */
+    {
+        size_t length = object->count;
+        for (index = 0; index < length && index < object->count; ++index) {
+            kiln_value copied;
+            int status;
+            if (object->properties[index].accessor) {
+                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    continue;
+                }
+                status = kiln_c99_call(host, &copied, object->properties[index].getter, source,
+                                       NULL, 0, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            } else {
+                copied = object->properties[index].value;
+            }
+            status = kiln_c99_put(host, target, object->properties[index].key,
+                                  object->properties[index].key_len, copied, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
+    return KILN_C99_OK;
+}
+
+/* Define an accessor half, merging with a half already defined under the same key.
+ *
+ * Merging matters because `get x()` and `set x()` are written separately and describe one
+ * property; defining the second must not discard the first. */
+static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
+                                    kiln_value getter, kiln_value setter) {
+    kiln_object *object;
+    size_t index;
+    int status;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        kiln_value store;
+        status = kiln_c99_function_store(target, &store);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        return kiln_c99_define_accessor(store, key, key_len, getter, setter);
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            continue;
+        }
+        if (!object->properties[index].accessor) {
+            object->properties[index].accessor = 1;
+            object->properties[index].getter = kiln_c99_undefined();
+            object->properties[index].setter = kiln_c99_undefined();
+        }
+        if (getter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].getter = getter;
+        }
+        if (setter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].setter = setter;
+        }
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_put(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            object->properties[index].accessor = 1;
+            object->properties[index].getter = getter;
+            object->properties[index].setter = setter;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_CONTROL_ERROR;
 }
 
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
@@ -3137,6 +3312,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetPrototype
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
+        | Instruction::DefineAccessor { .. }
+        | Instruction::SpreadObject
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -3212,12 +3389,10 @@ fn stack_effect(
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Dup2
         | Instruction::SpreadInto
-        | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
-        | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
@@ -3300,6 +3475,23 @@ fn stack_effect(
                 Err(underflow(needed))
             } else {
                 Ok((height - needed + 1, false))
+            }
+        }
+        // The half and the key are consumed; the target stays, so a class body can define
+        // several accessors on one object without reloading it.
+        Instruction::DefineAccessor { .. } => {
+            if height < 3 {
+                Err(underflow(3))
+            } else {
+                Ok((height - 2, false))
+            }
+        }
+        // The source is consumed and the target stays, the same shape `SetPrototype` uses.
+        Instruction::SpreadObject => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // The prototype is written into the target, which stays.
@@ -3450,20 +3642,6 @@ fn uses_this(code: &[Instruction]) -> bool {
         .any(|instruction| matches!(instruction, Instruction::LoadThis))
 }
 
-/// Whether the emitted entry point needs a call-depth counter.
-///
-/// A program with no call is the scalar shape this backend has always produced, and it must keep
-/// producing byte-for-byte the same unit: the output is content-addressed, so even a declaration
-/// nothing reads would invalidate every cached object.
-fn tracks_call_depth(program: &Program) -> bool {
-    program.code.iter().any(|instruction| {
-        matches!(
-            instruction,
-            Instruction::Call { .. } | Instruction::CallMethod { .. }
-        )
-    })
-}
-
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
 /// Local slots this body treats as cells without ever creating one.
@@ -3500,18 +3678,36 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
     needed
 }
 
-/// Whether anything in this program can throw, and so whether the entry point needs somewhere
-/// to put the value. A call counts: the callee's throw arrives here as a status and a value.
-fn can_throw(program: &Program) -> bool {
-    let throws = |code: &[Instruction]| {
+/// Whether this program needs a call context -- a depth counter and somewhere to put a thrown
+/// value -- in scope.
+///
+/// It is not only calls. Reading a property can call, because the property may be an accessor;
+/// writing one can call a setter; building an object literal converts its keys. Anything that
+/// reaches the runtime's property machinery reaches its calling machinery with it.
+///
+/// A program with none of these is the scalar shape this backend started with, and it must keep
+/// producing byte-for-byte the same unit: those bytes are a cache key, so even a declaration
+/// nothing reads would invalidate every cached object.
+fn needs_call_context(program: &Program) -> bool {
+    let needs = |code: &[Instruction]| {
         code.iter().any(|instruction| {
             matches!(
                 instruction,
-                Instruction::Throw | Instruction::Call { .. } | Instruction::CallMethod { .. }
+                Instruction::Throw
+                    | Instruction::Call { .. }
+                    | Instruction::CallMethod { .. }
+                    | Instruction::New { .. }
+                    | Instruction::GetProperty(_)
+                    | Instruction::SetProperty(_)
+                    | Instruction::GetComputed
+                    | Instruction::SetComputed
+                    | Instruction::NewObject { .. }
+                    | Instruction::DefineAccessor { .. }
+                    | Instruction::SpreadObject
             )
         })
     };
-    throws(&program.code) || program.functions.iter().any(|proto| throws(&proto.code))
+    needs(&program.code) || program.functions.iter().any(|proto| needs(&proto.code))
 }
 
 /// What a call site does when the callee threw: jump to this body's handler, or hand it on.
@@ -3710,13 +3906,11 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
-    if tracks_call_depth(program) {
+    // The entry point owns the depth counter and the thrown value every body writes into. Both
+    // are locals rather than parameters because the embedding signature is fixed and a reference
+    // must not cross it: an uncaught throw leaves as text in `*result`.
+    if needs_call_context(program) {
         output.push_str("    int depth = 0;\n");
-    }
-    // The entry point owns the thrown value every body writes into. It is a local rather than a
-    // parameter because the embedding signature is fixed and a reference must not cross it: an
-    // uncaught throw leaves as text in `*result` with a status that says what happened.
-    if can_throw(program) {
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
@@ -3801,13 +3995,11 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
-    if tracks_call_depth(program) {
+    // The entry point owns the depth counter and the thrown value every body writes into. Both
+    // are locals rather than parameters because the embedding signature is fixed and a reference
+    // must not cross it: an uncaught throw leaves as text in `*result`.
+    if needs_call_context(program) {
         output.push_str("    int depth = 0;\n");
-    }
-    // The entry point owns the thrown value every body writes into. It is a local rather than a
-    // parameter because the embedding signature is fixed and a reference must not cross it: an
-    // uncaught throw leaves as text in `*result` with a status that says what happened.
-    if can_throw(program) {
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
@@ -3930,12 +4122,10 @@ fn emit_instruction(
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::Dup2
         | Instruction::SpreadInto
-        | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
-        | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
@@ -4073,6 +4263,7 @@ fn emit_instruction(
         // and only then replaces it -- a key that failed to convert must not leave a half-built
         // object where the program can see it.
         Instruction::NewObject { count } => {
+            let unwind = unwind_or_return(handlers);
             let count = usize::try_from(*count).unwrap();
             output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
             output.push_str("        status = kiln_c99_new_object(&built);\n");
@@ -4080,7 +4271,7 @@ fn emit_instruction(
             if count > 0 {
                 writeln!(
                     output,
-                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_set_computed(built, key, member); if (status != KILN_C99_OK) return status; }}"
+                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_set_computed(host, built, key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
                 writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
@@ -4107,37 +4298,45 @@ fn emit_instruction(
             output.push_str("        stack[sp++] = built;\n    }\n");
         }
         Instruction::GetProperty(name) => {
+            let unwind = unwind_or_return(handlers);
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get(stack[sp - 1], {symbol}_constant_{name}, {}, &read); if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ kiln_value read; int status = kiln_c99_get(host, stack[sp - 1], {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
         }
         Instruction::SetProperty(name) => {
+            let unwind = unwind_or_return(handlers);
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
             // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(stack[sp - 1], {symbol}_constant_{name}, {}, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], {symbol}_constant_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len()
             )
             .unwrap();
         }
         Instruction::GetComputed => {
-            output.push_str(
-                "    { kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(stack[sp - 1], key, &read); if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }\n",
-            );
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+            )
+            .unwrap();
         }
         Instruction::SetComputed => {
-            output.push_str(
-                "    { kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(stack[sp - 1], key, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }\n",
-            );
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}"
+            )
+            .unwrap();
         }
         Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
         // Module scope is one array for the whole module, so a read from a function body names
@@ -4167,6 +4366,23 @@ fn emit_instruction(
                 output,
                 "    {{ kiln_value built; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
+            )
+            .unwrap();
+        }
+        Instruction::DefineAccessor { setter } => {
+            let half = if *setter { "setter" } else { "getter" };
+            let other = if *setter { "getter" } else { "setter" };
+            writeln!(
+                output,
+                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_text(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter); if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
+        Instruction::SpreadObject => {
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_spread_object(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -4207,7 +4423,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(self_value, {symbol}_constant_{name}, {}, &method); if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )

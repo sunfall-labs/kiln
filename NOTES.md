@@ -2163,17 +2163,33 @@ they are written in is not the order they call each other in -- a property read 
 conversion, conversion reaches the array join, the join reaches the read. I reshuffled the file
 three times for that before deciding the ordering constraint should simply not exist.
 
-**Still refused, and this is the queue in order:** accessors (`DefineAccessor`, 6), `JSON` (5),
-`Date` (5), `NewRegExp` (4), spread and `IterableToArray` (3 each), `Map`/`Set`, `delete`,
-`EnumerateKeys`, `SuperCall`/`SuperForward` (so `class D extends C` still refuses), then
-generators and `async` -- which need a suspended frame and so a different shape entirely.
+**Accessors and object spread came next**, and they changed the shape of the backend more than
+the count suggests: **reading a property is now a call**, so `kiln_c99_get` takes a host, a depth
+and somewhere to put a throw, and so does every emitted site that reads or writes one. A getter
+that throws is caught by an enclosing `try` exactly as a call would be -- which took a second
+pass, because I had put the unwind check only on the sites that were obviously calls.
+
+A setter found anywhere on the chain takes a write, where a *data* property on the prototype is
+shadowed by an own one instead. That asymmetry is the whole reason `obj.x = 1` on a class with
+`set x()` runs the setter, and it is the same bug I fixed in the interpreter a few entries above
+-- worth noting that the native backend needed it stated separately rather than inheriting it.
+
+Object spread (`{ ...source }`) fell out of the same work, because an object literal that mixes an
+accessor with a data property lowers *through* it -- I found that by writing the accessor probe
+and watching it refuse.
+
+**Still refused, and this is the queue in order:** `JSON` (8), generators and `async` (6), `Date`
+(5), `NewRegExp` (4), array spread and `IterableToArray` (3 each), `Map`/`Set`, `in`, `delete`,
+`EnumerateKeys`, `SuperCall`/`SuperForward` (so `class D extends C` still refuses). Generators
+need a suspended frame, which an automatic C frame cannot be, so they are a different shape
+rather than more of the same.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 10/10, differential 93/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 11/11, differential 93/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
