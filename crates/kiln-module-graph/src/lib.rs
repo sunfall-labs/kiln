@@ -461,6 +461,18 @@ impl ModuleGraph {
                         path: dependency.target.clone(),
                     }
                 })?;
+                // `import * as ns` wants every export at once rather than one by name. The
+                // specification orders a namespace object's keys, so this sorts them: a hash map
+                // would otherwise make `Object.keys(ns)` differ run to run.
+                if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                    let mut entries: Vec<(String, Value)> = provider
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    entries.sort_by(|left, right| left.0.cmp(&right.0));
+                    imports.push(kiln_interpreter::namespace_object(entries));
+                    continue;
+                }
                 let value = provider.get(&import.imported).ok_or_else(|| {
                     ModuleGraphError::MissingExport {
                         importer: path.clone(),
@@ -504,11 +516,28 @@ impl ModuleGraph {
             total_steps = total_steps
                 .checked_add(result.execution.steps)
                 .ok_or(ModuleGraphError::StepOverflow)?;
-            let exports = result
+            // A `export * from` entry stands for the provider's names rather than for one of
+            // its own. Local exports are inserted first so that a name this module exports
+            // itself wins over the same name arriving through a star, which is what the
+            // specification says and what a barrel file that overrides one name relies on.
+            let mut exports: HashMap<String, Value> = result
                 .exports
                 .iter()
+                .filter(|export| !export.name.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
                 .map(|export| (export.name.clone(), export.value.clone()))
                 .collect();
+            for star in result
+                .exports
+                .iter()
+                .filter(|export| export.name.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
+            {
+                for (name, value) in kiln_interpreter::namespace_entries(&star.value) {
+                    // `export *` never forwards a default: a module's default is its own.
+                    if name != "default" {
+                        exports.entry(name).or_insert(value);
+                    }
+                }
+            }
             values.insert(path.clone(), exports);
             if path == &self.entry {
                 entry_result = Some(result.execution);
@@ -657,16 +686,18 @@ fn validate_links(
                     importer: importer_path.clone(),
                     source: import.source.clone(),
                 })?;
-            let provider = modules.get(&dependency.target).ok_or_else(|| {
-                ModuleGraphError::InternalMissingModule {
+            // Looked up for its own sake: a dependency naming a module the graph does not hold
+            // is an internal inconsistency, and saying so here is clearer than the missing-export
+            // error the check below would otherwise produce.
+            if !modules.contains_key(&dependency.target) {
+                return Err(ModuleGraphError::InternalMissingModule {
                     path: dependency.target.clone(),
-                }
-            })?;
-            if !provider
-                .program
-                .exports
-                .iter()
-                .any(|export| export.exported == import.imported)
+                });
+            }
+            // A namespace import names no export, so there is nothing to check: it takes
+            // whatever the provider has, including nothing.
+            if import.imported != kiln_ir::NAMESPACE_IMPORT
+                && !provides_export(modules, &dependency.target, &import.imported, 0)
             {
                 return Err(ModuleGraphError::MissingExport {
                     importer: importer_path.clone(),
@@ -677,6 +708,46 @@ fn validate_links(
         }
     }
     Ok(())
+}
+
+/// Whether `module` exports `name`, following `export * from` into the modules it forwards.
+///
+/// A star export is one entry naming a specifier, not a list of names, so this is where the two
+/// export tables meet. The graph is acyclic, but `depth` bounds the walk anyway: this runs before
+/// execution, and a link check that can hang is worse than one that gives up.
+fn provides_export(
+    modules: &BTreeMap<PathBuf, ModuleNode>,
+    module: &Path,
+    name: &str,
+    depth: usize,
+) -> bool {
+    const MAX_STAR_DEPTH: usize = 64;
+    let Some(node) = modules.get(module) else {
+        return false;
+    };
+    if node
+        .program
+        .exports
+        .iter()
+        .any(|export| export.exported == name)
+    {
+        return true;
+    }
+    if depth >= MAX_STAR_DEPTH {
+        return false;
+    }
+    node.program
+        .exports
+        .iter()
+        .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+        .any(|source| {
+            node.dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == source)
+                .is_some_and(|dependency| {
+                    provides_export(modules, &dependency.target, name, depth + 1)
+                })
+        })
 }
 
 #[cfg(test)]
@@ -827,6 +898,95 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["lib/constant main"]);
+    }
+
+    /// `import * as ns` binds one object holding every export, with keys in sorted order.
+    ///
+    /// Sorted because the specification orders a namespace object's keys and because the linker
+    /// holds exports in a hash map: without sorting, `Object.keys(ns)` would differ run to run.
+    #[test]
+    fn a_namespace_import_binds_every_export_as_one_object() {
+        let project = TempProject::new();
+        project.write(
+            "lib.js",
+            "export const one = 1;\n\
+             export function two() { return 2; }\n\
+             export default 'zero';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import * as lib from './lib.js';\n\
+             console.log(Object.keys(lib).join(','));\n\
+             console.log(lib.one, lib.two(), lib.default);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["default,one,two", "1 2 zero"]);
+    }
+
+    /// A named re-export forwards a provider's binding without the module ever naming it.
+    #[test]
+    fn named_re_exports_forward_without_a_local_binding() {
+        let project = TempProject::new();
+        project.write(
+            "base.js",
+            "export const alpha = 'a';\n\
+             export function beta() { return 'b'; }\n\
+             export default 'delta';",
+        );
+        project.write(
+            "middle.js",
+            "export { alpha, beta as gamma } from './base.js';\n\
+             export { default as delta } from './base.js';\n\
+             export * as everything from './base.js';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { alpha, gamma, delta, everything } from './middle.js';\n\
+             console.log(alpha, gamma(), delta, Object.keys(everything).join(','));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["a b delta alpha,beta,default"]);
+    }
+
+    /// `export * from` forwards the names the provider chooses, and never its default.
+    ///
+    /// A name the forwarding module exports itself wins, which is what a barrel file overriding
+    /// one entry depends on. The link check has to see through the star too, or importing a
+    /// forwarded name would be rejected before anything ran.
+    #[test]
+    fn a_star_re_export_forwards_names_but_not_the_default() {
+        let project = TempProject::new();
+        project.write(
+            "base.js",
+            "export const alpha = 'a';\n\
+             export const shared = 'base';\n\
+             export default 'delta';",
+        );
+        project.write(
+            "wide.js",
+            "export * from './base.js';\nexport const shared = 'wide';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import * as wide from './wide.js';\n\
+             import { alpha, shared } from './wide.js';\n\
+             console.log(alpha, shared);\n\
+             console.log(Object.keys(wide).join(','));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["a wide", "alpha,shared"]);
     }
 
     #[test]

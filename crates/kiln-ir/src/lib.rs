@@ -483,6 +483,20 @@ pub struct ImportBinding {
     pub local_slot: u32,
 }
 
+/// The `imported` name an `import * as ns` binding carries.
+///
+/// A sentinel rather than a flag on [`ImportBinding`]: the linker already looks a name up in the
+/// provider's exports, and a name no export can have keeps that one lookup doing all the work.
+pub const NAMESPACE_IMPORT: &str = "*namespace*";
+
+/// The prefix of the export name a `export * from "./m"` compiles to, followed by the specifier.
+///
+/// A module's export table is fixed when it compiles and the provider's is not, so `export *`
+/// cannot be listed as names here. It is recorded as one export whose name says where to look,
+/// and the linker -- which does have both tables -- expands it. The prefix carries characters no
+/// exported name can, so it can never be mistaken for one.
+pub const STAR_REEXPORT_PREFIX: &str = "*star*";
+
 /// A provider-visible name backed by one module-scope local slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportBinding {
@@ -559,13 +573,9 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         let imported = match &import.imported {
             ImportName::Name(name) => name.clone(),
             ImportName::Default => "default".to_owned(),
-            ImportName::Namespace => {
-                compiler.error(
-                    Some(import.span),
-                    format!("namespace import `{}` is not supported yet", import.local),
-                );
-                continue;
-            }
+            // `import * as ns` asks for every export at once. The name carries characters an
+            // identifier cannot, so it can never collide with a real export.
+            ImportName::Namespace => NAMESPACE_IMPORT.to_owned(),
         };
         if let Some(local_slot) = compiler.declare_import(&import.local, import.span) {
             imports.push(ImportBinding {
@@ -577,11 +587,67 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         }
     }
 
+    // `export { x } from "./m"` is an import the module never names plus an export of what it
+    // brought in. Desugaring it here rather than teaching the linker a third kind of export
+    // means the import path and the local-export path each stay the only one of their kind.
+    //
+    // The value is read once, when the provider finishes, which is where every other export is
+    // read too. A genuinely live re-export -- one that shows a later reassignment in the
+    // provider -- needs exported cells rather than exported values, and is a separate change.
+    let mut reexport_slots: HashMap<usize, u32> = HashMap::new();
+    let mut star_exports: Vec<ExportBinding> = Vec::new();
+    for (index, export) in module.exports.iter().enumerate() {
+        if export.type_only {
+            continue;
+        }
+        let (source, imported) = match &export.origin {
+            ExportOrigin::ReExport { source, imported } => (
+                source,
+                match imported {
+                    ImportName::Name(name) => name.clone(),
+                    ImportName::Default => "default".to_owned(),
+                    ImportName::Namespace => NAMESPACE_IMPORT.to_owned(),
+                },
+            ),
+            ExportOrigin::NamespaceReExport { source } | ExportOrigin::Star { source } => {
+                (source, NAMESPACE_IMPORT.to_owned())
+            }
+            _ => continue,
+        };
+        // A name no program can write, and one per re-export, so two of them from the same
+        // module do not share a slot.
+        let local = format!("*reexport{index}*");
+        let Some(local_slot) = compiler.declare_import(&local, export.span) else {
+            continue;
+        };
+        // `export *` names nothing, so the main loop below -- which needs an exported name --
+        // never sees it. Its export entry is made here instead, naming the source.
+        if let ExportOrigin::Star { source } = &export.origin {
+            star_exports.push(ExportBinding {
+                exported: format!("{STAR_REEXPORT_PREFIX}{source}"),
+                local_slot,
+            });
+        } else {
+            reexport_slots.insert(index, local_slot);
+        }
+        imports.push(ImportBinding {
+            source: source.clone(),
+            imported,
+            local,
+            local_slot,
+        });
+    }
+
     compiler.box_captured_imports();
     compiler.compile_body(module);
 
-    let mut exports = Vec::new();
-    for export in module.exports.iter().filter(|export| !export.type_only) {
+    let mut exports = star_exports;
+    for (index, export) in module
+        .exports
+        .iter()
+        .enumerate()
+        .filter(|(_, export)| !export.type_only)
+    {
         let Some(exported) = export.exported.as_ref().map(ExportName::as_str) else {
             if !matches!(export.origin, ExportOrigin::Star { .. }) {
                 compiler.error(Some(export.span), "runtime export has no exported name");
@@ -599,22 +665,27 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
                     format!("export `{exported}` refers to missing local `{local}`"),
                 ),
             },
-            ExportOrigin::DefaultExpression => compiler.error(
-                Some(export.span),
-                "default expression exports are not supported yet",
-            ),
-            ExportOrigin::ReExport { source, .. } => compiler.error(
-                Some(export.span),
-                format!("re-export from `{source}` is not supported yet"),
-            ),
-            ExportOrigin::Star { source } => compiler.error(
-                Some(export.span),
-                format!("star re-export from `{source}` is not supported yet"),
-            ),
-            ExportOrigin::NamespaceReExport { source } => compiler.error(
-                Some(export.span),
-                format!("namespace re-export from `{source}` is not supported yet"),
-            ),
+            ExportOrigin::DefaultExpression => {
+                match compiler.resolve_module_local(kiln_hir::DEFAULT_EXPORT_LOCAL) {
+                    Some(local_slot) => exports.push(ExportBinding {
+                        exported: exported.to_owned(),
+                        local_slot,
+                    }),
+                    None => {
+                        compiler.error(Some(export.span), "`export default` has no value to export")
+                    }
+                }
+            }
+            ExportOrigin::ReExport { .. } | ExportOrigin::NamespaceReExport { .. } => {
+                if let Some(local_slot) = reexport_slots.get(&index) {
+                    exports.push(ExportBinding {
+                        exported: exported.to_owned(),
+                        local_slot: *local_slot,
+                    });
+                }
+            }
+            // Handled above: a star export has no exported name, so control never reaches here.
+            ExportOrigin::Star { .. } => {}
             ExportOrigin::Unsupported { description, .. } => compiler.error(
                 Some(export.span),
                 format!("unsupported export: {description}"),
@@ -993,9 +1064,14 @@ impl Compiler {
             }
             StatementKind::Return(value) => self.return_statement(value.as_ref(), statement.span),
             StatementKind::Class(class) => self.class_declaration(class),
-            StatementKind::ExportDefault(_) => self.error(
-                Some(statement.span),
-                "default expression exports are not supported yet",
+            // `export default <expression>` has no name in the source, so it binds the reserved
+            // one the module record already uses for an anonymous default. Everything after it
+            // -- the export table, the linker -- then sees an ordinary local export.
+            StatementKind::ExportDefault(expression) => self.variable(
+                VariableKind::Const,
+                kiln_hir::DEFAULT_EXPORT_LOCAL,
+                Some(expression),
+                statement.span,
             ),
             StatementKind::Unsupported { feature } => self.error(
                 Some(statement.span),

@@ -91,3 +91,14 @@ if [[ $KILN_CI_EXPORTS_STDOUT != "$KILN_CI_EXPORTS_EXPECTED" ]]; then
 	printf 'expected: %s\nactual: %s\n' "$KILN_CI_EXPORTS_EXPECTED" "$KILN_CI_EXPORTS_STDOUT" >&2
 	exit 1
 fi
+
+# Every forwarding form: a named re-export, a rename, the default under a new name, a namespace,
+# and a star whose names lose to one the forwarding module exports itself.
+KILN_CI_REEXPORTS_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/exports/via.ts)"
+KILN_CI_REEXPORTS_EXPECTED=$'1cm 4 0cm box 3cm\nmm metric\nBox,default,describe,double\ntrue'
+if [[ $KILN_CI_REEXPORTS_STDOUT != "$KILN_CI_REEXPORTS_EXPECTED" ]]; then
+	echo "a re-export forwarded the wrong binding" >&2
+	printf 'expected: %s\nactual: %s\n' "$KILN_CI_REEXPORTS_EXPECTED" "$KILN_CI_REEXPORTS_STDOUT" >&2
+	exit 1
+fi

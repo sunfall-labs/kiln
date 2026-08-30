@@ -861,6 +861,13 @@ impl ExportName {
     }
 }
 
+/// The module-scope local an anonymous or expression `export default` binds.
+///
+/// It carries characters an identifier cannot, so nothing a program writes can collide with it,
+/// and it is the same name a module record uses for an anonymous default declaration -- which is
+/// what lets `export default function () {}` and `export default 1 + 1` share one path.
+pub const DEFAULT_EXPORT_LOCAL: &str = "*default*";
+
 /// Where an exported binding comes from. These forms are distinct in ECMAScript and must remain
 /// distinct until graph linking; collapsing them loses live-binding and ambiguity semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]

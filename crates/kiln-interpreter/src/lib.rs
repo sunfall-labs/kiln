@@ -1593,6 +1593,38 @@ pub fn execute<H: HostOps + ?Sized>(
     })
 }
 
+/// The object `import * as ns` binds: one property per export of the provider.
+///
+/// Built by the linker rather than by the module itself, because the module does not know it is
+/// being imported this way. Frozen, which is what a module namespace is -- assigning to one is a
+/// TypeError in the specification and silently ignored here, as every frozen object's writes are.
+pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> Value {
+    let mut data = ObjectData::default();
+    for (name, value) in exports {
+        data.set(&name, value);
+    }
+    data.freeze();
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// The own properties of a namespace object, in the order it holds them.
+///
+/// The inverse of [`namespace_object`], for the linker expanding a `export * from` entry back
+/// into the names it stands for.
+pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
+    let Value::Object(object) = value else {
+        return Vec::new();
+    };
+    object
+        .borrow()
+        .entries()
+        .filter_map(|(name, property)| match property {
+            Property::Value(value) => Some((name.to_owned(), value.clone())),
+            Property::Accessor { .. } => None,
+        })
+        .collect()
+}
+
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
 ///
 /// `import_values` is ordered exactly like [`ModuleProgram::imports`]. Each value is installed in
