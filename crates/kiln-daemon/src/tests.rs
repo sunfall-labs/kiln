@@ -745,6 +745,7 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
     engine.set_source(file, "console.log('old');\n".into());
     let prepared = prepare_run(
         &mut engine,
+        None,
         path,
         fixture.dir.to_string_lossy().into_owned(),
     )
@@ -2335,6 +2336,65 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
         panic!("expected project response");
     };
     assert_eq!(project.modules, 1);
+}
+
+/// A cache sweep is the one request that can delete a file, so it is worth proving over a real
+/// socket that `--dry-run` reaches the daemon as a dry run and that the answer is a report rather
+/// than an error, without a source view anywhere in the exchange.
+#[test]
+fn cache_gc_sweeps_over_the_socket_without_disturbing_the_source_set() {
+    let fixture = Fixture::started();
+    let shard = fixture.dir.join(".kiln/cache/generated-c/aa");
+    std::fs::create_dir_all(&shard).expect("create cache shard");
+    let record = shard.join("a".repeat(64));
+    std::fs::write(&record, vec![b'x'; 2048]).expect("seed a cache record");
+
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: "gc.js".into(),
+            text: "export const a = 1;\n".into(),
+        })
+        .expect("set source");
+    let Response::Stats(before) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats");
+    };
+
+    let response = client
+        .raw_request(&Request::CacheGc {
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            dry_run: true,
+        })
+        .expect("cache gc");
+    match response {
+        Response::CacheSwept(summary) => {
+            assert!(summary.dry_run);
+            assert_eq!(summary.layers.len(), 1, "{summary:?}");
+            assert_eq!(summary.layers[0].records_scanned, 1, "{summary:?}");
+            assert_eq!(
+                summary.cache_root,
+                fixture.dir.join(".kiln/cache").to_string_lossy()
+            );
+        }
+        // The sweep reaches the cache through the native builder, so a machine with no C
+        // compiler cannot answer this request at all. That is worth reporting, not asserting.
+        Response::Error { message } if message.contains("no supported C compiler") => {
+            eprintln!("skipping cache gc integration: {message}");
+            return;
+        }
+        other => panic!("unexpected cache gc response: {other:?}"),
+    }
+
+    assert!(record.exists(), "a dry run must not delete a record");
+    let Response::Stats(after) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats");
+    };
+    assert_eq!(
+        after.revision, before.revision,
+        "a sweep is not a source event"
+    );
 }
 
 #[test]

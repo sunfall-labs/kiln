@@ -48,7 +48,15 @@ impl OneShot {
             Error::Daemon(format!("cannot start an in-process engine: {source}"))
         })?;
         let stop = daemon.shutdown_handle();
-        let serving = std::thread::spawn(move || daemon.serve());
+        // Built rather than `spawn`ed, for the stack: a default 2 MiB thread overflows on an
+        // ordinary project, and a stack overflow aborts the process rather than reporting.
+        // See `kiln_daemon::SERVE_STACK_BYTES`.
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .map_err(|source| {
+                Error::Daemon(format!("cannot start an in-process engine: {source}"))
+            })?;
 
         // `bind` already returned, so the socket is accepting: no polling needed here.
         match DaemonClient::connect(&socket).and_then(|mut client| {
@@ -99,7 +107,9 @@ impl Drop for OneShot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{SourceResponse, SyncCommit};
     use crate::commands;
+    use kiln_proto::{PackageResolution, ResolutionMap, SourceHash, source_digest};
 
     #[test]
     fn concurrent_one_shot_sessions_have_private_socket_directories() {
@@ -170,6 +180,86 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert_eq!(updated.text, "43\n");
         assert_eq!(updated.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn daemon_replays_the_pinned_package_target_after_the_manifest_disappears() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-pinned-package-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let package = fixture.join("node_modules/pkg");
+        std::fs::create_dir_all(&package).expect("create package fixture");
+        let source = fixture.join("main.js");
+        let target = package.join("index.js");
+        let manifest = package.join("package.json");
+        let source_text = "import { answer } from 'pkg'; console.log(answer);\n";
+        let target_text = "export const answer = 42;\n";
+        let manifest_text = r#"{"exports":"./index.js"}"#;
+        std::fs::write(&source, source_text).expect("write entry");
+        std::fs::write(&target, target_text).expect("write package entry");
+        std::fs::write(&manifest, manifest_text).expect("write package manifest");
+
+        let root = fixture.canonicalize().expect("canonical root");
+        let source = source.canonicalize().expect("canonical entry");
+        let target = target.canonicalize().expect("canonical target");
+        let manifest = manifest.canonicalize().expect("canonical manifest");
+        let source_path = source.to_string_lossy().into_owned();
+        let target_path = target.to_string_lossy().into_owned();
+        let mut session = OneShot::start().expect("start an in-process engine");
+        let plan = session
+            .begin_sync(
+                vec![
+                    SourceHash {
+                        path: source_path.clone(),
+                        hash: source_digest(source_text),
+                    },
+                    SourceHash {
+                        path: target_path.clone(),
+                        hash: source_digest(target_text),
+                    },
+                ],
+                ResolutionMap::new(
+                    root.to_string_lossy(),
+                    vec![PackageResolution {
+                        importer: source_path.clone(),
+                        specifier: "pkg".to_owned(),
+                        target: target_path.clone(),
+                        package_json: manifest.to_string_lossy().into_owned(),
+                        package_json_hash: source_digest(manifest_text),
+                    }],
+                )
+                .expect("valid resolution map"),
+            )
+            .expect("begin sync");
+        for path in plan.paths {
+            let text = if path == source_path {
+                source_text
+            } else if path == target_path {
+                target_text
+            } else {
+                panic!("unexpected needed path {path}");
+            };
+            session
+                .stage_source(plan.sync_id, path, text.to_owned())
+                .expect("stage source");
+        }
+        let SyncCommit::Synced(view) = session.commit_sync(plan.sync_id).expect("commit sync")
+        else {
+            panic!("fresh sync became stale");
+        };
+
+        std::fs::remove_file(&manifest).expect("remove manifest after commit");
+        let SourceResponse::Ready(summary) = session
+            .run_at_view(source_path, root.to_string_lossy().into_owned(), view)
+            .expect("run pinned graph")
+        else {
+            panic!("fresh source view became stale");
+        };
+        assert!(summary.succeeded, "{:?}", summary.diagnostics);
+        assert_eq!(summary.stdout, "42\n");
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }

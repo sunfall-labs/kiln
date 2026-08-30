@@ -282,7 +282,10 @@ mod tests {
         let socket = dir.join("daemon.sock");
         let daemon = kiln_daemon::Daemon::bind(&socket).expect("bind the test daemon");
         let stop = daemon.shutdown_handle();
-        let serving = std::thread::spawn(move || daemon.serve());
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .expect("spawn the in-process daemon");
 
         let mut client = DaemonClient::connect(&socket).expect("connect");
         assert_eq!(

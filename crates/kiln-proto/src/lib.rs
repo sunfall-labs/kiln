@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -385,6 +385,15 @@ pub enum Request {
     Project {
         source_view: SourceView,
     },
+    /// Sweep this project's artifact cache back under its byte budget.
+    ///
+    /// Carries no source view: the cache is addressed by content, so a sweep is independent of
+    /// the authoritative source set and can never be made stale by an edit. `dry_run` asks for
+    /// the report a sweep would produce without unlinking anything.
+    CacheGc {
+        project_root: String,
+        dry_run: bool,
+    },
     /// Recompute counters, so callers can assert what was and was not invalidated.
     Stats,
     /// Reset all counters without discarding cached values.
@@ -411,6 +420,8 @@ pub enum Response {
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
     Project(ProjectSummary),
+    /// What one [`Request::CacheGc`] observed and did.
+    CacheSwept(CacheGcSummary),
     Stats(Stats),
     /// The paths from a [`Request::Sync`] whose contents the daemon still needs.
     Needed {
@@ -619,6 +630,48 @@ pub struct ProjectSummary {
     pub interface_hash: u64,
 }
 
+/// What one `kiln cache gc` did to one project's artifact cache.
+///
+/// The cache is layered, and only writable layers are swept, so the per-layer reports are kept
+/// separate rather than summed: a total would hide which layer is the one under pressure.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheGcSummary {
+    pub cache_root: String,
+    /// True when nothing was unlinked and the numbers describe what a real sweep would do.
+    pub dry_run: bool,
+    /// Bytes one layer was allowed to keep.
+    pub budget_bytes: u64,
+    pub layers: Vec<CacheLayerSweep>,
+}
+
+/// One layer's sweep, mirroring the cache crate's own report.
+///
+/// Counts are `u64` rather than `usize` so the wire form does not depend on the pointer width of
+/// whichever peer encoded it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheLayerSweep {
+    pub layer_index: u64,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub records_scanned: u64,
+    pub records_evicted: u64,
+    /// Of those, records evicted because no key this toolchain can build addresses them.
+    pub identity_stale_evicted: u64,
+    pub records_raced: u64,
+    pub records_within_grace: u64,
+    pub temporaries_skipped: u64,
+    pub orphan_markers_removed: u64,
+    pub unrecognized_entries: u64,
+    /// True when the layer is still over budget because every remaining record is protected.
+    pub over_budget_after_sweep: bool,
+}
+
+impl CacheLayerSweep {
+    pub const fn bytes_reclaimed(&self) -> u64 {
+        self.bytes_before.saturating_sub(self.bytes_after)
+    }
+}
+
 /// Per-query recompute counts. The point of the whole design is that these stay flat when
 /// an edit does not cross an interface boundary, so they are a first-class observable, not
 /// debug output: the tests and the timing harness both assert on them.
@@ -641,8 +694,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v17_sync_and_source_view_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 17);
+    fn protocol_v18_sync_source_view_and_cache_gc_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 18);
 
         let requests = [
             (
@@ -693,6 +746,13 @@ mod tests {
                 },
                 serde_json::json!({"Project": {"source_view": 12}}),
             ),
+            (
+                Request::CacheGc {
+                    project_root: "/project".to_owned(),
+                    dry_run: true,
+                },
+                serde_json::json!({"CacheGc": {"project_root": "/project", "dry_run": true}}),
+            ),
         ];
 
         for (request, expected) in requests {
@@ -731,6 +791,46 @@ mod tests {
                     current: SourceView(13),
                 },
                 serde_json::json!({"StaleSourceView": {"current": 13}}),
+            ),
+            (
+                Response::CacheSwept(CacheGcSummary {
+                    cache_root: "/project/.kiln/cache".to_owned(),
+                    dry_run: true,
+                    budget_bytes: 2_147_483_648,
+                    layers: vec![CacheLayerSweep {
+                        layer_index: 0,
+                        bytes_before: 900,
+                        bytes_after: 400,
+                        records_scanned: 3,
+                        records_evicted: 1,
+                        identity_stale_evicted: 0,
+                        records_raced: 0,
+                        records_within_grace: 1,
+                        temporaries_skipped: 0,
+                        orphan_markers_removed: 0,
+                        unrecognized_entries: 0,
+                        over_budget_after_sweep: false,
+                    }],
+                }),
+                serde_json::json!({"CacheSwept": {
+                    "cache_root": "/project/.kiln/cache",
+                    "dry_run": true,
+                    "budget_bytes": 2_147_483_648u64,
+                    "layers": [{
+                        "layer_index": 0,
+                        "bytes_before": 900,
+                        "bytes_after": 400,
+                        "records_scanned": 3,
+                        "records_evicted": 1,
+                        "identity_stale_evicted": 0,
+                        "records_raced": 0,
+                        "records_within_grace": 1,
+                        "temporaries_skipped": 0,
+                        "orphan_markers_removed": 0,
+                        "unrecognized_entries": 0,
+                        "over_budget_after_sweep": false
+                    }]
+                }}),
             ),
         ];
 

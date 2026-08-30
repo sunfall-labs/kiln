@@ -7,8 +7,8 @@ use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
-    ScalarValueSummary, Stats,
+    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
+    RunSummary, ScalarValueSummary, Stats,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             Next::Continue,
         );
     }
-    dispatch_source(engine, request)
+    dispatch_source(engine, None, request)
 }
 
 /// Dispatch a source-consuming request after the server has checked its SourceView while holding
@@ -78,6 +78,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
 /// exposed to callers.
 pub(crate) fn dispatch_source<E: QueryEngine>(
     engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
     request: Request,
 ) -> (Response, Next) {
     match request {
@@ -124,12 +125,15 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             path,
             project_root,
             source_view: _,
-        } => (check(engine, path, project_root), Next::Continue),
+        } => (
+            check(engine, resolutions, path, project_root),
+            Next::Continue,
+        ),
         Request::Run {
             path,
             project_root,
             source_view: _,
-        } => (run(engine, path, project_root), Next::Continue),
+        } => (run(engine, resolutions, path, project_root), Next::Continue),
         Request::NativeBuild {
             path,
             project_root,
@@ -137,7 +141,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root) {
                 Ok(Some(graph)) => native_build_graph(graph, path, project_root, output, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
@@ -162,7 +166,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root) {
                 Ok(Some(graph)) if graph.module_count() > 1 => {
                     native_build_shared_graph(graph, path, project_root, output, profile)
                 }
@@ -182,7 +186,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root) {
                 Ok(Some(graph)) => native_run_graph(graph, path, project_root, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => native_run_program(program, path, project_root, profile),
@@ -217,6 +221,13 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             )
         }
 
+        // The cache is content addressed, so a sweep neither reads nor advances the source set.
+        // It needs no engine, and the server routes it off the engine lock for that reason.
+        Request::CacheGc {
+            project_root,
+            dry_run,
+        } => (cache_gc(&project_root, dry_run), Next::Continue),
+
         Request::Stats => (Response::Stats(stats(engine)), Next::Continue),
 
         Request::ResetStats => {
@@ -233,7 +244,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
 /// Reading from disk only when the file has no source yet is what makes an editor-driven
 /// `SetSource` authoritative: once a client has pushed unsaved buffer contents, later `Check`s
 /// must see the buffer, not the stale bytes on disk.
-fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
+fn check<E: QueryEngine>(
+    engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
+    path: String,
+    project_root: String,
+) -> Response {
     let entry = resolve_source_path(&path, &project_root);
     let source = match entry.as_deref() {
         Some(entry) => ensure_canonical_source(engine, &path, entry, &project_root),
@@ -261,13 +277,15 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
         })
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
-        entry.and_then(|entry| match build_graph(engine, &entry, &project_root) {
-            Ok(graph) => graph.resolved_export_names(&entry),
-            Err(error) => {
-                diagnostics.extend(module_graph_diagnostics(error));
-                None
-            }
-        })
+        entry.and_then(
+            |entry| match build_graph(engine, resolutions, &entry, &project_root) {
+                Ok(graph) => graph.resolved_export_names(&entry),
+                Err(error) => {
+                    diagnostics.extend(module_graph_diagnostics(error));
+                    None
+                }
+            },
+        )
     } else {
         None
     };
@@ -286,6 +304,7 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
 /// Prepare one interpreted run from a single engine snapshot.
 pub(crate) fn prepare_run<E: QueryEngine>(
     engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
     path: String,
     project_root: String,
 ) -> Result<PreparedRun, String> {
@@ -293,7 +312,7 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
-            graph: build_graph(engine, &entry, &project_root),
+            graph: build_graph(engine, resolutions, &entry, &project_root),
             path,
             file,
             revision: engine.revision().0,
@@ -441,8 +460,13 @@ fn wait_for_execution_gate(key: &str) {
     }
 }
 
-fn run<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
-    match prepare_run(engine, path, project_root) {
+fn run<E: QueryEngine>(
+    engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
+    path: String,
+    project_root: String,
+) -> Response {
+    match prepare_run(engine, resolutions, path, project_root) {
         Ok(prepared) => execute_prepared_run(prepared),
         Err(message) => Response::Error { message },
     }
@@ -490,16 +514,25 @@ fn execute_graph(
 
 fn build_graph<E: QueryEngine>(
     engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
     entry: &Path,
     project_root: &str,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
-    let resolver =
-        kiln_module_resolver::NodePackageResolver::new(project_root).map_err(|error| {
-            kiln_module_graph::ModuleGraphError::Resolve {
-                importer: PathBuf::new(),
-                specifier: String::new(),
-                error,
-            }
+    let entries = resolutions
+        .into_iter()
+        .flat_map(|map| &map.entries)
+        .map(|entry| {
+            (
+                PathBuf::from(&entry.importer),
+                entry.specifier.clone(),
+                PathBuf::from(&entry.target),
+            )
+        });
+    let resolver = kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
+        .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
+            importer: PathBuf::new(),
+            specifier: String::new(),
+            error,
         })?;
     ModuleGraph::build_with_policy(entry, resolver, |module_path| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
@@ -567,6 +600,7 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
 
 pub(crate) fn native_graph<E: QueryEngine>(
     engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
     path: &str,
     project_root: &str,
 ) -> Result<Option<ModuleGraph>, String> {
@@ -575,7 +609,7 @@ pub(crate) fn native_graph<E: QueryEngine>(
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    build_graph(engine, &entry, project_root)
+    build_graph(engine, resolutions, &entry, project_root)
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -657,6 +691,52 @@ fn scalar_value_summary(value: &kiln_interpreter::Value) -> Option<ScalarValueSu
     }
 }
 
+/// Answer a finished executable build, accounting for what it published into the cache.
+///
+/// Every native build path funnels its report through here, so the opportunistic sweep is paced
+/// by everything the daemon publishes rather than by whichever entry point a client happened to
+/// use. The accounting runs after the build is complete and only ever spawns a sweep on another
+/// thread, so it adds nothing to the latency of the response it precedes.
+fn native_built(project_root: &Path, report: kiln_native::NativeBuildReport) -> Response {
+    crate::cache_gc::record_publication(project_root, crate::cache_gc::published_bytes(&report));
+    Response::NativeBuilt(native_summary(report))
+}
+
+/// Answer a finished shared-library build, accounting for what it published into the cache.
+fn native_shared_built(
+    project_root: &Path,
+    report: kiln_native::NativeSharedLibraryReport,
+) -> Response {
+    crate::cache_gc::record_publication(
+        project_root,
+        crate::cache_gc::published_shared_bytes(&report),
+    );
+    Response::NativeSharedBuilt(native_shared_summary(report))
+}
+
+/// Answer a finished native run, accounting for what its build published into the cache.
+fn native_ran(project_root: &Path, report: kiln_native::NativeRunReport) -> Response {
+    crate::cache_gc::record_publication(
+        project_root,
+        crate::cache_gc::published_bytes(&report.build),
+    );
+    Response::NativeRan(NativeRunSummary {
+        exit_code: report.exit_code,
+        stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
+        scalar_value: report.result.map(native_scalar_value_summary),
+        build: native_summary(report.build),
+    })
+}
+
+/// Sweep one project's artifact cache and report what a sweep did, or would do.
+pub(crate) fn cache_gc(project_root: &str, dry_run: bool) -> Response {
+    match crate::cache_gc::sweep(Path::new(project_root), dry_run) {
+        Ok(summary) => Response::CacheSwept(summary),
+        Err(message) => Response::Error { message },
+    }
+}
+
 pub(crate) fn native_build_program(
     program: kiln_ir::Program,
     path: String,
@@ -692,7 +772,7 @@ pub(crate) fn native_build_program(
             profile: native_profile(profile),
         },
     ) {
-        Ok(report) => Response::NativeBuilt(native_summary(report)),
+        Ok(report) => native_built(&project_root, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -724,7 +804,7 @@ pub(crate) fn native_build_shared_program(
             Err(message) => return Response::Error { message },
         };
     match builder.build_shared_library(&program, &options) {
-        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
+        Ok(report) => native_shared_built(Path::new(&project_root), report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -744,7 +824,7 @@ pub(crate) fn native_build_shared_graph(
             Err(message) => return Response::Error { message },
         };
     match builder.build_shared_graph(&graph, &options) {
-        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
+        Ok(report) => native_shared_built(Path::new(&project_root), report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -844,7 +924,7 @@ pub(crate) fn native_build_graph(
             profile: native_profile(profile),
         },
     ) {
-        Ok(report) => Response::NativeBuilt(native_summary(report)),
+        Ok(report) => native_built(&project_root, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -875,13 +955,7 @@ pub(crate) fn native_run_program(
             profile: native_profile(profile),
         },
     ) {
-        Ok(report) => Response::NativeRan(NativeRunSummary {
-            exit_code: report.exit_code,
-            stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
-            scalar_value: report.result.map(native_scalar_value_summary),
-            build: native_summary(report.build),
-        }),
+        Ok(report) => native_ran(&project_root, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -912,13 +986,7 @@ pub(crate) fn native_run_graph(
             profile: native_profile(profile),
         },
     ) {
-        Ok(report) => Response::NativeRan(NativeRunSummary {
-            exit_code: report.exit_code,
-            stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
-            scalar_value: report.result.map(native_scalar_value_summary),
-            build: native_summary(report.build),
-        }),
+        Ok(report) => native_ran(&project_root, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },

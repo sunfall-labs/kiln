@@ -4744,21 +4744,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::IterableToArray => {
                     let source = self.pop(current)?;
-                    // An array is already the right shape; anything else goes through the
-                    // protocol, so `const [a, b] = someSet` binds what iterating it would yield.
+                    // Everything goes through the iteration protocol, an array included. An
+                    // array is already the shape the pattern wants, but destructuring is defined
+                    // as `GetIterator` and the difference is observable: after
+                    // `delete Array.prototype[Symbol.iterator]`, `var [x] = [1]` is a TypeError,
+                    // and a replaced array iterator is what the pattern must bind from. Reading
+                    // the elements directly answered from the array itself and could see
+                    // neither.
+                    //
                     // The walk has to go through `catchable`: `var [a] = null` is a `TypeError`
                     // the program is meant to catch, and letting the error out of the loop
                     // aborted the whole module -- taking every unrelated test in the file with
                     // it, and doing so where no `try` could see it.
-                    let items = match &source {
-                        Value::Array(items) => dense_items(&items.borrow()),
-                        other => {
-                            let drained = self.drain_iterable(other, current);
-                            let Some(items) = self.catchable(drained, current)? else {
-                                continue;
-                            };
-                            items
-                        }
+                    let drained = self.drain_iterable(&source, current);
+                    let Some(items) = self.catchable(drained, current)? else {
+                        continue;
                     };
                     self.stack.push(Value::Array(ArrayData::new(items)));
                 }
@@ -4771,21 +4771,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             value: target.type_name(),
                         });
                     };
-                    // Spread consumes any iterable, not only an array, so it goes through the
-                    // protocol for anything else -- the same rule `for-of` follows.
-                    match &source {
-                        Value::Array(source) => {
-                            let appended = dense_items(&source.borrow());
-                            items.borrow_mut().extend(appended);
-                        }
-                        other => {
-                            let drained = self.drain_iterable(other, current);
-                            let Some(collected) = self.catchable(drained, current)? else {
-                                continue;
-                            };
-                            items.borrow_mut().extend(collected);
-                        }
-                    }
+                    // Spread consumes any iterable through the protocol, an array included:
+                    // `[...arr]` is defined as `GetIterator(arr)`, so a removed or replaced
+                    // `Array.prototype[Symbol.iterator]` decides what the spread produces --
+                    // or that it throws. Copying an array's elements directly answered from the
+                    // array and could see neither.
+                    let drained = self.drain_iterable(&source, current);
+                    let Some(collected) = self.catchable(drained, current)? else {
+                        continue;
+                    };
+                    items.borrow_mut().extend(collected);
                     self.stack.push(target);
                 }
                 Instruction::GetComputed => {
@@ -6418,8 +6413,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut data = ObjectData::default();
                 for entry in self.drain_iterable(&source, instruction)? {
-                    let key = self.computed(&entry, &Value::Number(0.0));
-                    let value = self.computed(&entry, &Value::Number(1.0));
+                    // Both halves of an entry are ordinary `Get`s on whatever the iterator
+                    // handed back, so an accessor at `0` or `1` runs and may throw.
+                    let key = self.read_computed(&entry, &Value::Number(0.0), instruction)?;
+                    let value = self.read_computed(&entry, &Value::Number(1.0), instruction)?;
                     data.set(&key.property_key(), value);
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
@@ -7741,20 +7738,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut items = match &source {
             // Already the right shape, and copying beats walking an iterator to the same elements.
             Value::Array(items) => dense_items(&items.borrow()),
-            other
-                if self
-                    .property(other, WellKnown::Iterator.property_key())
-                    .is_nullish() =>
-            {
-                let length = match self.property(other, "length") {
-                    Value::Number(length) if length >= 1.0 => length as usize,
-                    _ => 0,
-                };
-                (0..length)
-                    .map(|index| self.computed(&source, &Value::Number(index as f64)))
-                    .collect()
+            _ => {
+                // `Symbol.iterator` is read exactly once and then branched on. Reading it to
+                // decide between the two shapes and again to call it would run a user's getter
+                // twice -- and every one of these reads is an ordinary `Get`, so an accessor
+                // standing in front of it has to run and its throw has to propagate.
+                let method =
+                    self.read_property(&source, WellKnown::Iterator.property_key(), instruction)?;
+                if method.is_nullish() {
+                    let length = match self.read_property(&source, "length", instruction)? {
+                        Value::Number(length) if length >= 1.0 => length as usize,
+                        _ => 0,
+                    };
+                    let mut collected = Vec::with_capacity(length.min(1024));
+                    for index in 0..length {
+                        collected.push(self.read_computed(
+                            &source,
+                            &Value::Number(index as f64),
+                            instruction,
+                        )?);
+                    }
+                    collected
+                } else {
+                    self.drain_with(&source, method, instruction)?
+                }
             }
-            other => self.drain_iterable(other, instruction)?,
         };
 
         if !map.is_nullish() {
@@ -7777,7 +7785,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<Vec<Value>, ExecutionError> {
-        let method = self.property(value, WellKnown::Iterator.property_key());
+        let method = self.read_property(value, WellKnown::Iterator.property_key(), instruction)?;
+        self.drain_with(value, method, instruction)
+    }
+
+    /// Walk an iterable to exhaustion, given the `Symbol.iterator` already read off it.
+    ///
+    /// Split from `drain_iterable` for the callers that had to read the method themselves to
+    /// decide whether to walk at all: `Symbol.iterator` may be an accessor, and asking for it a
+    /// second time would run that getter twice.
+    fn drain_with(
+        &mut self,
+        value: &Value,
+        method: Value,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
         // Said as "not iterable" rather than as "undefined is not a function": what the program
         // got wrong is the value it destructured or spread, and the missing method is an
         // implementation detail of finding that out.
@@ -7790,12 +7812,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         let mut collected = Vec::new();
         loop {
-            let next = self.property(&iterator, "next");
+            // Every read here is an ordinary `Get`, so an accessor in front of `next`, `done` or
+            // `value` runs and is allowed to throw. Reading them accessor-blind did not merely
+            // lose a value: a getter that throws is how a test says "stop", and swallowing it
+            // turned the walk into a loop that never ends and accumulates a value per step.
+            let next = self.read_property(&iterator, "next", instruction)?;
             let step = self.call_value(&next, iterator.clone(), Vec::new(), instruction)?;
-            if self.property(&step, "done").is_truthy() {
+            // A step that is not an object has no `done` to read, and treating its absence as
+            // "not done" is the same non-terminating walk by another route.
+            if !is_an_object(&step) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "iterator result {} is not an object",
+                        step.to_display_string()
+                    ),
+                });
+            }
+            if self.read_property(&step, "done", instruction)?.is_truthy() {
                 return Ok(collected);
             }
-            collected.push(self.property(&step, "value"));
+            collected.push(self.read_property(&step, "value", instruction)?);
             if collected.len() > self.limits.max_steps as usize {
                 return Err(ExecutionError::StepLimitExceeded {
                     steps: collected.len() as u64,
@@ -9408,9 +9444,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             for item in self.drain_iterable(&source, current)? {
                 let (key, value) = if is_map {
+                    // An entry's two halves are ordinary `Get`s: a `Map` seeded from entries an
+                    // accessor produces has to see what the getter answers, and stop if it throws.
                     (
-                        self.computed(&item, &Value::Number(0.0)),
-                        self.computed(&item, &Value::Number(1.0)),
+                        self.read_computed(&item, &Value::Number(0.0), current)?,
+                        self.read_computed(&item, &Value::Number(1.0), current)?,
                     )
                 } else {
                     (item, Value::Undefined)
@@ -9926,7 +9964,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // matches the C backend's exactly -- "string" or "default" -- so a program that branches
         // on it cannot tell the two engines apart. `Number(x)` passing "default" rather than
         // "number" is a shared inaccuracy, not a divergence, and is noted in NOTES.md.
-        let exotic = self.property(value, WellKnown::ToPrimitive.property_key());
+        let exotic =
+            self.read_property(value, WellKnown::ToPrimitive.property_key(), instruction)?;
         if matches!(
             exotic,
             Value::Function(_) | Value::Native(_) | Value::Callback(_)
@@ -9947,7 +9986,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ["valueOf", "toString"]
         };
         for name in order {
-            let method = self.property(value, name);
+            let method = self.read_property(value, name, instruction)?;
             if !matches!(
                 method,
                 Value::Function(_) | Value::Native(_) | Value::Callback(_)
@@ -10215,6 +10254,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && let Some(constructor) = intrinsic_constructor(target)
         {
             return constructor;
+        }
+        // An element, a typed-array slot and a string's code unit are storage rather than
+        // properties, and a name is how a pattern reaches one: `var { 0: v } = [7]` binds the
+        // element, not a property called "0". The named and computed spellings of one key cannot
+        // disagree about what they reach, so the named read routes to the same place.
+        if matches!(
+            target,
+            Value::Array(_) | Value::TypedArray(_) | Value::String(_)
+        ) && canonical_index(name).is_some()
+        {
+            return self.computed(target, &Value::String(name.to_owned()));
         }
         match target {
             // A `Temporal` value's fields and methods both come from its own table: `day` is a
@@ -14109,6 +14159,14 @@ fn prototype_of(value: &Value) -> Value {
         Value::Native(Native::PrototypeOf(_)) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::Object))
         }
+        // Each `Intl` instance links to its own service's prototype, and each of those to
+        // `Object.prototype`. Without the first link `Object.getPrototypeOf(new Intl.Collator())`
+        // is null and every method on it is found only because the value kind answers directly --
+        // which is a chain a program can see is missing.
+        Value::Intl(built) => Value::Native(Native::Intl(intl::Op::Prototype(built.service()))),
+        Value::Native(Native::Intl(intl::Op::Prototype(_) | intl::Op::Namespace)) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        }
         // The nine view constructors inherit from `%TypedArray%` rather than straight from
         // `Function.prototype`, which is the only way a program can name the abstract
         // constructor: `Object.getPrototypeOf(Int8Array)` is what every use of it starts from.
@@ -14556,13 +14614,25 @@ fn array_property(name: &str) -> Value {
 fn array_index(key: &Value) -> Option<usize> {
     let number = match key {
         Value::Number(value) => *value,
-        Value::String(text) => text.parse::<f64>().ok()?,
+        // A string reaches an element only in the one spelling that names it. `"01"`, `"1.0"`,
+        // `" 1"`, `"1e2"` and `"-0"` are ordinary named properties in JavaScript, and parsing
+        // them as numbers handed back an element the program never asked for.
+        Value::String(text) => return canonical_index(text),
         _ => return None,
     };
     if number < 0.0 || number.fract() != 0.0 || !number.is_finite() {
         return None;
     }
     Some(number as usize)
+}
+
+/// The element a property name reaches, if it is the canonical spelling of an index.
+///
+/// Canonical means the name is exactly what the index stringifies back to, which is the test the
+/// language uses to separate an element from a property that merely looks like one.
+fn canonical_index(name: &str) -> Option<usize> {
+    let index: usize = name.parse().ok()?;
+    (index.to_string() == name).then_some(index)
 }
 
 /// `Array.prototype.join` semantics: null and undefined become empty, everything else stringifies.

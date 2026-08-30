@@ -532,7 +532,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 };
                 let first = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let second = arguments.get(1).cloned().unwrap_or(Value::Undefined);
-                let a = self.coerce_temporal(kind, &first, &engine::Options::default(), instruction)?;
+                let a =
+                    self.coerce_temporal(kind, &first, &engine::Options::default(), instruction)?;
                 let b =
                     self.coerce_temporal(kind, &second, &engine::Options::default(), instruction)?;
                 let ordering = if kind == engine::Kind::Duration {

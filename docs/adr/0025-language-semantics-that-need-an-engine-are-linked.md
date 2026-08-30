@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted, unimplemented. The decision is recorded before the work because the work touches
-packaging, and packaging is where two people editing the same repository collide.
+Accepted and implemented for regular expressions and BigInt. ADR 0028 keeps the decision that these
+are linked runtime semantics rather than HostOps services, while folding the transitional provider
+archive into the complete shipped Rust runtime.
 
 ## Context
 
@@ -27,9 +28,9 @@ does not cover -- which is the one failure mode the whole three-corpus arrangeme
 prevent. `conformance/native` could not catch it either: it compares the two engines, and this
 would be the two engines being genuinely different.
 
-**Ask the host, through the HostOps ABI.** Cheap: the native runtime is already Rust (ADR 0018),
-so `regress` is already linked into the launcher, and a host operation would reach the very same
-engine the interpreter uses -- identical by construction rather than by testing.
+**Ask the host, through the HostOps ABI.** Technically cheap: ADR 0018's migration already links a
+Rust provider into native artifacts, so that provider can carry the same `regress` engine the
+interpreter uses -- identical by construction rather than by testing.
 
 It is still wrong. HostOps are *services of the environment*: write to stdout, read the clock,
 open a file. They are what an embedder implements, and the contract is deliberately tiny and

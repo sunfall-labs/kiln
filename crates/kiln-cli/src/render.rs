@@ -11,7 +11,8 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use kiln_proto::{
-    ModuleSummary, NativeBuildSummary, NativeSharedLibrarySummary, ProjectSummary, Stats,
+    CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeSharedLibrarySummary, ProjectSummary,
+    Stats,
 };
 
 /// Width of the indented label column, sized to the longest label ("implementation").
@@ -256,6 +257,128 @@ pub fn native_shared_build(source: &str, summary: &NativeSharedLibrarySummary) -
     out
 }
 
+/// `kiln cache gc` output.
+///
+/// A cache sweep is the one command here that deletes something, so the report is written to be
+/// read *before* trusting it: it names the directory it swept, says plainly when nothing was
+/// deleted, and reports what it declined to touch (records inside the grace window, in-flight
+/// temporaries, entries the cache does not recognize) as well as what it removed. A sweep that
+/// evicts nothing is the normal case and still prints, because "nothing to do" is the answer.
+pub fn cache_gc(summary: &CacheGcSummary) -> String {
+    let verb = if summary.dry_run {
+        "would evict"
+    } else {
+        "evicted"
+    };
+    let mut out = format!(
+        "cache gc {}{}\n",
+        summary.cache_root,
+        if summary.dry_run {
+            "  (dry run: nothing was deleted)"
+        } else {
+            ""
+        }
+    );
+    row(
+        &mut out,
+        "budget",
+        &format!("{} per layer", bytes(summary.budget_bytes)),
+    );
+    if summary.layers.is_empty() {
+        // Every layer is read-only, or there are none: a sweep only ever touches what this
+        // process owns, so there is nothing to report rather than nothing to do.
+        row(&mut out, "layers", "none writable");
+        return out;
+    }
+    for layer in &summary.layers {
+        let reclaimed = layer.bytes_reclaimed();
+        row(
+            &mut out,
+            &format!("layer {}", layer.layer_index),
+            &format!(
+                "{} of {} used ({})",
+                bytes(layer.bytes_after),
+                bytes(summary.budget_bytes),
+                if reclaimed == 0 {
+                    "nothing reclaimed".to_owned()
+                } else {
+                    format!(
+                        "{} reclaimed from {}",
+                        bytes(reclaimed),
+                        bytes(layer.bytes_before)
+                    )
+                }
+            ),
+        );
+        row(
+            &mut out,
+            "scanned",
+            &format!("{} records", layer.records_scanned),
+        );
+        row(
+            &mut out,
+            verb,
+            &format!(
+                "{} records ({} unreachable)",
+                layer.records_evicted, layer.identity_stale_evicted
+            ),
+        );
+        let mut kept = Vec::new();
+        if layer.records_within_grace > 0 {
+            kept.push(format!("{} within grace", layer.records_within_grace));
+        }
+        if layer.temporaries_skipped > 0 {
+            kept.push(format!("{} in flight", layer.temporaries_skipped));
+        }
+        if layer.unrecognized_entries > 0 {
+            kept.push(format!("{} unrecognized", layer.unrecognized_entries));
+        }
+        if !kept.is_empty() {
+            row(&mut out, "kept", &kept.join(", "));
+        }
+        if layer.orphan_markers_removed > 0 {
+            row(
+                &mut out,
+                "markers",
+                &format!("{} orphaned removed", layer.orphan_markers_removed),
+            );
+        }
+        if layer.records_raced > 0 {
+            row(
+                &mut out,
+                "raced",
+                &format!("{} already gone", layer.records_raced),
+            );
+        }
+        if layer.over_budget_after_sweep {
+            // Not a failure: everything left is either too new to touch or the shared runtime
+            // the cost ordering keeps for last. Saying so is better than a silent overshoot.
+            row(
+                &mut out,
+                "note",
+                "still over budget; every remaining record is protected",
+            );
+        }
+    }
+    out
+}
+
+/// Binary units, because a cache budget is a disk allocation and `du` reports the same way.
+fn bytes(value: u64) -> String {
+    const UNIT: f64 = 1024.0;
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    if value < 1024 {
+        return format!("{value} B");
+    }
+    let mut size = value as f64;
+    let mut unit = 0;
+    while size >= UNIT && unit + 1 < units.len() {
+        size /= UNIT;
+        unit += 1;
+    }
+    format!("{size:.1} {}", units[unit])
+}
+
 fn work_rows(out: &mut String, work: &Work) {
     row(out, "recomputed", &work.recomputed());
     if let Some(reused) = work.reused() {
@@ -331,6 +454,66 @@ mod tests {
             validated,
             early_cutoff: cutoff,
         }
+    }
+
+    fn sweep(dry_run: bool, evicted: u64, before: u64, after: u64) -> CacheGcSummary {
+        CacheGcSummary {
+            cache_root: "/project/.kiln/cache".to_owned(),
+            dry_run,
+            budget_bytes: 2 * 1024 * 1024 * 1024,
+            layers: vec![kiln_proto::CacheLayerSweep {
+                layer_index: 0,
+                bytes_before: before,
+                bytes_after: after,
+                records_scanned: 42,
+                records_evicted: evicted,
+                identity_stale_evicted: 0,
+                records_raced: 0,
+                records_within_grace: 3,
+                temporaries_skipped: 1,
+                orphan_markers_removed: 2,
+                unrecognized_entries: 0,
+                over_budget_after_sweep: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_dry_sweep_says_it_deleted_nothing_and_reports_in_the_conditional() {
+        let out = cache_gc(&sweep(true, 5, 900 * 1024 * 1024, 700 * 1024 * 1024));
+        assert!(
+            out.starts_with("cache gc /project/.kiln/cache  (dry run: nothing was deleted)\n"),
+            "{out}"
+        );
+        assert!(out.contains("would evict     5 records"), "{out}");
+        assert!(!out.contains("evicted         "), "{out}");
+        assert!(out.contains("200.0 MiB reclaimed from 900.0 MiB"), "{out}");
+        assert!(
+            out.contains("kept            3 within grace, 1 in flight"),
+            "{out}"
+        );
+        assert!(out.contains("markers         2 orphaned removed"), "{out}");
+    }
+
+    #[test]
+    fn a_sweep_that_evicted_nothing_still_reports_what_it_scanned() {
+        let out = cache_gc(&sweep(false, 0, 100, 100));
+        assert!(out.starts_with("cache gc /project/.kiln/cache\n"), "{out}");
+        assert!(out.contains("budget          2.0 GiB per layer"), "{out}");
+        assert!(out.contains("nothing reclaimed"), "{out}");
+        assert!(out.contains("scanned         42 records"), "{out}");
+        assert!(
+            out.contains("evicted         0 records (0 unreachable)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_cache_with_no_writable_layer_reports_that_rather_than_nothing() {
+        let mut summary = sweep(false, 0, 0, 0);
+        summary.layers.clear();
+        let out = cache_gc(&summary);
+        assert!(out.contains("layers          none writable"), "{out}");
     }
 
     #[test]

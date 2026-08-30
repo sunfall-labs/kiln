@@ -2,9 +2,8 @@
 //! selected batch without launching a compiler process per test.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use kiln_conformance::{
@@ -14,6 +13,7 @@ use kiln_proto::{
     Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestReasonSummary, TestSummary,
 };
 use kiln_test_selector::{ChangeSet, FailureState, TestId, TestMetadata, TestTier, select};
+use rayon::prelude::*;
 
 pub fn run(
     root: &str,
@@ -110,79 +110,19 @@ pub fn run(
 
 /// Run every selected test, returning each one's variants in the caller's order.
 ///
-/// The workers are plain scoped threads over a shared cursor rather than pre-cut chunks, because
-/// conformance durations are wildly uneven -- a parse-only refusal is microseconds, an interpreted
-/// async test is many milliseconds -- so any static split leaves one worker holding the tail while
-/// the rest idle. Claiming the next index atomically is the whole of the work stealing, and needs
-/// nothing outside `std`.
-///
-/// Each worker only ever touches `ConformanceTest`, which is inert data; the interpreter's `Rc`
-/// graph is built and dropped entirely inside one `test.run` call, so nothing `!Send` is ever
-/// held across the boundary. What crosses back is `VariantResult`: owned strings, spans and
-/// durations.
+/// Rayon's indexed iterator steals uneven work while collecting results in selection order. Each
+/// task builds and drops the interpreter's `Rc` graph locally; only owned results cross threads.
 fn execute(
     pending: &[(String, &ConformanceTest)],
     mode: RunMode,
 ) -> Result<Vec<Vec<VariantResult>>, String> {
-    if pending.len() < 2 {
-        return Ok(pending.iter().map(|(_, test)| test.run(mode)).collect());
-    }
-    let cursor = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        let cursor = &cursor;
-        let workers = (0..worker_count(available_workers(), pending.len()))
-            .map(|_| {
-                scope.spawn(move || {
-                    let mut claimed = Vec::new();
-                    loop {
-                        let index = cursor.fetch_add(1, Ordering::Relaxed);
-                        let Some((_, test)) = pending.get(index) else {
-                            break;
-                        };
-                        claimed.push((index, test.run(mode)));
-                    }
-                    claimed
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut slots = (0..pending.len()).map(|_| None).collect::<Vec<_>>();
-        for worker in workers {
-            for (index, variants) in join_worker(worker.join())? {
-                slots[index] = Some(variants);
-            }
-        }
-        slots
-            .into_iter()
-            .map(|slot| slot.ok_or_else(|| WORKER_PANIC.to_owned()))
-            .collect()
-    })
-}
-
-const WORKER_PANIC: &str = "conformance worker panicked";
-
-/// Turn a worker panic into this call's error rather than letting it escape as a panic on an
-/// unrelated thread, mirroring `kiln_native`'s `join_worker`.
-fn join_worker<T>(result: std::thread::Result<T>) -> Result<T, String> {
-    result.map_err(|_| WORKER_PANIC.to_owned())
-}
-
-/// The parallelism the machine will admit for a conformance batch.
-///
-/// `mbx` budgets CPU across concurrent cargo invocations, but it does not publish that budget to
-/// the processes it launches (see NOTES.md "Conventions"), and on macOS there is no cgroup for
-/// `available_parallelism` to read either -- so a batch run under `mbx test` alongside another
-/// build will happily ask for every core. `KILN_TEST_WORKERS` is the way to say otherwise.
-fn available_workers() -> usize {
-    std::env::var("KILN_TEST_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|workers| *workers > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, NonZeroUsize::get))
-}
-
-/// Never more workers than there is work for them, and never none.
-fn worker_count(available: usize, pending: usize) -> usize {
-    available.clamp(1, pending.max(1))
+    pending
+        .par_iter()
+        .map(|(_, test)| {
+            catch_unwind(AssertUnwindSafe(|| test.run(mode)))
+                .map_err(|_| "conformance worker panicked".to_owned())
+        })
+        .collect()
 }
 
 /// Group every non-passing result by reason, so the summary carries the backlog and not only its
@@ -430,22 +370,6 @@ expected_stdout = "bundle\n"
         );
     }
 
-    #[test]
-    fn a_batch_never_spawns_more_workers_than_it_has_cases() {
-        assert_eq!(
-            worker_count(8, 3),
-            3,
-            "three cases never need eight threads"
-        );
-        assert_eq!(worker_count(2, 900), 2);
-        assert_eq!(
-            worker_count(0, 5),
-            1,
-            "a machine always runs at least one worker"
-        );
-        assert_eq!(worker_count(8, 0), 1);
-    }
-
     /// The point of the index-keyed collection: the summary must not be able to observe which
     /// worker finished first. Running the same corpus repeatedly is the only honest check, since
     /// a single run of a scheduler that happens to stay ordered proves nothing.
@@ -630,12 +554,12 @@ expected_stdout = "bundle\n"
         )
         .expect("local corpus is valid");
 
-        assert_eq!(summary.discovered, 4);
-        assert_eq!(summary.selected, 5, "ordinary scripts have two variants");
+        assert_eq!(summary.discovered, 5);
+        assert_eq!(summary.selected, 6, "ordinary scripts have two variants");
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.unsupported, 0);
         assert_eq!(summary.skipped, 2, "ordinary execution needs the harness");
-        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.passed, 4);
     }
 
     fn corpus(relative: &str) -> String {

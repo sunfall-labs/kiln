@@ -23,7 +23,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 
-use args::{Command, DaemonAction, Invocation, Parsed};
+use args::{CacheAction, Command, DaemonAction, Invocation, Parsed};
 use backend::Backend;
 use client::DaemonClient;
 use commands::Output;
@@ -180,6 +180,10 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             )?;
             Ok(0)
         }
+        Command::Cache(CacheAction::Gc { dry_run }) => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::cache_gc(backend.as_mut(), &root, dry_run)?)
+        }
         Command::Daemon(DaemonAction::Start) => report(lifecycle::start(&socket)?),
         Command::Daemon(DaemonAction::Stop) => report(lifecycle::stop(&socket)?),
         Command::Daemon(DaemonAction::Status) => {
@@ -257,10 +261,12 @@ mod tests {
             "stats",
             "watch",
             "daemon",
+            "cache",
             "--one-shot",
             "--socket",
             "--interval",
             "--out",
+            "--dry-run",
             "--help",
             "--version",
             "exit status",
@@ -284,7 +290,7 @@ mod tests {
         assert_eq!(
             commands,
             [
-                "run", "build", "check", "test", "project", "stats", "watch", "daemon"
+                "run", "build", "check", "test", "project", "stats", "watch", "daemon", "cache"
             ]
         );
     }

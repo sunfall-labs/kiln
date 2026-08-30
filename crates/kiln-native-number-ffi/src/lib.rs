@@ -12,7 +12,6 @@
 //! The crate is still called `kiln-native-number-ffi`, which is now half a name. Renaming it moves
 //! a packaging contract -- the manifest field, the archive filename, the environment variable --
 //! and that is `kiln-native`'s to move; see NOTES.md.
-#![no_std]
 #![deny(
     unsafe_op_in_unsafe_fn,
     clippy::arithmetic_side_effects,
@@ -25,10 +24,649 @@
 #[cfg(any(feature = "regexp", feature = "bigint"))]
 extern crate alloc;
 
-#[cfg(not(test))]
-use core::panic::PanicInfo;
-
 const INVALID_ARGUMENT: i32 = -1;
+#[cfg(feature = "realm")]
+const RUNTIME_ERROR: i32 = -8;
+
+/// The private native Realm ABI.
+///
+/// Handles are process-unique integers rather than Rust pointers. The owning thread keeps the
+/// actual runtime in thread-local storage, so a stale or cross-thread handle is rejected without
+/// dereferencing caller-controlled memory. No Tokio or Rust layout crosses the C seam.
+#[cfg(feature = "realm")]
+mod realm {
+    use super::{INVALID_ARGUMENT, RUNTIME_ERROR};
+    use core::ffi::c_void;
+    use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
+    type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
+    type DropWork = unsafe extern "C" fn(*mut c_void);
+
+    struct WorkOwner {
+        pointer: *mut c_void,
+        run: RunWork,
+        drop: DropWork,
+    }
+
+    impl Drop for WorkOwner {
+        fn drop(&mut self) {
+            // SAFETY: the enqueue call transfers one live work allocation and its matching
+            // disposer. `Rc` makes this run exactly once, including interval cancellation.
+            unsafe { (self.drop)(self.pointer) };
+        }
+    }
+
+    #[derive(Clone)]
+    struct NativeWork(Rc<WorkOwner>);
+
+    impl NativeWork {
+        fn new(pointer: *mut c_void, run: Option<RunWork>, drop: Option<DropWork>) -> Option<Self> {
+            let (Some(run), Some(drop)) = (run, drop) else {
+                return None;
+            };
+            if pointer.is_null() {
+                return None;
+            }
+            Some(Self(Rc::new(WorkOwner { pointer, run, drop })))
+        }
+
+        fn run(&self, host: *mut c_void, thrown: *mut c_void) -> i32 {
+            // SAFETY: the C Adapter supplied this callback with the allocation, and the caller of
+            // `kiln_realm_drive` keeps `host` and `thrown` live for the complete drive.
+            unsafe { (self.0.run)(self.0.pointer, host, thrown) }
+        }
+    }
+
+    struct NativeRealm {
+        runtime: RefCell<RealmRuntime>,
+        work: RefCell<Realm<NativeWork, NativeWork>>,
+        entered: Cell<bool>,
+    }
+
+    impl NativeRealm {
+        fn new() -> Result<Self, kiln_runtime::RuntimeBuildError> {
+            Ok(Self {
+                runtime: RefCell::new(RealmRuntime::new()?),
+                work: RefCell::new(Realm::new()),
+                entered: Cell::new(false),
+            })
+        }
+    }
+
+    struct ActiveRealm {
+        realm: Rc<NativeRealm>,
+    }
+
+    impl ActiveRealm {
+        fn enter(handle: u64, realm: Rc<NativeRealm>) -> Option<Self> {
+            if realm.entered.replace(true) {
+                return None;
+            }
+            let activated = ACTIVE_REALM.with(|active| {
+                if active.get() != 0 {
+                    false
+                } else {
+                    active.set(handle);
+                    true
+                }
+            });
+            if !activated {
+                realm.entered.set(false);
+                return None;
+            }
+            Some(Self { realm })
+        }
+    }
+
+    impl Drop for ActiveRealm {
+        fn drop(&mut self) {
+            ACTIVE_REALM.with(|active| active.set(0));
+            self.realm.entered.set(false);
+        }
+    }
+
+    static NEXT_REALM: AtomicU64 = AtomicU64::new(1);
+
+    std::thread_local! {
+        static REALMS: RefCell<HashMap<u64, Rc<NativeRealm>>> = RefCell::new(HashMap::new());
+        static ACTIVE_REALM: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn ffi(operation: impl FnOnce() -> i32) -> i32 {
+        catch_unwind(AssertUnwindSafe(operation)).unwrap_or(RUNTIME_ERROR)
+    }
+
+    fn realm(handle: u64) -> Option<Rc<NativeRealm>> {
+        if handle == 0 {
+            return None;
+        }
+        REALMS.with(|realms| realms.borrow().get(&handle).cloned())
+    }
+
+    fn active_realm() -> Option<Rc<NativeRealm>> {
+        ACTIVE_REALM.with(|active| realm(active.get()))
+    }
+
+    fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
+        loop {
+            let microtask = realm.work.borrow_mut().pop_microtask();
+            if let Some(work) = microtask {
+                let status = work.run(host, thrown);
+                if status != 0 {
+                    return status;
+                }
+                continue;
+            }
+
+            let timer = realm
+                .runtime
+                .borrow_mut()
+                .next_timer(&mut realm.work.borrow_mut());
+            let Some(WorkItem::Timer { work, .. }) = timer else {
+                return 0;
+            };
+            let status = work.run(host, thrown);
+            if status != 0 {
+                return status;
+            }
+        }
+    }
+
+    /// Creates one current-thread Realm Runtime and writes its opaque identity to `out`.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be a writable `u64` slot owned by the caller.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
+        ffi(|| {
+            if out.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Ok(realm) = NativeRealm::new() else {
+                return RUNTIME_ERROR;
+            };
+            let Ok(handle) =
+                NEXT_REALM.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                })
+            else {
+                return RUNTIME_ERROR;
+            };
+            REALMS.with(|realms| {
+                realms.borrow_mut().insert(handle, Rc::new(realm));
+            });
+            // SAFETY: the caller supplies a writable slot and null was rejected above.
+            unsafe { out.write(handle) };
+            0
+        })
+    }
+
+    /// Executes `entry(context)` as the current task of the owning Realm Runtime.
+    ///
+    /// Recursive entry fails closed instead of attempting a nested `block_on`.
+    pub unsafe extern "C" fn enter(handle: u64, entry: Option<Entry>, context: *mut c_void) -> i32 {
+        ffi(|| {
+            let Some(entry) = entry else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(realm) = realm(handle) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(_active) = ActiveRealm::enter(handle, Rc::clone(&realm)) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: the C caller owns `context` and the callback contract for this call.
+            realm
+                .runtime
+                .borrow_mut()
+                .enter(|| unsafe { entry(context) })
+        })
+    }
+
+    /// C-exported spelling of [`enter`].
+    ///
+    /// # Safety
+    ///
+    /// `entry`, when present, must be a valid C function and `context` must satisfy that
+    /// function's contract for the duration of this call.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_enter(
+        handle: u64,
+        entry: Option<Entry>,
+        context: *mut c_void,
+    ) -> i32 {
+        // SAFETY: this function has exactly the same caller contract as `enter`.
+        unsafe { enter(handle, entry, context) }
+    }
+
+    /// Returns one when generated code is already executing inside a Realm.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_is_active() -> i32 {
+        i32::from(ACTIVE_REALM.with(|active| active.get() != 0))
+    }
+
+    /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
+    ///
+    /// # Safety
+    ///
+    /// `out_milliseconds` must be a writable `f64` slot owned by the caller.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_now(out_milliseconds: *mut f64) -> i32 {
+        ffi(|| {
+            if out_milliseconds.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(work) = realm.work.try_borrow() else {
+                return RUNTIME_ERROR;
+            };
+            let milliseconds = work.now().as_millis() as f64;
+            // SAFETY: null was rejected and the caller supplies a writable slot.
+            unsafe { out_milliseconds.write(milliseconds) };
+            0
+        })
+    }
+
+    /// Queues one opaque FIFO microtask on the active Realm.
+    ///
+    /// # Safety
+    ///
+    /// `work` must be owned storage accepted by `run` and `drop`. Ownership transfers on success.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_queue_microtask(
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut queue) = realm.work.try_borrow_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let Some(work) = NativeWork::new(work, run, drop) else {
+                return INVALID_ARGUMENT;
+            };
+            queue.queue_microtask(work);
+            0
+        })
+    }
+
+    fn set_timer(
+        repeating: bool,
+        delay_ms: f64,
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+        out_id: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_id.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut queue) = realm.work.try_borrow_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let Some(work) = NativeWork::new(work, run, drop) else {
+                return INVALID_ARGUMENT;
+            };
+            let delay = if delay_ms.is_finite() && delay_ms > 0.0 {
+                duration_from_milliseconds(delay_ms)
+            } else {
+                std::time::Duration::ZERO
+            };
+            let id = if repeating {
+                queue.set_interval(delay, work)
+            } else {
+                queue.set_timeout(delay, work)
+            };
+            // SAFETY: null was rejected and the caller supplies a writable identity slot.
+            unsafe { out_id.write(id.get()) };
+            0
+        })
+    }
+
+    /// Schedules one opaque timeout on the active Realm.
+    ///
+    /// # Safety
+    ///
+    /// `out_id` must be writable and `work` must satisfy the callback ownership contract.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_set_timeout(
+        delay_ms: f64,
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+        out_id: *mut u64,
+    ) -> i32 {
+        set_timer(false, delay_ms, run, drop, work, out_id)
+    }
+
+    /// Schedules one opaque interval on the active Realm.
+    ///
+    /// # Safety
+    ///
+    /// `out_id` must be writable and `work` must satisfy the callback ownership contract.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_set_interval(
+        delay_ms: f64,
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+        out_id: *mut u64,
+    ) -> i32 {
+        set_timer(true, delay_ms, run, drop, work, out_id)
+    }
+
+    /// Cancels a timeout or interval on the active Realm. Unknown identities are a no-op.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_clear_timer(id: u64) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut queue) = realm.work.try_borrow_mut() else {
+                return RUNTIME_ERROR;
+            };
+            queue.clear_timeout(TimerId::new(id));
+            0
+        })
+    }
+
+    /// Drives every queued microtask and timer on `handle` to deterministic quiescence.
+    ///
+    /// # Safety
+    ///
+    /// `host` and `thrown` must remain valid for every queued work callback during this call.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_drive(
+        handle: u64,
+        host: *mut c_void,
+        thrown: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = realm(handle) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(_active) = ActiveRealm::enter(handle, Rc::clone(&realm)) else {
+                return INVALID_ARGUMENT;
+            };
+            drive(&realm, host, thrown)
+        })
+    }
+
+    /// Destroys a Realm Runtime on its owning thread.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
+        ffi(|| {
+            if handle == 0 {
+                return INVALID_ARGUMENT;
+            }
+            if ACTIVE_REALM.with(|active| active.get() == handle) {
+                return INVALID_ARGUMENT;
+            }
+            REALMS.with(|realms| {
+                if realms.borrow_mut().remove(&handle).is_some() {
+                    0
+                } else {
+                    INVALID_ARGUMENT
+                }
+            })
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::ptr;
+
+        struct RecordedWork {
+            value: u8,
+            order: *mut Vec<u8>,
+            drops: *mut usize,
+            clear: u64,
+        }
+
+        unsafe extern "C" fn record_work(
+            work: *mut c_void,
+            _host: *mut c_void,
+            _thrown: *mut c_void,
+        ) -> i32 {
+            if work.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let work = work.cast::<RecordedWork>();
+            // SAFETY: the scheduling test keeps the record and both target allocations live until
+            // Realm teardown invokes `drop_recorded_work`.
+            unsafe {
+                (*(*work).order).push((*work).value);
+                if (*work).clear != 0 {
+                    return kiln_realm_clear_timer((*work).clear);
+                }
+            }
+            0
+        }
+
+        unsafe extern "C" fn drop_recorded_work(work: *mut c_void) {
+            if work.is_null() {
+                return;
+            }
+            // SAFETY: Realm ownership invokes this exactly once for the pointer transferred by
+            // the scheduling test.
+            let work = unsafe { Box::from_raw(work.cast::<RecordedWork>()) };
+            // SAFETY: the test's drop counter outlives Realm teardown.
+            unsafe { *work.drops = (*work.drops).saturating_add(1) };
+        }
+
+        fn recorded_work(value: u8, order: &mut Vec<u8>, drops: &mut usize) -> *mut c_void {
+            Box::into_raw(Box::new(RecordedWork {
+                value,
+                order,
+                drops,
+                clear: 0,
+            }))
+            .cast::<c_void>()
+        }
+
+        unsafe extern "C" fn schedule_recorded_work(context: *mut c_void) -> i32 {
+            if context.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the test passes live `(Vec<u8>, usize)` storage for this entry call.
+            let (order, drops) = unsafe { &mut *context.cast::<(Vec<u8>, usize)>() };
+            let microtask = recorded_work(1, order, drops);
+            // SAFETY: callbacks match the transferred allocation.
+            let mut status = unsafe {
+                kiln_realm_queue_microtask(Some(record_work), Some(drop_recorded_work), microtask)
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_recorded_work(microtask) };
+                return status;
+            }
+
+            for (value, delay) in [(2, 0.0), (4, 10.0)] {
+                let timer = recorded_work(value, order, drops);
+                let mut id = 0;
+                // SAFETY: callbacks, allocation, and identity slot satisfy the timer contract.
+                status = unsafe {
+                    kiln_realm_set_timeout(
+                        delay,
+                        Some(record_work),
+                        Some(drop_recorded_work),
+                        timer,
+                        &raw mut id,
+                    )
+                };
+                if status != 0 {
+                    // SAFETY: ownership did not transfer on failure.
+                    unsafe { drop_recorded_work(timer) };
+                    return status;
+                }
+            }
+
+            let interval = recorded_work(3, order, drops);
+            let mut interval_id = 0;
+            // SAFETY: callbacks, allocation, and identity slot satisfy the interval contract.
+            status = unsafe {
+                kiln_realm_set_interval(
+                    5.0,
+                    Some(record_work),
+                    Some(drop_recorded_work),
+                    interval,
+                    &raw mut interval_id,
+                )
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_recorded_work(interval) };
+                return status;
+            }
+            // SAFETY: the allocation remains Realm-owned and live until the interval is cleared.
+            unsafe { (*interval.cast::<RecordedWork>()).clear = interval_id };
+            0
+        }
+
+        unsafe extern "C" fn sees_tokio(context: *mut c_void) -> i32 {
+            if context.is_null() || tokio::runtime::Handle::try_current().is_err() {
+                return RUNTIME_ERROR;
+            }
+            // SAFETY: the test passes a live `bool` slot.
+            unsafe { context.cast::<bool>().write(true) };
+            17
+        }
+
+        unsafe extern "C" fn reads_realm_clock(context: *mut c_void) -> i32 {
+            // SAFETY: the test supplies one live `f64` slot while this callback runs.
+            unsafe { kiln_realm_now(context.cast::<f64>()) }
+        }
+
+        #[test]
+        fn opaque_handle_enters_tokio_and_rejects_stale_or_cross_thread_use() {
+            let mut handle = 0;
+            // SAFETY: `handle` is a live writable slot.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_ne!(handle, 0);
+            let mut entered = false;
+            // SAFETY: callback and context satisfy `sees_tokio`'s contract.
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(sees_tokio),
+                        (&raw mut entered).cast::<c_void>(),
+                    )
+                },
+                17
+            );
+            assert!(entered);
+
+            let foreign = std::thread::spawn(move || {
+                // SAFETY: null context is accepted by this callback only after handle lookup;
+                // the foreign thread must reject the handle before invoking it.
+                unsafe { kiln_realm_enter(handle, Some(sees_tokio), ptr::null_mut()) }
+            })
+            .join()
+            .unwrap_or(RUNTIME_ERROR);
+            assert_eq!(foreign, INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(kiln_realm_destroy(handle), INVALID_ARGUMENT);
+        }
+
+        #[test]
+        fn null_slots_and_callbacks_fail_closed() {
+            // SAFETY: the null pointer is intentionally rejected without dereferencing.
+            assert_eq!(
+                unsafe { kiln_realm_create(ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
+            // SAFETY: the absent callback is intentionally rejected.
+            assert_eq!(
+                unsafe { kiln_realm_enter(1, None, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
+            // SAFETY: the null slot is intentionally rejected without dereferencing.
+            assert_eq!(unsafe { kiln_realm_now(ptr::null_mut()) }, INVALID_ARGUMENT);
+        }
+
+        #[test]
+        fn realm_clock_is_visible_only_while_entered() {
+            let mut handle = 0;
+            let mut now = f64::NAN;
+            // SAFETY: handle and clock slots remain live for their calls.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(reads_realm_clock),
+                        (&raw mut now).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            assert_eq!(now, 0.0);
+            // SAFETY: the slot is live, but no Realm is active now.
+            assert_eq!(unsafe { kiln_realm_now(&raw mut now) }, INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+        }
+
+        #[test]
+        fn rust_panics_become_runtime_errors_before_reaching_c() {
+            assert_eq!(
+                ffi(|| std::panic::resume_unwind(Box::new("realm panic"))),
+                RUNTIME_ERROR
+            );
+        }
+
+        #[test]
+        fn opaque_work_uses_realm_ordering_and_drops_every_payload_once() {
+            let mut handle = 0;
+            let mut observed = (Vec::<u8>::new(), 0_usize);
+            // SAFETY: handle and context are live for the calls that use them.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(schedule_recorded_work),
+                        (&raw mut observed).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            // SAFETY: both opaque callback-context slots remain live for the complete drive.
+            assert_eq!(
+                unsafe {
+                    kiln_realm_drive(
+                        handle,
+                        (&raw mut host).cast::<c_void>(),
+                        (&raw mut thrown).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            assert_eq!(observed.0, [1, 2, 3, 4]);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(observed.1, 4);
+        }
+    }
+}
 
 /// The allocator the regexp engine runs on.
 ///
@@ -644,7 +1282,10 @@ mod bigint {
     ///
     /// `handle` must be live and `out` must be a writable slot.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_bigint_negate(handle: *const BigInt, out: *mut *mut BigInt) -> i32 {
+    pub unsafe extern "C" fn kiln_bigint_negate(
+        handle: *const BigInt,
+        out: *mut *mut BigInt,
+    ) -> i32 {
         if handle.is_null() || out.is_null() {
             return INVALID_ARGUMENT;
         }
@@ -656,28 +1297,8 @@ mod bigint {
     }
 }
 
-// A no-std static library must define a panic personality. All reachable core and adapter paths
-// are written and linted not to panic; spinning is an unreachable backstop that avoids unwinding
-// across C or terminating an embedding process by policy.
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_information: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-// Precompiled `core` retains an unreachable personality reference even when this final archive is
-// built with `panic=abort`. Supplying the symbol keeps the C link self-contained; no reachable path
-// unwinds through it, and the provider's exported-symbol policy will keep it private in a DSO.
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_eh_personality() {}
-
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
     use super::*;
 
     #[test]

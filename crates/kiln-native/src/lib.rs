@@ -12,8 +12,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kiln_artifact_cache::{
@@ -36,6 +36,7 @@ use kiln_native_toolchain::{
     Toolchain, ToolchainError,
 };
 use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
+use rayon::prelude::*;
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -55,7 +56,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 1);
+    assert!(PROVIDER_ABI_VERSION == 3);
 };
 
 /// Native optimization and checking policy.
@@ -520,44 +521,49 @@ impl NativeBuilder {
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
-        let (application_result, runtime_result, launcher_result) = std::thread::scope(|scope| {
-            let application = scope.spawn(|| {
-                self.object(
-                    &application_key,
-                    &module_source,
-                    &paths.module_c,
-                    &paths.module_o,
-                    &compile_options,
+        let ((application_result, runtime_result), launcher_result) = rayon::join(
+            || {
+                rayon::join(
+                    || {
+                        run_worker("application compile", || {
+                            self.object(
+                                &application_key,
+                                &module_source,
+                                &paths.module_c,
+                                &paths.module_o,
+                                &compile_options,
+                            )
+                        })
+                    },
+                    || {
+                        run_worker("runtime compile", || {
+                            self.object(
+                                &runtime_key,
+                                &runtime_bytes,
+                                &paths.runtime_c,
+                                &paths.runtime_o,
+                                &compile_options,
+                            )
+                        })
+                    },
                 )
-            });
-            let runtime = scope.spawn(|| {
-                self.object(
-                    &runtime_key,
-                    &runtime_bytes,
-                    &paths.runtime_c,
-                    &paths.runtime_o,
-                    &compile_options,
-                )
-            });
-            let launcher = scope.spawn(|| {
-                self.object(
-                    &launcher_key,
-                    &launcher_bytes,
-                    &paths.launcher_c,
-                    &paths.launcher_o,
-                    &compile_options,
-                )
-            });
-            (
-                join_worker(application.join(), "application compile"),
-                join_worker(runtime.join(), "runtime compile"),
-                join_worker(launcher.join(), "launcher compile"),
-            )
-        });
+            },
+            || {
+                run_worker("launcher compile", || {
+                    self.object(
+                        &launcher_key,
+                        &launcher_bytes,
+                        &paths.launcher_c,
+                        &paths.launcher_o,
+                        &compile_options,
+                    )
+                })
+            },
+        );
         let (application, application_digest, application_hit, _application_elapsed) =
-            application_result??;
-        let (runtime_object, runtime_digest, runtime_hit, _runtime_elapsed) = runtime_result??;
-        let (launcher_object, launcher_digest, launcher_hit, _launcher_elapsed) = launcher_result??;
+            application_result?;
+        let (runtime_object, runtime_digest, runtime_hit, _runtime_elapsed) = runtime_result?;
+        let (launcher_object, launcher_digest, launcher_hit, _launcher_elapsed) = launcher_result?;
         let compile_elapsed = if application_hit && runtime_hit && launcher_hit {
             Duration::ZERO
         } else {
@@ -977,32 +983,14 @@ impl NativeBuilder {
             [wrapper_source_digest, topology],
         );
         let compile_started = Instant::now();
-        let (module_objects, wrapper_object) = std::thread::scope(|scope| {
-            let module_keys_ref = &module_keys;
-            let module_sources_ref = &module_sources;
-            let module_c_ref = &paths.module_c;
-            let module_o_ref = &paths.module_o;
-            let wrapper_c_ref = &paths.wrapper_c;
-            let wrapper_o_ref = &paths.wrapper_o;
-            let module_compile_options_ref = &module_compile_options;
-            let wrapper_compile_options_ref = &wrapper_compile_options;
-            let wrapper_bytes_ref = &wrapper_bytes;
-            // The wrapper is spawned before the module workers so that it overlaps them, exactly as
-            // it did when the modules were chunked ahead of it.
-            let wrapper = scope.spawn(move || {
-                self.object(
-                    &wrapper_object_key,
-                    wrapper_bytes_ref,
-                    wrapper_c_ref,
-                    wrapper_o_ref,
-                    wrapper_compile_options_ref,
-                )
-            });
-            let module_objects = compile_indexed(
-                scope,
-                module_keys_ref.len(),
-                "module compile",
-                move |index| {
+        let (module_objects, wrapper_object) = rayon::join(
+            || {
+                let module_keys_ref = &module_keys;
+                let module_sources_ref = &module_sources;
+                let module_c_ref = &paths.module_c;
+                let module_o_ref = &paths.module_o;
+                let module_compile_options_ref = &module_compile_options;
+                compile_indexed(module_keys_ref.len(), "module compile", move |index| {
                     self.object(
                         &module_keys_ref[index],
                         &module_sources_ref[index].0,
@@ -1011,11 +999,22 @@ impl NativeBuilder {
                         module_compile_options_ref,
                     )
                     .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
-                },
-            )?;
-            let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
-            Ok::<_, NativeError>((module_objects, wrapper_object))
-        })?;
+                })
+            },
+            || {
+                run_worker("shared graph wrapper compile", || {
+                    self.object(
+                        &wrapper_object_key,
+                        &wrapper_bytes,
+                        &paths.wrapper_c,
+                        &paths.wrapper_o,
+                        &wrapper_compile_options,
+                    )
+                })
+            },
+        );
+        let module_objects = module_objects?;
+        let wrapper_object = wrapper_object?;
         let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 {
             Duration::ZERO
         } else {
@@ -1255,41 +1254,14 @@ impl NativeBuilder {
             object_options,
             [launcher_source_digest],
         );
-        let (module_objects, runtime_object, launcher_object) = std::thread::scope(|scope| {
-            let module_keys_ref = &module_keys;
-            let module_sources_ref = &module_sources;
-            let module_c_ref = &paths.module_c;
-            let module_o_ref = &paths.module_o;
-            let compile_options_ref = &compile_options;
-            let runtime_c_ref = &paths.runtime_c;
-            let runtime_o_ref = &paths.runtime_o;
-            let launcher_c_ref = &paths.launcher_c;
-            let launcher_o_ref = &paths.launcher_o;
-            // Runtime and launcher are spawned before the module workers so that they overlap them,
-            // exactly as they did when the modules were chunked ahead of them.
-            let runtime = scope.spawn(move || {
-                self.object(
-                    &runtime_key,
-                    &runtime_bytes,
-                    runtime_c_ref,
-                    runtime_o_ref,
-                    compile_options_ref,
-                )
-            });
-            let launcher = scope.spawn(move || {
-                self.object(
-                    &launcher_key,
-                    &launcher_bytes,
-                    launcher_c_ref,
-                    launcher_o_ref,
-                    compile_options_ref,
-                )
-            });
-            let module_objects = compile_indexed(
-                scope,
-                module_keys_ref.len(),
-                "module compile",
-                move |index| {
+        let (module_objects, (runtime_object, launcher_object)) = rayon::join(
+            || {
+                let module_keys_ref = &module_keys;
+                let module_sources_ref = &module_sources;
+                let module_c_ref = &paths.module_c;
+                let module_o_ref = &paths.module_o;
+                let compile_options_ref = &compile_options;
+                compile_indexed(module_keys_ref.len(), "module compile", move |index| {
                     self.object(
                         &module_keys_ref[index],
                         &module_sources_ref[index].0,
@@ -1298,12 +1270,38 @@ impl NativeBuilder {
                         compile_options_ref,
                     )
                     .map(|(object, digest, hit, _elapsed)| (object, digest, hit))
-                },
-            )?;
-            let runtime_object = join_worker(runtime.join(), "runtime compile")??;
-            let launcher_object = join_worker(launcher.join(), "launcher compile")??;
-            Ok::<_, NativeError>((module_objects, runtime_object, launcher_object))
-        })?;
+                })
+            },
+            || {
+                rayon::join(
+                    || {
+                        run_worker("runtime compile", || {
+                            self.object(
+                                &runtime_key,
+                                &runtime_bytes,
+                                &paths.runtime_c,
+                                &paths.runtime_o,
+                                &compile_options,
+                            )
+                        })
+                    },
+                    || {
+                        run_worker("launcher compile", || {
+                            self.object(
+                                &launcher_key,
+                                &launcher_bytes,
+                                &paths.launcher_c,
+                                &paths.launcher_o,
+                                &compile_options,
+                            )
+                        })
+                    },
+                )
+            },
+        );
+        let module_objects = module_objects?;
+        let runtime_object = runtime_object?;
+        let launcher_object = launcher_object?;
         let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object;
         let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object;
         let compile_elapsed =
@@ -1910,10 +1908,19 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
+                                    const kiln_value *imports, size_t import_count,
+                                    kiln_value *exports, size_t export_count);
+typedef int (*kiln_realm_entry_fn)(void *context);
+
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure(int status, kiln_value value);
+extern int kiln_realm_create(uint64_t *out_realm);
+extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+extern int kiln_realm_destroy(uint64_t realm);
 "#,
     );
     for (_, module) in modules {
@@ -1944,10 +1951,32 @@ extern void kiln_cli_report_failure(int status, kiln_value value);
     }
     output.push_str(
         r#"
+typedef struct kiln_graph_entry_context {
+    kiln_graph_module_fn module;
+    kiln_host *host;
+    kiln_value *result;
+    const kiln_value *imports;
+    size_t import_count;
+    kiln_value *exports;
+    size_t export_count;
+} kiln_graph_entry_context;
+
+static int kiln_graph_enter_module(void *opaque) {
+    kiln_graph_entry_context *context = (kiln_graph_entry_context *)opaque;
+    if (context == NULL || context->module == NULL) return -1;
+    return context->module(context->host, context->result, context->imports,
+                           context->import_count, context->exports,
+                           context->export_count);
+}
+
 int main(void) {
     kiln_host host;
-    kiln_value result;
+    kiln_value result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    kiln_value entry_result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    kiln_graph_entry_context context;
+    uint64_t realm = 0;
     int status;
+    int destroy_status;
 "#,
     );
     output.push_str(
@@ -1956,6 +1985,11 @@ int main(void) {
     }
     host.call = kiln_cli_host_call;
     host.context = NULL;
+    status = kiln_realm_create(&realm);
+    if (status != 0) {
+        kiln_cli_report_failure(status, result);
+        return 1;
+    }
 "#,
     );
     for (index, (node, module)) in modules.iter().enumerate() {
@@ -1981,27 +2015,40 @@ int main(void) {
         } else {
             format!("kiln_exports_{index}")
         };
+        writeln!(output, "    context.module = {};", module.symbol).unwrap();
+        output.push_str("    context.host = &host;\n    context.result = &result;\n");
+        writeln!(output, "    context.imports = {imports};").unwrap();
         writeln!(
             output,
-            "    status = {}(&host, &result, {}, (size_t){}, {}, (size_t){});",
-            module.symbol,
-            imports,
-            node.program.imports.len(),
-            exports,
+            "    context.import_count = (size_t){};",
+            node.program.imports.len()
+        )
+        .unwrap();
+        writeln!(output, "    context.exports = {exports};").unwrap();
+        writeln!(
+            output,
+            "    context.export_count = (size_t){};",
             node.program.exports.len()
         )
         .unwrap();
+        output
+            .push_str("    status = kiln_realm_enter(realm, kiln_graph_enter_module, &context);\n");
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
         output.push_str(
-            "    if (status != 0) { kiln_cli_report_failure(status, result); return 1; }\n",
+            "    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n",
         );
         if node.path == graph.entry() {
-            output.push_str("    if (kiln_cli_write_result(result) != 0) return 1;\n");
+            output.push_str("    entry_result = result;\n");
         }
     }
-    output.push_str("    return 0;\n}\n");
+    output.push_str(
+        "    status = kiln_realm_drive(realm, &host, &result);\n    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n    if (kiln_cli_write_result(entry_result) != 0) { status = 1; goto cleanup; }\n",
+    );
+    output.push_str(
+        "cleanup:\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+    );
     // Keep this check in the launcher generation path so an unexpectedly empty graph fails as a
     // structured graph error instead of producing a linker error with little context.
     if modules.is_empty() {
@@ -2044,6 +2091,16 @@ fn graph_shared_wrapper_source(
     );
     output.push_str(embedding_header());
     output.push('\n');
+    output.push_str(
+        r#"typedef int (*kiln_realm_entry_fn)(void *context);
+extern int kiln_realm_create(uint64_t *out_realm);
+extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+extern int kiln_realm_destroy(uint64_t realm);
+extern int kiln_realm_is_active(void);
+
+"#,
+    );
     for (_, module) in modules {
         writeln!(
             output,
@@ -2124,7 +2181,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     );
     writeln!(
         output,
-        "\nint {wrapper_symbol}(kiln_host *host, kiln_value *result) {{\n    kiln_proxy_arena arena = {{ NULL, 0, 0 }};\n    kiln_proxy_host proxy = {{ host, &arena }};\n    kiln_host proxy_host = {{ kiln_proxy_call, &proxy }};\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -2164,7 +2221,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         let export_count = node.program.exports.len();
         writeln!(
             output,
-            "    status = {}(&proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) goto cleanup;",
+            "    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) goto cleanup;",
             modules[index].1.symbol
         )
         .unwrap();
@@ -2173,80 +2230,80 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         }
     }
     output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
-    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    kiln_proxy_arena_clear(&arena);\n    return status;\n}}\n", modules.len()).unwrap();
+    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    return status;\n}}\n", modules.len()).unwrap();
+    writeln!(
+        output,
+        r#"
+typedef struct {wrapper_symbol}_realm_context {{
+    kiln_value *result;
+    kiln_proxy_arena arena;
+    kiln_proxy_host proxy;
+    kiln_host proxy_host;
+}} {wrapper_symbol}_realm_context;
+
+static int {wrapper_symbol}_realm_entry(void *opaque) {{
+    {wrapper_symbol}_realm_context *context = ({wrapper_symbol}_realm_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return {wrapper_symbol}_body(&context->proxy_host, context->result);
+}}
+
+int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
+    {wrapper_symbol}_realm_context context;
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    context.result = result;
+    context.arena = (kiln_proxy_arena){{ NULL, 0, 0 }};
+    context.proxy = (kiln_proxy_host){{ host, &context.arena }};
+    context.proxy_host = (kiln_host){{ kiln_proxy_call, &context.proxy }};
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {wrapper_symbol}_realm_entry, &context);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_drive(realm, &context.proxy_host, result);
+    if (realm != 0) {{
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }}
+    kiln_proxy_arena_clear(&context.arena);
+    return status;
+}}
+"#
+    )
+    .unwrap();
     Ok(output)
 }
 
-fn join_worker<T>(result: std::thread::Result<T>, stage: &'static str) -> Result<T, NativeError> {
-    result.map_err(|_| NativeError::WorkerPanic { stage })
+fn run_worker<T>(
+    stage: &'static str,
+    work: impl FnOnce() -> Result<T, NativeError>,
+) -> Result<T, NativeError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .map_err(|_| NativeError::WorkerPanic { stage })?
 }
 
-/// Runs `work` over `0..count` on scoped workers that claim indices as they finish.
+/// Runs `work` over `0..count` on Rayon's work-stealing pool.
 ///
 /// Object compile times are wildly uneven: a twenty-line module and a bundled application are both
-/// one index here, and they differ by orders of magnitude. Splitting the index space into
-/// contiguous chunks up front therefore decides the build's wall-clock before any compiling
-/// happens — whichever worker draws the bundle holds the whole build while the others sit idle on
-/// chunks they finished in milliseconds. The thread count was never the problem; the static
-/// partition was. Workers here claim one index at a time from a shared cursor with `fetch_add`, so
-/// a slow index costs only itself and every thread stays busy until the work actually runs out.
-///
-/// The cursor is deliberately the entire scheduler. A general work-stealing pool would want its own
-/// global threads, and this repository builds through `mbx` precisely so that concurrent cargo
-/// invocations share one CPU budget; a second scheduler underneath that would fight it.
+/// one index here, and they differ by orders of magnitude. Rayon's indexed parallel iterator keeps
+/// idle workers useful without making Kiln maintain its own cursor, worker lifecycle or stealing
+/// policy.
 ///
 /// Results come back in index order regardless of which worker produced them, and the failure
 /// reported is the one belonging to the lowest failing index — either the error `work` returned or
-/// [`NativeError::WorkerPanic`] where the worker holding that index died.
-fn compile_indexed<'scope, 'env, T, F>(
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    count: usize,
-    stage: &'static str,
-    work: F,
-) -> Result<Vec<T>, NativeError>
+/// [`NativeError::WorkerPanic`] where the task holding that index panicked.
+fn compile_indexed<T, F>(count: usize, stage: &'static str, work: F) -> Result<Vec<T>, NativeError>
 where
-    F: Fn(usize) -> Result<T, NativeError> + Copy + Send + 'scope,
-    T: Send + 'scope,
+    F: Fn(usize) -> Result<T, NativeError> + Send + Sync,
+    T: Send,
 {
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(count.max(1));
-    let cursor = Arc::new(AtomicUsize::new(0));
-    let workers = (0..worker_count)
-        .map(|_| {
-            let cursor = Arc::clone(&cursor);
-            scope.spawn(move || {
-                let mut claimed = Vec::new();
-                loop {
-                    let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    if index >= count {
-                        break claimed;
-                    }
-                    claimed.push((index, work(index)));
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
-    let mut panic = None;
-    for worker in workers {
-        // A panic is held rather than returned here so that every worker's finished work is laid
-        // out first: which worker claimed a failing index is now a scheduling accident, and the
-        // caller should still see the lowest failing index either way.
-        match join_worker(worker.join(), stage) {
-            Ok(claimed) => {
-                for (index, result) in claimed {
-                    results[index] = Some(result);
-                }
-            }
-            Err(error) => panic = panic.or(Some(error)),
-        }
-    }
-    let completed = results
+    (0..count)
+        .into_par_iter()
+        .map(|index| run_worker(stage, || work(index)))
+        .collect::<Vec<_>>()
         .into_iter()
-        .map(|result| result.unwrap_or_else(|| Err(NativeError::WorkerPanic { stage })))
-        .collect::<Result<Vec<_>, _>>()?;
-    panic.map_or(Ok(completed), Err)
+        .collect()
 }
 
 fn read(path: &Path, operation: &'static str) -> Result<Vec<u8>, NativeError> {
@@ -2856,8 +2913,8 @@ fn configure_shared_library_link(
 mod tests {
     use super::*;
     use kiln_ir::{
-        BYTECODE_VERSION, Constant, ExportBinding, HostOp, ImportBinding, Instruction,
-        ModuleProgram,
+        BYTECODE_VERSION, Constant, ExportBinding, FunctionProto, HostOp, ImportBinding,
+        Instruction, ModuleProgram,
     };
     use std::sync::{Arc, Barrier};
 
@@ -2894,15 +2951,13 @@ mod tests {
     #[test]
     fn indexed_compiles_return_in_index_order_under_uneven_work() {
         let count = 64;
-        let objects = std::thread::scope(|scope| {
-            compile_indexed(scope, count, "test compile", |index| {
-                // Deliberately uneven: the low indices are the slow ones, so a scheduler that
-                // returned completion order rather than index order would say so loudly.
-                if index % 8 == 0 {
-                    std::thread::sleep(Duration::from_millis(10 * (8 - index / 8) as u64));
-                }
-                Ok(index)
-            })
+        let objects = compile_indexed(count, "test compile", |index| {
+            // Deliberately uneven: the low indices are the slow ones, so a scheduler that
+            // returned completion order rather than index order would say so loudly.
+            if index % 8 == 0 {
+                std::thread::sleep(Duration::from_millis(10 * (8 - index / 8) as u64));
+            }
+            Ok(index)
         })
         .expect("every index compiles");
         assert_eq!(objects, (0..count).collect::<Vec<_>>());
@@ -2910,20 +2965,18 @@ mod tests {
 
     #[test]
     fn an_indexed_compile_reports_the_lowest_failing_index() {
-        let failure = std::thread::scope(|scope| {
-            compile_indexed(scope, 32, "test compile", |index| {
-                // The later failure is also the faster one, so whichever worker claims it will
-                // usually report first. The lowest failing index must still win.
-                if index == 3 {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                if index == 3 || index == 17 {
-                    return Err(NativeError::NumberProvider {
-                        message: format!("index {index}"),
-                    });
-                }
-                Ok(index)
-            })
+        let failure = compile_indexed(32, "test compile", |index| {
+            // The later failure is also the faster one, so whichever worker claims it will
+            // usually report first. The lowest failing index must still win.
+            if index == 3 {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if index == 3 || index == 17 {
+                return Err(NativeError::NumberProvider {
+                    message: format!("index {index}"),
+                });
+            }
+            Ok(index)
         })
         .expect_err("a failing index fails the batch");
         match failure {
@@ -2934,11 +2987,9 @@ mod tests {
 
     #[test]
     fn a_panicking_indexed_worker_becomes_a_worker_panic() {
-        let failure = std::thread::scope(|scope| {
-            compile_indexed(scope, 16, "panicking test compile", |index| {
-                assert_ne!(index, 9, "deliberate test panic");
-                Ok(index)
-            })
+        let failure = compile_indexed(16, "panicking test compile", |index| {
+            assert_ne!(index, 9, "deliberate test panic");
+            Ok(index)
         })
         .expect_err("a panicking worker fails the batch");
         assert!(matches!(
@@ -2951,7 +3002,7 @@ mod tests {
 
     #[test]
     fn one_slow_index_does_not_hold_the_indices_behind_it() {
-        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let workers = rayon::current_num_threads();
         if workers < 2 {
             // Nothing to steal from on a single-core machine.
             return;
@@ -2962,26 +3013,24 @@ mod tests {
         // the other workers drain the whole rest of the space while zero waits.
         let progress = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
         let progress_ref = &progress;
-        let observed = std::thread::scope(|scope| {
-            compile_indexed(scope, count, "test compile", move |index| {
-                let (finished, signal) = progress_ref;
-                if index == 0 {
-                    let mut finished = finished.lock().expect("progress lock");
-                    while *finished < count - 1 {
-                        let (guard, timeout) = signal
-                            .wait_timeout(finished, Duration::from_secs(20))
-                            .expect("progress lock");
-                        finished = guard;
-                        if timeout.timed_out() {
-                            break;
-                        }
+        let observed = compile_indexed(count, "test compile", move |index| {
+            let (finished, signal) = progress_ref;
+            if index == 0 {
+                let mut finished = finished.lock().expect("progress lock");
+                while *finished < count - 1 {
+                    let (guard, timeout) = signal
+                        .wait_timeout(finished, Duration::from_secs(20))
+                        .expect("progress lock");
+                    finished = guard;
+                    if timeout.timed_out() {
+                        break;
                     }
-                    return Ok(*finished);
                 }
-                *finished.lock().expect("progress lock") += 1;
-                signal.notify_all();
-                Ok(0)
-            })
+                return Ok(*finished);
+            }
+            *finished.lock().expect("progress lock") += 1;
+            signal.notify_all();
+            Ok(0)
         })
         .expect("every index compiles");
         assert_eq!(
@@ -3366,6 +3415,202 @@ mod tests {
             .expect("construct one-module graph")
     }
 
+    fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
+        fs::create_dir_all(project).expect("create scheduling graph project");
+        for name in ["dep.js", "main.js"] {
+            fs::write(project.join(name), "").expect("write scheduling graph module");
+        }
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("dependency timer".to_owned()),
+                    Constant::Number(0.0_f64.to_bits()),
+                    Constant::Undefined,
+                ],
+                code: vec![
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::SetTimeout),
+                    Instruction::MakeFunction(0),
+                    Instruction::Const(1),
+                    Instruction::Call { argc: 2 },
+                    Instruction::Pop,
+                    Instruction::Const(2),
+                    Instruction::Return,
+                ],
+                local_count: 0,
+                functions: vec![FunctionProto {
+                    asynchronous: false,
+                    name: None,
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::Const(0),
+                        Instruction::HostCall {
+                            op: HostOp::WriteStdout,
+                            argc: 1,
+                        },
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                }],
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("entry body".to_owned()),
+                    Constant::Undefined,
+                ],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Pop,
+                    Instruction::Const(1),
+                    Instruction::Return,
+                ],
+                local_count: 0,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".to_owned()],
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let dependency_path =
+            fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
+        ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
+            if path == dependency_path {
+                dependency.clone()
+            } else {
+                entry.clone()
+            }
+        })
+        .expect("construct scheduling graph")
+    }
+
+    #[test]
+    fn one_realm_defers_dependency_work_until_the_complete_native_graph_finishes() {
+        let root = TestDirectory::new("kiln-native-realm-graph");
+        let graph = realm_scheduling_graph(&root.path.join("project"));
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native Realm graph integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let run = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native scheduling graph runs");
+        assert_eq!(run.stdout, b"entry body\ndependency timer\n");
+    }
+
+    #[test]
+    fn embedded_graph_owns_one_realm_through_async_quiescence() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping embedded Realm graph integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping embedded Realm graph integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-embedded-realm-graph");
+        let graph = realm_scheduling_graph(&root.path.join("project"));
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let library = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(if cfg!(target_os = "macos") {
+                        "program.dylib"
+                    } else {
+                        "program.so"
+                    }),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build embedded scheduling graph");
+        let header_name = library
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph header name");
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <stdio.h>
+
+static int write_host_call(void *context, uint16_t operation, uint16_t argc,
+                           const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
+        result == NULL || arguments[0].tag != KILN_VALUE_STRING ||
+        (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
+    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
+        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    kiln_host host = {{ write_host_call, NULL }};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
+}}
+"#,
+                symbol = library.module_symbol,
+            ),
+        )
+        .expect("write embedded scheduling host");
+        let host_object = root.path.join("host.o");
+        let mut compile = CompileOptions::default();
+        compile.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile)
+            .expect("compile embedded scheduling host");
+        let host_executable = root.path.join("host");
+        let loader_directory = library.loader.parent().expect("loader directory");
+        let mut link = LinkOptions::default();
+        link.runtime_libraries.push(library.output.clone());
+        link.extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link)
+            .expect("link embedded scheduling host");
+        let mut command = Command::new(host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run embedded scheduling graph");
+        assert!(
+            output.status.success(),
+            "embedded scheduling graph failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"entry body\ndependency timer\n");
+    }
+
     fn star_reexport_graph(project: &Path) -> ModuleGraph {
         fs::create_dir_all(project).expect("create star graph project");
         for name in ["origin.js", "barrel.js", "main.js"] {
@@ -3521,6 +3766,14 @@ mod tests {
         let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
         assert!(launcher.contains("kiln_imports_2[0] = kiln_exports_0[0];"));
         assert!(!launcher.contains("kiln_imports_1[0] ="));
+        assert_eq!(launcher.matches("kiln_realm_create(&realm)").count(), 1);
+        assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
+        assert_eq!(
+            launcher
+                .matches("kiln_realm_enter(realm, kiln_graph_enter_module, &context)")
+                .count(),
+            modules.len()
+        );
         let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
             .expect("shared wrapper emits");
         assert!(wrapper.contains("import_arrays[2][0] = export_arrays[0][0];"));
@@ -4342,9 +4595,20 @@ int main(void) {
             .compile_c(&wrapper_source, &wrapper_object, &compile_options)
             .expect("compile wrapper source");
         objects.push(wrapper_object);
+        let target = target_identity(toolchain.identity());
+        let (provider, _, _) = builder
+            .cached_number_provider(&target)
+            .expect("load Realm provider");
+        let provider_archive = root.path.join("realm-provider.a");
+        materialize(&provider_archive, &provider, false).expect("materialize Realm provider");
         let library = root.path.join(shared_library_name());
+        let mut manual_link = LinkOptions::default();
+        manual_link.runtime_libraries.push(provider_archive);
+        if cfg!(not(target_os = "windows")) {
+            manual_link.libraries.push("m".to_owned());
+        }
         toolchain
-            .link_shared_library(&objects, &library, &LinkOptions::default())
+            .link_shared_library(&objects, &library, &manual_link)
             .expect("link shared graph");
         assert!(library.is_file());
         let header = root.path.join("wrapper.h");
@@ -4776,6 +5040,26 @@ int main(void) {{
             .file_name()
             .and_then(|name| name.to_str())
             .expect("second header name");
+        // Zig's Mach-O linker does not yet implement `-exported_symbols_list`
+        // (ziglang/zig#24662). The generated module entries are still hidden by object
+        // visibility, which is the interposition property this regression protects; exercise
+        // the stronger provider-export policy whenever the selected linker can enforce it.
+        let provider_visibility_checks =
+            if cfg!(target_os = "macos") && toolchain.identity().kind == CompilerKind::Zig {
+                ""
+            } else {
+                r#"
+    if (dlsym(first, "kiln_number_to_js_string") != NULL ||
+        dlsym(second, "kiln_number_to_js_string") != NULL ||
+        dlsym(first, "kiln_string_to_number") != NULL ||
+        dlsym(second, "kiln_string_to_number") != NULL ||
+        dlsym(first, "kiln_realm_create") != NULL ||
+        dlsym(second, "kiln_realm_create") != NULL ||
+        dlsym(first, "kiln_realm_drive") != NULL ||
+        dlsym(second, "kiln_realm_drive") != NULL)
+        return 4;
+"#
+            };
         let host_source = root.path.join("host.c");
         fs::write(
             &host_source,
@@ -4808,18 +5092,9 @@ int main(int argc, char **argv) {{
     if (first == NULL) return 2;
     second = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
     if (second == NULL) return 3;
-    if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL ||
-        dlsym(first, "kiln_number_to_js_string") != NULL ||
-        dlsym(second, "kiln_number_to_js_string") != NULL ||
-        dlsym(first, "kiln_string_to_number") != NULL ||
-        dlsym(second, "kiln_string_to_number") != NULL ||
-        dlsym(first, "rust_eh_personality") != NULL ||
-        dlsym(second, "rust_eh_personality") != NULL ||
-        dlsym(first, "rust_begin_unwind") != NULL ||
-        dlsym(second, "rust_begin_unwind") != NULL ||
-        dlsym(first, "ffc_parse_double") != NULL ||
-        dlsym(second, "ffc_parse_double") != NULL)
+    if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL)
         return 4;
+    {provider_visibility_checks}
     first_entry = load_entry(first, "{first_symbol}");
     second_entry = load_entry(second, "{second_symbol}");
     if (first_entry == NULL || second_entry == NULL) return 5;
@@ -4839,6 +5114,7 @@ int main(int argc, char **argv) {{
                 second_symbol = second.module_symbol,
                 first_bits = 11.0_f64.to_bits(),
                 second_bits = 22.0_f64.to_bits(),
+                provider_visibility_checks = provider_visibility_checks,
             ),
         )
         .expect("write visibility host");
@@ -4869,7 +5145,7 @@ int main(int argc, char **argv) {{
             output.status.success(),
             "shared graph visibility host failed with {:?}: {}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr),
         );
     }
 

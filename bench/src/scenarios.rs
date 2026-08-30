@@ -329,7 +329,7 @@ fn native_entry_program() -> ModuleProgram {
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
-                Instruction::LoadLocal(0),
+                Instruction::LoadCell(0),
                 Instruction::HostCall {
                     op: HostOp::WriteStdout,
                     argc: 1,
@@ -952,5 +952,18 @@ mod tests {
         assert_eq!(measurement.stats.ir_computed, 1);
         assert_eq!(measurement.stats.project_computed, 0);
         assert!(measurement.steady_state);
+    }
+
+    #[test]
+    fn native_entry_fixture_reads_import_cells_before_host_calls() {
+        let root = temp_root();
+        let _cleanup = TempTree(root.clone());
+        native_fixture_files(&root).expect("materialise native fixture");
+        let graph = native_graph(&root, 42).expect("construct native graph");
+
+        assert_eq!(
+            execute_linked(&graph).expect("execute native fixture"),
+            "42\n"
+        );
     }
 }

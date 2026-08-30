@@ -43,6 +43,7 @@ pub enum DaemonError {
 pub(crate) struct DaemonState<E> {
     pub(crate) engine: E,
     pub(crate) source_view: SourceView,
+    pub(crate) resolutions: Option<ResolutionMap>,
 }
 
 /// Connection-local synchronization state. Staged text is private until CommitSync obtains the
@@ -53,15 +54,6 @@ struct PendingSync {
     manifest: BTreeMap<String, SourceDigest>,
     needed: BTreeSet<String>,
     staged: BTreeMap<String, String>,
-    /// The package resolutions the client pinned for this snapshot.
-    ///
-    /// Carried rather than consumed: linking does not read them yet, and dropping them at the
-    /// door would make the field look optional when the protocol says it is not. Held here, the
-    /// commit that starts using them has them already. See NOTES.md.
-    #[expect(
-        dead_code,
-        reason = "held for the commit path that will link against it"
-    )]
     resolutions: ResolutionMap,
 }
 
@@ -215,6 +207,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
             state: Arc::new(Mutex::new(DaemonState {
                 engine,
                 source_view: SourceView(0),
+                resolutions: None,
             })),
             _socket: SocketGuard(socket.to_path_buf()),
         })
@@ -268,36 +261,44 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         let state = Arc::clone(&self.state);
         let shared = Arc::clone(&self.shared);
 
-        thread::spawn(move || {
-            // A clone of the socket, not the socket, so the thread keeps sole ownership of the
-            // one it reads and writes.
-            let handle = match stream.try_clone() {
-                Ok(handle) => handle,
-                Err(error) => {
-                    eprintln!("kiln-daemon: cannot track connection: {error}");
-                    return;
-                }
-            };
-            let id = shared.register(handle);
+        // Built rather than `spawn`ed, for the stack: see `crate::SERVE_STACK_BYTES`. A default
+        // 2 MiB thread overflows on an ordinary project, and a stack overflow here aborts the
+        // whole daemon rather than failing one connection.
+        thread::Builder::new()
+            .stack_size(crate::SERVE_STACK_BYTES)
+            .spawn(move || {
+                // A clone of the socket, not the socket, so the thread keeps sole ownership of the
+                // one it reads and writes.
+                let handle = match stream.try_clone() {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        eprintln!("kiln-daemon: cannot track connection: {error}");
+                        return;
+                    }
+                };
+                let id = shared.register(handle);
 
-            // Backstop for a panic outside the per-request guard - in the framing layer, say.
-            // It costs one connection; the alternative is a dead daemon.
-            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                serve_connection(stream, &state, &shared)
-            }));
-            shared.deregister(id);
+                // Backstop for a panic outside the per-request guard - in the framing layer, say.
+                // It costs one connection; the alternative is a dead daemon.
+                let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                    serve_connection(stream, &state, &shared)
+                }));
+                shared.deregister(id);
 
-            match outcome {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!("kiln-daemon: connection closed: {error}"),
-                Err(payload) => {
-                    eprintln!(
-                        "kiln-daemon: connection panicked: {}",
-                        panic_message(&*payload)
-                    )
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("kiln-daemon: connection closed: {error}"),
+                    Err(payload) => {
+                        eprintln!(
+                            "kiln-daemon: connection panicked: {}",
+                            panic_message(&*payload)
+                        )
+                    }
                 }
-            }
-        })
+            })
+            // A thread that cannot be created is not a connection that can be served, and the
+            // accept loop has no better answer than the one it already gives an unservable peer.
+            .expect("spawn a connection thread")
     }
 }
 
@@ -531,14 +532,20 @@ fn commit_sync<E: QueryEngine>(
             Ok(view) => view,
             Err(message) => return Response::Error { message },
         };
+        let PendingSync {
+            manifest,
+            staged,
+            resolutions,
+            ..
+        } = transaction;
         let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
             let active = guard.engine.source_files();
             for (file, path) in active {
-                if !transaction.manifest.contains_key(&path) {
+                if !manifest.contains_key(&path) {
                     guard.engine.remove_source(file);
                 }
             }
-            for (path, text) in transaction.staged {
+            for (path, text) in staged {
                 let file = guard.engine.intern(&path);
                 guard.engine.set_source(file, text);
             }
@@ -549,6 +556,7 @@ fn commit_sync<E: QueryEngine>(
             }
             return internal_error(&*payload);
         }
+        guard.resolutions = Some(resolutions);
         guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
@@ -594,7 +602,7 @@ fn set_source<E: QueryEngine>(
 fn handle_source_request<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     source_view: SourceView,
-    operation: impl FnOnce(&mut E) -> Response,
+    operation: impl FnOnce(&mut E, Option<&ResolutionMap>) -> Response,
 ) -> (Response, Next) {
     let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
     if guard.source_view != source_view {
@@ -606,7 +614,10 @@ fn handle_source_request<E: QueryEngine>(
         );
     }
     let revision = guard.engine.revision().0;
-    match panic::catch_unwind(AssertUnwindSafe(|| operation(&mut guard.engine))) {
+    let resolutions = guard.resolutions.clone();
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        operation(&mut guard.engine, resolutions.as_ref())
+    })) {
         Ok(_response) if guard.engine.revision().0 != revision => {
             match next_source_view(guard.source_view) {
                 Ok(view) => {
@@ -685,9 +696,10 @@ fn handle<E: QueryEngine>(
             path,
             project_root,
             source_view,
-        } => handle_source_request(state, source_view, |engine| {
+        } => handle_source_request(state, source_view, |engine, resolutions| {
             dispatch_source(
                 engine,
+                resolutions,
                 Request::Check {
                     path,
                     project_root,
@@ -696,9 +708,11 @@ fn handle<E: QueryEngine>(
             )
             .0
         }),
-        Request::Project { source_view } => handle_source_request(state, source_view, |engine| {
-            dispatch_source(engine, Request::Project { source_view }).0
-        }),
+        Request::Project { source_view } => {
+            handle_source_request(state, source_view, |engine, resolutions| {
+                dispatch_source(engine, resolutions, Request::Project { source_view }).0
+            })
+        }
         Request::Run {
             path,
             project_root,
@@ -795,6 +809,13 @@ fn handle<E: QueryEngine>(
                 }),
             }
         }
+        // The artifact cache is content addressed and independent of the source set, so a sweep
+        // needs neither the engine nor its lock - and a sweep of a large cache is a directory
+        // walk that an unrelated `check` must not wait behind.
+        Request::CacheGc {
+            project_root,
+            dry_run,
+        } => run_without_engine_lock(|| crate::dispatch::cache_gc(&project_root, dry_run)),
         request => handle_engine_request(state, request),
     }
 }
@@ -816,8 +837,9 @@ fn handle_run<E: QueryEngine>(
             );
         }
         let revision = guard.engine.revision().0;
+        let resolutions = guard.resolutions.clone();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_run(&mut guard.engine, path, project_root)
+            prepare_run(&mut guard.engine, resolutions.as_ref(), path, project_root)
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
                 match next_source_view(guard.source_view) {
@@ -869,8 +891,14 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         if current_revision != expected_revision {
             return (Response::Stale { current_revision }, Next::Continue);
         }
+        let resolutions = guard.resolutions.clone();
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
-            let graph = native_graph(&mut guard.engine, &path, &project_root)?;
+            let graph = native_graph(
+                &mut guard.engine,
+                resolutions.as_ref(),
+                &path,
+                &project_root,
+            )?;
             match graph {
                 Some(graph) => Ok(PreparedNative::Graph(graph)),
                 None => native_program(&mut guard.engine, &path).map(PreparedNative::Program),
@@ -1008,8 +1036,9 @@ fn prepare_native_snapshot<E: QueryEngine>(
         });
     }
     let revision = guard.engine.revision().0;
+    let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        let graph = native_graph(&mut guard.engine, path, project_root)?;
+        let graph = native_graph(&mut guard.engine, resolutions.as_ref(), path, project_root)?;
         match graph {
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph))
