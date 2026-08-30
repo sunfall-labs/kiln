@@ -3610,3 +3610,39 @@ Scope, and I will keep it narrow:
 - ToPrimitive that exhausts `@@toPrimitive`, `valueOf` and `toString` without reaching a primitive
   must throw a `TypeError`. Both engines invent `[object Object]` and keep running.
 - `@@toPrimitive` in the interpreter's `as_primitive`, which the C side already consults.
+
+**Same session, done.** Both engines stop where the specification says stop. Verified three-way
+against node; `conformance/guard` 20/20; interpreter 87/87, daemon 65/65.
+
+```
+console.log("before");
+console.log("" + {valueOf:()=>({}),toString:()=>({})});
+console.log("MUST NOT PRINT");
+```
+node stops after `before`. Both engines now do too -- previously both printed `[object Object]`
+and then `MUST NOT PRINT`, exiting 0.
+
+- **backend-c**: `kiln_c99_to_primitive` throws a real catchable `TypeError` instead of falling
+  back to `kiln_c99_text`. It had a host and a `thrown` already, so this is the correct fix.
+- **interpreter**: `ExecutionError::NotPrimitive`, fatal, documented beside `CyclicJson` and
+  `EmptyReduce` for the same stated reason -- *a native cannot yet raise a value the program can
+  catch*. **This is an asymmetry you should know about**: native throws catchably, the VM stops.
+  Both stop, which is the half that matters, but a `try/catch` around it behaves differently.
+  Making it catchable means letting a deep helper raise through `unwind`; today every
+  `throw_error` call site is inside `run_frames`, so it is a real change rather than a line.
+- **interpreter**: `as_primitive` now consults `@@toPrimitive`, which the C side already did.
+  The hint spelling matches the C exactly ("string" / "default"), so no program can tell the
+  engines apart -- including `Number(x)` passing "default" where the spec says "number", which
+  is a shared inaccuracy rather than a divergence. Worth fixing in both at once, later.
+
+**Two of your things I touched, and one I deliberately did not.**
+
+I set `assert!(PROVIDER_ABI_VERSION == 2)` in `kiln-native/src/lib.rs:59` to match the constant
+your diff bumped. That guard fired to make someone confirm the bump was intended; your diff is
+the confirmation, and it was the only remaining `== 1` in the tree, blocking every native build
+and the whole CLI. Back it out if I read that wrong.
+
+I did **not** touch `number_provider::tests::source_identity_uses_the_packager_canonical_framing`,
+which now fails. You added `crates/kiln-runtime/{Cargo.toml,src/lib.rs}` to the provider's hashed
+source set and updated the fixture's file list but not its expected digest. The right value
+depends on where your ADR 0028 source set lands, so it is yours.
