@@ -71,13 +71,15 @@ kiln_provider_sha256_stream() {
 	fi
 }
 
-KILN_PROVIDER_RUSTFLAGS="${RUSTFLAGS:-}"
-if [[ -n $KILN_PROVIDER_RUSTFLAGS ]]; then
-	KILN_PROVIDER_RUSTFLAGS+=" "
-fi
-KILN_PROVIDER_RUSTFLAGS+="-C panic=abort -C relocation-model=pic"
+# The manifest advertises a portable generic CPU. RUSTFLAGS outranks Cargo config; removing the
+# encoded form prevents a caller's host-only flags from silently changing that deployment contract.
+KILN_PROVIDER_RUSTFLAGS="-C panic=abort -C relocation-model=pic -C target-cpu=generic"
 
-env RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
+env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+	RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
+	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
+	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
+	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
 	-p kiln-native-number-ffi --release --target "$KILN_PROVIDER_TARGET" \
 	--crate-type staticlib
 
@@ -114,7 +116,7 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
 		crates/kiln-native-number-ffi/src/lib.rs; do
-		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE")
+		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE" | tr -d '[:space:]')
 		printf '%s\0%s\0' "$KILN_PROVIDER_SOURCE" "$KILN_PROVIDER_SIZE"
 		dd if="$KILN_PROVIDER_SOURCE" bs=65536 2>/dev/null
 	done | kiln_provider_sha256_stream

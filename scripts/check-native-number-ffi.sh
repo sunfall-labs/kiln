@@ -22,11 +22,67 @@ kiln_number_cleanup() {
 }
 trap kiln_number_cleanup EXIT
 
-bash scripts/package-native-number-provider.sh "$KILN_NUMBER_TEMP/package" >/dev/null
+# A shipped package must not inherit host-only compiler flags while claiming a generic CPU. Invalid
+# sentinels make this smoke fail if any caller rustflags leak through to the provider build.
+env RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_ENCODED_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTFLAGS='--kiln-provider-must-not-inherit' \
+	CARGO_BUILD_RUSTC='/kiln/provider/must/not/inherit' \
+	RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WRAPPER='/kiln/provider/must/not/inherit' \
+	CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER='/kiln/provider/must/not/inherit' \
+	bash scripts/package-native-number-provider.sh "$KILN_NUMBER_TEMP/package" >/dev/null
 KILN_NUMBER_ARCHIVE="$KILN_NUMBER_TEMP/package/libkiln_native_number_ffi.a"
 KILN_NUMBER_MANIFEST="$KILN_NUMBER_TEMP/package/kiln-native-number-provider.json"
 if [[ ! -f $KILN_NUMBER_ARCHIVE || ! -f $KILN_NUMBER_MANIFEST ]]; then
 	printf 'packaged number provider is incomplete under %s\n' "$KILN_NUMBER_TEMP/package" >&2
+	exit 1
+fi
+
+kiln_number_sha256_stream() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk '{print $1}'
+	elif command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{print $1}'
+	else
+		printf 'neither shasum nor sha256sum is available\n' >&2
+		return 1
+	fi
+}
+
+# The shipped manifest and source fallback must describe identical inputs identically. Recompute
+# the two identities independently of the packager so a checkout build and installed archive share
+# native cache entries.
+KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
+	for KILN_NUMBER_SOURCE in \
+		Cargo.lock \
+		crates/kiln-number-core/Cargo.toml \
+		crates/kiln-number-core/src/lib.rs \
+		crates/kiln-native-number-ffi/Cargo.toml \
+		crates/kiln-native-number-ffi/src/lib.rs; do
+		KILN_NUMBER_SOURCE_SIZE=$(wc -c <"$KILN_NUMBER_SOURCE" | tr -d '[:space:]')
+		printf '%s\0%s\0' "$KILN_NUMBER_SOURCE" "$KILN_NUMBER_SOURCE_SIZE"
+		dd if="$KILN_NUMBER_SOURCE" bs=65536 2>/dev/null
+	done | kiln_number_sha256_stream
+)
+KILN_NUMBER_MANIFEST_SOURCE_DIGEST=$(
+	sed -n 's/^  "source_sha256": "\([0-9a-f]*\)",$/\1/p' "$KILN_NUMBER_MANIFEST"
+)
+if [[ $KILN_NUMBER_MANIFEST_SOURCE_DIGEST != "$KILN_NUMBER_EXPECTED_SOURCE_DIGEST" ]]; then
+	printf 'number-provider source identity drift: manifest has %s, expected %s\n' \
+		"$KILN_NUMBER_MANIFEST_SOURCE_DIGEST" "$KILN_NUMBER_EXPECTED_SOURCE_DIGEST" >&2
+	exit 1
+fi
+
+KILN_NUMBER_RUSTC="${RUSTC:-rustc}"
+KILN_NUMBER_EXPECTED_RUSTC_IDENTITY="sha256:$("$KILN_NUMBER_RUSTC" -vV | kiln_number_sha256_stream)"
+KILN_NUMBER_MANIFEST_RUSTC_IDENTITY=$(
+	sed -n 's/^  "rustc_identity": "\([^"]*\)",$/\1/p' "$KILN_NUMBER_MANIFEST"
+)
+if [[ $KILN_NUMBER_MANIFEST_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY" ]]; then
+	printf 'number-provider rustc identity drift: manifest has %s, expected %s\n' \
+		"$KILN_NUMBER_MANIFEST_RUSTC_IDENTITY" "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY" >&2
 	exit 1
 fi
 
@@ -46,7 +102,6 @@ env KILN_NATIVE_NUMBER_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
 # The child has a C toolchain but cannot see Cargo or rustc, so failed installed discovery cannot
 # silently fall back to rebuilding the provider from this checkout.
 KILN_NUMBER_CARGO="${CARGO:-cargo}"
-KILN_NUMBER_RUSTC="${RUSTC:-rustc}"
 KILN_NUMBER_HOST_TARGET=$(
 	"$KILN_NUMBER_RUSTC" -vV | sed -n 's/^host: //p'
 )
