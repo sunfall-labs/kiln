@@ -10467,9 +10467,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
-        Instruction::LoadWellKnown(_) => Err(EmitError::Unsupported {
-            feature: "well-known symbol access in the native backend".to_owned(),
-        }),
+        Instruction::LoadWellKnown(_) => Ok(()),
         Instruction::PrivateIn(_)
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
@@ -11579,8 +11577,18 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::LoadWellKnown(_)
-        | Instruction::PrivateIn(_)
+        Instruction::LoadWellKnown(well_known) => {
+            let (name, length) = match well_known {
+                kiln_ir::WellKnownSymbol::Iterator => ("@@iterator", 10),
+                kiln_ir::WellKnownSymbol::AsyncIterator => ("@@asyncIterator", 15),
+            };
+            writeln!(
+                output,
+                "    stack[sp++] = kiln_c99_well_known_value(\"{name}\", {length});"
+            )
+            .unwrap();
+        }
+        Instruction::PrivateIn(_)
         | Instruction::InitPrivate(_)
         | Instruction::DefinePrivateAccessor { .. } => {
             unreachable!("unsupported typed-key instruction was validated before emission")
@@ -13621,13 +13629,6 @@ int main(void) {{
     fn typed_key_instructions_are_refused_by_the_native_backend() {
         let cases = [
             (
-                vec![
-                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
-                    Instruction::Pop,
-                ],
-                "well-known symbol",
-            ),
-            (
                 vec![Instruction::Const(0), Instruction::GetPrivate(0)],
                 "private fields",
             ),
@@ -13643,6 +13644,74 @@ int main(void) {{
                 "typed-key instruction must be rejected by native emission"
             );
         }
+    }
+
+    #[test]
+    fn executable_well_known_symbols_are_canonical_and_not_strings() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("iterator".into()),
+                Constant::String("asyncIterator".into()),
+                Constant::String("@@iterator".into()),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(0),
+                Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(1),
+                Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::AsyncIterator),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::NewArray { count: 0 },
+                Instruction::Const(2),
+                Instruction::GetComputed,
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("well-known symbol program emits");
+        let wrapper = format!(
+            r#"
+static int calls;
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL) return 1;
+    if (calls < 2) {{
+        if (arguments[0].tag != KILN_VALUE_BOOLEAN || !arguments[0].bits) return 2;
+    }} else if (arguments[0].tag != KILN_VALUE_UNDEFINED) {{
+        return 3;
+    }}
+    calls += 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    if ({symbol}(&host, &result) != KILN_C99_OK || calls != 3) return 4;
+    return 0;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "well-known-symbols");
+        assert!(run.status.success(), "well-known symbols lost identity or string separation");
     }
 
     #[test]
