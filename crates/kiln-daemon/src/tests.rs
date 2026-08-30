@@ -684,6 +684,117 @@ fn warm_noop_sync_still_advances_the_source_view() {
 }
 
 #[test]
+fn warm_noop_sync_reuses_the_content_identical_graph_snapshot() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("dependency.js");
+    let entry = fixture.dir.join("entry.js");
+    let dependency_source = "export const answer = 42;\n";
+    let entry_source = "import { answer } from './dependency.js'; console.log(answer);\n";
+    std::fs::write(&dependency, dependency_source).expect("write dependency");
+    std::fs::write(&entry, entry_source).expect("write entry");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let dependency = std::fs::canonicalize(dependency).expect("canonical dependency");
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    let root_text = root.to_string_lossy().into_owned();
+    let dependency_text = dependency.to_string_lossy().into_owned();
+    let entry_text = entry.to_string_lossy().into_owned();
+    let files = [
+        (dependency_text.as_str(), dependency_source),
+        (entry_text.as_str(), entry_source),
+    ];
+    let resolutions =
+        || ResolutionMap::new(root_text.clone(), Vec::new()).expect("empty project resolution map");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let (first_sync, first_needed) =
+        begin_sync_with_resolutions(&mut client, &files, resolutions());
+    assert_eq!(first_needed.len(), files.len());
+    for (path, source) in files {
+        assert!(matches!(
+            stage_sync(&mut client, first_sync, path, source),
+            Response::Ok
+        ));
+    }
+    assert!(matches!(
+        commit_sync(&mut client, first_sync),
+        Response::Synced { .. }
+    ));
+    assert!(matches!(
+        client
+            .request(&Request::Check {
+                source_view: SourceView(0),
+                path: entry_text.clone(),
+                project_root: root_text.clone(),
+            })
+            .expect("prime graph cache"),
+        Response::Checked(_)
+    ));
+    client.request(&Request::ResetStats).expect("reset stats");
+
+    let (second_sync, second_needed) =
+        begin_sync_with_resolutions(&mut client, &files, resolutions());
+    assert!(second_needed.is_empty());
+    assert!(matches!(
+        commit_sync(&mut client, second_sync),
+        Response::Synced { .. }
+    ));
+    let Response::Ran(run) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: entry_text.clone(),
+            project_root: root_text.clone(),
+        })
+        .expect("run after warm no-op sync")
+    else {
+        panic!("expected run response");
+    };
+    assert!(run.succeeded, "{:?}", run.diagnostics);
+    assert_eq!(run.stdout, "42\n");
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_invalidations, 0);
+
+    client.request(&Request::ResetStats).expect("reset stats");
+    assert!(matches!(
+        client
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: entry_text.clone(),
+                text: entry_source.to_owned(),
+            })
+            .expect("repeat identical direct update"),
+        Response::Ok
+    ));
+    assert!(matches!(
+        client
+            .request(&Request::Run {
+                source_view: SourceView(0),
+                path: entry_text,
+                project_root: root_text,
+            })
+            .expect("run after identical direct update"),
+        Response::Ran(summary) if summary.succeeded && summary.stdout == "42\n"
+    ));
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_invalidations, 0);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
 fn sync_rejects_noncanonical_resolution_paths() {
     let fixture = Fixture::started();
     let mut client = fixture.client();
