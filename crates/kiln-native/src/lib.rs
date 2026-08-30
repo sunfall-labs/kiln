@@ -26,9 +26,9 @@ pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolvedExport};
 use kiln_native_runtime::{
-    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RESULT_PATH_ENV,
-    NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result, launcher_source,
-    runtime_source,
+    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
+    NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result,
+    embedding_module_api_symbol, launcher_source, runtime_source,
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
@@ -185,9 +185,12 @@ pub struct NativeSharedLibraryReport {
     /// Package this file with the requested output alias and add its parent directory to the
     /// embedding host's dynamic-loader search path.
     pub loader: PathBuf,
-    /// Program-specific C header declaring `module_symbol` against the stable embedding ABI.
+    /// Program-specific C header declaring both the legacy entry and owned-result API accessor.
     pub header: PathBuf,
+    /// Legacy ABI-v1 entry point with a borrowed scalar result.
     pub module_symbol: String,
+    /// ABI-v2 descriptor accessor with an explicitly owned scalar result.
+    pub module_api_symbol: String,
     pub tool: ToolIdentity,
     pub cache_hits: NativeSharedLibraryCacheHits,
     pub sizes: NativeSharedLibrarySizes,
@@ -661,9 +664,10 @@ impl NativeBuilder {
 
     /// Build one scalar bytecode module as a shared library for an embedding host.
     ///
-    /// The resulting library exports the module's generated entry point and expects the caller to
-    /// provide the stable `kiln_host` callback ABI. It deliberately does not link the CLI runtime
-    /// or launcher, so host policy remains in the embedding process.
+    /// The resulting library exports the module's legacy entry point plus its owned-result API-v2
+    /// descriptor accessor and expects the caller to provide the stable `kiln_host` callback ABI.
+    /// It deliberately does not link the CLI runtime or launcher, so host policy remains in the
+    /// embedding process.
     pub fn build_shared_library(
         &self,
         program: &Program,
@@ -672,6 +676,13 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let module = emit_c(program)?;
+        let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
+        let module_wrapper = owned_result_wrapper_source(
+            &module.symbol,
+            "scalar",
+            &format!("{}(&proxy_host, &value)", module.symbol),
+            "",
+        );
         let header = shared_library_header_path(&options.output);
         if options
             .output
@@ -691,10 +702,13 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
-        let embedding_abi = runtime_abi_identity();
+        let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        // Keep the plain generated unit on the same cache identity as executable builds.  The
+        // shared-only adapter is cached as a second generated-C artifact, so building a DSO does
+        // not poison the reusable non-PIC module source cache.
         let module_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-c-abi-{C_ABI_VERSION}"),
@@ -705,8 +719,23 @@ impl NativeBuilder {
             Digest::hash(b"deterministic-c11"),
             [Digest::hash(module.source.as_bytes())],
         );
-        let (module_source, module_source_digest, generated_c_hit) =
+        let (base_source, base_source_digest, _) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
+        let shared_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
+            Backend::Custom("native-shared-library-source".to_owned()),
+            &embedding_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"deterministic-c11-owned-result-v2"),
+            [base_source_digest, Digest::hash(module_wrapper.as_bytes())],
+        );
+        let mut shared_module_source = base_source;
+        shared_module_source.push(b'\n');
+        shared_module_source.extend_from_slice(module_wrapper.as_bytes());
+        let (module_source, module_source_digest, generated_c_hit) =
+            self.cached_payload(&shared_source_key, &shared_module_source)?;
         let object_options = Digest::hash(
             format!(
                 "shared-library\0pic\0c11\0{}\0{}",
@@ -753,17 +782,19 @@ impl NativeBuilder {
                 &embedding_abi,
                 &target,
                 profile,
-                &module.symbol,
+                &[module.symbol.as_str(), module_api_symbol.as_str()],
                 link_inputs,
             ),
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-library\0{}\0system-math\0{}\0{}\0{}",
+                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
+                EMBEDDING_MODULE_API_VERSION,
+                [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
             )
             .as_bytes(),
         );
@@ -795,7 +826,7 @@ impl NativeBuilder {
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
-                    &module.symbol,
+                    &[module.symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
                 )?;
                 let objects = [paths.module_o.clone()];
@@ -814,6 +845,7 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: module.symbol,
+            module_api_symbol,
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: generated_c_hit,
@@ -868,8 +900,12 @@ impl NativeBuilder {
             ));
         }
         let topology = graph_shared_topology_digest(graph, &modules);
-        let wrapper_symbol = format!("kiln_shared_graph_{}", topology.to_hex());
+        let wrapper_symbol = format!(
+            "kiln_shared_graph_{}",
+            graph_shared_public_digest(topology, &modules).to_hex()
+        );
         let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
+        let module_api_symbol = embedding_module_api_symbol(&wrapper_symbol)?;
         let mut header_source = graph_shared_header(&wrapper_symbol)?;
         let emit_elapsed = emit_started.elapsed();
 
@@ -914,12 +950,14 @@ impl NativeBuilder {
         }
         let wrapper_source_key = key(
             ArtifactKind::GeneratedC,
-            format!("kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}"),
+            format!(
+                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
+            ),
             Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
             &embedding_abi,
             &target,
             CacheProfile::Debug,
-            Digest::hash(b"deterministic-c11-shared-graph-wrapper"),
+            Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
             [Digest::hash(wrapper.as_bytes()), topology],
         );
         let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
@@ -965,7 +1003,7 @@ impl NativeBuilder {
                 ArtifactKind::NativeObject,
                 &compiler,
                 Backend::Custom("native-shared-graph-module".to_owned()),
-                &embedding_abi,
+                &module_abi,
                 &target,
                 profile.cache(),
                 module_object_options,
@@ -1035,17 +1073,19 @@ impl NativeBuilder {
                 &embedding_abi,
                 &target,
                 profile,
-                &wrapper_symbol,
+                &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                 link_inputs.iter().copied(),
             ),
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-graph\0{}\0system-math\0{}\0{}\0{}",
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
+                EMBEDDING_MODULE_API_VERSION,
+                [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
             )
             .as_bytes(),
         );
@@ -1083,7 +1123,7 @@ impl NativeBuilder {
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
-                    &wrapper_symbol,
+                    &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
                 )?;
                 let report =
@@ -1101,6 +1141,7 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: wrapper_symbol,
+            module_api_symbol,
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
@@ -1580,6 +1621,13 @@ fn runtime_abi_identity() -> String {
     format!("{};runtime-{NATIVE_RUNTIME_VERSION}", module_abi_identity())
 }
 
+fn shared_embedding_abi_identity() -> String {
+    format!(
+        "{};module-api-{EMBEDDING_MODULE_API_VERSION}",
+        runtime_abi_identity()
+    )
+}
+
 fn native_number_abi_identity() -> String {
     format!("kiln-native-number-provider-{PROVIDER_ABI_VERSION}")
 }
@@ -1784,6 +1832,23 @@ fn graph_shared_topology_digest(
             bytes.extend_from_slice(export.exported.as_bytes());
             bytes.push(0);
         }
+    }
+    Digest::hash(&bytes)
+}
+
+/// Derive the public graph wrapper identity from both topology and ordered module bodies. Private
+/// module symbols intentionally remain topology-based, but a public wrapper must not collide with
+/// another DSO containing the same path/import topology and different bytecode.
+fn graph_shared_public_digest(
+    topology: Digest,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Digest {
+    let mut bytes = topology.to_hex().into_bytes();
+    bytes.push(0);
+    for (_, module) in modules {
+        let digest = Digest::hash(module.source.as_bytes());
+        bytes.extend_from_slice(digest.to_hex().as_bytes());
+        bytes.push(0);
     }
     Digest::hash(&bytes)
 }
@@ -2067,6 +2132,207 @@ fn graph_shared_header(wrapper_symbol: &str) -> Result<String, NativeError> {
     embedding_module_header(wrapper_symbol).map_err(NativeError::from)
 }
 
+/// Append the v2 owned-result ABI adapter to a shared-library translation unit.
+///
+/// The adapter deliberately calls the already-generated v1 entry point.  That keeps the two
+/// entry points semantically identical while making ownership explicit at the DSO boundary.
+/// `prefix` is only used to make the private helper names easy to identify in generated C; the
+/// public accessor always follows the ABI-mandated `{base}_api_v2` spelling.
+fn owned_result_wrapper_source(
+    base: &str,
+    prefix: &str,
+    invocation: &str,
+    post_invoke_cleanup: &str,
+) -> String {
+    let stem = format!("{}_{}", prefix, base);
+    let arena = format!("kiln_v2_{stem}_arena");
+    let proxy = format!("kiln_v2_{stem}_proxy");
+    let run = format!("kiln_v2_{stem}_run");
+    let read = format!("kiln_v2_{stem}_read");
+    let dispose = format!("kiln_v2_{stem}_dispose");
+    let descriptor = format!("kiln_v2_{stem}_descriptor");
+    let api_symbol = format!("{base}_api_v2");
+    format!(
+        r#"
+/* Kiln native owned-result API v2 adapter for {base}. */
+#ifndef KILN_MODULE_API_VERSION
+#define KILN_MODULE_API_VERSION {api_version}
+typedef struct kiln_result_v2 kiln_result_v2;
+typedef struct kiln_module_api_v2 {{
+    uint32_t abi_version;
+    uint32_t struct_size;
+    int (*run)(kiln_host *host, kiln_result_v2 **result);
+    int (*read)(const kiln_result_v2 *result, kiln_value *value);
+    void (*dispose)(kiln_result_v2 **result);
+}} kiln_module_api_v2;
+#endif
+
+struct kiln_result_v2 {{
+    kiln_value value;
+}};
+
+typedef struct {arena} {{
+    void **allocations;
+    size_t count;
+    size_t capacity;
+}} {arena};
+
+typedef struct {proxy} {{
+    kiln_host *upstream;
+    {arena} *arena;
+    int failure_status;
+}} {proxy};
+
+static void {arena}_clear({arena} *arena) {{
+    size_t index;
+    if (arena == NULL) return;
+    for (index = 0; index < arena->count; ++index) free(arena->allocations[index]);
+    free(arena->allocations);
+    arena->allocations = NULL;
+    arena->count = 0;
+    arena->capacity = 0;
+}}
+
+static int {arena}_track({arena} *arena, void *allocation) {{
+    size_t capacity;
+    void **grown;
+    if (arena == NULL || allocation == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (arena->count == arena->capacity) {{
+        capacity = arena->capacity == 0 ? 8 : arena->capacity;
+        if (capacity > (size_t)-1 / 2) return KILN_C99_HOST_ERROR;
+        capacity *= 2;
+        if (capacity > (size_t)-1 / sizeof(*grown)) return KILN_C99_HOST_ERROR;
+        grown = (void **)realloc(arena->allocations, capacity * sizeof(*grown));
+        if (grown == NULL) return KILN_C99_HOST_ERROR;
+        arena->allocations = grown;
+        arena->capacity = capacity;
+    }}
+    arena->allocations[arena->count++] = allocation;
+    return KILN_C99_OK;
+}}
+
+static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
+                             const kiln_value *arguments, kiln_value *result) {{
+    {proxy} *proxy = ({proxy} *)context;
+    kiln_host *upstream;
+    char *copy;
+    int status;
+    if (proxy == NULL || proxy->upstream == NULL || proxy->upstream->call == NULL ||
+        result == NULL) return KILN_C99_HOST_ERROR;
+    upstream = proxy->upstream;
+    status = upstream->call(upstream->context, operation, argc, arguments, result);
+    if (status != KILN_C99_OK) return status;
+    if (result->tag > KILN_VALUE_STRING) {{
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+        return KILN_C99_INVALID_ARGUMENT;
+    }}
+    result->reserved = 0;
+    if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
+    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+        return KILN_C99_INVALID_ARGUMENT;
+    }}
+    copy = (char *)malloc(result->len == 0 ? 1 : result->len);
+    if (copy == NULL) {{
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }}
+    if (result->len != 0) memcpy(copy, result->ptr, result->len);
+    status = {arena}_track(proxy->arena, copy);
+    if (status != KILN_C99_OK) {{
+        free(copy);
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }}
+    result->ptr = copy;
+    return KILN_C99_OK;
+}}
+
+static int {run}(kiln_host *host, kiln_result_v2 **out) {{
+    {arena} arena = {{ NULL, 0, 0 }};
+    {proxy} proxy = {{ host, &arena, KILN_C99_OK }};
+    kiln_host proxy_host = {{ {stem}_proxy_call, &proxy }};
+    kiln_value value = {{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+    kiln_result_v2 *owned = NULL;
+    char *copy = NULL;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out = NULL;
+    status = {invocation};
+    if (proxy.failure_status != KILN_C99_OK) status = proxy.failure_status;
+    if (status != KILN_C99_OK && status != KILN_C99_THROWN) goto cleanup;
+    if (value.tag > KILN_VALUE_STRING) {{
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto cleanup;
+    }}
+    value.reserved = 0;
+    if (value.tag == KILN_VALUE_STRING &&
+        (value.len == (size_t)-1 || (value.len != 0 && value.ptr == NULL))) {{
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto cleanup;
+    }}
+    owned = (kiln_result_v2 *)malloc(sizeof(*owned));
+    if (owned == NULL) {{
+        status = KILN_C99_HOST_ERROR;
+        goto cleanup;
+    }}
+    owned->value = value;
+    owned->value.reserved = 0;
+    if (value.tag == KILN_VALUE_STRING) {{
+        copy = (char *)malloc(value.len == 0 ? 1 : value.len);
+        if (copy == NULL) {{
+            status = KILN_C99_HOST_ERROR;
+            goto cleanup;
+        }}
+        if (value.len != 0) memcpy(copy, value.ptr, value.len);
+        owned->value.ptr = copy;
+        copy = NULL;
+    }} else {{
+        owned->value.ptr = NULL;
+        owned->value.len = 0;
+    }}
+    *out = owned;
+    owned = NULL;
+cleanup:
+    {post_invoke_cleanup}
+    free(copy);
+    free(owned);
+    {arena}_clear(&arena);
+    return status;
+}}
+
+static int {read}(const kiln_result_v2 *result, kiln_value *value) {{
+    if (result == NULL || value == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *value = result->value;
+    return KILN_C99_OK;
+}}
+
+static void {dispose}(kiln_result_v2 **result) {{
+    if (result == NULL || *result == NULL) return;
+    free((void *)(*result)->value.ptr);
+    (*result)->value.ptr = NULL;
+    (*result)->value.len = 0;
+    free(*result);
+    *result = NULL;
+}}
+
+static const kiln_module_api_v2 {descriptor} = {{
+    KILN_MODULE_API_VERSION,
+    (uint32_t)sizeof(kiln_module_api_v2),
+    {run},
+    {read},
+    {dispose}
+}};
+
+const kiln_module_api_v2 *{api_symbol}(void) {{
+    return &{descriptor};
+}}
+"#,
+        api_version = EMBEDDING_MODULE_API_VERSION,
+        api_symbol = api_symbol,
+    )
+}
+
 fn graph_shared_wrapper_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -2120,6 +2386,7 @@ typedef struct kiln_proxy_arena {
 typedef struct kiln_proxy_host {
     kiln_host *upstream;
     kiln_proxy_arena *arena;
+    int failure_status;
 } kiln_proxy_host;
 
 static void kiln_proxy_arena_clear(kiln_proxy_arena *arena) {
@@ -2164,15 +2431,21 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     status = upstream->call(upstream->context, operation, argc, arguments, result);
     if (status != KILN_C99_OK) return status;
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
-    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL))
+    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
+    }
     copy = (char *)malloc(result->len == 0 ? 1 : result->len);
-    if (copy == NULL) return KILN_C99_HOST_ERROR;
+    if (copy == NULL) {
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }
     if (result->len != 0) memcpy(copy, result->ptr, result->len);
     status = kiln_proxy_arena_track(arena, copy);
     if (status != KILN_C99_OK) {
         free(copy);
-        return status;
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
     }
     result->ptr = copy;
     return KILN_C99_OK;
@@ -2186,6 +2459,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         count = modules.len(),
     )
     .unwrap();
+    output.push_str("    proxy.failure_status = KILN_C99_OK;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if !node.program.imports.is_empty() {
             writeln!(
@@ -2272,6 +2546,13 @@ int {wrapper_symbol}(kiln_host *host, kiln_value *result) {{
 "#
     )
     .unwrap();
+    let invocation = format!("{wrapper_symbol}(&proxy_host, &value)");
+    output.push_str(&owned_result_wrapper_source(
+        wrapper_symbol,
+        "graph",
+        &invocation,
+        "",
+    ));
     Ok(output)
 }
 
@@ -2799,15 +3080,16 @@ fn shared_library_content_identity(
     embedding_abi: &str,
     target: &str,
     profile: NativeProfile,
-    public_symbol: &str,
+    public_symbols: &[&str],
     inputs: impl IntoIterator<Item = Digest>,
 ) -> Digest {
     let identity_options = Digest::hash(
         format!(
-            "shared-loader-content-v1\0{}\0system-math\0{}\0{}",
+            "shared-loader-content-v2\0{}\0system-math\0{}\0module-api-v{}\0exports={}",
             profile.as_str(),
             shared_library_link_policy(),
-            public_symbol,
+            EMBEDDING_MODULE_API_VERSION,
+            public_symbols.join(","),
         )
         .as_bytes(),
     );
@@ -2876,14 +3158,18 @@ const fn shared_library_link_policy() -> &'static str {
 fn configure_shared_library_link(
     options: &mut LinkOptions,
     output: &Path,
-    public_symbol: &str,
+    public_symbols: &[&str],
     workspace: &Path,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
     {
         let exports = workspace.join("exports.txt");
-        materialize(&exports, format!("_{public_symbol}\n").as_bytes(), false)?;
+        let source = public_symbols
+            .iter()
+            .map(|symbol| format!("_{symbol}\n"))
+            .collect::<String>();
+        materialize(&exports, source.as_bytes(), false)?;
         options
             .extra_args
             .push(format!("-Wl,-install_name,{identity}").into());
@@ -2894,7 +3180,13 @@ fn configure_shared_library_link(
     #[cfg(target_os = "linux")]
     {
         let exports = workspace.join("exports.map");
-        let source = format!("KILN_1 {{\n  global:\n    {public_symbol};\n  local:\n    *;\n}};\n");
+        let source = format!(
+            "KILN_1 {{\n  global:\n{}  local:\n    *;\n}};\n",
+            public_symbols
+                .iter()
+                .map(|symbol| format!("    {symbol};\n"))
+                .collect::<String>()
+        );
         materialize(&exports, source.as_bytes(), false)?;
         options
             .extra_args
@@ -2905,7 +3197,7 @@ fn configure_shared_library_link(
         options.extra_args.push("-Wl,--exclude-libs,ALL".into());
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (options, identity, public_symbol, workspace);
+    let _ = (options, identity, public_symbols, workspace);
     Ok(())
 }
 
@@ -2938,6 +3230,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
+        let source = owned_result_wrapper_source(
+            "kiln_probe",
+            "scalar",
+            "kiln_probe(&proxy_host, &value)",
+            "",
+        );
+        assert_eq!(
+            source,
+            owned_result_wrapper_source(
+                "kiln_probe",
+                "scalar",
+                "kiln_probe(&proxy_host, &value)",
+                "",
+            )
+        );
+        for fragment in [
+            "kiln_probe_api_v2",
+            "kiln_module_api_v2",
+            "kiln_result_v2",
+            "kiln_v2_scalar_kiln_probe_run",
+            "kiln_v2_scalar_kiln_probe_read",
+            "kiln_v2_scalar_kiln_probe_dispose",
+            "failure_status",
+            "*out = NULL",
+            "memcpy(copy, value.ptr, value.len)",
+        ] {
+            assert!(
+                source.contains(fragment),
+                "missing generated fragment: {fragment}"
+            );
+        }
+        assert!(!source.contains("static kiln_result_v2"));
+        assert!(!source.contains("static kiln_value result"));
     }
 
     fn environment_digest(kind: CompilerKind, entries: &[(&str, &str)]) -> Digest {
@@ -4120,6 +4449,344 @@ int main(void) {
     }
 
     #[test]
+    fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping owned-result native integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping owned-result native integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-test");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("left\0right".to_owned())],
+            code: vec![Instruction::Const(0), Instruction::Return],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let report = builder
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build owned-result scalar library");
+        assert_eq!(
+            report.module_api_symbol,
+            format!("{}_api_v2", report.module_symbol)
+        );
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("owned-result header file name");
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    kiln_value value;
+    kiln_value legacy;
+    int index;
+    if (api == NULL || api->abi_version != KILN_MODULE_API_VERSION ||
+        api->struct_size < sizeof(*api) || api->run == NULL || api->read == NULL ||
+        api->dispose == NULL) return 1;
+    if ({module_symbol}(NULL, &legacy) != KILN_C99_OK ||
+        legacy.tag != KILN_VALUE_STRING || legacy.len != 10 ||
+        memcmp(legacy.ptr, "left\0right", 10) != 0) return 2;
+    for (index = 0; index < 64; ++index) {{
+        if (api->run(NULL, &owned) != KILN_C99_OK || owned == NULL) return 3;
+        if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
+            value.len != 10 || value.ptr == NULL || memcmp(value.ptr, "left\0right", 10) != 0)
+            return 4;
+        api->dispose(&owned);
+        if (owned != NULL) return 5;
+        api->dispose(&owned);
+    }}
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+                module_symbol = report.module_symbol,
+            ),
+        )
+        .expect("write owned-result host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile owned-result host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link owned-result host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run owned-result host");
+        assert!(
+            output.status.success(),
+            "owned-result host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            let symbols = Command::new("nm")
+                .args(["-D", "--defined-only"])
+                .arg(&report.loader)
+                .output()
+                .expect("nm is available");
+            assert!(symbols.status.success());
+            let mut exported = String::from_utf8_lossy(&symbols.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().last())
+                .filter(|symbol| symbol.starts_with("kiln_"))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            exported.sort_unstable();
+            let mut expected = vec![report.module_symbol, report.module_api_symbol];
+            expected.sort_unstable();
+            assert_eq!(exported, expected);
+        }
+    }
+
+    #[test]
+    fn owned_result_scalar_api_rejects_malformed_host_strings() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!(
+                "skipping owned-result scalar malformed-host integration on unsupported platform"
+            );
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!(
+                "skipping owned-result scalar malformed-host integration: no C compiler found"
+            );
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-malformed-scalar-test");
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 0,
+                },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_library(
+            &program,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build malformed-host scalar library");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("malformed-host scalar header file name");
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+
+static int malformed_call(void *context, uint16_t operation, uint16_t argc,
+                          const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    (void)operation;
+    (void)argc;
+    (void)arguments;
+    if (result == NULL) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 3}};
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    kiln_host host = {{malformed_call, NULL}};
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    if (api == NULL) return 1;
+    if (api->run(&host, &owned) != KILN_C99_INVALID_ARGUMENT || owned != NULL)
+        return 2;
+    api->dispose(&owned);
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+            ),
+        )
+        .expect("write malformed-host scalar host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile malformed-host scalar host");
+        let host_executable = root.path.join("host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link malformed-host scalar host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run malformed-host scalar host");
+        assert!(
+            output.status.success(),
+            "malformed-host scalar failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping owned-result graph throw integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping owned-result graph throw integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-throw-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create throw graph project");
+        fs::write(project.join("main.js"), "").expect("write throw graph entry");
+        let thrown = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::String("thrown\0value".to_owned())],
+                code: vec![Instruction::Const(0), Instruction::Throw],
+                local_count: 0,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| {
+            thrown.clone()
+        })
+        .expect("construct throw graph");
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build throw graph");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("throw graph header file name");
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    kiln_value value;
+    int status;
+    if (api == NULL) return 1;
+    status = api->run(NULL, &owned);
+    if (status != KILN_C99_THROWN || owned == NULL) return 2;
+    if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
+        value.len != 12 || value.ptr == NULL || memcmp(value.ptr, "thrown\0value", 12) != 0)
+        return 3;
+    api->dispose(&owned);
+    if (owned != NULL) return 4;
+    api->dispose(&owned);
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+            ),
+        )
+        .expect("write throw graph host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile throw graph host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link throw graph host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run throw graph host");
+        assert!(
+            output.status.success(),
+            "throw graph host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn concurrent_runs_with_one_public_output_launch_their_private_program() {
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native concurrency integration: no C compiler found");
@@ -4514,6 +5181,11 @@ int main(void) {
         let wrapper =
             graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");
         assert!(wrapper.contains(embedding_header()));
+        assert!(wrapper.contains(&format!("{}_api_v2", wrapper_symbol)));
+        assert!(wrapper.contains("preserve_result"));
+        assert!(wrapper.contains("kiln_module_api_v2"));
+        assert!(wrapper.contains("static int kiln_v2_graph_"));
+        assert!(!wrapper.contains("static kiln_result_v2"));
         assert!(wrapper.contains("extern int kiln_module_path_"));
         assert!(wrapper.contains("malloc((size_t)"));
         assert!(!wrapper.contains("static kiln_value kiln_import"));
@@ -4540,7 +5212,7 @@ int main(void) {
                 },
             )
             .expect("build shared graph succeeds");
-        assert_eq!(report.module_symbol, wrapper_symbol);
+        assert!(report.module_symbol.starts_with("kiln_shared_graph_"));
         assert!(report.output.is_file());
         let cached = builder
             .build_shared_graph(
@@ -4786,7 +5458,11 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
                memcmp(arguments[0].ptr, "dep", 3) != 0) {{
         return KILN_C99_HOST_ERROR;
     }}
-    *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+    if (context->mode == 0) {{
+        *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, context->storage, 3}};
+    }} else {{
+        *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+    }}
     return KILN_C99_OK;
 }}
 
@@ -4805,10 +5481,32 @@ int main(void) {{
     context.mode = 3;
     if ({symbol}(&host, &result) != KILN_C99_HOST_ERROR) return 5;
     if ({symbol}(NULL, &result) != KILN_C99_HOST_ERROR) return 6;
+    {{
+        const kiln_module_api_v2 *api = {api_symbol}();
+        kiln_result_v2 *owned = NULL;
+        if (api == NULL || api->abi_version != KILN_MODULE_API_VERSION) return 7;
+        context.mode = 0;
+        for (index = 0; index < 64; ++index) {{
+            if (api->run(&host, &owned) != KILN_C99_OK || owned == NULL) return 8;
+            if (api->read(owned, &result) != KILN_C99_OK || result.tag != KILN_VALUE_STRING ||
+                result.len != 3 || result.ptr == NULL || memcmp(result.ptr, "dep", 3) != 0)
+                return 9;
+            api->dispose(&owned);
+            if (owned != NULL) return 10;
+            api->dispose(&owned);
+        }}
+        context.mode = 2;
+        if (api->run(&host, &owned) != KILN_C99_HOST_ERROR || owned != NULL)
+            return 11;
+        context.mode = 3;
+        if (api->run(&host, &owned) != KILN_C99_INVALID_ARGUMENT || owned != NULL)
+            return 12;
+    }}
     return 0;
 }}
 "#,
                 symbol = report.module_symbol,
+                api_symbol = report.module_api_symbol,
             ),
         )
         .expect("write shared graph host");
@@ -4969,8 +5667,8 @@ int main(void) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-shared-graph-visibility-test");
-        let first_graph = one_module_graph(&root.path.join("first-project"), 11.0, "first");
-        let second_graph = one_module_graph(&root.path.join("second-project"), 22.0, "second");
+        let first_graph = one_module_graph(&root.path.join("first-project"), 11.0, "value");
+        let second_graph = one_module_graph(&root.path.join("second-project"), 22.0, "value");
         let first_internal = emit_module_with_logical_path(
             &first_graph
                 .modules()
@@ -5030,6 +5728,10 @@ int main(void) {{
             first.module_symbol, second.module_symbol,
             "the host must be able to address both public wrappers independently"
         );
+        assert_ne!(
+            first.module_api_symbol, second.module_api_symbol,
+            "owned-result accessors must not interpose across same-topology DSOs"
+        );
 
         let first_header = first
             .header
@@ -5071,22 +5773,7 @@ int main(void) {{
 #include <stdint.h>
 #include <string.h>
 
-typedef int (*kiln_entry_fn)(kiln_host *, kiln_value *);
-
-static kiln_entry_fn load_entry(void *handle, const char *name) {{
-    void *address = dlsym(handle, name);
-    kiln_entry_fn entry = NULL;
-    if (address == NULL) return NULL;
-    _Static_assert(sizeof(entry) == sizeof(address), "dlsym function pointer size");
-    memcpy(&entry, &address, sizeof(entry));
-    return entry;
-}}
-
 int main(int argc, char **argv) {{
-    void *first;
-    void *second;
-    kiln_entry_fn first_entry;
-    kiln_entry_fn second_entry;
     kiln_value result;
     if (argc != 3) return 1;
     first = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
@@ -5101,18 +5788,39 @@ int main(int argc, char **argv) {{
     if (first_entry == NULL || second_entry == NULL) return 5;
     if (first_entry(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits}))
-        return 6;
-    if (second_entry(NULL, &result) != KILN_C99_OK ||
+        return 1;
+    if ({second_symbol}(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits}))
-        return 7;
-    dlclose(second);
-    dlclose(first);
+        return 2;
+    {{
+        const kiln_module_api_v2 *first_api = {first_api_symbol}();
+        const kiln_module_api_v2 *second_api = {second_api_symbol}();
+        kiln_result_v2 *first_owned = NULL;
+        kiln_result_v2 *second_owned = NULL;
+        if (first_api == NULL || second_api == NULL ||
+            first_api->run(NULL, &first_owned) != KILN_C99_OK || first_owned == NULL ||
+            second_api->run(NULL, &second_owned) != KILN_C99_OK || second_owned == NULL)
+            return 3;
+        if (first_api->read(first_owned, &result) != KILN_C99_OK ||
+            result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits})) return 4;
+        if (second_api->read(second_owned, &result) != KILN_C99_OK ||
+            result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits})) return 5;
+        first_api->dispose(&first_owned);
+        second_api->dispose(&second_owned);
+        if (first_owned != NULL || second_owned != NULL) return 6;
+        first_api->dispose(&first_owned);
+        second_api->dispose(&second_owned);
+    }}
+    dlclose(second_handle);
+    dlclose(first_handle);
     return 0;
 }}
 "#,
-                internal = first_internal,
                 first_symbol = first.module_symbol,
                 second_symbol = second.module_symbol,
+                first_api_symbol = first.module_api_symbol,
+                second_api_symbol = second.module_api_symbol,
+                internal = first_internal,
                 first_bits = 11.0_f64.to_bits(),
                 second_bits = 22.0_f64.to_bits(),
                 provider_visibility_checks = provider_visibility_checks,
@@ -5126,7 +5834,8 @@ int main(int argc, char **argv) {{
             .compile_c(&host_source, &host_object, &compile_options)
             .expect("compile visibility host");
         let host_executable = root.path.join("host");
-        let link_options = LinkOptions {
+        let mut link_options = LinkOptions {
+            runtime_libraries: vec![first.output.clone(), second.output.clone()],
             libraries: if cfg!(target_os = "linux") {
                 vec!["dl".to_owned()]
             } else {
@@ -5134,6 +5843,14 @@ int main(int argc, char **argv) {{
             },
             ..LinkOptions::default()
         };
+        for directory in [
+            first.loader.parent().expect("first loader directory"),
+            second.loader.parent().expect("second loader directory"),
+        ] {
+            link_options
+                .extra_args
+                .push(format!("-Wl,-rpath,{}", directory.display()).into());
+        }
         toolchain
             .link_executable(&[host_object], &host_executable, &link_options)
             .expect("link visibility host");
