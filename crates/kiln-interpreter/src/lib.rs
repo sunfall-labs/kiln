@@ -142,6 +142,24 @@ pub enum Native {
     NumberToString,
     NumberToFixed,
     NumberValueOf,
+    StringAt,
+    StringCharAt,
+    StringCharCodeAt,
+    StringPadStart,
+    StringPadEnd,
+    StringReplace,
+    StringReplaceAll,
+    StringLastIndexOf,
+    StringTrimStart,
+    StringTrimEnd,
+    StringConcat,
+    ArrayAt,
+    ArrayConcat,
+    ArrayReverse,
+    ArrayShift,
+    ArrayUnshift,
+    ArrayLastIndexOf,
+    ArrayFill,
     BooleanConstructor,
     ParseInt,
     ParseFloat,
@@ -2006,6 +2024,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 CallbackMethod::Reduce => {
                     unreachable!("`reduce` is handled by `array_reduce`")
                 }
+                CallbackMethod::Sort => unreachable!("`sort` is handled by `array_sort`"),
+                CallbackMethod::FindIndex => {
+                    if result.is_truthy() {
+                        return Ok(Value::Number(index as f64));
+                    }
+                }
                 CallbackMethod::Map => collected.push(result),
                 CallbackMethod::ForEach => {}
                 CallbackMethod::Filter => {
@@ -2037,6 +2061,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 unreachable!("generator methods are handled by `invoke`")
             }
             CallbackMethod::Reduce => unreachable!("`reduce` is handled by `array_reduce`"),
+            CallbackMethod::Sort => unreachable!("`sort` is handled by `array_sort`"),
+            // Not undefined: `findIndex` reports -1 for "nowhere", where `find` reports the
+            // absence of a value.
+            CallbackMethod::FindIndex => Value::Number(-1.0),
             CallbackMethod::Map | CallbackMethod::Filter => {
                 Value::Array(Rc::new(RefCell::new(collected)))
             }
@@ -2091,6 +2119,96 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             )?;
             index += 1;
         }
+    }
+
+    /// `sort(comparator?)`, in place.
+    ///
+    /// A bottom-up merge sort rather than `slice::sort_by`, for two reasons: the comparator can
+    /// be user code, so each comparison has to be able to re-enter the interpreter, and the sort
+    /// has to be stable, which the language requires and merging gives for free.
+    ///
+    /// Undefined elements sort to the end without ever reaching the comparator, and the default
+    /// comparison is by string -- which is why `[10, 9, 1].sort()` is `[1, 10, 9]`.
+    fn array_sort(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Array(items) = receiver else {
+            return Ok(Value::Undefined);
+        };
+        let comparator = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let taken = std::mem::take(&mut *items.borrow_mut());
+        let (mut present, absent): (Vec<_>, Vec<_>) = taken
+            .into_iter()
+            .partition(|item| !matches!(item, Value::Undefined));
+
+        let mut width = 1;
+        while width < present.len() {
+            let mut merged = Vec::with_capacity(present.len());
+            let mut start = 0;
+            while start < present.len() {
+                let middle = (start + width).min(present.len());
+                let end = (start + 2 * width).min(present.len());
+                let (mut left, mut right) = (start, middle);
+                while left < middle && right < end {
+                    // `<= 0` keeps the left run first on a tie, which is what makes it stable.
+                    if self.compare_for_sort(
+                        &comparator,
+                        &present[left],
+                        &present[right],
+                        instruction,
+                    )? <= 0.0
+                    {
+                        merged.push(present[left].clone());
+                        left += 1;
+                    } else {
+                        merged.push(present[right].clone());
+                        right += 1;
+                    }
+                }
+                merged.extend_from_slice(&present[left..middle]);
+                merged.extend_from_slice(&present[right..end]);
+                start = end;
+            }
+            present = merged;
+            width *= 2;
+        }
+
+        present.extend(absent);
+        *items.borrow_mut() = present;
+        // In place, and yields the same array rather than a copy.
+        Ok(receiver.clone())
+    }
+
+    /// One comparison for `array_sort`: the comparator's number, or the default string order.
+    fn compare_for_sort(
+        &mut self,
+        comparator: &Value,
+        left: &Value,
+        right: &Value,
+        instruction: usize,
+    ) -> Result<f64, ExecutionError> {
+        if comparator.is_nullish() {
+            let (left, right) = (left.to_display_string(), right.to_display_string());
+            // UTF-16 code units, which is the order the language compares strings in.
+            return Ok(match left.encode_utf16().cmp(right.encode_utf16()) {
+                std::cmp::Ordering::Less => -1.0,
+                std::cmp::Ordering::Equal => 0.0,
+                std::cmp::Ordering::Greater => 1.0,
+            });
+        }
+        let result = self.call_value(
+            comparator,
+            Value::Undefined,
+            vec![left.clone(), right.clone()],
+            instruction,
+        )?;
+        let ordering = result.as_number();
+        // A comparator returning NaN is treated as "equal", which keeps the merge total rather
+        // than letting an inconsistent comparator corrupt the result.
+        Ok(if ordering.is_nan() { 0.0 } else { ordering })
     }
 
     /// Call `callee` and run it to completion, returning its value.
@@ -2525,9 +2643,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 };
                 Ok(Some(iteration_result(value, done)))
             }
-            // `reduce` threads an accumulator, so it is not the same walk as the others.
+            // `reduce` threads an accumulator and `sort` compares pairs, so neither is the walk
+            // the other callback methods share.
             Value::Callback(CallbackMethod::Reduce) => self
                 .array_reduce(&receiver, &arguments, instruction)
+                .map(Some),
+            Value::Callback(CallbackMethod::Sort) => self
+                .array_sort(&receiver, &arguments, instruction)
                 .map(Some),
             Value::Callback(method) => Ok(Some(self.array_callback(
                 method,
@@ -3148,6 +3270,92 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
+        Native::ArrayAt => match receiver {
+            Value::Array(items) => {
+                let items = items.borrow();
+                let index = arguments.first().map_or(0.0, Value::as_number);
+                let index = if index < 0.0 {
+                    items.len() as f64 + index
+                } else {
+                    index
+                };
+                if index < 0.0 || index >= items.len() as f64 {
+                    Value::Undefined
+                } else {
+                    items[index as usize].clone()
+                }
+            }
+            _ => Value::Undefined,
+        },
+        // `concat` flattens an array argument one level and appends anything else as one
+        // element, which is the one place an array argument is not just a value.
+        Native::ArrayConcat => match receiver {
+            Value::Array(items) => {
+                let mut joined = items.borrow().clone();
+                for argument in arguments {
+                    match argument {
+                        Value::Array(more) => joined.extend(more.borrow().iter().cloned()),
+                        other => joined.push(other.clone()),
+                    }
+                }
+                Value::Array(Rc::new(RefCell::new(joined)))
+            }
+            _ => Value::Undefined,
+        },
+        // In place, and returns the same array rather than a copy.
+        Native::ArrayReverse => match receiver {
+            Value::Array(items) => {
+                items.borrow_mut().reverse();
+                receiver.clone()
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayShift => match receiver {
+            Value::Array(items) => {
+                let mut items = items.borrow_mut();
+                if items.is_empty() {
+                    Value::Undefined
+                } else {
+                    items.remove(0)
+                }
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayUnshift => match receiver {
+            Value::Array(items) => {
+                let mut items = items.borrow_mut();
+                // Inserted as a block so the arguments keep their order at the front.
+                items.splice(0..0, arguments.iter().cloned());
+                Value::Number(items.len() as f64)
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayLastIndexOf => match receiver {
+            Value::Array(items) => {
+                let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+                Value::Number(
+                    items
+                        .borrow()
+                        .iter()
+                        .rposition(|item| strict_equal(item, &needle))
+                        .map_or(-1.0, |index| index as f64),
+                )
+            }
+            _ => Value::Undefined,
+        },
+        Native::ArrayFill => match receiver {
+            Value::Array(items) => {
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let length = items.borrow().len();
+                let start = relative_index(arguments.get(1), length, 0);
+                let end = relative_index(arguments.get(2), length, length);
+                for slot in items.borrow_mut().iter_mut().take(end).skip(start) {
+                    *slot = value.clone();
+                }
+                receiver.clone()
+            }
+            _ => Value::Undefined,
+        },
         Native::ArrayJoin => {
             let separator = match arguments.first() {
                 None | Some(Value::Undefined) => ",".to_owned(),
@@ -3340,7 +3548,18 @@ fn call_native(
         | Native::StringSplit
         | Native::StringStartsWith
         | Native::StringEndsWith
-        | Native::StringRepeat => {
+        | Native::StringRepeat
+        | Native::StringAt
+        | Native::StringCharAt
+        | Native::StringCharCodeAt
+        | Native::StringPadStart
+        | Native::StringPadEnd
+        | Native::StringReplace
+        | Native::StringReplaceAll
+        | Native::StringLastIndexOf
+        | Native::StringTrimStart
+        | Native::StringTrimEnd
+        | Native::StringConcat => {
             let Value::String(text) = receiver else {
                 return Ok(Value::Undefined);
             };
@@ -3383,6 +3602,115 @@ fn call_native(
                             .collect()
                     };
                     Value::Array(Rc::new(RefCell::new(parts)))
+                }
+                // `at` accepts a negative index, where `charAt` clamps and `[i]` gives
+                // undefined -- three spellings of "the character there" that differ only at the
+                // edges, which is exactly where they get used.
+                Native::StringAt => {
+                    let characters: Vec<char> = text.chars().collect();
+                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    let index = if index < 0.0 {
+                        characters.len() as f64 + index
+                    } else {
+                        index
+                    };
+                    if index < 0.0 || index >= characters.len() as f64 {
+                        Value::Undefined
+                    } else {
+                        Value::String(characters[index as usize].to_string())
+                    }
+                }
+                Native::StringCharAt => {
+                    let characters: Vec<char> = text.chars().collect();
+                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    // Out of range is the empty string, not undefined.
+                    if index < 0.0 || index >= characters.len() as f64 {
+                        Value::String(String::new())
+                    } else {
+                        Value::String(characters[index as usize].to_string())
+                    }
+                }
+                Native::StringCharCodeAt => {
+                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let index = arguments.first().map_or(0.0, Value::as_number);
+                    // UTF-16 code units, so an astral character has two and this reads one.
+                    if index < 0.0 || index >= units.len() as f64 {
+                        Value::Number(f64::NAN)
+                    } else {
+                        Value::Number(f64::from(units[index as usize]))
+                    }
+                }
+                Native::StringPadStart | Native::StringPadEnd => {
+                    let target = arguments.first().map_or(0.0, Value::as_number);
+                    let padding = match arguments.get(1) {
+                        None | Some(Value::Undefined) => " ".to_owned(),
+                        Some(value) => value.to_display_string(),
+                    };
+                    let current = text.encode_utf16().count();
+                    let target = if target.is_finite() && target > 0.0 {
+                        target as usize
+                    } else {
+                        0
+                    };
+                    // Padding with the empty string cannot make progress, so it is left alone
+                    // rather than looping forever.
+                    if target <= current || padding.is_empty() {
+                        Value::String(text.clone())
+                    } else {
+                        let mut filler = String::new();
+                        while filler.encode_utf16().count() < target - current {
+                            filler.push_str(&padding);
+                        }
+                        // The last repetition is cut to length rather than overshooting.
+                        let filler: String = filler
+                            .chars()
+                            .scan(0usize, |units, character| {
+                                if *units >= target - current {
+                                    return None;
+                                }
+                                *units += character.len_utf16();
+                                Some(character)
+                            })
+                            .collect();
+                        Value::String(if matches!(native, Native::StringPadStart) {
+                            format!("{filler}{text}")
+                        } else {
+                            format!("{text}{filler}")
+                        })
+                    }
+                }
+                // String patterns only. A regular expression is a different search and a
+                // different replacement grammar, and neither exists yet.
+                Native::StringReplace | Native::StringReplaceAll => {
+                    let pattern = arguments
+                        .first()
+                        .map_or_else(String::new, Value::to_display_string);
+                    let replacement = arguments
+                        .get(1)
+                        .map_or_else(String::new, Value::to_display_string);
+                    Value::String(if matches!(native, Native::StringReplaceAll) {
+                        text.replace(&pattern, &replacement)
+                    } else {
+                        text.replacen(&pattern, &replacement, 1)
+                    })
+                }
+                Native::StringLastIndexOf => {
+                    let needle = arguments
+                        .first()
+                        .map_or_else(String::new, Value::to_display_string);
+                    // The index counts characters, not bytes, so the byte offset is converted.
+                    Value::Number(text.rfind(&needle).map_or(-1.0, |offset| {
+                        text[..offset].chars().count() as f64
+                    }))
+                }
+                Native::StringTrimStart => Value::String(text.trim_start().to_owned()),
+                Native::StringTrimEnd => Value::String(text.trim_end().to_owned()),
+                Native::StringConcat => {
+                    let mut joined = text.clone();
+                    for argument in arguments {
+                        joined.push_str(&argument.to_display_string());
+                    }
+                    Value::String(joined)
                 }
                 Native::StringSlice => {
                     let characters: Vec<char> = text.chars().collect();
@@ -3750,6 +4078,17 @@ fn string_property(name: &str) -> Value {
         "startsWith" => Value::Native(Native::StringStartsWith),
         "endsWith" => Value::Native(Native::StringEndsWith),
         "repeat" => Value::Native(Native::StringRepeat),
+        "at" => Value::Native(Native::StringAt),
+        "charAt" => Value::Native(Native::StringCharAt),
+        "charCodeAt" => Value::Native(Native::StringCharCodeAt),
+        "padStart" => Value::Native(Native::StringPadStart),
+        "padEnd" => Value::Native(Native::StringPadEnd),
+        "replace" => Value::Native(Native::StringReplace),
+        "replaceAll" => Value::Native(Native::StringReplaceAll),
+        "lastIndexOf" => Value::Native(Native::StringLastIndexOf),
+        "trimStart" => Value::Native(Native::StringTrimStart),
+        "trimEnd" => Value::Native(Native::StringTrimEnd),
+        "concat" => Value::Native(Native::StringConcat),
         _ => Value::Undefined,
     }
 }
@@ -3803,6 +4142,8 @@ fn array_callback_method(name: &str) -> Option<CallbackMethod> {
         "forEach" => Some(CallbackMethod::ForEach),
         "filter" => Some(CallbackMethod::Filter),
         "reduce" => Some(CallbackMethod::Reduce),
+        "sort" => Some(CallbackMethod::Sort),
+        "findIndex" => Some(CallbackMethod::FindIndex),
         "find" => Some(CallbackMethod::Find),
         "some" => Some(CallbackMethod::Some),
         "every" => Some(CallbackMethod::Every),
@@ -3826,6 +4167,10 @@ pub enum CallbackMethod {
     /// `reduce`: the only one whose callback takes the accumulator, so it does not fit the
     /// `(item, index, array)` walk the rest share.
     Reduce,
+    /// `sort`: its callback compares two elements rather than visiting one, so it does not fit
+    /// the walk either.
+    Sort,
+    FindIndex,
     Find,
     Some,
     Every,
@@ -3855,6 +4200,13 @@ fn array_property(name: &str) -> Value {
         "indexOf" => Value::Native(Native::ArrayIndexOf),
         "includes" => Value::Native(Native::ArrayIncludes),
         "slice" => Value::Native(Native::ArraySlice),
+        "at" => Value::Native(Native::ArrayAt),
+        "concat" => Value::Native(Native::ArrayConcat),
+        "reverse" => Value::Native(Native::ArrayReverse),
+        "shift" => Value::Native(Native::ArrayShift),
+        "unshift" => Value::Native(Native::ArrayUnshift),
+        "lastIndexOf" => Value::Native(Native::ArrayLastIndexOf),
+        "fill" => Value::Native(Native::ArrayFill),
         "values" => Value::Native(Native::ArrayValues),
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,
