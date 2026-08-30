@@ -191,6 +191,7 @@ dependencies = [
  "kiln-daemon",
  "kiln-db",
  "kiln-proto",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "serde_json",

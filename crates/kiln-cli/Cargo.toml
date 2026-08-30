@@ -15,6 +15,9 @@ kiln-daemon = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [[bin]]
 name = "kiln"
 path = "src/main.rs"
