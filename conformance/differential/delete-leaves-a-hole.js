@@ -27,3 +27,16 @@ console.log(deleted, 1 in deleted, deleted.length);
 // That is the only place the two disagree, and it is the reason `includes` exists.
 console.log([1, , 3].indexOf(undefined), [1, , 3].includes(undefined));
 console.log([NaN].indexOf(NaN), [NaN].includes(NaN), [-0].indexOf(0), [-0].includes(0));
+
+// Writing past the end extends with holes too, not with undefined.
+const grown = [1];
+grown[3] = 4;
+console.log(grown, grown.length, 1 in grown, Object.keys(grown), JSON.stringify(grown));
+const visited = [];
+for (const index in grown) { visited.push(index); }
+console.log(visited);
+
+// `reduce` walks elements, and a hole is not one: folding undefined into the accumulator would
+// turn every sum over a sparse array into NaN. Its seed is the first element that is *there*.
+console.log([1, , 3].reduce((total, x) => total + x, 0), [1, , 3].reduce((total, x) => total + x));
+console.log([, , 5].reduce((total, x) => total + x), [1, , 3].reduce((t, x) => t + x, 10));

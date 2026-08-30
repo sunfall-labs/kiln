@@ -4352,7 +4352,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Ok(index) => {
                                 let mut items = items.borrow_mut();
                                 if index >= items.len() {
-                                    items.resize(index + 1, Value::Undefined);
+                                    items.resize(index + 1, Value::Native(Native::Hole));
                                 }
                                 items[index] = value;
                             }
@@ -4817,10 +4817,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             None => {
                 // Reducing an empty array with no initial value has no answer to give, which is
                 // a TypeError in the specification and fatal here for want of a way to throw one.
-                let Some(first) = items.borrow().first().cloned() else {
+                // The seed is the first element that is *there*: an array of nothing but
+                // holes has no answer to give, exactly as an empty one does not.
+                let borrowed = items.borrow();
+                let Some(at) = borrowed.iter().position(|item| !Self::is_hole(item)) else {
                     return Err(ExecutionError::EmptyReduce);
                 };
-                (first, 1usize)
+                (borrowed[at].clone(), at + 1)
             }
         };
         loop {
@@ -4829,6 +4832,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let Some(item) = items.borrow().get(index).cloned() else {
                 return Ok(accumulator);
             };
+            // `reduce` walks elements, and a hole is not one: visiting it would fold undefined
+            // into the accumulator and turn every sum over a sparse array into NaN.
+            if Self::is_hole(&item) {
+                index += 1;
+                continue;
+            }
             accumulator = self.call_value(
                 &callback,
                 Value::Undefined,
@@ -7307,12 +7316,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(items) => match array_index(key) {
                 Some(index) => {
                     let mut items = items.borrow_mut();
-                    // Writing past the end extends with holes, which are `undefined` here.
-                    // Real holes are a distinct concept the frontend refuses, so this stays a
-                    // dense vector rather than growing a sparse representation it cannot yet
-                    // observe the difference from.
+                    // Writing past the end extends with *holes*, not undefined: `a[3] = 4` on a
+                    // one-element array leaves two positions that `in` denies, `for...in` skips
+                    // and a console shows as `<2 empty items>`.
                     if index >= items.len() {
-                        items.resize(index + 1, Value::Undefined);
+                        items.resize(index + 1, Value::Native(Native::Hole));
                     }
                     items[index] = value;
                     Ok(())

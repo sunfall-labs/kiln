@@ -2261,13 +2261,30 @@ skips it, which is the only place those two disagree.
 
 `conformance/differential/delete-leaves-a-hole.js` covers all of it.
 
-**The native backend cannot represent a hole**, so `delete` on an array element is the one thing
-in this batch it does not do -- `conformance/native/properties.ts` deletes an object property
-instead and says why. A hole would need its own tag and a console that groups runs of them; it is
-not worth that until something needs it.
+**Holes landed natively straight after**, because three more probes needed them and the tag was
+the smaller half of the work. A hole reads as undefined and is not one: `in` denies it,
+`for...in` and `Object.keys` skip it, `map` leaves one where it found one, `filter` and `reduce`
+drop it, `indexOf` skips it and `includes` sees the undefined it behaves like, `join` and
+`String()` contribute nothing for it, JSON writes null, and a console groups runs of them as
+`<n empty items>`. That list is the whole feature; every entry is a place the two could have
+disagreed.
 
-**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Map`/`Set` (5),
-`PushHole` (3), `BigInt` (2), `SuperCall` (2). `async` is the only one with a real design question
+**The smallest program that prints an array found a latent boundary bug.** `console.log([1])`
+failed with no diagnostic: the conversion that keeps a reference off the embedding boundary was
+emitted only for programs containing `MakeFunction` or `LoadBuiltin`, and that program has
+neither, so the host was handed a raw array and rejected the tag. Every probe until now happened
+to contain a function or a builtin. The predicate now asks the question the other way round --
+*is every instruction in the original scalar set?* -- so a new instruction is covered the day it
+is added rather than the day someone notices. An allowlist of what produces references was
+exactly the wrong shape for a growing instruction set.
+
+**Two more interpreter bugs, native on the right side of both:** `reduce` folded a hole into the
+accumulator, turning every sum over a sparse array into `NaN`, and its seed was the first *slot*
+rather than the first element that is there; and `a[3] = 4` on a one-element array extended with
+undefined rather than holes.
+
+**Still refused, and this is the queue in order:** `NewRegExp` (5), `Map`/`Set` (5), `async` (4),
+`BigInt` (2), `SuperCall` (2). `async` is the only one with a real design question
 left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
 live in a program that just returns from `main`.
 
@@ -2276,7 +2293,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 15/15, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 16/16, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
