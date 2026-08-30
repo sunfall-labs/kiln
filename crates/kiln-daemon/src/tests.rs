@@ -590,9 +590,9 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
     assert_eq!(first.exit_code, Some(0));
     assert_eq!(first.stdout, "native daemon 42\n");
     let expected_output = fixture.dir.join(".kiln/bin/src").join(if cfg!(windows) {
-        "native.exe"
+        "native.js.exe"
     } else {
-        "native"
+        "native.js"
     });
     assert_eq!(first.build.output_path, expected_output.to_string_lossy());
     assert!(expected_output.is_file());
@@ -762,8 +762,7 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     };
     let expected_output = Path::new(&root)
         .join(".kiln/lib/src")
-        .join("native-shared")
-        .with_extension(extension);
+        .join(format!("native-shared.js.{extension}"));
     assert_eq!(first.output_path, expected_output.to_string_lossy());
     let expected_header = expected_output.with_extension("h");
     assert_eq!(first.header_path, expected_header.to_string_lossy());
@@ -893,8 +892,7 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
     };
     let expected_output = Path::new(&root)
         .join(".kiln/lib")
-        .join("shared-entry")
-        .with_extension(extension);
+        .join(format!("shared-entry.js.{extension}"));
     assert_eq!(first.output_path, expected_output.to_string_lossy());
     let expected_header = expected_output.with_extension("h");
     assert_eq!(first.header_path, expected_header.to_string_lossy());
