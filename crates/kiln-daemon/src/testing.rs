@@ -647,9 +647,19 @@ expected_stdout = "bundle\n"
     #[test]
     fn one_manifest_serves_each_of_its_groups_and_the_whole_corpus() {
         let whole = run_corpus("conformance");
+        let groups = [
+            "conformance/guard",
+            "conformance/effect",
+            "conformance/regress",
+            "conformance/server",
+        ];
+        let expected = groups
+            .iter()
+            .map(|group| run_corpus(group).discovered)
+            .sum::<usize>();
         assert_eq!(
-            whole.discovered, 39,
-            "pointing at the corpus root picks up all groups"
+            whole.discovered, expected,
+            "pointing at the corpus root picks up every case from each declared group"
         );
         assert!(
             whole

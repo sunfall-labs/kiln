@@ -5,14 +5,12 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use kiln_host_abi::{
-    AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
-};
+use kiln_host_abi::{AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId};
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    Realm, RealmRuntime, RuntimeBuildError, TimerId, TokioHost, WorkItem,
+    Realm, RealmRuntime, TimerId, TokioHost, WorkItem,
     duration_from_milliseconds,
 };
 
@@ -3948,23 +3946,16 @@ pub fn execute_node<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
+    let mut runtime = realm_runtime()?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::new(program, host, locals, limits);
-    let mut runtime = realm_runtime()?;
-    vm.async_host = Some(TokioHost::new().map_err(runtime_build_error)?);
+    vm.node_host = Some(runtime.host_mut() as *mut TokioHost);
     let execution = runtime.enter(|| vm.run())?;
     vm.run_node_event_loop(&mut runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
         ..execution
     })
-}
-
-fn runtime_build_error(error: RuntimeBuildError) -> ExecutionError {
-    ExecutionError::Host {
-        instruction: 0,
-        message: error.to_string(),
-    }
 }
 
 /// Run a program whose values are all discarded, reclaiming the cycles it created.
@@ -4379,8 +4370,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     realm: Realm<Job, Timer>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
-    /// Live I/O for an explicitly Node-compatible execution; absent in deterministic modes.
-    async_host: Option<TokioHost>,
+    /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
+    node_host: Option<*mut TokioHost>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -4456,7 +4447,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_serial: 0,
             realm: Realm::new(),
             pending_host: Vec::new(),
-            async_host: None,
+            node_host: None,
             caught: None,
             unhandled: None,
             symbol_registry: Vec::new(),
@@ -4552,14 +4543,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         };
         let promise = PromiseState::pending();
-        let node = self
-            .async_host
-            .as_mut()
-            .ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: "node filesystem operation requires the Node execution Adapter".to_owned(),
-            })?;
-        let request = node.start(operation, true);
+        let node = self.node_host.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node filesystem operation requires the Node execution Adapter".to_owned(),
+        })?;
+        // The pointer names `runtime.host`; it outlives this VM and is accessed only while the
+        // current-thread RealmRuntime is polling the VM, so no alias can concurrently mutate it.
+        let request = unsafe { (&mut *node).start(operation, true) };
         let conversion = match native {
             Native::NodeFsReadFile if node_encoding(arguments.get(1))? => {
                 HostResultConversion::Utf8
@@ -4619,14 +4609,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.drain_microtasks(runtime)?;
             runtime.enter(|| self.check_unhandled_rejection())?;
             if !self.pending_host.is_empty() {
-                let completion = self
-                    .async_host
-                    .as_mut()
-                    .and_then(AsyncHostOps::next_completion)
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction: self.instruction,
-                        message: "Node host lost a pending request".to_owned(),
-                    })?;
+                let completion =
+                    runtime
+                        .next_host_completion()
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "Node host lost a pending request".to_owned(),
+                        })?;
                 self.settle_host_completion(completion)?;
                 continue;
             }

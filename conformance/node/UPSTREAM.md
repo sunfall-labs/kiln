@@ -15,8 +15,15 @@ namespace, and a successful assertion prints `pass`. The API actions and asserti
 small cases so the manifest records exactly which behavior passed rather than letting one early
 failure hide the rest.
 
-The stat, ENOENT, namespace-identity, and concurrency cases extend the same upstream API slice with
-Node-shaped assertions needed to cover Kiln's first Adapter boundary. Run the pinned gate with:
+The stat, ENOENT, namespace-identity, overwrite/truncate, Promise-chain, and concurrency cases
+extend the same upstream API slice with Node-shaped assertions needed to cover Kiln's first
+Adapter boundary. They are derived compatibility probes rather than byte-for-byte upstream files;
+the manifest labels every exercised behavior so the supported surface is explicit.
+
+Node mode currently has one supported execution path: the bytecode interpreter selected by
+`kiln test --node`. The native backend does not accept or silently emulate Node mode yet; when its
+private continuation ABI grows asynchronous HostOps, this corpus becomes the shared interpreter /
+native gate. Run today's pinned gate with:
 
 ```sh
 mbx run -p kiln-cli -- --one-shot test conformance/node --node
