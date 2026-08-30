@@ -77,6 +77,9 @@ against a different inherited environment.
 The cache coordinator treats generated module C, application object, runtime object, launcher
 object, and linked executable as separate artifacts. Cache records are containers rather than
 direct linker inputs, so validated payloads are materialized into process-owned work paths. A cached
+deterministic source or bundled-provider payload must also equal the bytes regenerated or shipped
+by the current process; a self-consistent record under the right key but with different bytes is
+corruption rather than a hit. A cached
 executable is materialized with executable permissions at the caller's requested output path.
 Independent application, runtime, and launcher units compile concurrently on a cold build. Native
 runs launch a process-owned executable before publishing the stable output path, so concurrent
