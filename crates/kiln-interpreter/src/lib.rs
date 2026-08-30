@@ -1769,6 +1769,8 @@ pub struct ExecutionResult {
 /// Module code and call frames remain on each [`Vm`], but globals, built-in identity, and the
 /// scheduler belong to the realm. This is what lets a graph behave like one JavaScript program
 /// without flattening the module programs that exported closures carry with them.
+/// A realm should be discarded after an execution error; its queued work and pending diagnostics
+/// are part of that failed execution and must not leak into a later one.
 #[derive(Clone)]
 pub struct Realm {
     state: Rc<RealmState>,
@@ -1781,7 +1783,7 @@ struct RealmState {
     now: RefCell<f64>,
     timers: RefCell<Vec<Timer>>,
     microtasks: RefCell<VecDeque<Job>>,
-    unhandled: RefCell<Option<Value>>,
+    pending_unhandled: RefCell<Vec<(Rc<RefCell<PromiseState>>, Value)>>,
     symbol_registry: RefCell<Vec<(String, Value)>>,
     next_timer_id: RefCell<f64>,
     random_state: RefCell<u64>,
@@ -1801,7 +1803,7 @@ impl Realm {
                 now: RefCell::new(0.0),
                 timers: RefCell::new(Vec::new()),
                 microtasks: RefCell::new(VecDeque::new()),
-                unhandled: RefCell::new(None),
+                pending_unhandled: RefCell::new(Vec::new()),
                 symbol_registry: RefCell::new(Vec::new()),
                 next_timer_id: RefCell::new(1.0),
                 random_state: RefCell::new(RANDOM_SEED),
@@ -2329,13 +2331,7 @@ fn execute_module_with_realm<H: HostOps + ?Sized>(
         };
     }
 
-    let mut vm = Vm::new(
-        Rc::new(module.program.clone()),
-        locals,
-        host,
-        limits,
-        realm,
-    );
+    let mut vm = Vm::new(Rc::new(module.program.clone()), locals, host, limits, realm);
     let execution = vm.run()?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
@@ -5608,11 +5604,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let unobserved = !state.handled && matches!(outcome, Settled::Rejected(_));
             (std::mem::take(&mut state.reactions), unobserved)
         };
-        // Recorded now and cleared if anything attaches later in the same drain, because a
+        // Recorded now and cleared if a handler attaches later in the same drain, because a
         // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
-        // ordinary code.
+        // ordinary code. Keep the promise identity with the reason: handling a different rejected
+        // promise must not erase this diagnostic.
         if unobserved && let Settled::Rejected(reason) = &outcome {
-            *self.realm.unhandled.borrow_mut() = Some(reason.clone());
+            self.realm
+                .pending_unhandled
+                .borrow_mut()
+                .push((Rc::clone(promise), reason.clone()));
         }
         for reaction in reactions {
             self.realm
@@ -5674,8 +5674,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let first = !state.handled;
             state.handled = true;
             if first && matches!(state.settled, Some(Settled::Rejected(_))) {
-                // Something is handling it after all.
-                *self.realm.unhandled.borrow_mut() = None;
+                // Something is handling this promise after all. Leave unrelated rejected
+                // promises pending for the event loop to report.
+                let mut pending = self.realm.pending_unhandled.borrow_mut();
+                if let Some(index) = pending
+                    .iter()
+                    .position(|(rejected, _)| Rc::ptr_eq(rejected, promise))
+                {
+                    pending.remove(index);
+                }
             }
             state.settled.clone()
         };
@@ -5993,7 +6000,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// it worked. Node prints a warning and exits non-zero; this fails the run, which is the same
     /// judgement stated more plainly and matches how an uncaught throw is treated.
     fn check_unhandled_rejection(&mut self) -> Result<(), ExecutionError> {
-        let Some(reason) = self.realm.unhandled.borrow_mut().take() else {
+        let Some((_, reason)) = ({
+            let mut pending = self.realm.pending_unhandled.borrow_mut();
+            (!pending.is_empty()).then(|| pending.remove(0))
+        }) else {
             return Ok(());
         };
         let trace = captured_trace(&reason);
@@ -13577,6 +13587,35 @@ mod tests {
             read_through_cell(&result.exports[0].value),
             Value::Number(42.0)
         );
+    }
+
+    #[test]
+    fn standalone_reports_unhandled_rejections_in_creation_order() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("first".to_owned()),
+                Constant::String("second".to_owned()),
+                Constant::String("reject".to_owned()),
+            ],
+            code: vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Promise),
+                Instruction::Const(0),
+                Instruction::CallMethod { name: 2, argc: 1 },
+                Instruction::Pop,
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Promise),
+                Instruction::Const(1),
+                Instruction::CallMethod { name: 2, argc: 1 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let error = run(&program).expect_err("an unhandled rejection should fail execution");
+        assert!(matches!(
+            error,
+            ExecutionError::Uncaught { ref message, .. } if message.contains("first")
+        ));
     }
 
     /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.

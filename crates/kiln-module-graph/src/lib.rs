@@ -1478,6 +1478,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_entry_handler_does_not_clear_a_dependency_unhandled_rejection() {
+        let project = TempProject::new();
+        project.write("dependency.js", "Promise.reject('dependency');");
+        let entry = project.write(
+            "main.js",
+            "import './dependency.js';
+             Promise.reject('entry').catch(() => console.log('entry handled'));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        let error = graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect_err("dependency rejection remains unhandled");
+        assert!(matches!(
+            error,
+            ModuleGraphError::Execution {
+                error: ExecutionError::Uncaught { ref message, .. },
+                ..
+            } if message.contains("dependency")
+        ));
+        assert_eq!(host.output, ["entry handled"]);
+    }
+
+    #[test]
+    fn unrelated_unhandled_rejections_are_reported_in_creation_order() {
+        let project = TempProject::new();
+        project.write("dependency.js", "Promise.reject('first');");
+        let entry = project.write(
+            "main.js",
+            "import './dependency.js'; Promise.reject('second');",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        let error = graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect_err("an unhandled rejection should fail the graph");
+        assert!(matches!(
+            error,
+            ModuleGraphError::Execution {
+                error: ExecutionError::Uncaught { ref message, .. },
+                ..
+            } if message.contains("first")
+        ));
+    }
+
     /// A namespace object is a snapshot, and says so.
     ///
     /// Node's namespace objects are live; this one reads the exported cells once, when the
