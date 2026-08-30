@@ -729,6 +729,8 @@ fn stack_effect(
         | Instruction::EnumerateKeys
         | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
+        | Instruction::GetPrivate(_)
+        | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
@@ -967,6 +969,8 @@ fn emit_instruction(
         | Instruction::EnumerateKeys
         | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
+        | Instruction::GetPrivate(_)
+        | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
@@ -1190,6 +1194,14 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::DeleteComputed => byte(&mut hash, 47),
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
+            Instruction::GetPrivate(value) => {
+                byte(&mut hash, 53);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::SetPrivate(value) => {
+                byte(&mut hash, 54);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::DefineAccessor { setter } => {
                 byte(&mut hash, 52);
                 byte(&mut hash, u8::from(*setter));

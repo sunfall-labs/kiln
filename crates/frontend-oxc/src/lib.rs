@@ -598,6 +598,14 @@ impl Lowerer {
                             value: Box::new(self.expression(&expression.right)),
                         }
                     }
+                    AssignmentTarget::PrivateFieldExpression(member) => {
+                        HirExpressionKind::PrivateAssignment {
+                            operator,
+                            object: Box::new(self.expression(&member.object)),
+                            name: member.field.name.to_string(),
+                            value: Box::new(self.expression(&expression.right)),
+                        }
+                    }
                     _ => {
                         return self
                             .unsupported_expression("non-identifier assignment", expression_span);
@@ -644,9 +652,10 @@ impl Lowerer {
                 property: Box::new(self.expression(&member.expression)),
                 optional: member.optional,
             },
-            Expression::PrivateFieldExpression(_) => {
-                return self.unsupported_expression("private property access", expression_span);
-            }
+            Expression::PrivateFieldExpression(member) => HirExpressionKind::PrivateMember {
+                object: Box::new(self.expression(&member.object)),
+                name: member.field.name.to_string(),
+            },
             Expression::CallExpression(_) => {
                 return self.unsupported_expression("optional call", expression_span);
             }
@@ -939,6 +948,26 @@ impl Lowerer {
     ///
     /// Refusing wholesale for the same reason a partial function is refused: a class missing a
     /// method it declared would construct successfully and fail somewhere else entirely.
+    /// The key a class member declares, including the private form.
+    ///
+    /// A private name is not a string key: `#x` and `"#x"` name different properties, and only
+    /// the first is hidden from everything that enumerates.
+    fn member_key(
+        &mut self,
+        key: &oxc_ast::ast::PropertyKey<'_>,
+        computed: bool,
+    ) -> Option<kiln_hir::ObjectKey> {
+        if let oxc_ast::ast::PropertyKey::PrivateIdentifier(private) = key {
+            return Some(kiln_hir::ObjectKey::Private(private.name.to_string()));
+        }
+        if computed {
+            return Some(kiln_hir::ObjectKey::Computed(
+                self.expression(key.as_expression()?),
+            ));
+        }
+        Some(kiln_hir::ObjectKey::Static(key.static_name()?.to_string()))
+    }
+
     fn class(&mut self, class: &Class<'_>, statement_span: HirSpan) -> Option<kiln_hir::Class> {
         let mut constructor = None;
         let mut methods = Vec::new();
@@ -946,11 +975,7 @@ impl Lowerer {
 
         for element in &class.body.body {
             if let ClassElement::PropertyDefinition(property) = element {
-                let key = if property.computed {
-                    kiln_hir::ObjectKey::Computed(self.expression(property.key.as_expression()?))
-                } else {
-                    kiln_hir::ObjectKey::Static(property.key.static_name()?.to_string())
-                };
+                let key = self.member_key(&property.key, property.computed)?;
                 fields.push(kiln_hir::ClassField {
                     key,
                     value: property.value.as_ref().map(|value| self.expression(value)),
@@ -972,12 +997,7 @@ impl Lowerer {
                 kind @ (MethodDefinitionKind::Method
                 | MethodDefinitionKind::Get
                 | MethodDefinitionKind::Set) => {
-                    let key = if method.computed {
-                        let key = method.key.as_expression()?;
-                        kiln_hir::ObjectKey::Computed(self.expression(key))
-                    } else {
-                        kiln_hir::ObjectKey::Static(method.key.static_name()?.to_string())
-                    };
+                    let key = self.member_key(&method.key, method.computed)?;
                     methods.push(kiln_hir::ClassMethod {
                         key,
                         function: lowered,
@@ -1152,10 +1172,10 @@ impl Lowerer {
                     optional: member.optional,
                 }
             }
-            oxc_ast::ast::MemberExpression::PrivateFieldExpression(_) => {
-                self.unsupported("private property access", expression_span);
-                HirExpressionKind::Unsupported {
-                    feature: "private property access".to_string(),
+            oxc_ast::ast::MemberExpression::PrivateFieldExpression(member) => {
+                HirExpressionKind::PrivateMember {
+                    object: Box::new(self.expression(&member.object)),
+                    name: member.field.name.to_string(),
                 }
             }
         };
