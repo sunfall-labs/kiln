@@ -4,10 +4,11 @@
 //! is written against is [`QueryEngine`], and a stub is the only way to provoke the failure modes
 //! that matter here - notably a query that panics, which a correct engine never does.
 
+use crate::dispatch::{Next, dispatch};
 use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
-use kiln_proto::{NativeProfile, PROTOCOL_VERSION, Request, Response};
+use kiln_proto::{NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash};
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -70,6 +71,27 @@ impl QueryEngine for StubEngine {
 
     fn source(&self, file: FileId) -> Option<&str> {
         self.sources.get(&file.0).map(String::as_str)
+    }
+
+    fn source_files(&self) -> Vec<(FileId, String)> {
+        let mut files = self
+            .sources
+            .keys()
+            .filter_map(|id| {
+                self.paths
+                    .get(*id as usize)
+                    .map(|path| (FileId(*id), path.clone()))
+            })
+            .collect::<Vec<_>>();
+        files.sort_by_key(|(file, _)| *file);
+        files
+    }
+
+    fn remove_source(&mut self, file: FileId) {
+        if self.sources.remove(&file.0).is_some() {
+            self.revision += 1;
+            self.stats.revision = self.revision;
+        }
     }
 
     fn parse(&mut self, file: FileId) -> Parsed {
@@ -257,6 +279,80 @@ fn request_and_response_round_trip_over_a_socket() {
     };
     assert_eq!(stats.parse_computed, 0, "reset clears counters");
     assert_eq!(stats.revision, 1, "but not the revision");
+}
+
+#[test]
+fn sync_reconciles_omissions_and_rejects_duplicates_without_partial_removal() {
+    let mut engine = StubEngine::default();
+    let alpha = "export alpha\n";
+    let beta = "export beta\n";
+    dispatch(
+        &mut engine,
+        Request::SetSource {
+            path: "alpha.js".into(),
+            text: alpha.into(),
+        },
+    );
+    dispatch(
+        &mut engine,
+        Request::SetSource {
+            path: "beta.js".into(),
+            text: beta.into(),
+        },
+    );
+
+    let (response, next) = dispatch(
+        &mut engine,
+        Request::Sync {
+            files: vec![
+                SourceHash {
+                    path: "alpha.js".into(),
+                    hash: kiln_db::content_hash(alpha),
+                },
+                SourceHash {
+                    path: "alpha.js".into(),
+                    hash: kiln_db::content_hash(alpha),
+                },
+            ],
+        },
+    );
+    assert_eq!(next, Next::Continue);
+    assert!(
+        matches!(response, Response::Error { ref message } if message.contains("duplicate paths") && message.contains("alpha.js")),
+        "got {response:?}"
+    );
+    assert_eq!(
+        engine.source_files().len(),
+        2,
+        "rejection is all-or-nothing"
+    );
+
+    let (response, _) = dispatch(
+        &mut engine,
+        Request::Sync {
+            files: vec![SourceHash {
+                path: "alpha.js".into(),
+                hash: kiln_db::content_hash(alpha),
+            }],
+        },
+    );
+    assert!(matches!(response, Response::Needed { paths } if paths.is_empty()));
+    assert_eq!(
+        engine.source_files(),
+        vec![(FileId(0), "alpha.js".to_owned())],
+        "omitted held files are removed before Needed is returned"
+    );
+
+    let (response, _) = dispatch(
+        &mut engine,
+        Request::Sync {
+            files: vec![SourceHash {
+                path: "gamma.js".into(),
+                hash: 7,
+            }],
+        },
+    );
+    assert!(matches!(response, Response::Needed { paths } if paths == ["gamma.js"]));
 }
 
 #[test]
@@ -1107,6 +1203,92 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("cycle"))
+    );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("sync-dependency.js");
+    let entry = fixture.dir.join("sync-entry.js");
+    std::fs::write(
+        &dependency,
+        "console.log('stale dependency'); export const answer = 42;\n",
+    )
+    .expect("write dependency");
+    std::fs::write(
+        &entry,
+        "import { answer } from './sync-dependency.js'; console.log(answer);\n",
+    )
+    .expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    let dependency = std::fs::canonicalize(dependency).expect("canonical dependency");
+    let entry_path = entry.to_string_lossy().into_owned();
+    let dependency_path = dependency.to_string_lossy().into_owned();
+    let entry_source = std::fs::read_to_string(&entry).expect("read entry");
+    let dependency_source = std::fs::read_to_string(&dependency).expect("read dependency");
+    for (path, text) in [
+        (dependency_path.clone(), dependency_source),
+        (entry_path.clone(), entry_source.clone()),
+    ] {
+        assert!(matches!(
+            client
+                .request(&Request::SetSource { path, text })
+                .expect("upload source"),
+            Response::Ok
+        ));
+    }
+
+    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let Response::Ran(first) = client
+        .request(&Request::Run {
+            path: entry_path.clone(),
+            project_root: project_root.clone(),
+        })
+        .expect("initial run")
+    else {
+        panic!("expected initial run response");
+    };
+    assert!(first.succeeded, "{:?}", first.diagnostics);
+    assert_eq!(first.stdout, "stale dependency\n42\n");
+
+    let sync = client
+        .request(&Request::Sync {
+            files: vec![SourceHash {
+                path: entry_path.clone(),
+                hash: kiln_db::content_hash(&entry_source),
+            }],
+        })
+        .expect("sync authoritative view");
+    assert!(matches!(sync, Response::Needed { paths } if paths.is_empty()));
+
+    let Response::Ran(second) = client
+        .request(&Request::Run {
+            path: entry_path,
+            project_root,
+        })
+        .expect("warm run after removal")
+    else {
+        panic!("expected warm run response");
+    };
+    assert!(!second.succeeded, "removed dependency must not execute");
+    assert!(second.stdout.is_empty(), "stale side effects must not run");
+    assert!(
+        second
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("source is not synchronized")),
+        "missing dependency should be reported, got {:?}",
+        second.diagnostics
     );
 
     stop.shutdown();

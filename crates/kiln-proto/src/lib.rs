@@ -7,8 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped on every wire-shape change. The daemon refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
+/// refuses a client that does not match.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -41,7 +42,8 @@ pub enum Request {
     /// Answered with [`Response::Needed`]: the subset whose contents the daemon does not
     /// already hold, which is all the client then has to push. Without this a stateless client
     /// re-sends every source on every command -- on a 320-file project that was ~370KB of JSON
-    /// to answer a question whose response was "nothing changed".
+    /// to answer a question whose response was "nothing changed". The list is authoritative:
+    /// active daemon sources omitted from it are removed before the response is sent.
     Sync {
         files: Vec<SourceHash>,
     },
