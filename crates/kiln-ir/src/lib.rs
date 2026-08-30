@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use kiln_hir::{
     ArrayElement, AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName,
     ExportOrigin, Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, Span, Statement, StatementKind, UnaryOperator,
-    VariableKind,
+    Module, ObjectKey, ObjectMember, Pattern, Span, Statement, StatementKind, SwitchCase,
+    UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -200,6 +200,8 @@ pub enum Instruction {
     /// Remove an own property, leaving `true` -- which is what the `delete` operator evaluates
     /// to. Stack: `[target] -> [true]`.
     DeleteProperty(u32),
+    /// `delete target[key]`. Stack: `[target, key] -> [true]`.
+    DeleteComputed,
     /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
     /// than a copy of its value.
     ///
@@ -534,8 +536,20 @@ enum Cleanup {
     CloseIterator { binding: String },
 }
 
+/// What a `break` or a `continue` is allowed to leave.
+///
+/// A `switch` catches `break` and is transparent to `continue`, so the two jumps do not always
+/// choose the same enclosing construct and the stack has to record which is which.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum BreakableKind {
+    #[default]
+    Loop,
+    Switch,
+}
+
 #[derive(Default)]
 struct LoopContext {
+    kind: BreakableKind,
     breaks: Vec<usize>,
     continues: Vec<usize>,
     /// How many cleanups were pending when the loop began, so a `break` runs only those entered
@@ -761,6 +775,11 @@ impl Compiler {
                 alternate,
             } => self.if_statement(test, consequent, alternate.as_deref()),
             StatementKind::While { test, body } => self.while_statement(test, body),
+            StatementKind::DoWhile { body, test } => self.do_while_statement(body, test),
+            StatementKind::Switch {
+                discriminant,
+                cases,
+            } => self.switch_statement(discriminant, cases, statement.span),
             StatementKind::For {
                 init,
                 test,
@@ -1461,7 +1480,17 @@ impl Compiler {
         }
         // Only the cleanups entered since the loop began: an outer `finally` is not left by
         // this jump, so running it here would run it twice.
-        let (depth, handler_depth) = self.loops.last().map_or((0, 0), |context| {
+        // `break` leaves the innermost breakable; `continue` steps over any `switch` in the way,
+        // because a `switch` is not something a `continue` can continue.
+        let target = if is_break {
+            self.loops.len().checked_sub(1)
+        } else {
+            self.loops
+                .iter()
+                .rposition(|context| context.kind == BreakableKind::Loop)
+        };
+        let (depth, handler_depth) = target.map_or((0, 0), |index| {
+            let context = &self.loops[index];
             (context.finalizer_depth, context.handler_depth)
         });
         // Before the cleanups, not after: a `finally` reached by `break` must not still be
@@ -1473,7 +1502,7 @@ impl Compiler {
         self.unwind_finalizers(depth);
 
         let jump = self.emit_jump(Instruction::Jump(0));
-        let Some(context) = self.loops.last_mut() else {
+        let Some(context) = target.map(|index| &mut self.loops[index]) else {
             self.error(
                 Some(span),
                 if is_break {
@@ -1508,9 +1537,125 @@ impl Compiler {
         let loop_start = self.code.len();
         self.expression(test);
         let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        self.loops.push(LoopContext {
+            finalizer_depth: self.finalizers.len(),
+            handler_depth: self.handler_depth,
+            ..LoopContext::default()
+        });
         self.statement(body);
+        let context = self.loops.pop().expect("this loop pushed its own context");
+
+        // `continue` re-tests, which for a `while` is the top of the loop.
+        for jump in context.continues {
+            self.patch_jump_to(jump, loop_start as u32);
+        }
         self.code.push(Instruction::Jump(loop_start as u32));
         self.patch_jump(exit_jump);
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+    }
+
+    /// `do body while (test)`, whose body always runs once before the test is reached.
+    fn do_while_statement(&mut self, body: &Statement, test: &Expression) {
+        let loop_start = self.code.len();
+
+        self.loops.push(LoopContext {
+            finalizer_depth: self.finalizers.len(),
+            handler_depth: self.handler_depth,
+            ..LoopContext::default()
+        });
+        self.statement(body);
+        let context = self.loops.pop().expect("this loop pushed its own context");
+
+        // `continue` skips the rest of the body but still runs the test, so it lands here rather
+        // than at the top -- the one place a do-while differs from a while for a jump.
+        let test_target = self.code.len() as u32;
+        for jump in context.continues {
+            self.patch_jump_to(jump, test_target);
+        }
+        self.expression(test);
+        let repeat = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.patch_jump_to(repeat, loop_start as u32);
+
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+    }
+
+    /// `switch (discriminant) { case … }`.
+    ///
+    /// Two passes over the arms, because a `switch` is not a set of alternatives: the tests are
+    /// evaluated in order until one matches with `===`, and control then enters that arm's body
+    /// and *keeps going* through the arms after it until a `break`. So the tests are emitted as a
+    /// dispatch chain and the bodies as one straight run entered at different offsets.
+    ///
+    /// `default` is not special beyond being the arm with no test: it may sit anywhere among
+    /// them, it is only reached once every test has failed, and it falls through like the rest.
+    fn switch_statement(&mut self, discriminant: &Expression, cases: &[SwitchCase], span: Span) {
+        // The discriminant is evaluated once, however many tests are compared against it.
+        let subject = format!("%switch{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+        self.expression(discriminant);
+        self.declare_hidden(&subject, span);
+
+        let mut entries = Vec::with_capacity(cases.len());
+        let mut fallback = None;
+        for case in cases {
+            let Some(test) = &case.test else {
+                // Emitted with the other bodies below; only its entry point is recorded here.
+                fallback = Some(entries.len());
+                entries.push(None);
+                continue;
+            };
+            self.load_hidden(&subject);
+            self.expression(test);
+            self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+            entries.push(Some(self.emit_jump(Instruction::JumpIfTruthy(0))));
+        }
+        // No test matched, so control goes to `default` if there is one and past the whole
+        // statement if there is not.
+        let no_match = self.emit_jump(Instruction::Jump(0));
+
+        self.loops.push(LoopContext {
+            kind: BreakableKind::Switch,
+            finalizer_depth: self.finalizers.len(),
+            handler_depth: self.handler_depth,
+            ..LoopContext::default()
+        });
+        let mut starts = Vec::with_capacity(cases.len());
+        for case in cases {
+            starts.push(self.code.len() as u32);
+            for statement in &case.body {
+                self.statement(statement);
+            }
+        }
+        let context = self
+            .loops
+            .pop()
+            .expect("this switch pushed its own context");
+
+        for (entry, start) in entries.iter().zip(&starts) {
+            if let Some(jump) = entry {
+                self.patch_jump_to(*jump, *start);
+            }
+        }
+        match fallback.and_then(|index| starts.get(index)) {
+            Some(start) => self.patch_jump_to(no_match, *start),
+            None => self.patch_jump(no_match),
+        }
+
+        let exit = self.code.len() as u32;
+        // A `default` in the middle still falls through, so this is the only jump that leaves
+        // early -- and it is the same jump `break` uses.
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+        self.scopes.pop().expect("switch scope was just pushed");
     }
 
     fn expression(&mut self, expression: &Expression) {
@@ -1701,6 +1846,38 @@ impl Compiler {
                 value,
             } => self.member_assignment(*operator, object, property, value),
             ExpressionKind::Object { members } => self.object_literal(members, expression.span),
+            // Concatenation, starting from a string so that every `+` after it is a string
+            // append rather than a numeric add. `${1}${2}` is "12" for exactly that reason.
+            ExpressionKind::Template {
+                quasis,
+                expressions,
+            } => {
+                let mut quasis = quasis.iter();
+                self.push_constant(Constant::String(quasis.next().cloned().unwrap_or_default()));
+                for (expression, quasi) in expressions.iter().zip(quasis) {
+                    self.expression(expression);
+                    self.code.push(Instruction::Binary(BinaryOp::Add));
+                    // A run of text between two holes is skipped when it is empty, which is the
+                    // common shape: `${a}${b}` has two empty quasis in the middle and the end.
+                    if !quasi.is_empty() {
+                        self.push_constant(Constant::String(quasi.clone()));
+                        self.code.push(Instruction::Binary(BinaryOp::Add));
+                    }
+                }
+            }
+            ExpressionKind::Delete { object, property } => {
+                self.expression(object);
+                match property.as_ref() {
+                    ObjectKey::Static(key) => {
+                        let name = self.constant_index(Constant::String(key.clone()));
+                        self.code.push(Instruction::DeleteProperty(name));
+                    }
+                    ObjectKey::Computed(key) => {
+                        self.expression(key);
+                        self.code.push(Instruction::DeleteComputed);
+                    }
+                }
+            }
             ExpressionKind::StaticMember { object, property } => {
                 self.expression(object);
                 let name = self.constant_index(Constant::String(property.clone()));
@@ -2815,6 +2992,24 @@ fn collect_nested_function_names(
             collect_identifiers(test, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
         }
+        StatementKind::DoWhile { body, test } => {
+            collect_nested_function_names(body, names, inside_function);
+            collect_identifiers(test, names, inside_function);
+        }
+        StatementKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            collect_identifiers(discriminant, names, inside_function);
+            for case in cases {
+                if let Some(test) = &case.test {
+                    collect_identifiers(test, names, inside_function);
+                }
+                for statement in &case.body {
+                    collect_nested_function_names(statement, names, inside_function);
+                }
+            }
+        }
         StatementKind::For {
             init,
             test,
@@ -3013,6 +3208,17 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
         }
+        ExpressionKind::Template { expressions, .. } => {
+            for expression in expressions {
+                collect_identifiers(expression, names, collecting);
+            }
+        }
+        ExpressionKind::Delete { object, property } => {
+            collect_identifiers(object, names, collecting);
+            if let ObjectKey::Computed(key) = property.as_ref() {
+                collect_identifiers(key, names, collecting);
+            }
+        }
         ExpressionKind::Object { members } => {
             for member in members {
                 match member {
@@ -3101,6 +3307,13 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::SuperCall { arguments } => arguments
             .iter()
             .any(|argument| expression_references(argument, name)),
+        ExpressionKind::Template { expressions, .. } => expressions
+            .iter()
+            .any(|expression| expression_references(expression, name)),
+        ExpressionKind::Delete { object, property } => {
+            expression_references(object, name)
+                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_references(key, name))
+        }
         ExpressionKind::Object { members } => members.iter().any(|member| match member {
             ObjectMember::Property(property) => {
                 expression_references(&property.value, name)
@@ -4041,6 +4254,99 @@ mod tests {
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::NewCell(_))),
             "an unboxed loop variable needs no per-iteration cell"
+        );
+    }
+
+    #[test]
+    fn a_switch_evaluates_its_discriminant_once() {
+        // Once, however many arms are compared against it -- so it lands in a hidden binding
+        // rather than being re-emitted per test.
+        let program = compile(&module(vec![statement(StatementKind::Switch {
+            discriminant: number(1.0),
+            cases: vec![
+                kiln_hir::SwitchCase {
+                    test: Some(number(1.0)),
+                    body: Vec::new(),
+                },
+                kiln_hir::SwitchCase {
+                    test: Some(number(2.0)),
+                    body: Vec::new(),
+                },
+            ],
+        })]))
+        .expect("compiles");
+        assert_eq!(
+            program
+                .code
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::StoreLocal(_)))
+                .count(),
+            1,
+            "the discriminant is stored once: {:?}",
+            program.code
+        );
+    }
+
+    #[test]
+    fn continue_steps_over_a_switch_to_reach_its_loop() {
+        // A `switch` catches `break` and is transparent to `continue`, so the two jumps do not
+        // always choose the same enclosing construct.
+        let program = compile(&module(vec![statement(StatementKind::While {
+            test: number(1.0),
+            body: Box::new(statement(StatementKind::Switch {
+                discriminant: number(1.0),
+                cases: vec![kiln_hir::SwitchCase {
+                    test: Some(number(1.0)),
+                    body: vec![statement(StatementKind::Continue { label: None })],
+                }],
+            })),
+        })]));
+        assert!(
+            program.is_ok(),
+            "`continue` inside a switch belongs to the loop around it"
+        );
+    }
+
+    #[test]
+    fn a_continue_with_no_loop_at_all_is_still_refused() {
+        let messages = errors(vec![statement(StatementKind::Switch {
+            discriminant: number(1.0),
+            cases: vec![kiln_hir::SwitchCase {
+                test: Some(number(1.0)),
+                body: vec![statement(StatementKind::Continue { label: None })],
+            }],
+        })]);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("`continue` outside of a loop")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_template_concatenates_from_a_string() {
+        // Starting from a string is what makes every `+` after it an append rather than a
+        // numeric add, so `${1}${2}` is "12".
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Template {
+                    quasis: vec![String::new(), String::new(), String::new()],
+                    expressions: vec![number(1.0), number(2.0)],
+                },
+                span: Span::default(),
+            },
+        ))]))
+        .expect("compiles");
+        assert!(matches!(program.code.first(), Some(Instruction::Const(_))));
+        assert_eq!(
+            program
+                .code
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::Binary(BinaryOp::Add)))
+                .count(),
+            2,
+            "one append per hole, and none for the empty text between them"
         );
     }
 }

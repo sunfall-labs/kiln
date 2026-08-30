@@ -91,6 +91,14 @@ pub struct Parameter {
     pub span: Span,
 }
 
+/// One arm of a `switch`. `test` is `None` for `default`, which may appear anywhere among them
+/// and still falls through like any other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchCase {
+    pub test: Option<Expression>,
+    pub body: Vec<Statement>,
+}
+
 /// One `key: value` pair in an object literal.
 ///
 /// Keys are already strings: an identifier key, a string key and a numeric key all name the same
@@ -203,6 +211,22 @@ pub enum StatementKind {
     While {
         test: Expression,
         body: Box<Statement>,
+    },
+    /// `do body while (test)`. Its own node rather than a `while` with the body copied in front:
+    /// duplicating the body would duplicate its side effects in the source the diagnostics point
+    /// at, and would double the code size of a nested one.
+    DoWhile {
+        body: Box<Statement>,
+        test: Expression,
+    },
+    /// `switch (discriminant) { case … }`.
+    ///
+    /// Cases are in source order and keep their bodies separate, because a matched case falls
+    /// through into the *next* one rather than ending -- so the bodies are one run of statements
+    /// entered at different points, not a set of alternatives.
+    Switch {
+        discriminant: Expression,
+        cases: Vec<SwitchCase>,
     },
     /// `for (init; test; update) body`.
     ///
@@ -437,6 +461,26 @@ pub enum ExpressionKind {
     /// enumerates string keys in and therefore not an implementation detail.
     Object {
         members: Vec<ObjectMember>,
+    },
+    /// A template literal. `quasis` is always one longer than `expressions`, so the two
+    /// interleave starting and ending with text -- an empty string standing in where the source
+    /// wrote none.
+    ///
+    /// Not lowered to concatenation in the frontend: the desugaring is real but it belongs in one
+    /// place, and doing it here would put a `+` in the HIR that the source never wrote.
+    Template {
+        quasis: Vec<String>,
+        expressions: Vec<Expression>,
+    },
+    /// `delete object.property`.
+    ///
+    /// Not a unary operator over a member expression: the operand must not be *read*, and a
+    /// unary node would say that it is.
+    Delete {
+        object: Box<Expression>,
+        /// Boxed because an `ObjectKey` can hold an `Expression`, and a variant of
+        /// `ExpressionKind` that owns one directly has no finite size.
+        property: Box<ObjectKey>,
     },
     StaticMember {
         object: Box<Expression>,
