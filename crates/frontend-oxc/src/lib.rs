@@ -174,6 +174,11 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
     }
 }
 
+/// The local name a module record gives an anonymous `export default` declaration.
+///
+/// It carries characters an identifier cannot, so nothing a program writes can collide with it.
+const DEFAULT_EXPORT: &str = "*default*";
+
 struct Lowerer;
 
 impl Lowerer {
@@ -192,6 +197,29 @@ impl Lowerer {
                     ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
                 ) {
                     return None;
+                } else if let ExportDefaultDeclarationKind::FunctionDeclaration(declaration) =
+                    &declaration.declaration
+                {
+                    // `export default function f() {}` declares `f` and exports it under
+                    // `default`; the anonymous form declares the name the module record already
+                    // uses for it, which carries characters an identifier cannot.
+                    let lowered = self
+                        .function(declaration, statement_span)
+                        .map(|mut function| {
+                            function
+                                .name
+                                .get_or_insert_with(|| DEFAULT_EXPORT.to_owned());
+                            HirStatementKind::Function(Box::new(function))
+                        });
+                    self.default_declaration(lowered, statement_span)
+                } else if let ExportDefaultDeclarationKind::ClassDeclaration(declaration) =
+                    &declaration.declaration
+                {
+                    let lowered = self.class(declaration, statement_span).map(|mut class| {
+                        class.name.get_or_insert_with(|| DEFAULT_EXPORT.to_owned());
+                        HirStatementKind::Class(Box::new(class))
+                    });
+                    self.default_declaration(lowered, statement_span)
                 } else {
                     self.unsupported_statement("default function or class export", statement_span)
                 }
@@ -411,11 +439,19 @@ impl Lowerer {
             Declaration::TSTypeAliasDeclaration(_)
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => return None,
-            Declaration::FunctionDeclaration(_) => {
-                self.unsupported_statement("exported function declaration", statement_span)
+            // `export function f() {}` is a declaration that also names an export. The export
+            // side is read from the module record separately, so lowering only has to produce
+            // the declaration -- the same one the unexported form produces.
+            Declaration::FunctionDeclaration(declaration) => {
+                self.function_declaration(declaration, statement_span)
             }
-            Declaration::ClassDeclaration(_) => {
-                self.unsupported_statement("exported class declaration", statement_span)
+            Declaration::ClassDeclaration(declaration) => {
+                match self.class(declaration, statement_span) {
+                    Some(class) => HirStatementKind::Class(Box::new(class)),
+                    None => HirStatementKind::Unsupported {
+                        feature: "class declaration".to_string(),
+                    },
+                }
             }
             _ => self.unsupported_statement("TypeScript runtime declaration", statement_span),
         };
@@ -874,6 +910,18 @@ impl Lowerer {
     /// a generator whose `yield`s were dropped, or an async function whose `await`s were, would
     /// be a function that runs and produces a confidently wrong answer. A missing function is a
     /// diagnostic; a silently altered one is a bug report six months later.
+    /// A `export default function`/`class` whose lowering may have been refused.
+    fn default_declaration(
+        &mut self,
+        lowered: Option<HirStatementKind>,
+        statement_span: HirSpan,
+    ) -> HirStatementKind {
+        match lowered {
+            Some(kind) => kind,
+            None => self.unsupported_statement("default function or class export", statement_span),
+        }
+    }
+
     fn function_declaration(
         &mut self,
         declaration: &Function<'_>,

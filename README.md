@@ -165,6 +165,15 @@ is visible next to the reasoning for it.
   use a hidden, cached C Ryu runtime for ECMAScript-exact binary64 formatting.
 - [0014](docs/adr/0014-string-numeric-literals-use-a-bounded-runtime-parser.md) — string numeric
   coercion uses a bounded decimal core plus explicit ECMAScript grammar and radix rounding.
+- [0016](docs/adr/0016-native-specialization-is-profile-driven-and-falls-back-in-unit.md) — observed
+  types are a query input and specialization guards fall back in-unit; deoptimizing into the
+  interpreter is rejected.
+- [0017](docs/adr/0017-an-unresolved-identifier-is-a-runtime-error.md) — an identifier that resolves
+  to nothing is a runtime `ReferenceError` rather than a compile error, so a bundle's `typeof`
+  guards get to run.
+- [0019](docs/adr/0019-a-closure-carries-its-module.md) — a closure holds its own program and its
+  module-scope bindings are ordinary captures, so a function value survives the module boundary
+  it was exported across.
 
 ## License
 

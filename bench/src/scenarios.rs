@@ -610,7 +610,7 @@ fn warm_execution(w: &Workload, budget: Budget) -> Result<Measurement, String> {
             format!("compiling interpreter scenario failed: {diagnostics:?}")
         })?;
         let mut host = kiln_runtime::CaptureHost::new();
-        kiln_interpreter::execute(&program, &mut host, Default::default())
+        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default())
             .map_err(|error| format!("executing interpreter scenario failed: {error}"))?;
         let elapsed = started.elapsed();
         let expected = format!("warm {}\n", 100 + seed);

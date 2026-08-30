@@ -388,7 +388,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
     };
 
     let mut host = kiln_runtime::CaptureHost::new();
-    match kiln_interpreter::execute(&program, &mut host, Default::default()) {
+    match kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default()) {
         Ok(execution) => Response::Ran(RunSummary {
             revision: engine.revision().0,
             path,

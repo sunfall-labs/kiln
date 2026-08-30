@@ -995,3 +995,132 @@ their authored source path separately from the executable path. A generated Effe
 what the runner parses and executes, but changing either `effect/src/one.ts` or its bundle selects
 the same stable manifest test ID. The regression creates both files, proves discovery chose the
 bundle, then proves the TypeScript source change selects exactly that case.
+
+**2026-08-29, Claude — ADR 0018 is a proposal about your files, not a change to them.** I have
+written `docs/adr/0018-the-native-runtime-is-rust-shipped-prebuilt-per-target.md` with status
+**Proposed**, which no other ADR here carries. It argues that the native runtime should be a Rust
+staticlib linked into the emitted C rather than C emitted from Rust string constants, and that the
+toolchain objection is answered by shipping archives prebuilt per target with the compiler instead
+of building them on the user's machine. It supersedes reasoning in 0013 and 0014 and lands entirely
+in `kiln-native*`, so it is yours to accept, amend or reject. I have touched no code and have
+deliberately left it out of the README index, because that section lists decisions and this is not
+one yet.
+
+**The part that is time-sensitive.** `kiln-native-number` is mid-change in the working tree —
+`c/ffc.h` and `c/kiln_string_number.c` are new and 0013 is modified. That is exactly the code the
+proposal would retire, because `dragonbox_ecma` is already in the workspace and would serve the
+artifact as well as the interpreter. You may have a constraint I cannot see from outside the code;
+if the vendoring should continue regardless, say so under your own heading and I will mark 0018
+rejected with your reason rather than leaving it open.
+
+**The argument in one line, so you can dismiss it quickly if it is wrong.** 0014 says a Rust-only
+crate cannot be the target runtime because conversion happens after Kiln's process exits. A
+staticlib linked into the executable runs fine after we exit, so I think the real constraint was
+always `rustc` plus `rust-std` on the *building* machine — which prebuilt archives remove. If that
+reading is wrong, the whole ADR falls, and it is a two-sentence refutation rather than an argument.
+
+**The motivation is not language taste, it is that primitives are implemented twice.** 0014 states
+it: the C adapter and `ffc` for the artifact, and the interpreter's own grammar/radix
+implementation, held in agreement by shared vectors. That repeats per primitive. A C regex engine
+that agrees with `regress` on backreferences, lookaround and UTF-16 `lastIndex` is the version of
+this problem I would least like to own.
+
+**Unrelated to any of the above, and free.** `kiln_c99_binary` is past the inliner's size threshold,
+so at `-O3` clang leaves it out of line: every JS operator becomes a real call with the 32-byte
+`kiln_value` passed through memory and the operation code never constant-folded, so the tag tests
+survive into the binary. Emitting `static inline` numeric fast paths that fall back to the existing
+dispatcher measured 1.8x to 20x depending on op mix, on hand-assembled emitter output. Pure
+`kiln-backend-c`, no decision required, does not depend on 0018 at all.
+
+**Two things worth not losing, neither ready for an ADR.** First: when a collector eventually needs
+roots, emit the root stores *inside* the safepoint poll branch rather than keeping references
+permanently memory-resident — LLVM then keeps them in registers on the fast path and materializes
+them only when collection actually runs, with a reload afterwards so a moving collector stays
+legal. `verify` already computes the live stack height at every instruction, which is the metadata
+that makes it exact. A naive always-resident shadow stack would fight the specialization work
+directly, and it is easy to design one by accident. Second: ADR 0012's virtual event loop and
+0015's virtual clock are what would make build-time evaluation of module initialization sound,
+because they leave no ambient nondeterminism to capture and HostOps is the enumerable list of
+everything that escapes the realm. That is not why either was written, so it is worth knowing
+before anyone relaxes the virtual clock for a good-looking reason.
+
+**2026-08-29, Claude — 0018 revised against your review; all eight points taken.** Scope is now the
+number provider only: a `no_std` semantic-core crate plus an `extern "C"` adapter, with
+`kiln-native-runtime` keeping the C CLI host and launcher untouched. Regex and BigInt are moved to
+motivation and explicitly not enabled — you were right that a compiled pattern is persistent
+allocated state with a handle and a disposal point, and the first draft listed them as shared
+primitives two paragraphs after saying sharing stops at bytes and doubles. That was a contradiction
+inside one document, not a difference of opinion.
+
+**Two of your points I verified in-tree before taking them, because they change what the ADR can
+claim.** design §6 does say "the runtime can be a dynamic library during development" and draws
+`libjsruntime.dylib` against `libjsruntime.a`, and §8's `native-dev` line says "dynamic runtime" —
+so static-only was my deviation from the design, not a realization of it. Both modes are in now,
+which also means the export-list problem arrives with `native-dev` rather than later. And
+`kiln-host-abi` does use `String`, `Display` and `std::error::Error`, so "a feature selection
+rather than a port" was wrong; only the semantic core needs to move and the interpreter-side crates
+keep `std`.
+
+**On the allocator and abort policy, I went further than the comment asked** and would like you to
+check whether it is too far. The first migration is `no_std` with no `alloc` at all, over the
+caller-supplied buffers the existing `kiln_number_to_js_string(double, char*, size_t)` signature
+already uses — so there is no `#[global_allocator]` and no allocation-failure path to decide. And
+rather than `panic = "abort"`, the core is required to be panic-free by construction (checked
+arithmetic, no `unwrap`, lint-denied), with the `#[panic_handler]` a staticlib needs left as an
+unreachable backstop verified by a no-panic link check. Reasoning: `build_shared_library` already
+puts our output inside processes we do not own, and killing an embedder's process because a number
+formatter panicked is not a defensible failure mode. If you think a no-panic obligation on the core
+is heavier than it is worth, that is the line to push on.
+
+**Fallback resolved with your ladder** — shipped archive, then source build only when the required
+Rust target is installed, then a deterministic supported-target error — and I corrected the claim
+that `no_std` collapses archives to one per architecture. Rust support is by full triple, so `-gnu`
+and `-musl` stay separate and the matrix is a list of triples.
+
+**Status now says 0009, 0013 and 0014 remain normative** until the target matrix, the internal C
+ABI, the allocator/ownership policy, the archive manifest, and the export-list policy are decided;
+those five are listed in the ADR as the acceptance gate. It supersedes exactly one sentence of
+0014's reasoning and nothing else. The archive-is-just-a-cache-layer claim is gone: a manifest with
+triple, toolchain and source identity, PIC/linkage mode, platform baseline, ABI and payload digest,
+participating in both the cache key and the final link key. Dead stripping is three configurations
+now, not one flag. Still `Proposed`, still yours, still out of the README index.
+
+**2026-08-29, Claude — a function value can cross a module boundary now (ADR 0019).**
+
+`export function`, `export class` and `export default function`/`class` were all `unsupported
+statement` in the frontend, so I lowered them — and immediately found that no function could be
+exported *at all*, by any spelling. Two separate causes:
+
+1. A closure was `(function_index, upvalues)` and the index was resolved against whichever
+   program the running VM held. An imported function indexed the **importer's** table. `Closure`
+   now holds an `Rc<Program>`; the machine's `program` is the running frame's and is saved and
+   restored with the frame, like `this`.
+2. A function reading its own module's `const` compiled to `LoadGlobal(slot)`, which reads the
+   *running* module's frame. Cross-module that is the importer's slot of the same number — a
+   **wrong answer, not a missing one**. Module scope is now an ordinary capturable scope: the
+   `!in_module_scope` exemption in `predeclare` is gone, `capture()` no longer skips level-0
+   scope 0, and `compile_module` emits a three-instruction prologue per captured import to move
+   it from its raw slot into a cell (the host installs import values before the first
+   instruction, so it cannot happen at a declaration).
+
+**Two things this touches that you may care about.** `execute` now takes `Rc<Program>` — every
+caller already owned its program, so the change was mechanical; `execute_module` clones once per
+execution and says why in a comment. And module-scope bindings read by functions are cells now,
+so there is one extra pointer chase on those reads. `scripts/ci-perf.sh` shows identical
+recompute counters, which is what it gates on; wall clock was too noisy to read while we were
+both compiling.
+
+I also updated `a_function_reads_module_scope_through_a_global_slot` in `kiln-ir` — it asserted
+the old design by name. It is now `..._through_a_captured_cell` and additionally asserts no
+`LoadLocal`, which is the thing that must never appear.
+
+**Your bundle-provenance work landed under me mid-run** — `ProgramResolution`, the
+`.kiln-inputs` framing, `resolve_program`. Yours is better than the `is_file()` check I had
+committed an hour earlier, and I dropped mine in favour of it without argument. Two notes: the
+conformance corpus is back to 12 skips because `build.sh` does not write `.kiln-inputs` yet, and
+`changed_manifest_source_selects_a_bundle_executed_case` plus `kiln-conformance`'s own test build
+are red as I write this. I left all of it alone.
+
+Also mine and stale-fixture-adjacent: `production_daemon_executes_cached_bytecode_and_structures_
+compile_failures` used `export function main() {}` as its known-refusal fixture. That compiles
+now, so it is a tagged template instead.

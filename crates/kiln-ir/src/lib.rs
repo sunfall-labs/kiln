@@ -572,6 +572,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         }
     }
 
+    compiler.box_captured_imports();
     compiler.compile_body(module);
 
     let mut exports = Vec::new();
@@ -854,10 +855,35 @@ impl Compiler {
                 imported: true,
                 // An import is bound before the module body runs, so it is never in a dead zone.
                 initialized: true,
-                celled: false,
+                // Boxed on the same rule as anything else, so a function can capture it. The
+                // value arrives in the raw slot before the first instruction, so the module
+                // prologue is what puts it in the cell.
+                celled: self.captured.contains(name),
             },
         );
         Some(slot)
+    }
+
+    /// Move each captured import from its raw slot into a cell, before the body runs.
+    ///
+    /// The host installs import values directly in the slots, which it must do before any
+    /// instruction executes -- so the boxing cannot happen at the declaration the way it does
+    /// for a `let`. Three instructions per captured import, once per module.
+    fn box_captured_imports(&mut self) {
+        let celled: Vec<u32> = self.scopes[0]
+            .values()
+            .filter(|local| local.imported && local.celled)
+            .map(|local| local.slot)
+            .collect();
+        // Sorted so the prologue is the same bytecode however the scope map happened to iterate,
+        // which a content-addressed cache depends on.
+        let mut celled = celled;
+        celled.sort_unstable();
+        for slot in celled {
+            self.code.push(Instruction::LoadLocal(slot));
+            self.code.push(Instruction::NewCell(slot));
+            self.code.push(Instruction::StoreCell(slot));
+        }
     }
 
     fn resolve_module_local(&self, name: &str) -> Option<u32> {
@@ -1261,9 +1287,14 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
-        let in_module_scope = !self.compiling_function() && scope_index == 0;
+        // Module scope boxes a captured binding exactly like any other scope. It used to be
+        // exempt, on the reasoning that a function reaches a module binding through the module
+        // frame -- true within one module, and wrong across two: the frame a `LoadGlobal` finds
+        // belongs to whichever module is *running*, not to the one the function was written in.
+        // An exported function reading its own module's `const` read the importer's slot of the
+        // same number instead, which is a wrong answer rather than a missing one.
         let captured = self.captured.contains(name);
-        let celled = captured && !in_module_scope;
+        let celled = captured;
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -1287,10 +1318,10 @@ impl Compiler {
             } else {
                 Instruction::StoreLocal(slot)
             });
-        } else if celled || (in_module_scope && captured) {
-            // Only these can be read before the declaration without the compiler seeing it: a
-            // captured binding through a cell or upvalue, and a captured module binding through
-            // a function that was called too early. A plain local cannot, so it pays nothing.
+        } else if celled {
+            // Only a captured binding can be read before its declaration without the compiler
+            // seeing it, through a function that was called too early. A plain local cannot, so
+            // it pays nothing.
             self.code.push(Instruction::MarkUninitialized(slot));
         }
     }
@@ -3771,20 +3802,20 @@ impl Compiler {
     /// Every function in between gains an upvalue too, because a closure can only reach cells
     /// its immediately enclosing frame holds -- a two-level capture is two hops, not one long
     /// one. Levels are indices into `enclosing` followed by the current function.
+    ///
+    /// Module scope is included. It was skipped while a module binding was reached through the
+    /// module frame instead, which cannot survive a function value leaving its module.
     fn capture(&mut self, name: &str) -> Option<u32> {
         // Scope 0 of level 0 is module scope, whose bindings are globals rather than captures --
         // but a *block* inside the module body is an ordinary scope, and a closure created there
         // captures from it like any other. Skipping level 0 entirely missed exactly that: a
         // `for-of` at module level whose body creates a closure over the loop variable.
         let (owner, local) = (0..self.enclosing.len()).rev().find_map(|level| {
-            let skip = usize::from(level == 0);
             self.enclosing[level]
                 .scopes
                 .iter()
-                .enumerate()
                 .rev()
-                .filter(|(index, _)| *index >= skip)
-                .find_map(|(_, scope)| scope.get(name))
+                .find_map(|scope| scope.get(name))
                 .map(|local| (level, *local))
         })?;
         if !local.celled {
@@ -4887,10 +4918,14 @@ mod tests {
         );
     }
 
-    /// Module bindings are read through a distinct instruction, because a frame's locals are
-    /// its own and a module slot is shared by every frame.
+    /// A function reads a module binding through a captured cell, never through its own slots.
+    ///
+    /// It used to read one through `LoadGlobal`, against the running module's frame. That is
+    /// right while the function stays home and wrong the moment it is exported: the frame found
+    /// belongs to the importer. A cell belongs to the binding, so it travels with the closure.
+    /// What must never appear is `LoadLocal`, which would read the callee frame's own slot.
     #[test]
-    fn a_function_reads_module_scope_through_a_global_slot() {
+    fn a_function_reads_module_scope_through_a_captured_cell() {
         let program = compile(&module(vec![
             statement(StatementKind::Variable {
                 kind: VariableKind::Let,
@@ -4911,9 +4946,18 @@ mod tests {
             program.functions[0]
                 .code
                 .iter()
-                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+                .any(|instruction| matches!(instruction, Instruction::LoadUpvalue(_))),
+            "a module binding a function reads has to reach it through a cell"
+        );
+        assert!(
+            !program.functions[0]
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadLocal(_))),
             "module reads must not compile to LoadLocal, which would read the frame's own slot"
         );
+        // The cell is made at module scope, before anything can capture it.
+        assert!(program.code.contains(&Instruction::NewCell(0)));
     }
 
     /// Step 1a refused captures outright; 1b compiles them. What must remain true is that a

@@ -847,6 +847,12 @@ impl PartialEq for GeneratorState {
 /// A callable value: which function body to run, and the bindings it closed over.
 #[derive(Debug)]
 pub struct Closure {
+    /// The program this closure's code lives in.
+    ///
+    /// `function` indexes *this* table, not the running VM's. A function value that crosses a
+    /// module boundary -- which is what `export function` produces -- would otherwise be called
+    /// against the importer's function table and find someone else's body, or nothing at all.
+    pub program: Rc<Program>,
     pub function: u32,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
@@ -1529,12 +1535,12 @@ impl std::error::Error for ExecutionError {}
 
 /// Execute one IR program against a host implementation.
 pub fn execute<H: HostOps + ?Sized>(
-    program: &Program,
+    program: Rc<Program>,
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut vm = Vm {
-        program,
+        program: Rc::clone(&program),
         host,
         stack: Vec::new(),
         locals: vec![Value::Undefined; program.local_count as usize],
@@ -1606,7 +1612,10 @@ pub fn execute_module<H: HostOps + ?Sized>(
     }
 
     let mut vm = Vm {
-        program: &module.program,
+        // Cloned into an `Rc` because a function value this module exports outlives the run
+        // that made it: the importer calls it against *this* table, and holding it by reference
+        // would tie every exported function to one module execution.
+        program: Rc::new(module.program.clone()),
         host,
         stack: Vec::new(),
         locals,
@@ -1659,7 +1668,11 @@ pub fn execute_module<H: HostOps + ?Sized>(
         };
         exports.push(ModuleExportValue {
             name: binding.exported.clone(),
-            value: value.clone(),
+            // A captured binding lives in a cell; the importer wants what is in it, not the box.
+            value: match value {
+                Value::Cell(cell) => cell.borrow().clone(),
+                value => value.clone(),
+            },
         });
     }
     Ok(ModuleExecutionResult { execution, exports })
@@ -1810,6 +1823,8 @@ struct Handler {
 /// The module body is not represented here: it is the bottom of the call stack rather than a
 /// frame in it, which is why an empty `frames` means `Return` ends execution.
 struct Frame {
+    /// The program that was running, restored with the frame.
+    program: Rc<Program>,
     /// The closure that was running, or `None` for the module body.
     function: Option<Rc<Closure>>,
     this_value: Value,
@@ -1828,8 +1843,9 @@ struct Frame {
     stack_base: usize,
 }
 
-struct Vm<'program, 'host, H: HostOps + ?Sized> {
-    program: &'program Program,
+struct Vm<'host, H: HostOps + ?Sized> {
+    /// The program the *running* frame belongs to, swapped on every call and restored on return.
+    program: Rc<Program>,
     host: &'host mut H,
     stack: Vec<Value>,
     locals: Vec<Value>,
@@ -1883,7 +1899,7 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     limits: ExecutionLimits,
 }
 
-impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
+impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
         // `Return` -- the end of the program.
@@ -1903,7 +1919,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     limit: self.limits.max_steps,
                 });
             }
-            let Some(opcode) = self.code().get(self.instruction) else {
+            // Cloned so the borrow lives on this local rather than on `self`, which every
+            // instruction below needs mutably. It is a refcount bump, not a copy of the code.
+            let program = Rc::clone(&self.program);
+            let Some(opcode) = Self::code(&program, self.function.as_ref()).get(self.instruction)
+            else {
                 return Err(ExecutionError::InvalidInstructionPointer {
                     instruction: self.instruction,
                 });
@@ -1914,7 +1934,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
 
             match opcode {
                 Instruction::Const(index) => {
-                    let Some(value) = self.program.constants.get(*index as usize) else {
+                    let Some(value) = program.constants.get(*index as usize) else {
                         return Err(ExecutionError::ConstantOutOfBounds {
                             index: *index as usize,
                         });
@@ -2758,6 +2778,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         self.handlers.pop();
                     }
                     self.locals = frame.locals;
+                    self.program = frame.program;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
                     self.arguments = frame.arguments;
@@ -2807,6 +2828,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             while self.frames.len() > handler.frame_depth {
                 let frame = self.frames.pop().expect("checked by the loop condition");
                 self.locals = frame.locals;
+                self.program = frame.program;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
                 self.arguments = frame.arguments;
@@ -2819,6 +2841,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         while self.frames.len() > handler.frame_depth {
             let frame = self.frames.pop().expect("checked by the loop condition");
             self.locals = frame.locals;
+            self.program = frame.program;
             self.function = frame.function;
             self.this_value = frame.this_value;
             self.arguments = frame.arguments;
@@ -2837,7 +2860,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         argc: u16,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let proto = &self.program.functions[closure.function as usize];
+        let proto = &closure.program.functions[closure.function as usize];
         let argc = argc as usize;
         if self.stack.len() < argc + 1 {
             return Err(ExecutionError::StackUnderflow { instruction });
@@ -2915,6 +2938,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         };
 
         self.frames.push(Frame {
+            program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             arguments: std::mem::replace(&mut self.arguments, arguments),
@@ -3014,6 +3038,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             .pop()
             .expect("a resumption always pushes a frame");
         self.locals = frame.locals;
+        self.program = frame.program;
         self.function = frame.function;
         self.this_value = frame.this_value;
         self.arguments = frame.arguments;
@@ -4024,11 +4049,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     }
 
     /// Bytecode of the function currently executing.
-    fn code(&self) -> &'program [Instruction] {
-        match &self.function {
-            None => &self.program.code,
+    /// The instruction stream of the running frame, borrowed from `program` rather than `self`.
+    ///
+    /// Taking the `Rc` by value is what lets the interpreter loop hold an instruction across the
+    /// `&mut self` calls that execute it: the borrow is on a local clone, not on the machine.
+    fn code<'a>(program: &'a Rc<Program>, function: Option<&Rc<Closure>>) -> &'a [Instruction] {
+        match function {
+            None => &program.code,
             // Validated when the closure was created; a call never installs a bad index.
-            Some(closure) => &self.program.functions[closure.function as usize].code,
+            Some(closure) => &program.functions[closure.function as usize].code,
         }
     }
 
@@ -4969,6 +4998,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             } else {
                 None
             },
+            program: Rc::clone(&self.program),
             captured_arguments: if proto.arrow {
                 // What `arguments` means *here*, which for an arrow defined inside another
                 // arrow is what that one captured -- not its own call's list, which is its rest
@@ -5604,7 +5634,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         constructing: Option<Value>,
     ) -> Result<(), ExecutionError> {
         let function = closure.function;
-        let Some(proto) = self.program.functions.get(function as usize) else {
+        let Some(proto) = closure.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
         if proto.generator {
@@ -5658,6 +5688,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         // rest parameter needs it, and `LoadArguments` is the one place that substitutes the
         // captured list instead.
         self.frames.push(Frame {
+            program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
             arguments: std::mem::replace(&mut self.arguments, received),
@@ -5679,7 +5710,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
 
     fn jump(&mut self, instruction: usize, target: u32) -> Result<(), ExecutionError> {
         let target = target as usize;
-        if target >= self.code().len() {
+        if target >= Self::code(&self.program, self.function.as_ref()).len() {
             return Err(ExecutionError::InvalidJump {
                 instruction,
                 target,
@@ -8976,9 +9007,28 @@ mod tests {
         }
     }
 
+    /// A stand-in program for a closure that is never called.
+    ///
+    /// The prototype-chain tests build closures to compare identities, not to run: the table
+    /// they would index is irrelevant and an empty one says so.
+    fn no_program() -> Rc<Program> {
+        Rc::new(Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        })
+    }
+
     fn run(program: &Program) -> Result<Value, ExecutionError> {
         let mut host = TestHost { calls: Vec::new() };
-        execute(program, &mut host, ExecutionLimits::default()).map(|result| result.value)
+        execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .map(|result| result.value)
     }
 
     /// An object with the given own properties, in order.
@@ -9176,6 +9226,7 @@ mod tests {
         let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
         let parent = Rc::new(Closure {
             name: None,
+            program: no_program(),
             function: 0,
             upvalues: Vec::new(),
             captured_this: None,
@@ -9189,6 +9240,7 @@ mod tests {
         let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
         let child = Rc::new(Closure {
             name: None,
+            program: no_program(),
             function: 1,
             upvalues: Vec::new(),
             captured_this: None,
@@ -9214,6 +9266,7 @@ mod tests {
         // A separate constructor with its own prototype must not match, however alike.
         let unrelated = Rc::new(Closure {
             name: None,
+            program: no_program(),
             function: 2,
             upvalues: Vec::new(),
             captured_this: None,
@@ -9689,7 +9742,7 @@ mod tests {
             ..ExecutionLimits::default()
         };
         assert!(matches!(
-            execute(&program, &mut host, limits),
+            execute(Rc::new(program.clone()), &mut host, limits),
             Err(ExecutionError::CallDepthExceeded { limit: 8 })
         ));
     }
@@ -9819,7 +9872,12 @@ mod tests {
             ],
         );
         let mut host = TestHost { calls: Vec::new() };
-        let result = execute(&program, &mut host, ExecutionLimits::default()).unwrap();
+        let result = execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
         assert_eq!(result.value, Value::Number(5.0));
         assert_eq!(result.steps, 4);
     }
@@ -9838,7 +9896,12 @@ mod tests {
             ],
         );
         let mut host = TestHost { calls: Vec::new() };
-        let result = execute(&program, &mut host, ExecutionLimits::default()).unwrap();
+        let result = execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
         assert_eq!(result.value, Value::Number(2.0));
     }
 
@@ -9862,7 +9925,12 @@ mod tests {
             ],
         );
         let mut host = TestHost { calls: Vec::new() };
-        let result = execute(&program, &mut host, ExecutionLimits::default()).unwrap();
+        let result = execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
         assert_eq!(result.value, Value::String("left".into()));
     }
 
@@ -9881,7 +9949,12 @@ mod tests {
             ],
         );
         let mut host = TestHost { calls: Vec::new() };
-        execute(&program, &mut host, ExecutionLimits::default()).unwrap();
+        execute(
+            Rc::new(program.clone()),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
         assert_eq!(host.calls.len(), 1);
         assert_eq!(host.calls[0].0, HostOp::WriteStdout);
         assert_eq!(host.calls[0].1[0], HostValue::String("first".into()));
@@ -9893,7 +9966,7 @@ mod tests {
         let program = program(Vec::new(), vec![Instruction::Jump(0)]);
         let mut host = TestHost { calls: Vec::new() };
         let error = execute(
-            &program,
+            Rc::new(program.clone()),
             &mut host,
             ExecutionLimits {
                 max_steps: 3,
@@ -10462,7 +10535,7 @@ mod tests {
             }
         }
         let mut host = Recorder { lines: Vec::new() };
-        execute(program, &mut host, ExecutionLimits::default()).expect("runs");
+        execute(Rc::new(program.clone()), &mut host, ExecutionLimits::default()).expect("runs");
         host.lines.join(",")
     }
 

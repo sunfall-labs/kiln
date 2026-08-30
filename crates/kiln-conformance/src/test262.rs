@@ -227,7 +227,7 @@ pub fn run_variant(case: &TestCase, mode: RunMode, variant: Variant) -> CaseResu
     };
 
     let mut host = CaptureHost::new();
-    match execute(&program, &mut host, ExecutionLimits::default()) {
+    match execute(std::rc::Rc::new(program), &mut host, ExecutionLimits::default()) {
         Ok(_) => {
             diagnostics.push(Diagnostic::new(
                 DiagnosticPhase::Runtime,
@@ -296,7 +296,7 @@ fn execute_positive(
     };
 
     let mut host = CaptureHost::new();
-    match execute(&program, &mut host, ExecutionLimits::default()) {
+    match execute(std::rc::Rc::new(program), &mut host, ExecutionLimits::default()) {
         Ok(_) => CaseResult::new(Outcome::Pass, diagnostics, host.into_stdout(), started),
         Err(error) => {
             diagnostics.push(runtime_diagnostic(&error));
