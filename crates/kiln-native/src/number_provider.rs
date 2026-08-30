@@ -434,31 +434,48 @@ fn require_compatible_target(
 
 fn canonical_rust_target(target: &str) -> Option<String> {
     let lower = target.to_ascii_lowercase();
-    let arch = if lower.starts_with("aarch64-") || lower.starts_with("arm64-") {
-        "aarch64"
-    } else if lower.starts_with("x86_64-") || lower.starts_with("amd64-") {
-        "x86_64"
-    } else {
+    let components: Vec<&str> = lower.split('-').collect();
+    if components.len() < 2 || components.iter().any(|component| component.is_empty()) {
         return None;
+    }
+
+    let arch = match components[0] {
+        "aarch64" | "arm64" => "aarch64",
+        "x86_64" | "amd64" => "x86_64",
+        _ => return None,
     };
-    let suffix = if lower.contains("darwin") || lower.contains("apple") {
-        "apple-darwin"
-    } else if lower.contains("linux") {
-        if lower.contains("musl") {
-            "unknown-linux-musl"
-        } else {
+
+    let suffix = match &components[1..] {
+        ["macos"] => "apple-darwin",
+        [vendor, darwin]
+            if matches!(*vendor, "apple" | "unknown") && is_darwin_component(darwin) =>
+        {
+            "apple-darwin"
+        }
+        ["linux", "gnu"] | ["unknown" | "pc" | "redhat" | "suse", "linux", "gnu"] => {
             "unknown-linux-gnu"
         }
-    } else if lower.contains("windows") {
-        if lower.contains("gnu") {
-            "pc-windows-gnu"
-        } else {
-            "pc-windows-msvc"
+        ["linux", "musl"] | ["unknown" | "pc" | "redhat" | "suse", "linux", "musl"] => {
+            "unknown-linux-musl"
         }
-    } else {
-        return None;
+        ["w64", "mingw32"] if arch == "x86_64" => "pc-windows-gnu",
+        ["windows", "gnu"] | ["unknown" | "pc" | "w64", "windows", "gnu"] if arch == "x86_64" => {
+            "pc-windows-gnu"
+        }
+        ["windows", "msvc"] | ["unknown" | "pc" | "w64", "windows", "msvc"] => "pc-windows-msvc",
+        _ => return None,
     };
     Some(format!("{arch}-{suffix}"))
+}
+
+fn is_darwin_component(component: &str) -> bool {
+    let Some(version) = component.strip_prefix("darwin") else {
+        return false;
+    };
+    version.is_empty()
+        || version
+            .split('.')
+            .all(|component| !component.is_empty() && component.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn cargo_program() -> Option<PathBuf> {
@@ -575,6 +592,53 @@ mod tests {
             identity("aarch64-apple-darwin").target,
             "aarch64-apple-darwin"
         );
+    }
+
+    #[test]
+    fn target_compatibility_accepts_supported_compiler_target_spellings() {
+        for (compiler_target, rust_target) in [
+            ("aarch64-apple-darwin", "aarch64-apple-darwin"),
+            ("aarch64-unknown-darwin25.6.0", "aarch64-apple-darwin"),
+            ("aarch64-macos", "aarch64-apple-darwin"),
+            ("arm64-apple-darwin25.6.0", "aarch64-apple-darwin"),
+            ("x86_64-apple-darwin24.0.0", "x86_64-apple-darwin"),
+            ("amd64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"),
+            ("x86_64-redhat-linux-gnu", "x86_64-unknown-linux-gnu"),
+            ("aarch64-linux-musl", "aarch64-unknown-linux-musl"),
+            ("x86_64-w64-mingw32", "x86_64-pc-windows-gnu"),
+            ("x86_64-unknown-windows-gnu", "x86_64-pc-windows-gnu"),
+            ("x86_64-pc-windows-gnu", "x86_64-pc-windows-gnu"),
+            ("aarch64-unknown-windows-msvc", "aarch64-pc-windows-msvc"),
+            ("amd64-w64-windows-msvc", "x86_64-pc-windows-msvc"),
+        ] {
+            require_compatible_target(compiler_target, rust_target)
+                .unwrap_or_else(|error| panic!("{compiler_target} should be compatible: {error}"));
+        }
+    }
+
+    #[test]
+    fn target_compatibility_rejects_unknown_abi_near_misses() {
+        for compiler_target in [
+            "x86_64-unknown-linux-gnux32",
+            "x86_64-unknown-linux-uclibc",
+            "x86_64-unknown-linux-gnullvm",
+            "aarch64-unknown-linux-gnueabihf",
+            "x86_64-unknown-linux-musleabihf",
+            "x86_64-apple-darwinfoo",
+            "x86_64-evil-apple-darwin25.0.0",
+            "x86_64-apple-darwin25..0",
+            "x86_64-pc-windows-mingw32",
+            "x86_64-pc-windows-msvc-debug",
+            "aarch64-unknown-windows-gnu",
+            "x86_64-foo-bar-linux-gnu",
+            "aarch64-none-linux-gnu",
+            "aarch64-ohos-linux-gnu",
+        ] {
+            assert!(
+                canonical_rust_target(compiler_target).is_none(),
+                "unknown target ABI should be rejected: {compiler_target}"
+            );
+        }
     }
 
     #[test]
