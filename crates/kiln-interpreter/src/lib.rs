@@ -14314,7 +14314,16 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                 instruction: 0,
                 message: format!(
                     "persistent Node resource {} has no JavaScript representation yet",
-                    resource.get()
+                    resource.id.get()
+                ),
+            });
+        }
+        AsyncHostValue::AcceptedTcpStream(accepted) => {
+            return Err(ExecutionError::Host {
+                instruction: 0,
+                message: format!(
+                    "accepted Node resource {} has no JavaScript representation yet",
+                    accepted.resource.id.get()
                 ),
             });
         }
