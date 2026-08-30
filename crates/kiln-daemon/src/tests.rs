@@ -795,6 +795,115 @@ fn warm_noop_sync_reuses_the_content_identical_graph_snapshot() {
 }
 
 #[test]
+fn alternating_entries_and_unrelated_edits_reuse_reachable_graph_snapshots() {
+    let fixture = Fixture::empty();
+    let first = fixture.dir.join("first.js");
+    let second = fixture.dir.join("second.js");
+    let unrelated = fixture.dir.join("unrelated.js");
+    std::fs::write(&first, "console.log('first');\n").expect("write first entry");
+    std::fs::write(&second, "console.log('second');\n").expect("write second entry");
+    std::fs::write(&unrelated, "export const value = 1;\n").expect("write unrelated source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let root_text = root.to_string_lossy().into_owned();
+    let first = std::fs::canonicalize(first).expect("canonical first entry");
+    let second = std::fs::canonicalize(second).expect("canonical second entry");
+    let unrelated = std::fs::canonicalize(unrelated).expect("canonical unrelated source");
+    let first_text = first.to_string_lossy().into_owned();
+    let second_text = second.to_string_lossy().into_owned();
+    let unrelated_text = unrelated.to_string_lossy().into_owned();
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    for (path, text) in [
+        (&first_text, "console.log('first');\n"),
+        (&second_text, "console.log('second');\n"),
+        (&unrelated_text, "export const value = 1;\n"),
+    ] {
+        assert!(matches!(
+            client
+                .request(&Request::SetSource {
+                    source_view: SourceView(0),
+                    path: path.clone(),
+                    text: text.to_owned(),
+                })
+                .expect("synchronize source"),
+            Response::Ok
+        ));
+    }
+
+    for (path, output) in [(&first_text, "first\n"), (&second_text, "second\n")] {
+        let Response::Ran(summary) = client
+            .request(&Request::Run {
+                source_view: SourceView(0),
+                path: path.clone(),
+                project_root: root_text.clone(),
+            })
+            .expect("prime entry graph")
+        else {
+            panic!("expected run response");
+        };
+        assert!(summary.succeeded, "{:?}", summary.diagnostics);
+        assert_eq!(summary.stdout, output);
+    }
+    client.request(&Request::ResetStats).expect("reset stats");
+
+    let Response::Ran(first_again) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: first_text.clone(),
+            project_root: root_text.clone(),
+        })
+        .expect("reuse first entry graph")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(first_again.stdout, "first\n");
+    let Response::Stats(after_alternating) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_alternating.graph_cache_hits, 1);
+    assert_eq!(after_alternating.graph_cache_misses, 0);
+    assert_eq!(after_alternating.graph_cache_entries, 2);
+    assert_eq!(after_alternating.graph_cache_modules, 2);
+
+    assert!(matches!(
+        client
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: unrelated_text,
+                text: "export const value = 2;\n".to_owned(),
+            })
+            .expect("edit unrelated source"),
+        Response::Ok
+    ));
+    client.request(&Request::ResetStats).expect("reset stats");
+    let Response::Ran(after_unrelated_edit) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: first_text,
+            project_root: root_text,
+        })
+        .expect("reuse graph after unrelated edit")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(after_unrelated_edit.stdout, "first\n");
+    let Response::Stats(after_unrelated) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_unrelated.graph_cache_hits, 1);
+    assert_eq!(after_unrelated.graph_cache_misses, 0);
+    assert_eq!(after_unrelated.graph_cache_invalidations, 0);
+    assert_eq!(after_unrelated.graph_cache_entries, 2);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
 fn sync_rejects_noncanonical_resolution_paths() {
     let fixture = Fixture::started();
     let mut client = fixture.client();

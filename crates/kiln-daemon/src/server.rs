@@ -586,8 +586,6 @@ fn commit_sync<E: QueryEngine>(
             Ok(view) => view,
             Err(message) => return Response::Error { message },
         };
-        let revision = guard.engine.revision().0;
-        let resolutions_changed = guard.resolutions.as_ref() != Some(&transaction.resolutions);
         let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
             let active = guard.engine.source_files();
             for (file, path) in active {
@@ -608,9 +606,6 @@ fn commit_sync<E: QueryEngine>(
             return internal_error(&*payload);
         }
         guard.resolutions = Some(transaction.resolutions);
-        if guard.engine.revision().0 != revision || resolutions_changed {
-            guard.graph_cache.invalidate();
-        }
         guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
@@ -637,7 +632,6 @@ fn set_source<E: QueryEngine>(
         Ok(view) => view,
         Err(message) => return Response::Error { message },
     };
-    let revision = guard.engine.revision().0;
     let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
         let file = guard.engine.intern(&path);
         guard.engine.set_source(file, text);
@@ -648,10 +642,8 @@ fn set_source<E: QueryEngine>(
         return internal_error(&*payload);
     }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
-    // warm no-op behavior. The view still advances, but a content-identical graph remains valid.
-    if guard.engine.revision().0 != revision {
-        guard.graph_cache.invalidate();
-    }
+    // warm no-op behavior. Graph entries validate only the reachable source revisions, so both a
+    // byte-identical update and an edit outside a graph retain that graph safely.
     guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
@@ -683,7 +675,6 @@ fn handle_source_request<E: QueryEngine>(
         operation(engine, graph_cache, resolutions.as_ref())
     })) {
         Ok(_response) if guard.engine.revision().0 != revision => {
-            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => {
                     guard.source_view = view;
@@ -913,7 +904,6 @@ fn handle_run<E: QueryEngine>(
             )
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
-                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => {
                         guard.source_view = view;
@@ -997,7 +987,6 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             }
         };
         if guard.engine.revision().0 != current_revision {
-            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => guard.source_view = view,
                 Err(message) => return (Response::Error { message }, Next::Continue),
@@ -1146,7 +1135,6 @@ fn prepare_native_snapshot<E: QueryEngine>(
         }
     })) {
         Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
-            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => guard.source_view = view,
                 Err(message) => return Err(Response::Error { message }),
