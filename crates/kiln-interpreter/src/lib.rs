@@ -581,6 +581,18 @@ impl Native {
         matches!(self, Self::ArrayReverse)
     }
 
+    /// Whether this method creates an iterator that must keep observing its original receiver.
+    ///
+    /// Most generic array methods can operate on a temporary dense copy. Iterators cannot: a
+    /// write after iterator creation but before `next()` has to be visible, especially for a
+    /// typed-array view whose whole purpose is sharing its backing bytes.
+    fn creates_array_iterator(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayEntries | Self::ArrayKeys | Self::ArrayValues
+        )
+    }
+
     /// Whether this built-in reads its receiver as an array, and so should accept an array-like
     /// one when it is redirected through `call` or `apply`.
     ///
@@ -6673,7 +6685,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => native.walks_an_array(),
             _ => false,
         };
-        if !walks_an_array || matches!(receiver, Value::Array(_)) {
+        let preserves_live_typed_array = matches!(
+            callee,
+            Value::Native(native) if native.creates_array_iterator()
+        ) && matches!(receiver, Value::TypedArray(_));
+        if !walks_an_array || matches!(receiver, Value::Array(_)) || preserves_live_typed_array {
             return Ok(receiver);
         }
         let items = match &receiver {
@@ -7581,7 +7597,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             if *key == PropertyKey::Symbol(Symbol::WellKnown(WellKnown::Iterator)) {
                 return match target {
-                    Value::Array(_) => Value::Native(Native::ArrayValues),
+                    Value::Array(_) | Value::TypedArray(_) => Value::Native(Native::ArrayValues),
                     Value::String(_) => Value::Native(Native::StringValues),
                     Value::Generator(state) if is_async_generator(state) => Value::Undefined,
                     Value::Generator(_) => Value::Native(Native::IteratorSelf),
@@ -9230,38 +9246,6 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
-        Native::ArrayEntries | Native::ArrayKeys => match receiver {
-            Value::Array(items) => {
-                let entries = items
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        let index = Value::Number(index as f64);
-                        if matches!(native, Native::ArrayKeys) {
-                            index
-                        } else {
-                            Value::Array(ArrayData::new(vec![
-                                index,
-                                if matches!(item, Value::Native(Native::Hole)) {
-                                    Value::Undefined
-                                } else {
-                                    item.clone()
-                                },
-                            ]))
-                        }
-                    })
-                    .collect();
-                // The snapshot is walked by the ordinary array iterator, so `entries()` and
-                // `values()` share one `next`.
-                call_native(
-                    Native::ArrayValues,
-                    &Value::Array(ArrayData::new(entries)),
-                    &[],
-                )?
-            }
-            _ => Value::Undefined,
-        },
         Native::ArrayOf => Value::Array(ArrayData::new(arguments.to_vec())),
         Native::StringFromCharCode => Value::String(String::from_utf16_lossy(
             &arguments
@@ -10250,17 +10234,25 @@ fn call_native(
         // Present so `typeof` reports "function", which is what the corpus checks. Calling it
         // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
-        // `Array.prototype.values` should return an iterator object. Nothing consumes one yet
-        // -- for-of is a later step -- and the corpus only checks the function's identity and
-        // type, so returning undefined is the honest placeholder rather than a fake iterator
-        // that would break the moment anything called `.next()` on it.
-        // A real iterator object: state lives in reserved properties on the iterator itself,
-        // so it needs no special value kind and `next` is an ordinary method call.
-        Native::ArrayValues => match receiver {
-            Value::Array(_) => {
+        // Array and typed-array iterators retain their receiver rather than snapshotting it.
+        // State lives in reserved properties on the iterator itself, so `next` can observe a
+        // write that happened after iterator creation, as the language requires.
+        Native::ArrayEntries | Native::ArrayKeys | Native::ArrayValues => match receiver {
+            Value::Array(_) | Value::TypedArray(_) => {
                 let mut iterator = ObjectData::default();
                 iterator.set(internal_key("iterated"), receiver.clone());
                 iterator.set(internal_key("index"), Value::Number(0.0));
+                iterator.set(
+                    internal_key("part"),
+                    Value::String(
+                        match native {
+                            Native::ArrayEntries => "entry",
+                            Native::ArrayKeys => "key",
+                            _ => "value",
+                        }
+                        .to_owned(),
+                    ),
+                );
                 iterator.set("next", Value::Native(Native::ArrayIteratorNext));
                 // An iterator is itself iterable, which is what lets one be passed straight to
                 // another `for-of` or to `Array.from`.
@@ -10813,7 +10805,7 @@ fn call_native(
             let Value::Object(state) = receiver else {
                 return Ok(iteration_result(Value::Undefined, true));
             };
-            let (iterated, index) = {
+            let (iterated, index, part) = {
                 let state = state.borrow();
                 (
                     state.get(internal_key("iterated")).unwrap_or(Value::Undefined),
@@ -10821,16 +10813,21 @@ fn call_native(
                         .get(internal_key("index"))
                         .unwrap_or(Value::Number(0.0))
                         .as_number(),
+                    state
+                        .get(internal_key("part"))
+                        .unwrap_or(Value::String("value".to_owned()))
+                        .to_display_string(),
                 )
-            };
-            let Value::Array(items) = &iterated else {
-                return Ok(iteration_result(Value::Undefined, true));
             };
             let index = index as usize;
             // Re-read the length every step. An array shortened during iteration must stop
             // early rather than read past its end, which is exactly what a cached length would
             // do -- and is the mutation-during-iteration case the corpus checks.
-            let item = items.borrow().get(index).cloned();
+            let item = match &iterated {
+                Value::Array(items) => items.borrow().get(index).cloned(),
+                Value::TypedArray(view) => view.get(index).map(Value::Number),
+                _ => None,
+            };
             match item {
                 Some(value) => {
                     state
@@ -10838,14 +10835,20 @@ fn call_native(
                         .set(internal_key("index"), Value::Number(index as f64 + 1.0));
                     // An iterator walks *indices*, so it visits a hole -- and what it yields
                     // there is what a read yields, which is undefined.
-                    iteration_result(
-                        if matches!(value, Value::Native(Native::Hole)) {
-                            Value::Undefined
-                        } else {
-                            value
-                        },
-                        false,
-                    )
+                    let value = if matches!(value, Value::Native(Native::Hole)) {
+                        Value::Undefined
+                    } else {
+                        value
+                    };
+                    let yielded = match part.as_str() {
+                        "key" => Value::Number(index as f64),
+                        "entry" => Value::Array(ArrayData::new(vec![
+                            Value::Number(index as f64),
+                            value,
+                        ])),
+                        _ => value,
+                    };
+                    iteration_result(yielded, false)
                 }
                 None => iteration_result(Value::Undefined, true),
             }
@@ -11065,6 +11068,7 @@ fn has_property(target: &Value, key: &Value) -> bool {
             Value::Array(items) => {
                 items.properties.borrow().lookup(typed.clone()).is_some() || typed == iterator_key()
             }
+            Value::TypedArray(_) => typed == iterator_key(),
             Value::String(_) => typed == iterator_key(),
             Value::Generator(state) => typed == iterator_key() && !is_async_generator(state),
             _ => false,
@@ -15207,6 +15211,53 @@ mod tests {
         assert_eq!(descriptor.get("configurable"), Some(Value::Boolean(true)));
         assert!(
             own_descriptor(&prototype, &PropertyKey::String("notARealMethod".into())).is_none()
+        );
+    }
+
+    #[test]
+    fn typed_arrays_use_the_array_values_iteration_protocol() {
+        let view = Rc::new(TypedArrayData {
+            kind: TypedKind::Uint8,
+            buffer: Rc::new(RefCell::new(vec![7, 8])),
+            offset: 0,
+            length: 2,
+        });
+        let value = Value::TypedArray(Rc::clone(&view));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+
+        assert_eq!(
+            vm.property_key(&value, &iterator_key()),
+            Value::Native(Native::ArrayValues)
+        );
+        assert!(has_property(
+            &value,
+            &Value::Symbol(Symbol::WellKnown(WellKnown::Iterator))
+        ));
+        let iterator = vm
+            .call_value(
+                &Value::Native(Native::ArrayValues),
+                value.clone(),
+                Vec::new(),
+                0,
+            )
+            .expect("create typed-array iterator");
+        view.set(0, 9.0);
+        let next = vm.property(&iterator, "next");
+        let step = vm
+            .call_value(&next, iterator, Vec::new(), 0)
+            .expect("advance typed-array iterator");
+        assert_eq!(vm.property(&step, "value"), Value::Number(9.0));
+        assert_eq!(
+            vm.drain_iterable(&value, 0).expect("typed-array iterator"),
+            vec![Value::Number(9.0), Value::Number(8.0)]
         );
     }
 
