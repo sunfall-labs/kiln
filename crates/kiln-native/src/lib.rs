@@ -5085,6 +5085,149 @@ int main(void) {{
     }
 
     #[test]
+    fn shared_graph_preserves_well_known_symbol_keys_across_translation_units() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph symbol integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph symbol integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-symbol-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph symbol project");
+        fs::write(project.join("main.js"), "").expect("write shared graph symbol entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph symbol dependency");
+
+        // The provider and consumer each get a separate generated C translation unit.  The
+        // provider's object stores a value under its own copy of Symbol.iterator; the consumer
+        // has to recognise that imported symbol as the same well-known key by its reserved
+        // spelling, rather than by pointer identity.
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(123.0_f64.to_bits())],
+                code: vec![
+                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                    Instruction::Const(0),
+                    Instruction::NewObject { count: 1 },
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                    Instruction::GetComputed,
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared graph symbol graph");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared graph symbol library");
+
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph symbol header file name");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    kiln_value result;
+    double number;
+    if ({symbol}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 1;
+    memcpy(&number, &result.bits, sizeof number);
+    return number == 123.0 ? 0 : 2;
+}}
+"#,
+                symbol = report.module_symbol,
+            ),
+        )
+        .expect("write shared graph symbol host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared graph symbol host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared graph symbol host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run shared graph symbol host");
+        assert!(
+            output.status.success(),
+            "shared graph symbol host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
