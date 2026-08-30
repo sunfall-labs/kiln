@@ -447,6 +447,8 @@ pub enum ExpressionKind {
     ComputedMember {
         object: Box<Expression>,
         property: Box<Expression>,
+        /// `?.[`, with the same whole-chain short circuit as [`ExpressionKind::StaticMember`].
+        optional: bool,
     },
     /// `object[property] = value`, including the compound forms.
     ComputedAssignment {
@@ -477,6 +479,15 @@ pub enum ExpressionKind {
     Object {
         members: Vec<ObjectMember>,
     },
+    /// The boundary of an optional chain.
+    ///
+    /// It has to be marked, because `?.` does not short-circuit only its own access: in
+    /// `a?.b.c`, a nullish `a` makes the *whole* expression undefined rather than reading `.c` of
+    /// undefined. The chain is the region those jumps leave, and nothing smaller says where it
+    /// ends.
+    Chain {
+        expression: Box<Expression>,
+    },
     /// A template literal. `quasis` is always one longer than `expressions`, so the two
     /// interleave starting and ending with text -- an empty string standing in where the source
     /// wrote none.
@@ -500,6 +511,9 @@ pub enum ExpressionKind {
     StaticMember {
         object: Box<Expression>,
         property: String,
+        /// `?.`, which stops the whole enclosing [`ExpressionKind::Chain`] when the object is
+        /// nullish rather than only this one access.
+        optional: bool,
     },
     Unsupported {
         feature: String,

@@ -630,23 +630,21 @@ impl Lowerer {
                     property: member.property.name.to_string(),
                 }
             }
-            Expression::StaticMemberExpression(member) if !member.optional => {
-                HirExpressionKind::StaticMember {
-                    object: Box::new(self.expression(&member.object)),
-                    property: member.property.name.to_string(),
-                }
-            }
-            Expression::ComputedMemberExpression(member) if !member.optional => {
-                HirExpressionKind::ComputedMember {
-                    object: Box::new(self.expression(&member.object)),
-                    property: Box::new(self.expression(&member.expression)),
-                }
-            }
+            Expression::StaticMemberExpression(member) => HirExpressionKind::StaticMember {
+                object: Box::new(self.expression(&member.object)),
+                property: member.property.name.to_string(),
+                optional: member.optional,
+            },
+            Expression::ComputedMemberExpression(member) => HirExpressionKind::ComputedMember {
+                object: Box::new(self.expression(&member.object)),
+                property: Box::new(self.expression(&member.expression)),
+                optional: member.optional,
+            },
             Expression::PrivateFieldExpression(_) => {
                 return self.unsupported_expression("private property access", expression_span);
             }
-            Expression::CallExpression(_) | Expression::StaticMemberExpression(_) => {
-                return self.unsupported_expression("optional chaining", expression_span);
+            Expression::CallExpression(_) => {
+                return self.unsupported_expression("optional call", expression_span);
             }
             Expression::ObjectExpression(object) => {
                 return self.object_literal(object, expression_span);
@@ -766,8 +764,36 @@ impl Lowerer {
             Expression::Super(_) => {
                 return self.unsupported_expression("super expression", expression_span);
             }
-            Expression::ChainExpression(_) => {
-                return self.unsupported_expression("chain expression", expression_span);
+            // The chain is what the `?.` jumps leave, so the boundary is marked here rather
+            // than inferred later from where the optional links happen to sit.
+            Expression::ChainExpression(chain) => {
+                let inner = match &chain.expression {
+                    oxc_ast::ast::ChainElement::CallExpression(call) if call.optional => {
+                        // `a?.()` short-circuits on the *callee*, which for a method call would
+                        // have to keep the receiver alive across the jump. Refused rather than
+                        // silently calling with the wrong `this`.
+                        self.unsupported_expression("optional call", expression_span)
+                    }
+                    oxc_ast::ast::ChainElement::CallExpression(call) => HirExpression {
+                        kind: HirExpressionKind::Call {
+                            callee: Box::new(self.expression(&call.callee)),
+                            arguments: self.arguments(&call.arguments),
+                        },
+                        span: expression_span,
+                    },
+                    other => match other.as_member_expression() {
+                        Some(member) => self.member_expression(member, expression_span),
+                        None => self.unsupported_expression("chain element", expression_span),
+                    },
+                };
+                // A chain around something already refused adds nothing, and wrapping it would
+                // hide which construct was refused from anything matching on the kind.
+                if matches!(inner.kind, HirExpressionKind::Unsupported { .. }) {
+                    return inner;
+                }
+                HirExpressionKind::Chain {
+                    expression: Box::new(inner),
+                }
             }
             Expression::ImportExpression(_) => {
                 return self.unsupported_expression("dynamic import expression", expression_span);
@@ -1097,6 +1123,41 @@ impl Lowerer {
             _ => HirVariableKind::Let,
         };
         Some((kind, identifier.name.to_string()))
+    }
+
+    /// Lower a member access, optional or not. Shared with the chain path, where the same three
+    /// shapes appear behind a `?.`.
+    fn member_expression(
+        &mut self,
+        member: &oxc_ast::ast::MemberExpression<'_>,
+        expression_span: HirSpan,
+    ) -> HirExpression {
+        let kind = match member {
+            oxc_ast::ast::MemberExpression::StaticMemberExpression(member) => {
+                HirExpressionKind::StaticMember {
+                    object: Box::new(self.expression(&member.object)),
+                    property: member.property.name.to_string(),
+                    optional: member.optional,
+                }
+            }
+            oxc_ast::ast::MemberExpression::ComputedMemberExpression(member) => {
+                HirExpressionKind::ComputedMember {
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(self.expression(&member.expression)),
+                    optional: member.optional,
+                }
+            }
+            oxc_ast::ast::MemberExpression::PrivateFieldExpression(_) => {
+                self.unsupported("private property access", expression_span);
+                HirExpressionKind::Unsupported {
+                    feature: "private property access".to_string(),
+                }
+            }
+        };
+        HirExpression {
+            kind,
+            span: expression_span,
+        }
     }
 
     /// Lower an argument list, where a spread contributes however many an iterable holds.
@@ -1497,7 +1558,7 @@ mod tests {
         let cases = [
             ("const value = tag`x`;", "tagged template literal"),
             ("const value = /x/;", "regular expression literal"),
-            ("const value = a?.b;", "chain expression"),
+            ("const value = a?.();", "optional call"),
         ];
         for (source, expected) in cases {
             let module = parse("module.js", source);

@@ -633,6 +633,11 @@ struct Compiler {
     finalizers: Vec<Cleanup>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
+    /// Short-circuit jumps of the optional chains being compiled, innermost last.
+    ///
+    /// A stack rather than a field because a chain can appear inside another chain's arguments,
+    /// and each `?.` has to leave the chain it was written in rather than the innermost one.
+    chains: Vec<Vec<usize>>,
     /// Exception handlers active at this point in the emitted code. Tracked because a non-local
     /// exit jumps past `PopHandler` instructions that would otherwise have balanced them.
     handler_depth: usize,
@@ -675,6 +680,7 @@ impl Compiler {
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
             handler_depth: 0,
+            chains: Vec::new(),
             super_bindings: Vec::new(),
             super_binding_count: 0,
             scopes: vec![HashMap::new()],
@@ -1920,8 +1926,23 @@ impl Compiler {
                 }
                 self.expression(last);
             }
-            ExpressionKind::ComputedMember { object, property } => {
+            ExpressionKind::Chain { expression: inner } => {
+                self.chains.push(Vec::new());
+                self.expression(inner);
+                let exits = self.chains.pop().expect("this chain pushed its own frame");
+                // Every `?.` in the chain lands here with `undefined` already on the stack, so
+                // the chain's value is one thing either way.
+                for jump in exits {
+                    self.patch_jump(jump);
+                }
+            }
+            ExpressionKind::ComputedMember {
+                object,
+                property,
+                optional,
+            } => {
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, expression.span);
                 self.expression(property);
                 self.code.push(Instruction::GetComputed);
             }
@@ -1992,8 +2013,13 @@ impl Compiler {
                     }
                 }
             }
-            ExpressionKind::StaticMember { object, property } => {
+            ExpressionKind::StaticMember {
+                object,
+                property,
+                optional,
+            } => {
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, expression.span);
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.code.push(Instruction::GetProperty(name));
             }
@@ -2005,6 +2031,34 @@ impl Compiler {
                 self.push_constant(Constant::Undefined);
             }
         }
+    }
+
+    /// Leave the enclosing optional chain with `undefined` when the value on top of the stack is
+    /// nullish, or fall through with it untouched.
+    ///
+    /// Does nothing when the access is not optional, so every member read can call it and only
+    /// the ones written with `?.` cost anything.
+    fn short_circuit_if_nullish(&mut self, optional: bool, span: Span) {
+        if !optional {
+            return;
+        }
+        if self.chains.is_empty() {
+            // The frontend only produces an optional access inside a chain, so this means the
+            // two have drifted apart rather than that a program did something unusual.
+            self.error(Some(span), "`?.` outside of an optional chain");
+            return;
+        }
+        self.code.push(Instruction::Dup);
+        let present = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        // Nullish: drop the object and hand the whole chain `undefined`.
+        self.code.push(Instruction::Pop);
+        self.push_constant(Constant::Undefined);
+        let exit = self.emit_jump(Instruction::Jump(0));
+        self.chains
+            .last_mut()
+            .expect("checked just above")
+            .push(exit);
+        self.patch_jump(present);
     }
 
     /// An object literal.
@@ -2799,7 +2853,7 @@ impl Compiler {
         let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
                 &callee.kind,
-                ExpressionKind::StaticMember { object, property }
+                ExpressionKind::StaticMember { object, property, optional: false }
                     if property == "log"
                         && matches!(&object.kind, ExpressionKind::Identifier(name) if name == "console")
             );
@@ -2851,9 +2905,16 @@ impl Compiler {
                 self.push_constant(Constant::Undefined);
                 return;
             }
-            ExpressionKind::StaticMember { object, property } => {
+            ExpressionKind::StaticMember {
+                object,
+                property,
+                optional,
+            } => {
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.expression(object);
+                // `a?.b()` short-circuits before the method is even read, so the receiver is the
+                // thing tested and the call never happens.
+                self.short_circuit_if_nullish(*optional, span);
                 if spreading {
                     // The receiver stays beneath the method, which is what `Apply` expects.
                     self.code.push(Instruction::Dup);
@@ -2866,8 +2927,13 @@ impl Compiler {
                 }
                 return;
             }
-            ExpressionKind::ComputedMember { object, property } => {
+            ExpressionKind::ComputedMember {
+                object,
+                property,
+                optional,
+            } => {
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
                 if spreading {
                     self.code.push(Instruction::Dup);
                     self.expression(property);
@@ -3353,7 +3419,9 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(value, names, collecting);
             }
         }
-        ExpressionKind::ComputedMember { object, property } => {
+        ExpressionKind::ComputedMember {
+            object, property, ..
+        } => {
             collect_identifiers(object, names, collecting);
             collect_identifiers(property, names, collecting);
         }
@@ -3370,6 +3438,9 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
+        }
+        ExpressionKind::Chain { expression } => {
+            collect_identifiers(expression, names, collecting);
         }
         ExpressionKind::Template { expressions, .. } => {
             for expression in expressions {
@@ -3438,7 +3509,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::Sequence { operands } => operands
             .iter()
             .any(|operand| expression_references(operand, name)),
-        ExpressionKind::ComputedMember { object, property } => {
+        ExpressionKind::ComputedMember { object, property, .. } => {
             expression_references(object, name) || expression_references(property, name)
         }
         ExpressionKind::ComputedAssignment {
@@ -3465,6 +3536,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::SuperCall { arguments } => arguments
             .iter()
             .any(|argument| expression_references(argument, name)),
+        ExpressionKind::Chain { expression } => expression_references(expression, name),
         ExpressionKind::Template { expressions, .. } => expressions
             .iter()
             .any(|expression| expression_references(expression, name)),
@@ -3698,6 +3770,7 @@ mod tests {
         let read = |name: &str| {
             statement(StatementKind::Expression(Expression {
                 kind: ExpressionKind::StaticMember {
+                    optional: false,
                     object: Box::new(identifier("o")),
                     property: name.into(),
                 },
@@ -4067,6 +4140,7 @@ mod tests {
             kind: ExpressionKind::Call {
                 callee: Box::new(Expression {
                     kind: ExpressionKind::StaticMember {
+                        optional: false,
                         object: Box::new(identifier("console")),
                         property: "log".into(),
                     },
