@@ -1,0 +1,6 @@
+/target
+
+# Corpora and crash inputs written by `cargo bolero`. A twenty-second run leaves several hundred
+# unpruned files; a corpus worth committing is one that has been through `cargo bolero reduce`,
+# and none has been yet.
+/tests/__fuzz__
