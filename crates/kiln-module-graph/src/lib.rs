@@ -747,7 +747,7 @@ where
                         let namespace = path
                             .to_str()
                             .ok_or_else(|| ModuleGraphError::FrontendPath { path: path.clone() })?;
-                        remap_private_namespace(&mut program, &namespace);
+                        remap_private_namespace(&mut program, namespace);
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
                         for specifier in &program.dependencies {
