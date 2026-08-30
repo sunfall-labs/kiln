@@ -773,9 +773,12 @@ impl Lowerer {
             Expression::BigIntLiteral(_) => {
                 return self.unsupported_expression("bigint literal", expression_span);
             }
-            Expression::RegExpLiteral(_) => {
-                return self.unsupported_expression("regular expression literal", expression_span);
-            }
+            Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
+                // The source text, not a compiled program: `re.source` hands the pattern back to
+                // the program, and compiling belongs to whoever owns the engine.
+                pattern: literal.regex.pattern.text.to_string(),
+                flags: literal.regex.flags.to_string(),
+            },
             Expression::Super(_) => {
                 return self.unsupported_expression("super expression", expression_span);
             }
@@ -1609,7 +1612,6 @@ mod tests {
         // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
             ("const value = tag`x`;", "tagged template literal"),
-            ("const value = /x/;", "regular expression literal"),
             ("const value = a?.();", "optional call"),
         ];
         for (source, expected) in cases {

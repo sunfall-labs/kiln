@@ -678,6 +678,7 @@ fn stack_effect(
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
+        | Instruction::NewRegExp { .. }
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -919,6 +920,7 @@ fn emit_instruction(
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
+        | Instruction::NewRegExp { .. }
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -1144,6 +1146,11 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
             Instruction::PushHole => byte(&mut hash, 55),
+            Instruction::NewRegExp { pattern, flags } => {
+                byte(&mut hash, 56);
+                word(&mut hash, u64::from(*pattern));
+                word(&mut hash, u64::from(*flags));
+            }
             Instruction::GetPrivate(value) => {
                 byte(&mut hash, 53);
                 word(&mut hash, u64::from(*value));
@@ -1687,9 +1694,11 @@ mod tests {
             0,
         );
         let generated = emit(&program).expect("locale probe emits");
-        assert!(generated
-            .source
-            .contains("kiln_string_to_number(value.ptr, value.len)"));
+        assert!(
+            generated
+                .source
+                .contains("kiln_string_to_number(value.ptr, value.len)")
+        );
         assert!(!generated.source.contains("strtod"));
         assert!(!generated.source.contains("kiln_c99_strtod_c"));
         assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));

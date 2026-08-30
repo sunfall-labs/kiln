@@ -210,6 +210,12 @@ pub enum Native {
     /// the id it was given, and the language does not distinguish which kind it was.
     ClearTimer,
     QueueMicrotask,
+    RegExpConstructor,
+    RegExpTest,
+    RegExpExec,
+    StringMatch,
+    StringMatchAll,
+    StringSearch,
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
@@ -622,6 +628,70 @@ impl PartialEq for Closure {
     }
 }
 
+/// An array: its elements, and the properties that are not elements.
+///
+/// Elements and properties are separate stores because they answer different questions. `length`
+/// is derived from the elements and writing an index changes it; `index` and `input` on an
+/// `exec` result, or anything a program assigns by name, are ordinary properties that do not.
+/// Keeping one store would mean deciding which a numeric-looking key is on every access.
+#[derive(Debug, Default)]
+pub struct ArrayData {
+    items: RefCell<Vec<Value>>,
+    /// Empty for almost every array, and allocated with it rather than on demand because an
+    /// array that never gains a named property still has to answer that it has none.
+    properties: RefCell<ObjectData>,
+}
+
+impl ArrayData {
+    fn new(items: Vec<Value>) -> Rc<Self> {
+        Rc::new(Self {
+            items: RefCell::new(items),
+            properties: RefCell::new(ObjectData::default()),
+        })
+    }
+
+    fn borrow(&self) -> std::cell::Ref<'_, Vec<Value>> {
+        self.items.borrow()
+    }
+
+    fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<Value>> {
+        self.items.borrow_mut()
+    }
+}
+
+impl PartialEq for ArrayData {
+    /// Identity: `[] === []` is false, and two references to one array are equal.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+/// A compiled regular expression, its source, and the cursor `g` and `y` advance.
+///
+/// The engine is `regress`, which targets ECMAScript semantics rather than the linear-time
+/// subset: backreferences, lookaround and sticky matching are all things a JavaScript program
+/// expects and a linear-time engine cannot offer. It also matches over UTF-16, so an index it
+/// reports is already in the units the language counts in and needs no conversion.
+#[derive(Debug)]
+pub struct RegExpData {
+    /// The pattern as written, which `source` hands back to the program.
+    source: String,
+    flags: String,
+    compiled: regress::Regex,
+    global: bool,
+    sticky: bool,
+    /// Where the next `g` or `y` search starts, in UTF-16 units. Mutable and program-visible,
+    /// which is why two evaluations of one literal must not share an object.
+    last_index: std::cell::Cell<usize>,
+}
+
+impl PartialEq for RegExpData {
+    /// Identity, like every other object: two literals with the same source are two regexps.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
 /// A JavaScript scalar value represented by the interpreter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -646,6 +716,7 @@ pub enum Value {
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
     Generator(Rc<RefCell<GeneratorState>>),
     Promise(Rc<RefCell<PromiseState>>),
+    RegExp(Rc<RegExpData>),
     /// The `resolve` or `reject` handed to a promise executor.
     ///
     /// A function bound to one promise, which no other value kind here can express: a `Native`
@@ -654,7 +725,7 @@ pub enum Value {
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
-    Array(Rc<RefCell<Vec<Value>>>),
+    Array(Rc<ArrayData>),
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
     Callback(CallbackMethod),
     /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
@@ -700,7 +771,7 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) => "function",
-            Self::Array(_) | Self::Generator(_) | Self::Promise(_) => "object",
+            Self::Array(_) | Self::Generator(_) | Self::Promise(_) | Self::RegExp(_) => "object",
             // A settler is a function the program can call, hold and pass on, so it says so.
             Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
@@ -722,6 +793,7 @@ impl Value {
             Self::Array(_) => "array",
             Self::Generator(_) => "generator",
             Self::Promise(_) => "promise",
+            Self::RegExp(_) => "regexp",
             Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
@@ -749,6 +821,7 @@ impl Value {
             | Self::Callback(_)
             | Self::Generator(_)
             | Self::Promise(_)
+            | Self::RegExp(_)
             | Self::Settler(..) => f64::NAN,
             // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
             Self::Symbol(_) => f64::NAN,
@@ -773,6 +846,7 @@ impl Value {
             | Self::Array(_)
             | Self::Generator(_)
             | Self::Promise(_)
+            | Self::RegExp(_)
             | Self::Settler(..)
             | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -803,6 +877,8 @@ impl Value {
             Self::Callback(method) => format!("[Function {method:?}]"),
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
+            // `String(/a/g)` is the literal as written, which is what `toString` returns.
+            Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
             Self::Settler(..) => "function () { [native code] }".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
@@ -1668,7 +1744,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         });
                     }
                     let items = self.stack.split_off(self.stack.len() - count);
-                    self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
+                    self.stack.push(Value::Array(ArrayData::new(items)));
                 }
                 Instruction::IterableToArray => {
                     let source = self.pop(current)?;
@@ -1678,7 +1754,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Value::Array(items) => dense_items(&items.borrow()),
                         other => self.drain_iterable(other, current)?,
                     };
-                    self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
+                    self.stack.push(Value::Array(ArrayData::new(items)));
                 }
                 Instruction::SpreadInto => {
                     let source = self.pop(current)?;
@@ -1791,8 +1867,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 Instruction::LoadArguments => {
                     let arguments = self.arguments.clone();
-                    self.stack
-                        .push(Value::Array(Rc::new(RefCell::new(arguments))));
+                    self.stack.push(Value::Array(ArrayData::new(arguments)));
                 }
                 Instruction::LoadThis => {
                     let this_value = self.this_value.clone();
@@ -1837,6 +1912,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             globals.set("String", Value::Native(Native::StringConstructor));
                             globals.set("Math", Value::Native(Native::Math));
                             globals.set("Promise", Value::Native(Native::PromiseConstructor));
+                            globals.set("RegExp", Value::Native(Native::RegExpConstructor));
                             globals.set("Number", Value::Native(Native::NumberConstructor));
                             globals.set("Boolean", Value::Native(Native::BooleanConstructor));
                             globals.set("NaN", Value::Number(f64::NAN));
@@ -1862,6 +1938,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         }
                         kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
                         kiln_ir::Builtin::Promise => Native::PromiseConstructor,
+                        kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -1950,7 +2027,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                         .map(Value::String)
                         .collect();
-                    self.stack.push(Value::Array(Rc::new(RefCell::new(keys))));
+                    self.stack.push(Value::Array(ArrayData::new(keys)));
                 }
                 Instruction::Apply => {
                     let arguments = self.pop(current)?;
@@ -1997,6 +2074,23 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                 }
                 Instruction::PushHole => self.stack.push(Value::Native(Native::Hole)),
+                Instruction::NewRegExp { pattern, flags } => {
+                    let pattern = self.string_constant(*pattern, current)?;
+                    let flags = self.string_constant(*flags, current)?;
+                    match build_regexp(&pattern, &flags) {
+                        Some(regexp) => self.stack.push(regexp),
+                        // A pattern oxc parsed but this engine rejects. A SyntaxError is what a
+                        // program would get from `new RegExp` with the same text.
+                        None => {
+                            self.throw_error(
+                                ErrorKind::Syntax,
+                                format!("Invalid regular expression: /{pattern}/{flags}"),
+                                current,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
@@ -2668,6 +2762,161 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     },
                 )
             }
+            Native::RegExpConstructor => {
+                let pattern = match arguments.first() {
+                    Some(Value::RegExp(existing)) => existing.source.clone(),
+                    None | Some(Value::Undefined) => String::new(),
+                    Some(value) => value.to_display_string(),
+                };
+                let flags = match arguments.get(1) {
+                    None | Some(Value::Undefined) => match arguments.first() {
+                        // `new RegExp(re)` keeps the original's flags.
+                        Some(Value::RegExp(existing)) => existing.flags.clone(),
+                        _ => String::new(),
+                    },
+                    Some(value) => value.to_display_string(),
+                };
+                match build_regexp(&pattern, &flags) {
+                    Some(regexp) => Ok(regexp),
+                    None => {
+                        self.throw_error(
+                            ErrorKind::Syntax,
+                            format!("Invalid regular expression: /{pattern}/{flags}"),
+                            instruction,
+                        )?;
+                        Ok(Value::Undefined)
+                    }
+                }
+            }
+            Native::RegExpTest | Native::RegExpExec => {
+                let Value::RegExp(regexp) = receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let subject: Vec<u16> = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string)
+                    .encode_utf16()
+                    .collect();
+                // Only `g` and `y` carry a cursor; a plain pattern always searches from the
+                // start, however many times it is used.
+                let start = if regexp.global || regexp.sticky {
+                    regexp.last_index.get()
+                } else {
+                    0
+                };
+                let found = regexp_search(regexp, &subject, start);
+                if (regexp.global || regexp.sticky) && found.is_none() {
+                    // A failed search resets the cursor, which is what stops a `g` regexp from
+                    // being permanently stuck past the end.
+                    regexp.last_index.set(0);
+                }
+                if let Some((range, _)) = &found
+                    && (regexp.global || regexp.sticky)
+                {
+                    regexp.last_index.set(range.end);
+                }
+                if matches!(native, Native::RegExpTest) {
+                    return Ok(Value::Boolean(found.is_some()));
+                }
+                let Some((range, groups)) = found else {
+                    return Ok(Value::Null);
+                };
+                Ok(match_result(&subject, &range, &groups))
+            }
+            Native::StringReplace | Native::StringReplaceAll
+                if matches!(arguments.first(), Some(Value::RegExp(_)))
+                    || matches!(
+                        arguments.get(1),
+                        Some(Value::Function(_) | Value::Native(_) | Value::Callback(_))
+                    ) =>
+            {
+                self.replace_with_pattern(receiver, arguments, native, instruction)
+            }
+            Native::StringSplit if matches!(arguments.first(), Some(Value::RegExp(_))) => {
+                let Value::String(text) = receiver else {
+                    return Ok(Value::Undefined);
+                };
+                let Some(Value::RegExp(regexp)) = arguments.first() else {
+                    unreachable!("checked by the guard");
+                };
+                let subject: Vec<u16> = text.encode_utf16().collect();
+                let mut parts = Vec::new();
+                let mut copied = 0;
+                for (range, groups) in regexp_search_all(regexp, &subject) {
+                    // A separator that matches nothing would split between every character
+                    // *and* produce an empty piece for each; the specification skips an empty
+                    // match at the position the last piece started.
+                    if range.start == range.end && range.start == copied {
+                        continue;
+                    }
+                    parts.push(Value::String(utf16_slice(&subject, copied..range.start)));
+                    // A capturing separator contributes its groups to the result, which is what
+                    // makes `"a1b".split(/(\d)/)` three elements rather than two.
+                    for group in groups.iter().skip(1) {
+                        parts.push(match group {
+                            Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                            None => Value::Undefined,
+                        });
+                    }
+                    copied = range.end;
+                }
+                parts.push(Value::String(utf16_slice(&subject, copied..subject.len())));
+                Ok(Value::Array(ArrayData::new(parts)))
+            }
+            Native::StringSearch => {
+                let Value::String(text) = receiver else {
+                    return Ok(Value::Number(-1.0));
+                };
+                let subject: Vec<u16> = text.encode_utf16().collect();
+                let Some(regexp) = self.pattern_argument(arguments, instruction)? else {
+                    return Ok(Value::Number(-1.0));
+                };
+                let Value::RegExp(regexp) = &regexp else {
+                    return Ok(Value::Number(-1.0));
+                };
+                // `search` ignores `lastIndex` entirely and always scans from the start.
+                Ok(Value::Number(
+                    regexp_search(regexp, &subject, 0)
+                        .map_or(-1.0, |(range, _)| range.start as f64),
+                ))
+            }
+            Native::StringMatch | Native::StringMatchAll => {
+                let Value::String(text) = receiver else {
+                    return Ok(Value::Null);
+                };
+                let subject: Vec<u16> = text.encode_utf16().collect();
+                let Some(pattern) = self.pattern_argument(arguments, instruction)? else {
+                    return Ok(Value::Null);
+                };
+                let Value::RegExp(regexp) = &pattern else {
+                    return Ok(Value::Null);
+                };
+                let all = matches!(native, Native::StringMatchAll) || regexp.global;
+                if !all {
+                    // Without `g`, `match` is `exec`: one result with its groups.
+                    return Ok(match regexp_search(regexp, &subject, 0) {
+                        Some((range, groups)) => match_result(&subject, &range, &groups),
+                        None => Value::Null,
+                    });
+                }
+                let mut results = Vec::new();
+                for (range, groups) in regexp_search_all(regexp, &subject) {
+                    results.push(if matches!(native, Native::StringMatchAll) {
+                        // `matchAll` yields full results; `match` with `g` yields only the text.
+                        match_result(&subject, &range, &groups)
+                    } else {
+                        Value::String(utf16_slice(&subject, range))
+                    });
+                }
+                if results.is_empty() && matches!(native, Native::StringMatch) {
+                    return Ok(Value::Null);
+                }
+                regexp.last_index.set(0);
+                Ok(Value::Array(ArrayData::new(results)))
+            }
             Native::QueueMicrotask => {
                 self.microtasks.push_back(Job::Callback(
                     arguments.first().cloned().unwrap_or(Value::Undefined),
@@ -2735,7 +2984,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             }
             items = mapped;
         }
-        Ok(Value::Array(Rc::new(RefCell::new(items))))
+        Ok(Value::Array(ArrayData::new(items)))
     }
 
     fn drain_iterable(
@@ -2848,9 +3097,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             // Not undefined: `findIndex` reports -1 for "nowhere", where `find` reports the
             // absence of a value.
             CallbackMethod::FindIndex => Value::Number(-1.0),
-            CallbackMethod::Map | CallbackMethod::Filter => {
-                Value::Array(Rc::new(RefCell::new(collected)))
-            }
+            CallbackMethod::Map | CallbackMethod::Filter => Value::Array(ArrayData::new(collected)),
             CallbackMethod::ForEach | CallbackMethod::Find => Value::Undefined,
             CallbackMethod::Some => Value::Boolean(false),
             CallbackMethod::Every => Value::Boolean(true),
@@ -3472,7 +3719,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             // could succeed, so it rejects, and an empty `race` never settles at all.
             match native {
                 Native::PromiseAll | Native::PromiseAllSettled => {
-                    let empty = Value::Array(Rc::new(RefCell::new(Vec::new())));
+                    let empty = Value::Array(ArrayData::new(Vec::new()));
                     self.settle(&result, &Settled::Fulfilled(empty));
                 }
                 Native::PromiseAny => {
@@ -3572,7 +3819,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         if state.outstanding.get() > 0 {
             return Ok(());
         }
-        let gathered = Value::Array(Rc::new(RefCell::new(state.slots.borrow().clone())));
+        let gathered = Value::Array(ArrayData::new(state.slots.borrow().clone()));
         match native {
             // Every input rejected, and `any` reports them together rather than picking one.
             Native::PromiseAny => {
@@ -3730,6 +3977,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
             }
+            Value::Native(Native::RegExpConstructor) => {
+                let regexp = self.dispatch_native(
+                    Native::RegExpConstructor,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(regexp);
+            }
             Value::Native(Native::PromiseConstructor) => {
                 let promise = PromiseState::pending();
                 let executor = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -3754,7 +4010,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
                 let is_map = matches!(kind, Native::MapConstructor);
                 let mut data = ObjectData::default();
-                data.set("@@entries", Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
                 if is_map {
                     data.set("@@map", Value::Boolean(true));
                 }
@@ -3894,6 +4150,119 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// `"abc".length` needs `String.prototype`, which does not exist yet. Returning undefined is
     /// wrong for those, and it is wrong in the direction that shows up as a visibly missing
     /// value rather than a plausible one.
+    /// `replace` and `replaceAll` where the pattern is a regexp or the replacement is a function.
+    ///
+    /// Both of those need the machine: one to run the engine, the other to call back into the
+    /// program. The plain string-for-string form stays with the pure built-ins.
+    fn replace_with_pattern(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        native: Native,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::String(text) = receiver else {
+            return Ok(Value::Undefined);
+        };
+        let subject: Vec<u16> = text.encode_utf16().collect();
+        let replacement = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        let callable = matches!(
+            replacement,
+            Value::Function(_) | Value::Native(_) | Value::Callback(_)
+        );
+
+        // A string pattern replaces the first occurrence, or every one for `replaceAll`; a
+        // regexp replaces every one only when it carries `g`.
+        let (matches, from_regexp) = match arguments.first() {
+            Some(Value::RegExp(regexp)) => {
+                let all = regexp.global;
+                let found = if all {
+                    regexp_search_all(regexp, &subject)
+                } else {
+                    regexp_search(regexp, &subject, 0).into_iter().collect()
+                };
+                (found, true)
+            }
+            other => {
+                let needle: Vec<u16> = other
+                    .map_or_else(String::new, Value::to_display_string)
+                    .encode_utf16()
+                    .collect();
+                (
+                    literal_matches(
+                        &subject,
+                        &needle,
+                        matches!(native, Native::StringReplaceAll),
+                    ),
+                    false,
+                )
+            }
+        };
+        let _ = from_regexp;
+
+        let mut out = String::new();
+        let mut copied = 0;
+        for (range, groups) in matches {
+            out.push_str(&utf16_slice(&subject, copied..range.start));
+            let matched = utf16_slice(&subject, range.clone());
+            if callable {
+                // The handler receives the match, then each group, then where it was found and
+                // the whole subject -- the same arguments the specification passes.
+                let mut call_arguments = vec![Value::String(matched.clone())];
+                for group in groups.iter().skip(1) {
+                    call_arguments.push(match group {
+                        Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                        None => Value::Undefined,
+                    });
+                }
+                call_arguments.push(Value::Number(range.start as f64));
+                call_arguments.push(Value::String(text.clone()));
+                let produced =
+                    self.call_value(&replacement, Value::Undefined, call_arguments, instruction)?;
+                out.push_str(&produced.to_display_string());
+            } else {
+                out.push_str(&expand_replacement(
+                    &replacement.to_display_string(),
+                    &subject,
+                    &range,
+                    &groups,
+                ));
+            }
+            copied = range.end;
+        }
+        out.push_str(&utf16_slice(&subject, copied..subject.len()));
+        Ok(Value::String(out))
+    }
+
+    /// The pattern argument of a string method, promoted to a regexp when it is a plain string.
+    ///
+    /// `"a.b".split(".")` splits on a literal dot while `"a.b".split(/./)` splits on anything, so
+    /// a string argument is escaped rather than compiled as a pattern.
+    fn pattern_argument(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        match arguments.first() {
+            Some(value @ Value::RegExp(_)) => Ok(Some(value.clone())),
+            None | Some(Value::Undefined) => Ok(None),
+            Some(value) => {
+                let escaped = regress::escape(&value.to_display_string());
+                match build_regexp(&escaped, "g") {
+                    Some(regexp) => Ok(Some(regexp)),
+                    None => {
+                        self.throw_error(
+                            ErrorKind::Syntax,
+                            "Invalid regular expression".to_owned(),
+                            instruction,
+                        )?;
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
     /// `ToPrimitive`: reduce an object to a value the operators can work on.
     ///
     /// Named `as_primitive` rather than `to_primitive` because it takes `&mut self`: reducing an
@@ -4017,7 +4386,31 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             }
             Value::String(_) => string_property(name),
             Value::Number(_) => number_property(name),
-            Value::Array(_) => array_property(name),
+            Value::Array(items) => match array_property(name) {
+                // A property that is not an element and not a method: `index` on an `exec`
+                // result, or anything the program assigned by name.
+                Value::Undefined => items
+                    .properties
+                    .borrow()
+                    .get(name)
+                    .unwrap_or(Value::Undefined),
+                method => method,
+            },
+            // A regexp's own properties. `lastIndex` is the mutable one, and the reason two
+            // evaluations of one literal must not share an object.
+            Value::RegExp(regexp) => match name {
+                "test" => Value::Native(Native::RegExpTest),
+                "exec" => Value::Native(Native::RegExpExec),
+                "toString" => Value::Native(Native::ErrorToString),
+                "source" => Value::String(regexp.source.clone()),
+                "flags" => Value::String(regexp.flags.clone()),
+                "global" => Value::Boolean(regexp.global),
+                "sticky" => Value::Boolean(regexp.sticky),
+                "ignoreCase" => Value::Boolean(regexp.flags.contains('i')),
+                "multiline" => Value::Boolean(regexp.flags.contains('m')),
+                "lastIndex" => Value::Number(regexp.last_index.get() as f64),
+                _ => Value::Undefined,
+            },
             Value::Promise(_) => match name {
                 "then" => Value::Native(Native::PromiseThen),
                 "catch" => Value::Native(Native::PromiseCatch),
@@ -4185,11 +4578,28 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     items[index] = value;
                     Ok(())
                 }
-                None => Err(ExecutionError::NotAnObject {
-                    instruction,
-                    value: "array with a non-index key",
-                }),
+                // Not an index, so it is an ordinary named property of the array.
+                None => {
+                    items
+                        .properties
+                        .borrow_mut()
+                        .set(&key.property_key(), value);
+                    Ok(())
+                }
             },
+            // `lastIndex` is the one writable property a regexp has, and writing it is how a
+            // program drives a sticky or global search by hand.
+            Value::RegExp(regexp) => {
+                if key.property_key() == "lastIndex" {
+                    let index = value.as_number();
+                    regexp.last_index.set(if index.is_finite() && index > 0.0 {
+                        index as usize
+                    } else {
+                        0
+                    });
+                }
+                Ok(())
+            }
             Value::Object(object) => {
                 let name = key.property_key();
                 // A setter found anywhere on the chain takes the write; only when there is none
@@ -4611,7 +5021,8 @@ fn json_stringify(
         }
         // None of these has own enumerable properties, so all serialise as the empty object --
         // which is also what a real engine produces for them.
-        Value::Generator(_) | Value::Promise(_) => Some("{}".to_owned()),
+        // A regexp has no own enumerable properties either, so `JSON.stringify(/a/)` is `{}`.
+        Value::Generator(_) | Value::Promise(_) | Value::RegExp(_) => Some("{}".to_owned()),
         // A function has no JSON spelling, and a settler is one.
         Value::Settler(..) => None,
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -4700,7 +5111,7 @@ fn call_native(
                     .collect(),
                 _ => Vec::new(),
             };
-            Value::Array(Rc::new(RefCell::new(keys)))
+            Value::Array(ArrayData::new(keys))
         }
         // Converting an object means calling its `toString`, which needs the machine.
         Native::StringConstructor => {
@@ -4735,6 +5146,16 @@ fn call_native(
                 .unwrap_or(Value::Null),
             _ => Value::Null,
         },
+        // A regexp operation reads and writes `lastIndex`, builds result arrays, and may call a
+        // replacement function -- so none of them is a pure function of its arguments either.
+        Native::RegExpConstructor
+        | Native::RegExpTest
+        | Native::RegExpExec
+        | Native::StringMatch
+        | Native::StringMatchAll
+        | Native::StringSearch => {
+            unreachable!("the regexp built-ins are dispatched by the interpreter")
+        }
         // Peeled off by `dispatch_native`, which every call site goes through: scheduling and
         // walking an iterable both need the interpreter, and this function deliberately does
         // not have one.
@@ -4802,7 +5223,7 @@ fn call_native(
                     .get(start..end.max(start))
                     .unwrap_or_default()
                     .to_vec();
-                Value::Array(Rc::new(RefCell::new(taken)))
+                Value::Array(ArrayData::new(taken))
             }
             _ => Value::Undefined,
         },
@@ -4834,7 +5255,7 @@ fn call_native(
                         other => joined.push(other.clone()),
                     }
                 }
-                Value::Array(Rc::new(RefCell::new(joined)))
+                Value::Array(ArrayData::new(joined))
             }
             _ => Value::Undefined,
         },
@@ -5127,7 +5548,7 @@ fn call_native(
                             .map(|part| Value::String(part.to_owned()))
                             .collect()
                     };
-                    Value::Array(Rc::new(RefCell::new(parts)))
+                    Value::Array(ArrayData::new(parts))
                 }
                 // `at` accepts a negative index, where `charAt` clamps and `[i]` gives
                 // undefined -- three spellings of "the character there" that differ only at the
@@ -5270,7 +5691,7 @@ fn call_native(
             let mut iterator = ObjectData::default();
             iterator.set(
                 "@@iterated",
-                Value::Array(Rc::new(RefCell::new(characters))),
+                Value::Array(ArrayData::new(characters)),
             );
             iterator.set("@@index", Value::Number(0.0));
             iterator.set("next", Value::Native(Native::StringIteratorNext));
@@ -5299,7 +5720,7 @@ fn call_native(
                 Some(_) => {}
                 None => {
                     let entry = if is_map {
-                        Value::Array(Rc::new(RefCell::new(vec![key, value])))
+                        Value::Array(ArrayData::new(vec![key, value]))
                     } else {
                         key
                     };
@@ -5639,6 +6060,9 @@ fn string_property(name: &str) -> Value {
         "trimStart" => Value::Native(Native::StringTrimStart),
         "trimEnd" => Value::Native(Native::StringTrimEnd),
         "concat" => Value::Native(Native::StringConcat),
+        "match" => Value::Native(Native::StringMatch),
+        "matchAll" => Value::Native(Native::StringMatchAll),
+        "search" => Value::Native(Native::StringSearch),
         _ => Value::Undefined,
     }
 }
@@ -5662,7 +6086,7 @@ fn collection_property(is_map: bool, name: &str) -> Value {
 }
 
 /// The backing entries of a Set or Map, and whether it is a Map.
-fn collection_state(receiver: &Value) -> Option<(Rc<RefCell<Vec<Value>>>, bool)> {
+fn collection_state(receiver: &Value) -> Option<(Rc<ArrayData>, bool)> {
     let Value::Object(object) = receiver else {
         return None;
     };
@@ -6132,13 +6556,13 @@ impl JsonReader<'_> {
         let mut items = Vec::new();
         self.skip_whitespace();
         if self.eat(']') {
-            return Ok(Value::Array(Rc::new(RefCell::new(items))));
+            return Ok(Value::Array(ArrayData::new(items)));
         }
         loop {
             items.push(self.value()?);
             self.skip_whitespace();
             if self.eat(']') {
-                return Ok(Value::Array(Rc::new(RefCell::new(items))));
+                return Ok(Value::Array(ArrayData::new(items)));
             }
             if !self.eat(',') {
                 return Err(ExecutionError::InvalidJson);
@@ -6217,6 +6641,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         Value::Callback(method) => format!("[Function: {method:?}]"),
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
         Value::Settler(..) => "[Function (anonymous)]".to_owned(),
+        Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
         Value::Promise(promise) => match &promise.borrow().settled {
             None => "Promise { <pending> }".to_owned(),
             Some(Settled::Fulfilled(value)) => {
@@ -6328,6 +6753,189 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         return "{}".to_owned();
     }
     format!("{{ {} }}", parts.join(", "))
+}
+
+/// Compile a regular expression, or `None` when the engine rejects the pattern.
+fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
+    let compiled = regress::Regex::with_flags(pattern, flags).ok()?;
+    Some(Value::RegExp(Rc::new(RegExpData {
+        source: pattern.to_owned(),
+        flags: flags.to_owned(),
+        compiled,
+        global: flags.contains('g'),
+        sticky: flags.contains('y'),
+        last_index: std::cell::Cell::new(0),
+    })))
+}
+
+/// Run a regular expression against a subject from a given UTF-16 offset.
+///
+/// Returns the match's range and its capture groups, all in UTF-16 units -- which is what the
+/// language counts in, and why the subject is converted rather than matched as UTF-8.
+fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<RegExpMatch> {
+    if start > subject.len() {
+        return None;
+    }
+    let found = regexp.compiled.find_from_utf16(subject, start).next()?;
+    // A sticky pattern must match exactly at the cursor, not merely at or after it.
+    if regexp.sticky && found.range().start != start {
+        return None;
+    }
+    let groups = found.groups().collect();
+    Some((found.range(), groups))
+}
+
+/// One match: where it landed, and where each capture group did.
+///
+/// Every range is in UTF-16 units, which is what the language counts in and what the engine
+/// reports when matching over UTF-16.
+type RegExpMatch = (std::ops::Range<usize>, Vec<Option<std::ops::Range<usize>>>);
+
+/// Where a literal needle occurs, in the shape a regexp match has, so replacement is one path.
+fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec<RegExpMatch> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at + needle.len() <= subject.len() {
+        if subject[at..at + needle.len()] == *needle {
+            let range = at..at + needle.len();
+            found.push((range.clone(), vec![Some(range)]));
+            if !all {
+                break;
+            }
+            // An empty needle would never advance, so it steps one at a time.
+            at = if needle.is_empty() {
+                at + 1
+            } else {
+                at + needle.len()
+            };
+            continue;
+        }
+        at += 1;
+    }
+    found
+}
+
+/// Expand `$&`, `` $` ``, `$'`, `$1`..`$99` and `$$` in a replacement string.
+fn expand_replacement(
+    template: &str,
+    subject: &[u16],
+    range: &std::ops::Range<usize>,
+    groups: &[Option<std::ops::Range<usize>>],
+) -> String {
+    let mut out = String::new();
+    let characters: Vec<char> = template.chars().collect();
+    let mut at = 0;
+    while at < characters.len() {
+        if characters[at] != '$' || at + 1 >= characters.len() {
+            out.push(characters[at]);
+            at += 1;
+            continue;
+        }
+        match characters[at + 1] {
+            '$' => {
+                out.push('$');
+                at += 2;
+            }
+            '&' => {
+                out.push_str(&utf16_slice(subject, range.clone()));
+                at += 2;
+            }
+            '`' => {
+                out.push_str(&utf16_slice(subject, 0..range.start));
+                at += 2;
+            }
+            '\'' => {
+                out.push_str(&utf16_slice(subject, range.end..subject.len()));
+                at += 2;
+            }
+            first if first.is_ascii_digit() => {
+                // Two digits are preferred when that names a group, which is why `$12` is group
+                // twelve where there are twelve and group one followed by "2" where there are not.
+                let two = characters
+                    .get(at + 2)
+                    .filter(|second| second.is_ascii_digit())
+                    .and_then(|second| format!("{first}{second}").parse::<usize>().ok())
+                    .filter(|index| *index > 0 && *index < groups.len());
+                let (index, width) = match two {
+                    Some(index) => (index, 3),
+                    None => match first.to_digit(10).map(|digit| digit as usize) {
+                        Some(index) if index > 0 && index < groups.len() => (index, 2),
+                        // Not a group reference at all, so the text stands as written.
+                        _ => {
+                            out.push('$');
+                            at += 1;
+                            continue;
+                        }
+                    },
+                };
+                if let Some(Some(group)) = groups.get(index) {
+                    out.push_str(&utf16_slice(subject, group.clone()));
+                }
+                at += width;
+            }
+            _ => {
+                out.push('$');
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Every match of a global pattern, from the start of the subject.
+///
+/// An empty match advances the cursor by one, or a pattern that can match nothing -- `/a*/g` --
+/// would never finish.
+fn regexp_search_all(regexp: &RegExpData, subject: &[u16]) -> Vec<RegExpMatch> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at <= subject.len() {
+        let Some((range, groups)) = regexp_search(regexp, subject, at) else {
+            break;
+        };
+        at = if range.end == range.start {
+            range.end + 1
+        } else {
+            range.end
+        };
+        found.push((range, groups));
+    }
+    found
+}
+
+/// The array `exec` and `match` produce: the whole match, then each group, with `index` and
+/// `input` alongside.
+fn match_result(
+    subject: &[u16],
+    range: &std::ops::Range<usize>,
+    groups: &[Option<std::ops::Range<usize>>],
+) -> Value {
+    let mut items = vec![Value::String(utf16_slice(subject, range.clone()))];
+    // The first group `regress` reports is the whole match, which is already element zero.
+    for group in groups.iter().skip(1) {
+        items.push(match group {
+            Some(range) => Value::String(utf16_slice(subject, range.clone())),
+            // A group that did not participate is undefined rather than empty.
+            None => Value::Undefined,
+        });
+    }
+    // `index` and `input` are properties *of the array*, which is why an array needs somewhere
+    // to keep a property that is not an element.
+    let result = ArrayData::new(items);
+    result
+        .properties
+        .borrow_mut()
+        .set("index", Value::Number(range.start as f64));
+    result.properties.borrow_mut().set(
+        "input",
+        Value::String(utf16_slice(subject, 0..subject.len())),
+    );
+    Value::Array(result)
+}
+
+/// The text of a UTF-16 range, as a JavaScript string.
+fn utf16_slice(subject: &[u16], range: std::ops::Range<usize>) -> String {
+    String::from_utf16_lossy(&subject[range])
 }
 
 /// An array's elements with every hole replaced by `undefined`.
@@ -6542,11 +7150,7 @@ enum OrderingPredicate {
 }
 
 fn parse_number(value: &str) -> f64 {
-    let value = value.trim();
-    if value.is_empty() {
-        return 0.0;
-    }
-    value.parse::<f64>().unwrap_or(f64::NAN)
+    kiln_host_abi::string_to_number(value)
 }
 
 /// A number as `String(value)` renders it.
@@ -6648,7 +7252,7 @@ mod tests {
     /// agree about what an array exposes. They share one table for that reason.
     #[test]
     fn arrays_expose_the_same_properties_to_reads_and_to_in() {
-        let items = Value::Array(Rc::new(RefCell::new(vec![Value::Number(1.0)])));
+        let items = Value::Array(ArrayData::new(vec![Value::Number(1.0)]));
         for key in ["join", "values", "@@iterator", "length"] {
             assert!(
                 has_property(&items, &Value::String(key.to_owned())),
@@ -6929,10 +7533,10 @@ mod tests {
     fn map_keys_are_matched_by_identity() {
         let key = object(&[("id", Value::Number(1.0))]);
         let twin = object(&[("id", Value::Number(1.0))]);
-        let entries = vec![Value::Array(Rc::new(RefCell::new(vec![
+        let entries = vec![Value::Array(ArrayData::new(vec![
             key.clone(),
             Value::String("found".to_owned()),
-        ])))];
+        ]))];
 
         assert_eq!(find_entry(&entries, &key, true), Some(0));
         assert_eq!(
@@ -7587,7 +8191,7 @@ mod tests {
     }
 
     fn array(items: &[Value]) -> Value {
-        Value::Array(Rc::new(RefCell::new(items.to_vec())))
+        Value::Array(ArrayData::new(items.to_vec()))
     }
 
     #[test]
@@ -7667,7 +8271,7 @@ mod tests {
 
     #[test]
     fn json_rejects_a_value_that_contains_itself() {
-        let items = Rc::new(RefCell::new(Vec::new()));
+        let items = ArrayData::new(Vec::new());
         items.borrow_mut().push(Value::Array(Rc::clone(&items)));
         assert!(matches!(
             serialize(&Value::Array(items), ""),
@@ -7952,7 +8556,7 @@ mod tests {
 
     #[test]
     fn a_cycle_prints_once_rather_than_forever() {
-        let items = Rc::new(RefCell::new(Vec::new()));
+        let items = ArrayData::new(Vec::new());
         items.borrow_mut().push(Value::Array(Rc::clone(&items)));
         assert_eq!(inspect(&Value::Array(items)), "[ [Circular *1] ]");
     }

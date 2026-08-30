@@ -37,6 +37,10 @@ oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 dragonbox_ecma = { version = "0.1.12", default-features = false, features = ["ecma"] }
+# The regexp engine. `regress` targets ECMAScript semantics specifically -- backreferences,
+# lookaround, sticky matching -- which `regex` deliberately does not have, and it matches over
+# UTF-16 so indices and `lastIndex` come out in the units the language counts in.
+regress = { version = "0.12", default-features = false, features = ["backend-pikevm", "std", "utf16"] }
 
 # Declared centrally so no crate-level change has to edit this file. NOTE: these were dropped
 # once by a concurrent rewrite of this section; if a build fails with "was not found in
