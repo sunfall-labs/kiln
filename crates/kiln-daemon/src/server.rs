@@ -554,6 +554,7 @@ fn commit_sync<E: QueryEngine>(
             }
         }));
         if let Err(payload) = mutation {
+            guard.graph_cache.invalidate();
             if let Ok(view) = next_source_view(guard.source_view) {
                 guard.source_view = view;
             }
@@ -1057,7 +1058,14 @@ fn prepare_native_snapshot<E: QueryEngine>(
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph.into()))
             }
-            Some(_) | None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
+            Some(graph) => {
+                // Graph construction canonicalized this entry already. Reuse that spelling for
+                // the scalar fallback; reusing the request's relative alias would reactivate an
+                // alias that ensure_canonical_source just removed and make every retry stale.
+                let canonical_path = graph.entry().to_string_lossy().into_owned();
+                native_program(&mut guard.engine, &canonical_path).map(PreparedNative::Program)
+            }
+            None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
         }
     })) {
         Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
