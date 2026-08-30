@@ -1,7 +1,7 @@
 # JavaScript conformance corpus
 
 **The corpus runs, and its remaining failures are intentional work items.**
-`kiln test conformance/guard` executes all twenty probes and reports each per-test result,
+`kiln test conformance/guard` executes all twenty-one probes and reports each per-test result,
 exiting non-zero when any probe fails. Read this directory as a specification of behaviour kiln
 will have to get right, not as a suite whose current pass count is the whole story.
 
@@ -20,7 +20,7 @@ the implementation backlog ordered by how many tests each entry unblocks:
 ```
 
 `docs/language-coverage.md` turns that into a ten-step ladder with a predicted pass count per
-step. Worth knowing: `--parse-only` passes all twenty, so the frontend accepts every probe and
+step. Worth knowing: `--parse-only` passes all twenty-one, so the frontend accepts every probe and
 lowering is what refuses them.
 
 ## Where this came from
@@ -50,7 +50,7 @@ JavaScript semantics a real library actually depends on, and how the bugs were c
       manifest.toml      every test: source path, expected stdout, feature tags, status
       status.sh          inventory and per-test status; refuses to imply success
       README.md          this file
-      guard/             20 standalone probes (.js), copied verbatim, plus their generator
+      guard/             21 standalone probes (.js), plus their generator
       effect/
         src/             12 Effect-TS programs (.ts), copied verbatim
         build.sh         bundles src/ into single self-contained files
@@ -61,7 +61,7 @@ JavaScript semantics a real library actually depends on, and how the bugs were c
 
 ## The two halves
 
-### `guard/` — 20 probes, one behaviour each
+### `guard/` — 21 probes, one behaviour each
 
 Small, standalone, no imports, no harness. Each probe was written to catch one specific defect,
 and each is deliberately minimal so that a failure names the defect rather than a region of the
@@ -92,7 +92,7 @@ Two probes are worth singling out because their shape encodes a lesson:
 A note on faithfulness: the probe `.js` files are copied byte for byte and were **not** edited.
 The task that commissioned this port described each probe as carrying a comment naming the bug it
 catches. That is not the case — in the source corpus only three of the twenty files carry any
-comment at all, and the rationale for all twenty lives in `guard/gen.mjs`, the script that
+comment at all, and the rationale for the original twenty lives in `guard/gen.mjs`, the script that
 generated them. Rather than write comments into the probes, `gen.mjs` is carried over unmodified
 alongside them and the rationale is recorded per test in `manifest.toml`.
 
@@ -203,13 +203,13 @@ non-zero so it can name per-test regressions.
 The source project ran three gates, and the reason all three existed is the single most
 transferable thing here.
 
-    guard/run.sh        20 probes, one behaviour each         ~6s
+    guard/run.sh        21 probes, one behaviour each         ~6s
     effect/run.sh       12 real Effect programs               ~60s
     guard/ab.sh         per-test test262 A/B against a base   ~25m/side
 
 Each of the three bugs introduced *during* the fixing work was caught by a **different** gate:
 
-1. Closing an iterator that was never opened. Passed all 20 probes. Showed no test262
+1. Closing an iterator that was never opened. Passed all 21 probes. Showed no test262
    regression. Only a real Effect program caught it.
 2. Two colliding `setTimeout` definitions that broke `clearTimeout` on its own and broke one
    build configuration entirely. Caught by a separate investigation pass, not by any of the
