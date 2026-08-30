@@ -73,6 +73,34 @@ fn is_source(path: &Path) -> bool {
         .is_some_and(|e| SOURCE_EXTENSIONS.contains(&e))
 }
 
+/// Whether a filesystem event names a file the authoritative project walk would discover.
+///
+/// Watch receives recursive events from ignored trees too. Keeping this predicate in the source
+/// discovery module prevents the event fast path from silently growing a different definition of
+/// the project than [`collect`]. The path need not exist: removals still need to be recognized so
+/// watch can reconcile the daemon's source set.
+pub(crate) fn is_discoverable(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    if !is_source(relative) {
+        return false;
+    }
+    relative
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .all(|component| {
+            let std::path::Component::Normal(name) = component else {
+                return false;
+            };
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            !name.starts_with('.') && !SKIP_DIRS.contains(&name)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +178,22 @@ mod tests {
         let second = collect(&tree.0).expect("walk succeeds").files;
         assert_eq!(first, second);
         assert!(first.windows(2).all(|pair| pair[0] < pair[1]), "{first:?}");
+    }
+
+    #[test]
+    fn event_filter_matches_discovery_even_after_a_source_is_removed() {
+        let root = Path::new("/project");
+        assert!(is_discoverable(root, Path::new("/project/src/main.ts")));
+        assert!(is_discoverable(root, Path::new("/project/removed.js")));
+        assert!(!is_discoverable(
+            root,
+            Path::new("/project/node_modules/pkg/index.js")
+        ));
+        assert!(!is_discoverable(
+            root,
+            Path::new("/project/.kiln/generated.js")
+        ));
+        assert!(!is_discoverable(root, Path::new("/other/main.js")));
+        assert!(!is_discoverable(root, Path::new("/project/README.md")));
     }
 }

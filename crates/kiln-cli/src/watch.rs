@@ -15,12 +15,12 @@
 //! comparison says "did the program actually change". Editors rewrite files on save whether or
 //! not anything changed, and rerunning for an edit the user did not make is noise and wasted work.
 //!
-//! The watch is registered on the file's *directory*, not the file. A watch on the file
-//! follows its inode, so the first atomic save renames a new file over the target and leaves
-//! the watcher staring at an unlinked one. The directory outlives every such swap, and it is
-//! also what lets the command start on a file that does not exist yet.
+//! The watch is registered recursively on the project, not on one file. A watch on the file
+//! follows its inode, so the first atomic save renames a new file over the target and leaves the
+//! watcher staring at an unlinked one. Recursive project events also keep imported sources fresh
+//! without a full filesystem walk. A target outside the project gets a second directory watch.
 
-use std::ffi::OsString;
+use std::collections::BTreeSet;
 use std::fmt::Arguments;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,7 @@ use crate::backend::Backend;
 use crate::backend::NativeBuildAtRevision;
 use crate::commands;
 use crate::error::{Error, Result};
+use crate::sources;
 use kiln_proto::NativeProfile;
 
 pub fn run(
@@ -46,15 +47,23 @@ pub fn run(
 ) -> Result<()> {
     let display = path.display().to_string();
     let target = Target::resolve(path)?;
+    let project_dir = PathBuf::from(commands::canonical_path(project_root)?);
 
     let (events, incoming) = mpsc::channel::<DebounceEventResult>();
     let mut debouncer = new_debouncer(debounce, None, events)
         .map_err(|source| watcher_failed("cannot start the filesystem watcher", source))?;
     debouncer
-        .watch(&target.dir, RecursiveMode::NonRecursive)
+        .watch(&project_dir, RecursiveMode::Recursive)
         .map_err(|source| {
-            watcher_failed(format!("cannot watch {}", target.dir.display()), source)
+            watcher_failed(format!("cannot watch {}", project_dir.display()), source)
         })?;
+    if !target.dir.starts_with(&project_dir) {
+        debouncer
+            .watch(&target.dir, RecursiveMode::NonRecursive)
+            .map_err(|source| {
+                watcher_failed(format!("cannot watch {}", target.dir.display()), source)
+            })?;
+    }
 
     note(
         notes,
@@ -69,6 +78,7 @@ pub fn run(
     let mut text: Option<String> = None;
     let mut missing = false;
     let mut project_synced = false;
+    let mut source_manifest = commands::SourceManifest::new();
     let peer = match backend.peer() {
         Ok(peer) => Some(peer),
         Err(error) => {
@@ -87,7 +97,7 @@ pub fn run(
                     canonical: &target.canonical,
                     text: current.clone(),
                 },
-                true,
+                SourceSync::Authoritative(&mut source_manifest),
                 out,
                 notes,
             )?;
@@ -125,8 +135,60 @@ pub fn run(
         };
         match batch {
             Ok(batch) => {
-                if !batch.iter().any(|event| target.matches(event)) {
+                let target_changed = batch.iter().any(|event| target.matches(event));
+                let dependency_paths = batch
+                    .iter()
+                    .flat_map(|event| event.paths.iter())
+                    .filter(|event_path| {
+                        !target.matches_path(event_path)
+                            && sources::is_discoverable(&project_dir, event_path)
+                    })
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let source_tree_removed = batch
+                    .iter()
+                    .flat_map(|event| event.paths.iter())
+                    .filter(|event_path| !event_path.exists())
+                    .any(|event_path| {
+                        source_manifest
+                            .keys()
+                            .any(|source| Path::new(source).starts_with(event_path))
+                    });
+                if !target_changed && dependency_paths.is_empty() && !source_tree_removed {
                     continue;
+                }
+
+                // Existing dependencies can be updated directly from the event batch. A removal
+                // needs an authoritative sync because Sync omission is the protocol's deletion
+                // operation; this is deliberately the uncommon slow path.
+                let mut dependency_changed = source_tree_removed;
+                let mut authoritative_sync = !project_synced || source_tree_removed;
+                let mut dependency_updates = Vec::new();
+                for dependency in dependency_paths {
+                    match commands::read_source(&dependency) {
+                        Ok(source) => {
+                            let canonical = commands::canonical_path(&dependency)?;
+                            let hash = kiln_db::content_hash(&source);
+                            if source_manifest.get(&canonical) != Some(&hash) {
+                                dependency_updates.push((canonical, source, hash));
+                                dependency_changed = true;
+                            }
+                        }
+                        Err(error) if is_missing(&error) => {
+                            let identity = dependency.to_string_lossy();
+                            if source_manifest.contains_key(identity.as_ref()) {
+                                authoritative_sync = true;
+                                dependency_changed = true;
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !authoritative_sync {
+                    for (canonical, source, hash) in dependency_updates {
+                        backend.set_source(canonical.clone(), source)?;
+                        source_manifest.insert(canonical, hash);
+                    }
                 }
                 match commands::read_source(path) {
                     Ok(current) => {
@@ -139,7 +201,12 @@ pub fn run(
                             note(notes, format_args!("{display} {what}"))?;
                             missing = false;
                         }
-                        if text.as_deref() != Some(current.as_str()) {
+                        if dependency_changed || text.as_deref() != Some(current.as_str()) {
+                            let sync = if authoritative_sync {
+                                SourceSync::Authoritative(&mut source_manifest)
+                            } else {
+                                SourceSync::Incremental
+                            };
                             let revision = run_once(
                                 backend,
                                 path,
@@ -148,7 +215,7 @@ pub fn run(
                                     canonical: &target.canonical,
                                     text: current.clone(),
                                 },
-                                !project_synced,
+                                sync,
                                 out,
                                 notes,
                             )?;
@@ -194,8 +261,6 @@ struct Target {
     /// The directory handed to notify. Canonical, so it is the same directory however the
     /// user spelled the path.
     dir: PathBuf,
-    /// File name within [`Target::dir`]; how an event is recognised as ours.
-    name: OsString,
     /// The daemon's identity for the file. Built from the canonical directory rather than by
     /// canonicalising the file itself, so it holds still before the file exists, while it is
     /// missing mid-save, and after an editor replaces it with a different inode.
@@ -229,21 +294,17 @@ impl Target {
                 Error::BadInput(format!("path is not valid UTF-8: {}", canonical.display()))
             })?
             .to_string();
-        Ok(Target {
-            dir,
-            name,
-            canonical,
-        })
+        Ok(Target { dir, canonical })
     }
 
-    /// Matched on the file name rather than the whole path: the watch is already scoped to
-    /// one directory, and comparing full paths would depend on the backend echoing them back
-    /// through the same alias the watch was registered with.
+    /// Recursive project watching requires the full stable path: dependencies may share the
+    /// target's file name in another directory.
     fn matches(&self, event: &DebouncedEvent) -> bool {
-        event
-            .paths
-            .iter()
-            .any(|path| path.file_name() == Some(self.name.as_os_str()))
+        event.paths.iter().any(|path| self.matches_path(path))
+    }
+
+    fn matches_path(&self, path: &Path) -> bool {
+        path == Path::new(&self.canonical)
     }
 }
 
@@ -252,22 +313,42 @@ struct SourceSnapshot<'a> {
     text: String,
 }
 
+enum SourceSync<'a> {
+    Authoritative(&'a mut commands::SourceManifest),
+    Incremental,
+}
+
 fn run_once(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
     source: SourceSnapshot<'_>,
-    authoritative_sync: bool,
+    sync: SourceSync<'_>,
     out: &mut dyn Write,
     notes: &mut dyn Write,
 ) -> Result<Option<u64>> {
-    // Seed the daemon with one authoritative project view. Once seeded, the watcher owns only
-    // this target and sends its already-read snapshot directly; repeating the whole filesystem
-    // walk on every edit would put O(project) work ahead of the incremental compiler.
-    let output = if authoritative_sync {
-        commands::run_source(backend, path, project_root, source.canonical, source.text)?
-    } else {
-        commands::run_watched_source(backend, path, project_root, source.canonical, source.text)?
+    // Seed the daemon with one authoritative project view. Once seeded, recursive events upload
+    // changed dependencies and this sends the already-read target directly; repeating the whole
+    // filesystem walk on every edit would put O(project) work ahead of the incremental compiler.
+    let output = match sync {
+        SourceSync::Authoritative(manifest) => {
+            let (output, current_manifest) = commands::run_source_with_manifest(
+                backend,
+                path,
+                project_root,
+                source.canonical,
+                source.text,
+            )?;
+            *manifest = current_manifest;
+            output
+        }
+        SourceSync::Incremental => commands::run_watched_source(
+            backend,
+            path,
+            project_root,
+            source.canonical,
+            source.text,
+        )?,
     };
     out.write_all(output.text.as_bytes())
         .and_then(|()| out.flush())
@@ -670,8 +751,6 @@ mod tests {
         let path = dir.join("later.js");
 
         let before = Target::resolve(&path).expect("resolves without the file");
-        assert_eq!(before.name, OsString::from("later.js"));
-
         std::fs::write(&path, "export const a = 1;").expect("write");
         let after = Target::resolve(&path).expect("resolves with the file");
         assert_eq!(
@@ -728,6 +807,83 @@ mod tests {
             panic!("the initial watch request must be Sync");
         };
         assert_eq!(files.len(), 65, "the initial sync must seed every source");
+
+        let dependency = dir.join("dependency-0.js");
+        let dependency_canonical = commands::canonical_path(&dependency).expect("dependency path");
+        std::fs::write(&dependency, "export const value0 = 100;\n").expect("edit dependency");
+        assert_eq!(
+            printed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a dependency edit should rerun the entry"),
+            "program: export const a = 1;\n"
+        );
+        let mut dependency_edit = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            dependency_edit.push(request);
+        }
+        assert_eq!(
+            dependency_edit.len(),
+            3,
+            "a dependency edit must upload the dependency and target, then run"
+        );
+        let Request::SetSource {
+            path: uploaded_path,
+            text,
+        } = &dependency_edit[0]
+        else {
+            panic!("the changed dependency must be uploaded first");
+        };
+        assert_eq!(uploaded_path, &dependency_canonical);
+        assert_eq!(text, "export const value0 = 100;\n");
+        assert!(matches!(dependency_edit[1], Request::SetSource { .. }));
+        assert!(matches!(dependency_edit[2], Request::Run { .. }));
+        assert!(
+            printed.recv_timeout(Duration::from_millis(250)).is_err(),
+            "one dependency edit must produce one rerun"
+        );
+
+        let added = dir.join("added.js");
+        std::fs::write(&added, "export const added = true;\n").expect("add dependency");
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("an added source should rerun the entry");
+        let mut addition = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            addition.push(request);
+        }
+        assert_eq!(addition.len(), 3, "an addition must stay on the fast path");
+        assert!(matches!(addition[0], Request::SetSource { .. }));
+        assert!(matches!(addition[1], Request::SetSource { .. }));
+        assert!(matches!(addition[2], Request::Run { .. }));
+        assert!(
+            printed.recv_timeout(Duration::from_millis(250)).is_err(),
+            "one source addition must produce one rerun"
+        );
+
+        std::fs::remove_file(&dependency).expect("delete dependency");
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a removed source should rerun the entry");
+        let mut removal = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            removal.push(request);
+        }
+        assert!(
+            matches!(removal.first(), Some(Request::Sync { .. })),
+            "a removal must reconcile the authoritative source set: {removal:?}"
+        );
+        assert_eq!(
+            removal
+                .iter()
+                .filter(|request| matches!(request, Request::Sync { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(removal.last(), Some(Request::Run { .. })));
+        assert!(
+            printed.recv_timeout(Duration::from_millis(250)).is_err(),
+            "one source removal must produce one rerun"
+        );
 
         // Rewriting the same bytes must not spend a recompute. That is the whole reason the
         // content comparison outlives the poll it was written for.
