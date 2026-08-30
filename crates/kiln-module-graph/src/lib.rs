@@ -75,7 +75,18 @@ pub struct ModuleGraph {
     /// Dependencies-first, deterministic (source-occurrence ordered) module order.
     order: Vec<PathBuf>,
     /// Link-time export identity for every visible, non-missing name.
-    export_resolutions: HashMap<PathBuf, BTreeMap<String, ExportResolution>>,
+    export_resolutions: HashMap<PathBuf, BTreeMap<String, ResolvedExport>>,
+}
+
+/// Link-time identity of one visible export.
+///
+/// A missing name has no entry. `Ambiguous` is retained so namespace construction can omit it and
+/// consumers can report the distinction from a missing export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedExport {
+    Local { module: PathBuf, local_slot: u32 },
+    Namespace { module: PathBuf },
+    Ambiguous,
 }
 
 /// User-facing failures produced while constructing or executing a graph.
@@ -446,6 +457,23 @@ impl ModuleGraph {
         &self.order
     }
 
+    /// Return the canonical link-time origin of `name` as exported by `module`.
+    ///
+    /// `None` means the name is missing. Callers that construct their own module ABI wiring must
+    /// use this result rather than searching the provider's raw [`ModuleProgram::exports`] table:
+    /// a star export has no raw entry for each name it forwards.
+    pub fn resolved_export(&self, module: impl AsRef<Path>, name: &str) -> Option<&ResolvedExport> {
+        let module = module.as_ref();
+        self.export_resolutions
+            .get(module)
+            .or_else(|| {
+                fs::canonicalize(module)
+                    .ok()
+                    .and_then(|canonical| self.export_resolutions.get(&canonical))
+            })?
+            .get(name)
+    }
+
     /// Execute every module once, dependencies first, and return the entry's value.
     ///
     /// The returned `steps` is the total across the graph; its `value` is the entry module's
@@ -557,7 +585,7 @@ impl ModuleGraph {
                             self.export_resolutions
                                 .get(path)
                                 .and_then(|resolutions| resolutions.get(&name)),
-                            Some(ExportResolution::Found(_))
+                            Some(ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. })
                         )
                     {
                         exports.entry(name).or_insert(value);
@@ -695,7 +723,7 @@ fn validate_exports(path: &Path, program: &ModuleProgram) -> Result<(), ModuleGr
 fn validate_links(
     modules: &BTreeMap<PathBuf, ModuleNode>,
     order: &[PathBuf],
-    export_resolutions: &HashMap<PathBuf, BTreeMap<String, ExportResolution>>,
+    export_resolutions: &HashMap<PathBuf, BTreeMap<String, ResolvedExport>>,
 ) -> Result<(), ModuleGraphError> {
     for importer_path in order {
         let importer =
@@ -728,8 +756,8 @@ fn validate_links(
                     .get(&dependency.target)
                     .and_then(|resolutions| resolutions.get(&import.imported))
                 {
-                    Some(ExportResolution::Found(_)) => {}
-                    Some(ExportResolution::Ambiguous) => {
+                    Some(ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. }) => {}
+                    Some(ResolvedExport::Ambiguous) => {
                         return Err(ModuleGraphError::AmbiguousExport {
                             importer: importer_path.clone(),
                             provider: dependency.target.clone(),
@@ -750,23 +778,6 @@ fn validate_links(
     Ok(())
 }
 
-/// The canonical origin of a visible export.
-///
-/// Identity matters because two star paths that converge on the same binding are not ambiguous,
-/// while two unrelated bindings with the same name are. A namespace re-export identifies the
-/// provider namespace rather than the importing module's temporary slot for the same reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ResolvedBinding {
-    Local { module: PathBuf, local_slot: u32 },
-    Namespace { module: PathBuf },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ExportResolution {
-    Found(ResolvedBinding),
-    Ambiguous,
-}
-
 /// Resolve every exported name in dependency-first order.
 ///
 /// The graph builder has already rejected cycles, so every star provider has a completed table by
@@ -775,8 +786,8 @@ enum ExportResolution {
 fn resolve_exports(
     modules: &BTreeMap<PathBuf, ModuleNode>,
     order: &[PathBuf],
-) -> Result<HashMap<PathBuf, BTreeMap<String, ExportResolution>>, ModuleGraphError> {
-    let mut tables: HashMap<PathBuf, BTreeMap<String, ExportResolution>> = HashMap::new();
+) -> Result<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>, ModuleGraphError> {
+    let mut tables: HashMap<PathBuf, BTreeMap<String, ResolvedExport>> = HashMap::new();
     for module_path in order {
         let node =
             modules
@@ -809,9 +820,9 @@ fn resolve_exports(
                         source: import.source.clone(),
                     })?;
                 if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                    ExportResolution::Found(ResolvedBinding::Namespace {
+                    ResolvedExport::Namespace {
                         module: dependency.target.clone(),
-                    })
+                    }
                 } else {
                     match tables
                         .get(&dependency.target)
@@ -822,10 +833,10 @@ fn resolve_exports(
                     }
                 }
             } else {
-                ExportResolution::Found(ResolvedBinding::Local {
+                ResolvedExport::Local {
                     module: module_path.clone(),
                     local_slot: export.local_slot,
-                })
+                }
             };
             table.insert(export.exported.clone(), resolution);
         }
@@ -857,16 +868,10 @@ fn resolve_exports(
                     (None, resolution) => {
                         table.insert(name.clone(), resolution.clone());
                     }
-                    (Some(ExportResolution::Ambiguous), _) | (_, ExportResolution::Ambiguous) => {
-                        table.insert(name.clone(), ExportResolution::Ambiguous);
+                    (Some(existing), candidate) if existing != candidate => {
+                        table.insert(name.clone(), ResolvedExport::Ambiguous);
                     }
-                    (
-                        Some(ExportResolution::Found(existing)),
-                        ExportResolution::Found(candidate),
-                    ) if existing != candidate => {
-                        table.insert(name.clone(), ExportResolution::Ambiguous);
-                    }
-                    (Some(ExportResolution::Found(_)), ExportResolution::Found(_)) => {}
+                    (Some(_), _) => {}
                 }
             }
         }
