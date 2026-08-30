@@ -597,7 +597,15 @@ impl QueryEngine for MemoEngine {
         self.revision = Revision(self.revision.0 + 1);
         let epoch = self.epoch;
         let state = self.file_mut(file);
-        state.source.clear();
+        // Interned path identity is permanent, but inactive payloads are not. A resident daemon
+        // may observe unbounded file churn; retaining String capacity, owned HIR, and two bytecode
+        // forms for every deleted path would make authoritative Sync deletion purely logical.
+        state.source = String::new();
+        state.parse = None;
+        state.ir = None;
+        state.module_ir = None;
+        // Keep the small interface memo. Restoring an equal file can still cut off here after its
+        // parse is rebuilt, without retaining the heavyweight parse value while it is inactive.
         state.source_set = false;
         state.source_changed_at = epoch;
         self.file_set_changed_at = epoch;
@@ -1120,6 +1128,31 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_source_releases_its_bytes_hir_and_bytecode() {
+        let source = format!("// {}\n{A_V1}", "large deleted payload ".repeat(4_096));
+        let (mut db, files) = engine(&[("large.js", &source)]);
+        let file = files[0];
+        db.parse(file);
+        let _ = db.ir(file);
+        let _ = db.module_ir(file);
+        db.interface(file);
+        assert!(db.file(file).source.capacity() >= source.len());
+
+        db.remove_source(file);
+
+        let state = db.file(file);
+        assert_eq!(state.source.capacity(), 0);
+        assert!(state.parse.is_none());
+        assert!(state.ir.is_none());
+        assert!(state.module_ir.is_none());
+        assert!(
+            state.interface.is_some(),
+            "interface metadata stays reusable"
+        );
+        assert_eq!(db.intern("large.js"), file, "path identity is retained");
+    }
+
+    #[test]
     fn removed_source_can_be_restored_with_the_same_file_id() {
         let (mut db, files) = cold_project();
         let file = files[0];
@@ -1138,7 +1171,7 @@ mod tests {
         );
         assert_eq!(db.stats().revision, 4);
         assert_eq!(db.stats().parse_computed, 1);
-        assert_eq!(db.stats().interface_computed, 0);
+        assert_eq!(db.stats().interface_computed, 1);
         assert_eq!(db.stats().early_cutoff, 1);
         assert_eq!(db.stats().project_computed, 1);
     }
