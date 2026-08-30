@@ -68,6 +68,7 @@ pub fn run(
     // landing between the read and the watch is never reported and never noticed.
     let mut text: Option<String> = None;
     let mut missing = false;
+    let mut project_synced = false;
     let peer = match backend.peer() {
         Ok(peer) => Some(peer),
         Err(error) => {
@@ -82,11 +83,15 @@ pub fn run(
                 backend,
                 path,
                 project_root,
-                &target.canonical,
-                current.clone(),
+                SourceSnapshot {
+                    canonical: &target.canonical,
+                    text: current.clone(),
+                },
+                true,
                 out,
                 notes,
             )?;
+            project_synced = true;
             refresher.submit(
                 revision,
                 target.canonical.clone(),
@@ -139,11 +144,15 @@ pub fn run(
                                 backend,
                                 path,
                                 project_root,
-                                &target.canonical,
-                                current.clone(),
+                                SourceSnapshot {
+                                    canonical: &target.canonical,
+                                    text: current.clone(),
+                                },
+                                !project_synced,
                                 out,
                                 notes,
                             )?;
+                            project_synced = true;
                             refresher.submit(
                                 revision,
                                 target.canonical.clone(),
@@ -238,18 +247,28 @@ impl Target {
     }
 }
 
+struct SourceSnapshot<'a> {
+    canonical: &'a str,
+    text: String,
+}
+
 fn run_once(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
-    canonical: &str,
-    current: String,
+    source: SourceSnapshot<'_>,
+    authoritative_sync: bool,
     out: &mut dyn Write,
     notes: &mut dyn Write,
 ) -> Result<Option<u64>> {
-    // `commands::run_source` owns the warm source-sync and interpreter request path while
-    // preserving the exact snapshot that the watcher compared for this save.
-    let output = commands::run_source(backend, path, project_root, canonical, current)?;
+    // Seed the daemon with one authoritative project view. Once seeded, the watcher owns only
+    // this target and sends its already-read snapshot directly; repeating the whole filesystem
+    // walk on every edit would put O(project) work ahead of the incremental compiler.
+    let output = if authoritative_sync {
+        commands::run_source(backend, path, project_root, source.canonical, source.text)?
+    } else {
+        commands::run_watched_source(backend, path, project_root, source.canonical, source.text)?
+    };
     out.write_all(output.text.as_bytes())
         .and_then(|()| out.flush())
         .map_err(|source| Error::io("cannot write to stdout", source))?;
@@ -442,6 +461,7 @@ fn is_missing(error: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io;
     use std::sync::mpsc::Sender;
 
@@ -453,7 +473,8 @@ mod tests {
     /// real execution from a wake-up that found nothing to do.
     struct Fake {
         stats: Stats,
-        source: String,
+        sources: HashMap<String, String>,
+        requests: Option<Sender<Request>>,
     }
 
     impl Backend for Fake {
@@ -462,24 +483,28 @@ mod tests {
         }
 
         fn request(&mut self, request: Request) -> Result<Response> {
+            if let Some(requests) = &self.requests {
+                let _ = requests.send(request.clone());
+            }
             Ok(match request {
                 Request::Stats => Response::Stats(self.stats.clone()),
                 Request::Sync { files } => Response::Needed {
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
-                Request::SetSource { text, .. } => {
-                    self.source = text;
+                Request::SetSource { path, text } => {
+                    self.sources.insert(path, text);
                     self.stats.revision += 1;
                     Response::Ok
                 }
                 Request::Run { path, .. } => {
-                    let failed = self.source.starts_with("fail");
+                    let source = self.sources.get(&path).cloned().unwrap_or_default();
+                    let failed = source.starts_with("fail");
                     Response::Ran(RunSummary {
                         revision: self.stats.revision,
                         path,
                         file: FileId(1),
                         succeeded: !failed,
-                        stdout: format!("program: {}\n", self.source.trim()),
+                        stdout: format!("program: {}\n", source.trim()),
                         value: Some("undefined".to_string()),
                         instructions: 1,
                         diagnostics: if failed {
@@ -603,13 +628,26 @@ mod tests {
 
     /// Starts a watch on `path` and hands back streams of stdout and notes.
     fn watch_in_background(path: &Path) -> (mpsc::Receiver<String>, mpsc::Receiver<String>) {
+        let (printed, notes, _) = watch_in_background_observed(path);
+        (printed, notes)
+    }
+
+    fn watch_in_background_observed(
+        path: &Path,
+    ) -> (
+        mpsc::Receiver<String>,
+        mpsc::Receiver<String>,
+        mpsc::Receiver<Request>,
+    ) {
         let (checks, printed) = mpsc::channel();
         let (messages, notes) = mpsc::channel();
+        let (request_tx, requests) = mpsc::channel();
         let watched = path.to_path_buf();
         std::thread::spawn(move || {
             let mut backend = Fake {
                 stats: Stats::default(),
-                source: String::new(),
+                sources: HashMap::new(),
+                requests: Some(request_tx),
             };
             let _ = run(
                 &mut backend,
@@ -623,7 +661,7 @@ mod tests {
                 },
             );
         });
-        (printed, notes)
+        (printed, notes, requests)
     }
 
     #[test]
@@ -661,12 +699,35 @@ mod tests {
         let dir = scratch("edit");
         let path = dir.join("a.js");
         std::fs::write(&path, "export const a = 1;").expect("write");
+        for index in 0..64 {
+            std::fs::write(
+                dir.join(format!("dependency-{index}.js")),
+                format!("export const value{index} = {index};\n"),
+            )
+            .expect("write dependency");
+        }
 
-        let (printed, _) = watch_in_background(&path);
+        let (printed, _, requests) = watch_in_background_observed(&path);
         let first = printed
             .recv_timeout(Duration::from_secs(5))
             .expect("the first run should be reported");
         assert_eq!(first, "program: export const a = 1;\n");
+        let mut initial = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            initial.push(request);
+        }
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|request| matches!(request, Request::Sync { .. }))
+                .count(),
+            1,
+            "the initial watch iteration must establish one authoritative project view"
+        );
+        let Request::Sync { files } = &initial[0] else {
+            panic!("the initial watch request must be Sync");
+        };
+        assert_eq!(files.len(), 65, "the initial sync must seed every source");
 
         // Rewriting the same bytes must not spend a recompute. That is the whole reason the
         // content comparison outlives the poll it was written for.
@@ -681,6 +742,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("a real edit should run");
         assert_eq!(second, "program: export const a = 2;\n");
+        let mut warm = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            warm.push(request);
+        }
+        assert_eq!(warm.len(), 2, "a warm edit must upload and run only");
+        assert!(matches!(warm[0], Request::SetSource { .. }));
+        assert!(matches!(warm[1], Request::Run { .. }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
