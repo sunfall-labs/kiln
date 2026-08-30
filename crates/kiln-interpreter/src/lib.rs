@@ -379,6 +379,34 @@ pub enum Native {
 }
 
 impl Native {
+    /// Whether this built-in reads its receiver as an array, and so should accept an array-like
+    /// one when it is redirected through `call` or `apply`.
+    ///
+    /// The constructor and the statics are excluded: `Array.from` and `Array.isArray` take their
+    /// subject as an argument, and coercing a receiver they never read would be noise.
+    fn walks_an_array(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayAt
+                | Self::ArrayConcat
+                | Self::ArrayEntries
+                | Self::ArrayFill
+                | Self::ArrayFlat
+                | Self::ArrayIncludes
+                | Self::ArrayIndexOf
+                | Self::ArrayJoin
+                | Self::ArrayKeys
+                | Self::ArrayLastIndexOf
+                | Self::ArrayPop
+                | Self::ArrayPush
+                | Self::ArrayReverse
+                | Self::ArrayShift
+                | Self::ArraySlice
+                | Self::ArrayUnshift
+                | Self::ArrayValues
+        )
+    }
+
     fn property(self, name: &str) -> Option<Value> {
         match (self, name) {
             (Self::Error(_), "captureStackTrace") => {
@@ -3900,6 +3928,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Value, ExecutionError> {
         match callee {
             Value::Native(native) => {
+                let this_value = self.as_array_like(callee, this_value, instruction)?;
                 self.dispatch_native(*native, &this_value, &arguments, instruction)
             }
             // `resolve` and `reject` from a promise executor. Calling one settles its promise
@@ -3917,9 +3946,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
-            Value::Callback(_) => Ok(self
-                .invoke(callee.clone(), this_value, arguments, instruction)?
-                .unwrap_or(Value::Undefined)),
+            Value::Callback(_) => {
+                let this_value = self.as_array_like(callee, this_value, instruction)?;
+                Ok(self
+                    .invoke(callee.clone(), this_value, arguments, instruction)?
+                    .unwrap_or(Value::Undefined))
+            }
             // Binding is transparent to the call: the receiver is the one `bind` fixed and the
             // bound arguments come first, whatever the target turns out to be.
             Value::Bound(bound) => {
@@ -4592,6 +4624,63 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// The point of building a real error object rather than failing outright is that a program
     /// can catch it: `try { null.x } catch (e) { e instanceof TypeError }` is ordinary code, and
     /// a fatal execution error would make it unwritable.
+    /// The receiver an array method should walk, when one is being redirected onto something
+    /// that is not an array.
+    ///
+    /// `Array.prototype.slice.call(arguments)` and `[].forEach.call(nodeList, ...)` are why the
+    /// array methods are generic, and redirection is the only way one of them can meet a
+    /// non-array receiver: reading `slice` off a plain object finds nothing, so `obj.slice()` is
+    /// a `TypeError` here exactly as it is in node. A string walks as its characters; anything
+    /// with a `length` walks as its indexed properties. The copy is not written back, so a
+    /// mutating method redirected this way changes nothing -- which is visible in the untouched
+    /// object rather than hidden in a wrong result.
+    fn as_array_like(
+        &mut self,
+        callee: &Value,
+        receiver: Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let walks_an_array = match callee {
+            Value::Callback(method) => !matches!(
+                method,
+                CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn
+            ),
+            Value::Native(native) => native.walks_an_array(),
+            _ => false,
+        };
+        if !walks_an_array || matches!(receiver, Value::Array(_)) {
+            return Ok(receiver);
+        }
+        let items = match &receiver {
+            Value::String(text) => text
+                .chars()
+                .map(|character| Value::String(character.to_string()))
+                .collect(),
+            Value::Object(_) | Value::Function(_) => {
+                let length = self
+                    .read_property(&receiver, "length", instruction)?
+                    .as_number();
+                if length.is_finite() && length > 0.0 {
+                    let mut items = Vec::with_capacity(length as usize);
+                    for index in 0..length as usize {
+                        items.push(self.read_property(
+                            &receiver,
+                            &index.to_string(),
+                            instruction,
+                        )?);
+                    }
+                    items
+                } else {
+                    Vec::new()
+                }
+            }
+            // A number, a boolean, `null`: none has indexed properties, so the walk is empty --
+            // which is what `Array.prototype.map.call(1, f)` gives.
+            _ => Vec::new(),
+        };
+        Ok(Value::Array(ArrayData::new(items)))
+    }
+
     /// What `arguments` refers to in the running function.
     ///
     /// An arrow has none of its own and sees the enclosing function's, which it captured when it

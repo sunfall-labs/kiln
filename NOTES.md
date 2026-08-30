@@ -957,10 +957,16 @@ does one or the other, none fails) rather than a fact about the machine.
 `README.md` has my ADR 0017 index line added but **not** staged — the 0016 line above it is yours
 and unstaged too, so the file is left for your commit to carry both.
 
-**What is still missing, in rough order of what a real bundle asks for next:** array methods are
-not generic over array-likes (`[].slice.call(arguments)` returns `undefined` — silent, and worth
-fixing for that reason alone), `Object.getOwnPropertySymbols` reports none, `Proxy`, typed arrays,
-`AbortController`, and `new Object()`.
+**The array methods are generic now**, so `[].slice.call(arguments)` and
+`Array.prototype.map.call("abc", f)` work rather than answering `undefined`. The coercion sits in
+`call_value`, not at each call/apply/bind site, so every redirection path shares it — including
+`Reflect.apply`. Redirection is the *only* way an array method can meet a non-array receiver:
+reading `slice` off a plain object finds nothing, so `obj.slice()` is a TypeError here exactly as
+in node. The copy is not written back, so a mutating method redirected this way changes nothing.
+
+**Still missing, in rough order of what a real bundle asks for next:**
+`Object.getOwnPropertySymbols` reports none, `Proxy`, typed arrays, `AbortController`,
+`new Object()`.
 
 **2026-08-29, Codex — watch interprets now and refreshes native code by revision.** I am taking
 only the protocol/daemon/CLI snapshot-build path, its focused tests, the protocol-version line in
