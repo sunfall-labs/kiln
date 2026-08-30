@@ -1764,6 +1764,68 @@ pub struct ExecutionResult {
     pub steps: u64,
 }
 
+/// State shared by every module evaluated in one graph realm.
+///
+/// Module code and call frames remain on each [`Vm`], but globals, built-in identity, and the
+/// scheduler belong to the realm. This is what lets a graph behave like one JavaScript program
+/// without flattening the module programs that exported closures carry with them.
+#[derive(Clone)]
+pub struct Realm {
+    state: Rc<RealmState>,
+}
+
+struct RealmState {
+    error_prototypes: RefCell<[Option<Value>; ErrorKind::ALL.len()]>,
+    global_object: RefCell<Option<Value>>,
+    process_object: RefCell<Option<Value>>,
+    now: RefCell<f64>,
+    timers: RefCell<Vec<Timer>>,
+    microtasks: RefCell<VecDeque<Job>>,
+    unhandled: RefCell<Option<Value>>,
+    symbol_registry: RefCell<Vec<(String, Value)>>,
+    next_timer_id: RefCell<f64>,
+    random_state: RefCell<u64>,
+    next_sequence: RefCell<u64>,
+    symbol_serial: RefCell<u64>,
+    driver_program: RefCell<Option<Rc<Program>>>,
+}
+
+impl Realm {
+    /// Create a fresh realm, as a standalone run or a new graph execution.
+    pub fn new() -> Self {
+        Self {
+            state: Rc::new(RealmState {
+                error_prototypes: RefCell::new([const { None }; ErrorKind::ALL.len()]),
+                global_object: RefCell::new(None),
+                process_object: RefCell::new(None),
+                now: RefCell::new(0.0),
+                timers: RefCell::new(Vec::new()),
+                microtasks: RefCell::new(VecDeque::new()),
+                unhandled: RefCell::new(None),
+                symbol_registry: RefCell::new(Vec::new()),
+                next_timer_id: RefCell::new(1.0),
+                random_state: RefCell::new(RANDOM_SEED),
+                next_sequence: RefCell::new(0),
+                symbol_serial: RefCell::new(0),
+                driver_program: RefCell::new(None),
+            }),
+        }
+    }
+
+    fn remember_program(&self, program: Rc<Program>) {
+        let mut driver = self.state.driver_program.borrow_mut();
+        if driver.is_none() {
+            *driver = Some(program);
+        }
+    }
+}
+
+impl Default for Realm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One value published by a completed module evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModuleExportValue {
@@ -2108,47 +2170,14 @@ pub fn execute<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
-    let mut vm = Vm {
-        program: Rc::clone(&program),
+    let realm = Realm::new();
+    let mut vm = Vm::new(
+        Rc::clone(&program),
+        vec![Value::Undefined; program.local_count as usize],
         host,
-        stack: Vec::new(),
-        locals: vec![Value::Undefined; program.local_count as usize],
-        function: None,
-        suspended: false,
-        handlers: Vec::new(),
-        arguments: Vec::new(),
-        error_prototypes: [const { None }; ErrorKind::ALL.len()],
-        this_value: Value::Undefined,
-        new_target: Value::Undefined,
-        suspended_awaiting: false,
-        global_object: None,
-        process_object: None,
-        native_depth: 0,
-        frames: Vec::new(),
-        instruction: 0,
-        function_names: program
-            .functions
-            .iter()
-            .map(|proto| proto.name.as_deref().map(Rc::from))
-            .collect(),
-        function_arity: program
-            .functions
-            .iter()
-            .map(|proto| proto.parameter_count)
-            .collect(),
-        steps: 0,
-        symbol_serial: 0,
-        now: 0.0,
-        timers: Vec::new(),
-        microtasks: VecDeque::new(),
-        caught: None,
-        unhandled: None,
-        symbol_registry: Vec::new(),
-        next_timer_id: 1.0,
-        random_state: RANDOM_SEED,
-        next_sequence: 0,
         limits,
-    };
+        &realm,
+    );
     // The program is not finished when its last statement is: anything it scheduled still has
     // to run, which is what makes a `setTimeout` observable at all.
     let execution = vm.run()?;
@@ -2225,6 +2254,56 @@ pub fn execute_module<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_with_realm(module, import_values, host, limits, &Realm::new(), true)
+}
+
+/// Execute one module body in an existing realm without draining its scheduler.
+///
+/// Graph execution uses this to evaluate every synchronous module body first. The caller drains
+/// the realm once, after the dependency-first body order is complete.
+pub fn execute_module_in_realm<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    realm: &Realm,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_with_realm(module, import_values, host, limits, realm, false)
+}
+
+/// Drain the shared realm scheduler after all synchronous graph module bodies have run.
+pub fn drain_realm<H: HostOps + ?Sized>(
+    realm: &Realm,
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<u64, ExecutionError> {
+    let program = realm
+        .state
+        .driver_program
+        .borrow()
+        .clone()
+        .unwrap_or_else(|| {
+            Rc::new(Program {
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 0,
+                functions: Vec::new(),
+            })
+        });
+    let mut vm = Vm::new(program, Vec::new(), host, limits, realm);
+    vm.run_event_loop()?;
+    Ok(vm.steps)
+}
+
+fn execute_module_with_realm<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    realm: &Realm,
+    drain: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
             expected: module.imports.len(),
@@ -2250,56 +2329,19 @@ pub fn execute_module<H: HostOps + ?Sized>(
         };
     }
 
-    let mut vm = Vm {
-        // Cloned into an `Rc` because a function value this module exports outlives the run
-        // that made it: the importer calls it against *this* table, and holding it by reference
-        // would tie every exported function to one module execution.
-        program: Rc::new(module.program.clone()),
-        host,
-        stack: Vec::new(),
+    let mut vm = Vm::new(
+        Rc::new(module.program.clone()),
         locals,
-        function: None,
-        suspended: false,
-        handlers: Vec::new(),
-        arguments: Vec::new(),
-        error_prototypes: [const { None }; ErrorKind::ALL.len()],
-        this_value: Value::Undefined,
-        new_target: Value::Undefined,
-        suspended_awaiting: false,
-        global_object: None,
-        process_object: None,
-        native_depth: 0,
-        frames: Vec::new(),
-        instruction: 0,
-        function_names: module
-            .program
-            .functions
-            .iter()
-            .map(|proto| proto.name.as_deref().map(Rc::from))
-            .collect(),
-        function_arity: module
-            .program
-            .functions
-            .iter()
-            .map(|proto| proto.parameter_count)
-            .collect(),
-        steps: 0,
-        symbol_serial: 0,
-        now: 0.0,
-        timers: Vec::new(),
-        microtasks: VecDeque::new(),
-        caught: None,
-        unhandled: None,
-        symbol_registry: Vec::new(),
-        next_timer_id: 1.0,
-        random_state: RANDOM_SEED,
-        next_sequence: 0,
+        host,
         limits,
-    };
+        realm,
+    );
     let execution = vm.run()?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
-    vm.run_event_loop()?;
+    if drain {
+        vm.run_event_loop()?;
+    }
     let execution = ExecutionResult {
         steps: vm.steps,
         ..execution
@@ -2518,35 +2560,13 @@ struct Vm<'host, H: HostOps + ?Sized> {
     handlers: Vec<Handler>,
     /// The arguments the running frame received.
     arguments: Vec<Value>,
-    /// One prototype per error kind for this execution, created on first use.
-    ///
-    /// One object per run per kind, because `e instanceof TypeError` compares it by identity:
-    /// two prototypes would make errors from the same program fail to recognise each other. Each
-    /// subclass's prototype chains to `Error.prototype`, which is what makes a `TypeError` an
-    /// `Error` too. This is the smallest thing a realm is, and it is where a real realm object
-    /// will start.
-    error_prototypes: [Option<Value>; ErrorKind::ALL.len()],
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
-    /// The realm's global object, built on first use and shared from then on.
-    ///
-    /// One object, because `globalThis === globalThis` has to hold and because a library that
-    /// stashes state on it -- `globalThis.__something ??= {}` is a common singleton idiom -- has
-    /// to find it again. What it does *not* do is back variable lookup: writing
-    /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
-    global_object: Option<Value>,
+    /// Realm state shared by all module VMs in one graph execution.
+    realm: Rc<RealmState>,
     /// How many built-ins are currently between the running code and the interpreter loop.
     native_depth: usize,
-    /// `process`, built on first use and shared from then on.
-    ///
-    /// Bundles read `process.env.NODE_ENV` unguarded -- it is the standard way a library ships
-    /// development-only checks -- and ADR 0017 made an unresolved identifier a runtime throw, so
-    /// without this a great deal of ordinary code fails at its first line. What is here is only
-    /// what such code reads: an environment that is empty (so every flag reads as undefined, the
-    /// production answer), and enough identity to log. It is deliberately not node's `process`
-    /// and has no way to exit, spawn, or reach a file system.
-    process_object: Option<Value>,
     /// Whether the suspension that just happened was an `await` rather than a `yield`.
     ///
     /// Written where the body stops and read by whoever resumed it, because the instruction that
@@ -2559,40 +2579,43 @@ struct Vm<'host, H: HostOps + ?Sized> {
     new_target: Value,
     frames: Vec<Frame>,
     instruction: usize,
-    /// One shared name per proto, so making a closure copies a pointer rather than a string.
-    function_names: Vec<Option<Rc<str>>>,
-    /// Declared parameter count per proto, which is what `f.length` reports.
-    function_arity: Vec<u32>,
-    /// The virtual clock, in milliseconds. Only a due timer moves it, so time passes exactly as
-    /// fast as the program asks for and never faster.
-    now: f64,
-    /// Scheduled callbacks, in no particular order -- the next one is chosen by due time.
-    timers: Vec<Timer>,
-    /// Jobs to run before the next timer, in order.
-    microtasks: VecDeque<Job>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
-    /// A rejection that reached the end of the run with nothing attached to it.
-    unhandled: Option<Value>,
-    /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
-    /// lookups of one key are the *same* symbol, which is what makes it usable across module
-    /// boundaries where `Symbol()` would produce two.
-    symbol_registry: Vec<(String, Value)>,
-    /// Ids handed out to timers, and the tie-break order among those due together.
-    next_timer_id: f64,
-    /// The state `Math.random` advances. Seeded from a constant rather than from the environment
-    /// (ADR 0026), so the same program produces the same sequence in both engines and on every
-    /// machine -- the same trade the virtual clock makes.
-    random_state: u64,
-    next_sequence: u64,
     steps: u64,
-    /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
-    /// symbol needs: it never leaves the run that made it.
-    symbol_serial: u64,
     limits: ExecutionLimits,
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn new<'host>(
+        program: Rc<Program>,
+        locals: Vec<Value>,
+        host: &'host mut H,
+        limits: ExecutionLimits,
+        realm: &Realm,
+    ) -> Vm<'host, H> {
+        realm.remember_program(Rc::clone(&program));
+        Vm {
+            program,
+            host,
+            stack: Vec::new(),
+            locals,
+            function: None,
+            suspended: false,
+            handlers: Vec::new(),
+            arguments: Vec::new(),
+            this_value: Value::Undefined,
+            realm: Rc::clone(&realm.state),
+            native_depth: 0,
+            suspended_awaiting: false,
+            new_target: Value::Undefined,
+            frames: Vec::new(),
+            instruction: 0,
+            caught: None,
+            steps: 0,
+            limits,
+        }
+    }
+
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
         // `Return` -- the end of the program.
@@ -3941,7 +3964,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // `Math.random` advances state that lives on the machine, so it cannot be a pure
             // function of its arguments either.
-            Native::MathRandom => Ok(Value::Number(random_double(&mut self.random_state))),
+            Native::MathRandom => Ok(Value::Number(random_double(
+                &mut self.realm.random_state.borrow_mut(),
+            ))),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
             Native::SetTimeout | Native::SetInterval => {
@@ -3951,13 +3976,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Some(delay) if delay.is_finite() && delay > 0.0 => delay,
                     _ => 0.0,
                 };
-                let id = self.next_timer_id;
-                self.next_timer_id += 1.0;
-                self.next_sequence += 1;
-                self.timers.push(Timer {
+                let id = {
+                    let mut next = self.realm.next_timer_id.borrow_mut();
+                    let id = *next;
+                    *next += 1.0;
+                    id
+                };
+                let sequence = {
+                    let mut next = self.realm.next_sequence.borrow_mut();
+                    *next += 1;
+                    *next
+                };
+                self.realm.timers.borrow_mut().push(Timer {
                     id,
-                    due: self.now + delay,
-                    sequence: self.next_sequence,
+                    due: *self.realm.now.borrow() + delay,
+                    sequence,
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
                     // timer carries state without a closure.
@@ -3968,7 +4001,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ClearTimeout | Native::ClearInterval => {
                 let id = argument_number(arguments);
-                self.timers.retain(|timer| timer.id != id);
+                self.realm
+                    .timers
+                    .borrow_mut()
+                    .retain(|timer| timer.id != id);
                 Ok(Value::Undefined)
             }
             Native::PromiseResolve => {
@@ -4091,7 +4127,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // and is the whole point of the clock being the machine's. ADR 0015.
             // The same virtual clock `Date.now` reads, so a program that measures with one and
             // reports with the other stays consistent.
-            Native::DateNow | Native::PerformanceNow => Ok(Value::Number(self.now)),
+            Native::DateNow | Native::PerformanceNow => Ok(Value::Number(*self.realm.now.borrow())),
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
@@ -4481,17 +4517,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let key = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
-                if let Some((_, symbol)) =
-                    self.symbol_registry.iter().find(|(name, _)| *name == key)
+                if let Some((_, symbol)) = self
+                    .realm
+                    .symbol_registry
+                    .borrow()
+                    .iter()
+                    .find(|(name, _)| *name == key)
                 {
                     return Ok(symbol.clone());
                 }
-                self.symbol_serial += 1;
+                let mut serial = self.realm.symbol_serial.borrow_mut();
+                *serial += 1;
                 let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
+                    serial: *serial,
                     description: Some(key.clone()),
                 })));
-                self.symbol_registry.push((key, symbol.clone()));
+                self.realm
+                    .symbol_registry
+                    .borrow_mut()
+                    .push((key, symbol.clone()));
                 Ok(symbol)
             }
             Native::SymbolKeyFor => {
@@ -4501,7 +4545,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Only a registered symbol has a key; one from `Symbol()` does not, which is how
                 // a program tells the two apart.
                 Ok(self
+                    .realm
                     .symbol_registry
+                    .borrow()
                     .iter()
                     .find(|(_, registered)| {
                         matches!(registered, Value::Symbol(other) if other == symbol)
@@ -4510,7 +4556,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
-                    0 => self.now,
+                    0 => *self.realm.now.borrow(),
                     1 => match arguments.first() {
                         // `new Date(otherDate)` copies the instant rather than stringifying it.
                         Some(Value::Date(existing)) => existing.get(),
@@ -4700,7 +4746,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Array(ArrayData::new(results)))
             }
             Native::QueueMicrotask => {
-                self.microtasks.push_back(Job::Callback(
+                self.realm.microtasks.borrow_mut().push_back(Job::Callback(
                     arguments.first().cloned().unwrap_or(Value::Undefined),
                     Vec::new(),
                 ));
@@ -4709,9 +4755,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Every call has to produce a symbol distinct from every other, so this needs the
             // counter rather than only its arguments.
             Native::SymbolConstructor => {
-                self.symbol_serial += 1;
+                *self.realm.symbol_serial.borrow_mut() += 1;
                 Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
+                    serial: *self.realm.symbol_serial.borrow(),
                     description: match arguments.first() {
                         None | Some(Value::Undefined) => None,
                         Some(value) => Some(value.to_display_string()),
@@ -5412,7 +5458,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A subclass's prototype chains to `Error.prototype`, so `e instanceof Error` holds for
     /// every kind and `toString` is inherited rather than copied.
     fn error_prototype(&mut self, kind: ErrorKind) -> Value {
-        if let Some(prototype) = &self.error_prototypes[kind.index()] {
+        if let Some(prototype) = &self.realm.error_prototypes.borrow()[kind.index()] {
             return prototype.clone();
         }
         let mut data = ObjectData::default();
@@ -5434,7 +5480,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 object.borrow_mut().set_prototype(base);
             }
         }
-        self.error_prototypes[kind.index()] = Some(prototype.clone());
+        self.realm.error_prototypes.borrow_mut()[kind.index()] = Some(prototype.clone());
         prototype
     }
 
@@ -5566,10 +5612,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
         // ordinary code.
         if unobserved && let Settled::Rejected(reason) = &outcome {
-            self.unhandled = Some(reason.clone());
+            *self.realm.unhandled.borrow_mut() = Some(reason.clone());
         }
         for reaction in reactions {
-            self.microtasks
+            self.realm
+                .microtasks
+                .borrow_mut()
                 .push_back(Job::React(outcome.clone(), reaction));
         }
     }
@@ -5596,7 +5644,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.settle(promise, &Settled::Rejected(error));
             return;
         }
-        self.microtasks
+        self.realm
+            .microtasks
+            .borrow_mut()
             .push_back(Job::Adopt(Rc::clone(promise), Rc::clone(inner)));
     }
 
@@ -5625,12 +5675,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             state.handled = true;
             if first && matches!(state.settled, Some(Settled::Rejected(_))) {
                 // Something is handling it after all.
-                self.unhandled = None;
+                *self.realm.unhandled.borrow_mut() = None;
             }
             state.settled.clone()
         };
         match settled {
-            Some(outcome) => self.microtasks.push_back(Job::React(outcome, reaction)),
+            Some(outcome) => self
+                .realm
+                .microtasks
+                .borrow_mut()
+                .push_back(Job::React(outcome, reaction)),
             None => promise.borrow_mut().reactions.push(reaction),
         }
     }
@@ -5901,20 +5955,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             // Rescheduled *before* running, and under the same id, so a `clearInterval` inside
             // the callback cancels the next run rather than a run that no longer exists.
-            let (callback, arguments) = {
-                let timer = &self.timers[index];
-                self.now = self.now.max(timer.due);
-                (timer.callback.clone(), timer.arguments.clone())
+            let (callback, arguments, repeat) = {
+                let timers = self.realm.timers.borrow();
+                let timer = &timers[index];
+                let now = *self.realm.now.borrow();
+                *self.realm.now.borrow_mut() = now.max(timer.due);
+                (
+                    timer.callback.clone(),
+                    timer.arguments.clone(),
+                    timer.repeat,
+                )
             };
-            match self.timers[index].repeat {
+            match repeat {
                 Some(delay) => {
-                    self.next_sequence += 1;
-                    let timer = &mut self.timers[index];
-                    timer.due = self.now + delay.max(1.0);
-                    timer.sequence = self.next_sequence;
+                    let sequence = {
+                        let mut next = self.realm.next_sequence.borrow_mut();
+                        *next += 1;
+                        *next
+                    };
+                    let now = *self.realm.now.borrow();
+                    let mut timers = self.realm.timers.borrow_mut();
+                    let timer = &mut timers[index];
+                    timer.due = now + delay.max(1.0);
+                    timer.sequence = sequence;
                 }
                 None => {
-                    self.timers.remove(index);
+                    self.realm.timers.borrow_mut().remove(index);
                 }
             }
             self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
@@ -5927,7 +5993,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// it worked. Node prints a warning and exits non-zero; this fails the run, which is the same
     /// judgement stated more plainly and matches how an uncaught throw is treated.
     fn check_unhandled_rejection(&mut self) -> Result<(), ExecutionError> {
-        let Some(reason) = self.unhandled.take() else {
+        let Some(reason) = self.realm.unhandled.borrow_mut().take() else {
             return Ok(());
         };
         let trace = captured_trace(&reason);
@@ -5942,7 +6008,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Run microtasks until none are left, including ones queued by the ones already running.
     fn drain_microtasks(&mut self) -> Result<(), ExecutionError> {
-        while let Some(job) = self.microtasks.pop_front() {
+        while let Some(job) = { self.realm.microtasks.borrow_mut().pop_front() } {
             match job {
                 Job::Callback(callback, arguments) => {
                     self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
@@ -5962,7 +6028,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The timer to run next: the earliest due, and among those the one scheduled first.
     fn next_due_timer(&self) -> Option<usize> {
-        self.timers
+        self.realm
+            .timers
+            .borrow()
             .iter()
             .enumerate()
             .min_by(|(_, left), (_, right)| {
@@ -6068,7 +6136,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The realm's global object, created on first use.
     fn global_object(&mut self) -> Value {
-        if let Some(existing) = &self.global_object {
+        if let Some(existing) = &*self.realm.global_object.borrow() {
             return existing.clone();
         }
         let mut globals = ObjectData::default();
@@ -6154,13 +6222,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // realm that has one".
         object.borrow_mut().set("globalThis", value.clone());
         object.borrow_mut().set("global", value.clone());
-        self.global_object = Some(value.clone());
+        *self.realm.global_object.borrow_mut() = Some(value.clone());
         value
     }
 
     /// The realm's `process`, created on first use.
     fn process_object(&mut self) -> Value {
-        if let Some(existing) = &self.process_object {
+        if let Some(existing) = &*self.realm.process_object.borrow() {
             return existing.clone();
         }
         let mut process = ObjectData::default();
@@ -6176,7 +6244,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         process.set("platform", Value::String("kiln".to_owned()));
         process.set("version", Value::String("kiln".to_owned()));
         let value = Value::Object(Rc::new(RefCell::new(process)));
-        self.process_object = Some(value.clone());
+        *self.realm.process_object.borrow_mut() = Some(value.clone());
         value
     }
 
@@ -6494,7 +6562,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         Ok(Rc::new(Closure {
             function,
-            name: self.function_names[function as usize].clone(),
+            name: proto.name.as_deref().map(Rc::from),
             upvalues,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
             // how it is called, so it captures nothing here.
@@ -6989,9 +7057,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "name" => {
                             Value::String(closure.name.as_deref().unwrap_or_default().to_owned())
                         }
-                        "length" => {
-                            Value::Number(f64::from(self.function_arity[closure.function as usize]))
-                        }
+                        "length" => Value::Number(f64::from(
+                            closure
+                                .program
+                                .functions
+                                .get(closure.function as usize)
+                                .map_or(0, |proto| proto.parameter_count),
+                        )),
                         _ => function_property(name),
                     })
             }
