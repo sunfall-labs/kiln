@@ -660,4 +660,7 @@ orchestration, its tests/help text if needed, and this note. `kiln watch app.ts`
 entry through the warm interpreter after the initial read and each byte-changing save, stream
 program stdout, keep diagnostics on stderr, ignore byte-identical rewrites, and survive compile or
 runtime failures for the next edit. Background native refresh and affected-test execution remain
-separate later slices. Claude's compiler/language files stay out of scope.
+separate later slices. Claude's compiler/language files stay out of scope. The implementation
+executes the exact source snapshot used for byte-change detection, even if the file changes again
+during project discovery. Five watcher regressions, the snapshot race regression, all 60 CLI tests,
+and warnings-denied CLI clippy pass in an isolated worktree at `c7ac98a`.
