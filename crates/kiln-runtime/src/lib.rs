@@ -92,6 +92,7 @@ impl std::error::Error for RuntimeBuildError {
 pub struct RealmRuntime {
     runtime: tokio::runtime::Runtime,
     time_paused: bool,
+    host: TokioHost,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
     _not_send: PhantomData<Rc<()>>,
@@ -116,8 +117,36 @@ impl RealmRuntime {
         Ok(Self {
             runtime,
             time_paused: false,
+            host: TokioHost::new(),
             _not_send: PhantomData,
         })
+    }
+
+    /// Returns the asynchronous host owned by this realm runtime.
+    ///
+    /// Host requests are spawned by [`Self::start_host_op`] so their futures always run on this
+    /// runtime. Keeping the request table separately borrowable lets the interpreter settle a
+    /// completion without exposing Tokio handles or constructing a second executor.
+    pub fn host(&mut self) -> &mut TokioHost {
+        &mut self.host
+    }
+
+    /// Starts one asynchronous host operation on this realm's Tokio runtime.
+    pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        let spawn = self.runtime.handle().clone();
+        self.host.start_on(&spawn, operation, referenced)
+    }
+
+    /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
+    pub fn next_host_completion(&mut self) -> Option<Completion> {
+        if self.host.pending.is_empty() {
+            return None;
+        }
+        if self.host.ready.is_empty() {
+            let completion = self.runtime.block_on(self.host.receiver.recv())?;
+            self.host.collect_ready(completion);
+        }
+        self.host.take_ready()
     }
 
     /// Runs one synchronous realm operation as the current Tokio task.
@@ -130,6 +159,14 @@ impl RealmRuntime {
         F: FnOnce() -> R,
     {
         self.runtime.block_on(async move { operation() })
+    }
+
+    /// Gives a caller exclusive access to the realm-owned host state between Tokio polls.
+    ///
+    /// This is useful for installing the host into a synchronous realm machine whose lifetime
+    /// spans several calls to [`Self::enter`] and [`Self::next_host_completion`].
+    pub fn host_mut(&mut self) -> &mut TokioHost {
+        &mut self.host
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -185,7 +222,6 @@ impl RealmRuntime {
 /// order. This keeps executor scheduling from becoming observable JavaScript semantics while
 /// allowing independent filesystem work to execute concurrently.
 pub struct TokioHost {
-    runtime: tokio::runtime::Runtime,
     next_request: u64,
     next_sequence: u64,
     pending: BTreeMap<RequestId, PendingRequest>,
@@ -212,15 +248,10 @@ impl std::fmt::Debug for TokioHost {
 }
 
 impl TokioHost {
-    /// Build a current-thread Tokio host with filesystem and timer drivers enabled.
-    pub fn new() -> Result<Self, RuntimeBuildError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(RuntimeBuildError)?;
+    /// Builds the request and completion state owned by a [`RealmRuntime`].
+    fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        Ok(Self {
-            runtime,
+        Self {
             next_request: 1,
             next_sequence: 0,
             pending: BTreeMap::new(),
@@ -228,38 +259,21 @@ impl TokioHost {
             sender,
             receiver,
             _not_send: PhantomData,
-        })
-    }
-
-    fn receive_one(&mut self) -> Option<Completion> {
-        self.runtime.block_on(self.receiver.recv())
-    }
-
-    fn collect_ready(&mut self, completion: Completion) {
-        self.ready.insert(completion.sequence, completion);
-        while let Ok(completion) = self.receiver.try_recv() {
-            self.ready.insert(completion.sequence, completion);
         }
     }
-}
 
-impl Drop for TokioHost {
-    fn drop(&mut self) {
-        for request in self.pending.values() {
-            request.task.abort();
-        }
-        self.pending.clear();
-    }
-}
-
-impl AsyncHostOps for TokioHost {
-    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+    fn start_on(
+        &mut self,
+        runtime: &tokio::runtime::Handle,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> RequestId {
         let request = RequestId::new(self.next_request);
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let sender = self.sender.clone();
-        let task = self.runtime.spawn(async move {
+        let task = runtime.spawn(async move {
             let result = execute_async_host_op(operation).await;
             let _ = sender.send(Completion {
                 request,
@@ -278,6 +292,48 @@ impl AsyncHostOps for TokioHost {
         request
     }
 
+    /// Starts a request while this host is entered through its owning [`RealmRuntime`].
+    pub fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        <Self as AsyncHostOps>::start(self, operation, referenced)
+    }
+
+    fn collect_ready(&mut self, completion: Completion) {
+        self.ready.insert(completion.sequence, completion);
+        while let Ok(completion) = self.receiver.try_recv() {
+            self.ready.insert(completion.sequence, completion);
+        }
+    }
+
+    fn collect_ready_nonblocking(&mut self) {
+        while let Ok(completion) = self.receiver.try_recv() {
+            self.ready.insert(completion.sequence, completion);
+        }
+    }
+
+    fn take_ready(&mut self) -> Option<Completion> {
+        let sequence = *self.ready.keys().next()?;
+        let completion = self.ready.remove(&sequence)?;
+        self.pending.remove(&completion.request);
+        Some(completion)
+    }
+}
+
+impl Drop for TokioHost {
+    fn drop(&mut self) {
+        for request in self.pending.values() {
+            request.task.abort();
+        }
+        self.pending.clear();
+    }
+}
+
+impl AsyncHostOps for TokioHost {
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        let runtime = tokio::runtime::Handle::try_current()
+            .expect("TokioHost requests must start inside their owning RealmRuntime");
+        self.start_on(&runtime, operation, referenced)
+    }
+
     fn cancel(&mut self, request: RequestId) -> bool {
         let Some(pending) = self.pending.remove(&request) else {
             return false;
@@ -292,17 +348,8 @@ impl AsyncHostOps for TokioHost {
     }
 
     fn next_completion(&mut self) -> Option<Completion> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        if self.ready.is_empty() {
-            let completion = self.receive_one()?;
-            self.collect_ready(completion);
-        }
-        let sequence = *self.ready.keys().next()?;
-        let completion = self.ready.remove(&sequence)?;
-        self.pending.remove(&completion.request);
-        Some(completion)
+        self.collect_ready_nonblocking();
+        self.take_ready()
     }
 }
 
@@ -682,23 +729,26 @@ mod tests {
         let directory = TestDirectory::new("async-files");
         let path = directory.join("value.bin");
         let path = path.to_string_lossy().into_owned();
-        let mut host = TokioHost::new().expect("Tokio host builds");
-        let write = host.start(
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let write = runtime.start_host_op(
             AsyncHostOp::WriteFile {
                 path: path.clone(),
                 data: vec![0, 1, 2, 255],
             },
             true,
         );
-        assert!(host.has_referenced_work());
+        assert!(runtime.host().has_referenced_work());
         assert_eq!(
-            host.next_completion().expect("write completes").request,
+            runtime
+                .next_host_completion()
+                .expect("write completes")
+                .request,
             write
         );
-        assert!(!host.has_referenced_work());
+        assert!(!runtime.host().has_referenced_work());
 
-        let read = host.start(AsyncHostOp::ReadFile { path }, true);
-        let completion = host.next_completion().expect("read completes");
+        let read = runtime.start_host_op(AsyncHostOp::ReadFile { path }, true);
+        let completion = runtime.next_host_completion().expect("read completes");
         assert_eq!(completion.request, read);
         assert_eq!(
             completion.result,
@@ -711,15 +761,18 @@ mod tests {
         let directory = TestDirectory::new("async-stat");
         let file = directory.join("value.txt");
         fs::write(&file, b"kiln").expect("seed file");
-        let mut host = TokioHost::new().expect("Tokio host builds");
-        host.start(
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
             AsyncHostOp::Stat {
                 path: file.to_string_lossy().into_owned(),
             },
             true,
         );
         assert_eq!(
-            host.next_completion().expect("stat completes").result,
+            runtime
+                .next_host_completion()
+                .expect("stat completes")
+                .result,
             Ok(AsyncHostValue::FileStat(FileStat {
                 size: 4,
                 is_file: true,
@@ -732,10 +785,10 @@ mod tests {
     fn tokio_host_maps_missing_paths_to_node_error_fields() {
         let directory = TestDirectory::new("async-missing");
         let path = directory.join("missing.txt").to_string_lossy().into_owned();
-        let mut host = TokioHost::new().expect("Tokio host builds");
-        host.start(AsyncHostOp::ReadFile { path: path.clone() }, true);
-        let error = host
-            .next_completion()
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(AsyncHostOp::ReadFile { path: path.clone() }, true);
+        let error = runtime
+            .next_host_completion()
             .expect("read completes")
             .result
             .expect_err("missing path fails");
@@ -747,31 +800,31 @@ mod tests {
     #[test]
     fn unreferenced_requests_do_not_keep_the_realm_alive() {
         let directory = TestDirectory::new("async-unref");
-        let mut host = TokioHost::new().expect("Tokio host builds");
-        host.start(
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
             AsyncHostOp::ReadFile {
                 path: directory.join("missing").to_string_lossy().into_owned(),
             },
             false,
         );
-        assert!(!host.has_referenced_work());
-        assert!(host.next_completion().is_some());
+        assert!(!runtime.host().has_referenced_work());
+        assert!(runtime.next_host_completion().is_some());
     }
 
     #[test]
     fn cancellation_removes_request_and_liveness() {
         let directory = TestDirectory::new("async-cancel");
-        let mut host = TokioHost::new().expect("Tokio host builds");
-        let request = host.start(
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
             AsyncHostOp::ReadFile {
                 path: directory.join("missing").to_string_lossy().into_owned(),
             },
             true,
         );
-        assert!(host.cancel(request));
-        assert!(!host.cancel(request));
-        assert!(!host.has_referenced_work());
-        assert!(host.next_completion().is_none());
+        assert!(runtime.host().cancel(request));
+        assert!(!runtime.host().cancel(request));
+        assert!(!runtime.host().has_referenced_work());
+        assert!(runtime.next_host_completion().is_none());
     }
 
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {

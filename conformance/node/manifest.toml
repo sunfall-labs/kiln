@@ -88,3 +88,45 @@ source = "upstream-adapted/fs-promises-concurrent-read-order.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop", "concurrency"]
 expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-readfile-text/buffer"
+source = "upstream-adapted/fs-promises-readfile-text-buffer.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-readfile-text/utf8-options"
+source = "upstream-adapted/fs-promises-readfile-text-utf8-options.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8", "options-objects"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-writefile/overwrite-truncate"
+source = "upstream-adapted/fs-promises-writefile-overwrite.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "overwrite", "truncate"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-stat/errors-enoent"
+source = "upstream-adapted/fs-promises-stat-errors-enoent.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "node-errors"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises/concurrent-write-order"
+source = "upstream-adapted/fs-promises-concurrent-write-order.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop", "concurrency"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises/promise-chain"
+source = "upstream-adapted/fs-promises-promise-chain.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop"]
+expected_stdout = "pass\n"
