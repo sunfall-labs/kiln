@@ -11,6 +11,8 @@ serde_json = { workspace = true }
 kiln-daemon = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-native-runtime = { workspace = true }
+kiln-module-resolver = { workspace = true }
+frontend-oxc = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 

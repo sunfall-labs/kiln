@@ -493,7 +493,15 @@ fn build_graph<E: QueryEngine>(
     entry: &Path,
     project_root: &str,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
-    ModuleGraph::build_with_module_provider(entry, project_root, |module_path| {
+    let resolver =
+        kiln_module_resolver::NodePackageResolver::new(project_root).map_err(|error| {
+            kiln_module_graph::ModuleGraphError::Resolve {
+                importer: PathBuf::new(),
+                specifier: String::new(),
+                error,
+            }
+        })?;
+    ModuleGraph::build_with_policy(entry, resolver, |module_path| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
             kiln_module_graph::ModuleGraphError::FrontendPath {
                 path: module_path.to_path_buf(),
