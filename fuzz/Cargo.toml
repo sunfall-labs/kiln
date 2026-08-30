@@ -1,0 +1,61 @@
+# Differential fuzzing for kiln.
+#
+# This crate is deliberately OUTSIDE the workspace (`exclude = ["fuzz"]` in the root manifest,
+# ADR 0004). bolero pulls in libfuzzer-sys, a C++ runtime, and a pile of engine plugins; none of
+# that belongs in the compiler developer's `cargo check --workspace` loop. The cost of the split
+# is a second lockfile, which is the intended trade.
+[package]
+name = "kiln-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Path dependencies, not workspace dependencies: this crate is not a workspace member.
+kiln-ir = { path = "../crates/kiln-ir" }
+kiln-hir = { path = "../crates/kiln-hir" }
+kiln-interpreter = { path = "../crates/kiln-interpreter" }
+kiln-runtime = { path = "../crates/kiln-runtime" }
+kiln-host-abi = { path = "../crates/kiln-host-abi" }
+kiln-backend-c = { path = "../crates/kiln-backend-c" }
+kiln-native = { path = "../crates/kiln-native" }
+kiln-native-runtime = { path = "../crates/kiln-native-runtime" }
+kiln-native-toolchain = { path = "../crates/kiln-native-toolchain" }
+kiln-artifact-cache = { path = "../crates/kiln-artifact-cache" }
+kiln-db = { path = "../crates/kiln-db" }
+frontend-oxc = { path = "../crates/frontend-oxc" }
+
+arbitrary = { version = "1.4", features = ["derive"] }
+bolero = { version = "0.13", features = ["arbitrary"] }
+
+[dev-dependencies]
+bolero = { version = "0.13", features = ["arbitrary"] }
+
+# The generators are cheap; the things they drive are not. An unoptimised interpreter run is
+# roughly an order of magnitude slower than an optimised one, and the native target spends its
+# whole budget in a C compiler either way, so the fuzz profile is optimised with debug assertions
+# left on -- a debug_assert firing in the interpreter is a finding, not noise.
+[profile.dev]
+opt-level = 2
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+# `cargo bolero` builds its targets under a profile of this name and refuses to run without it.
+# Optimised, because the thing being fuzzed is a compiler and a debug interpreter is an order of
+# magnitude slower; assertions left on, because a `debug_assert` firing inside kiln is a finding
+# and not noise.
+[profile.fuzz]
+inherits = "release"
+opt-level = 3
+debug = 1
+debug-assertions = true
+overflow-checks = true
+incremental = false
