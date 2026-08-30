@@ -27,8 +27,17 @@ absolute checkout path. The graph rejects any symbol collision before invoking t
 distinction lets a body-only edit change the module C/object keys without changing the launcher
 source that names the module. Artifact integrity and ABI compatibility remain content-addressed in
 the versioned native cache keys; a symbol is a link identity, not a cache proof. The backend
-validates bytecode version, control flow, indices, and stack shape before emission. Its canonical
-program identity includes the complete ordered function-prototype table as well as top-level code:
+validates bytecode version, control flow, indices, and stack shape before emission. Validation is
+closed-world across reachable and unreachable code: constants, locals, stack operations, scalar
+unary and binary operators, jumps, `HostCall::WriteStdout`, and `Return` are accepted, while every
+other instruction is rejected before C rendering. `In` and `InstanceOf` remain unsupported because
+the scalar ABI has no identity-bearing references. The same boundary applies to functions,
+closures, objects, properties, and the other reference-based instructions until native values gain
+a heap representation. Every accepted scalar operator has executable JavaScript-result tests and
+native/interpreter equivalence coverage; the C dispatcher's default arm is not a semantic fallback.
+
+The backend's canonical program identity includes the complete ordered function-prototype table as
+well as top-level code:
 function metadata, instruction streams, and tagged upvalue sources all participate, while numeric
 `MakeFunction` references remain flat so recursive function graphs cannot recurse during hashing.
 This identity rule lands before callable functions reach C emission, preventing that future backend

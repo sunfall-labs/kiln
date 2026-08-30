@@ -3655,6 +3655,38 @@ int main(int argc, char **argv) {{
     }
 
     fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
+        fn push_constant(constants: &mut Vec<Constant>, value: Constant) -> u32 {
+            let index = constants.len() as u32;
+            constants.push(value);
+            index
+        }
+
+        fn push_unary_result(
+            constants: &mut Vec<Constant>,
+            code: &mut Vec<Instruction>,
+            operator: kiln_ir::UnaryOp,
+            input: Constant,
+        ) {
+            let input = push_constant(constants, input);
+            code.extend([Instruction::Const(input), Instruction::Unary(operator)]);
+        }
+
+        fn push_binary_result(
+            constants: &mut Vec<Constant>,
+            code: &mut Vec<Instruction>,
+            operator: kiln_ir::BinaryOp,
+            left: Constant,
+            right: Constant,
+        ) {
+            let left = push_constant(constants, left);
+            let right = push_constant(constants, right);
+            code.extend([
+                Instruction::Const(left),
+                Instruction::Const(right),
+                Instruction::Binary(operator),
+            ]);
+        }
+
         let string_numeric_inputs = [
             "",
             "\u{00a0}\u{1680}\u{2000}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}1\u{feff}",
@@ -3694,6 +3726,107 @@ int main(int argc, char **argv) {{
                 .map(|value| Constant::String(value.to_owned()))
                 .collect(),
             code: string_numeric_code,
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
+        let number = |value: f64| Constant::Number(value.to_bits());
+        let mut operator_constants = Vec::new();
+        let mut operator_code = Vec::new();
+        let mut operator_results = 0;
+        for input in [
+            Constant::Undefined,
+            Constant::Null,
+            Constant::Boolean(true),
+            number(1.0),
+            Constant::String("x".to_owned()),
+        ] {
+            push_unary_result(
+                &mut operator_constants,
+                &mut operator_code,
+                kiln_ir::UnaryOp::TypeOf,
+                input,
+            );
+            operator_results += 1;
+        }
+        for (operator, input) in [
+            (kiln_ir::UnaryOp::BitwiseNot, number(5.0)),
+            (kiln_ir::UnaryOp::BitwiseNot, number(4_294_967_296.0)),
+            (kiln_ir::UnaryOp::Void, number(42.0)),
+        ] {
+            push_unary_result(&mut operator_constants, &mut operator_code, operator, input);
+            operator_results += 1;
+        }
+        for (operator, left, right) in [
+            (
+                kiln_ir::BinaryOp::LooseEqual,
+                Constant::Null,
+                Constant::Undefined,
+            ),
+            (
+                kiln_ir::BinaryOp::LooseEqual,
+                number(0.0),
+                Constant::Boolean(false),
+            ),
+            (
+                kiln_ir::BinaryOp::LooseEqual,
+                Constant::String("42".to_owned()),
+                number(42.0),
+            ),
+            (
+                kiln_ir::BinaryOp::LooseEqual,
+                Constant::String(String::new()),
+                number(0.0),
+            ),
+            (kiln_ir::BinaryOp::LooseEqual, Constant::Null, number(0.0)),
+            (
+                kiln_ir::BinaryOp::LooseNotEqual,
+                number(f64::NAN),
+                number(f64::NAN),
+            ),
+            (kiln_ir::BinaryOp::BitwiseAnd, number(5.0), number(3.0)),
+            (kiln_ir::BinaryOp::BitwiseOr, number(5.0), number(2.0)),
+            (kiln_ir::BinaryOp::BitwiseXor, number(5.0), number(3.0)),
+            (kiln_ir::BinaryOp::ShiftLeft, number(1.0), number(31.0)),
+            (kiln_ir::BinaryOp::ShiftLeft, number(1.0), number(32.0)),
+            (kiln_ir::BinaryOp::ShiftRight, number(-1.0), number(1.0)),
+            (
+                kiln_ir::BinaryOp::UnsignedShiftRight,
+                number(-1.0),
+                number(1.0),
+            ),
+            (
+                kiln_ir::BinaryOp::BitwiseOr,
+                number(4_294_967_296.0),
+                number(0.0),
+            ),
+            (kiln_ir::BinaryOp::BitwiseOr, number(-1.9), number(0.0)),
+            (
+                kiln_ir::BinaryOp::BitwiseOr,
+                number(f64::INFINITY),
+                number(0.0),
+            ),
+        ] {
+            push_binary_result(
+                &mut operator_constants,
+                &mut operator_code,
+                operator,
+                left,
+                right,
+            );
+            operator_results += 1;
+        }
+        operator_code.extend([
+            Instruction::HostCall {
+                op: HostOp::WriteStdout,
+                argc: operator_results,
+            },
+            Instruction::Return,
+        ]);
+        let operator_program = Program {
+            version: BYTECODE_VERSION,
+            constants: operator_constants,
+            code: operator_code,
             local_count: 0,
             functions: Vec::new(),
         };
@@ -3844,6 +3977,7 @@ int main(int argc, char **argv) {{
                     functions: Vec::new(),
                 },
             ),
+            ("scalar-operators", operator_program),
             ("string-numeric-literals", string_numeric_program),
             (
                 "utf16-order",

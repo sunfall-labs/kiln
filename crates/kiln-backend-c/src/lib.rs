@@ -324,7 +324,8 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     kiln_value l = kiln_c99_text(left);
     kiln_value r = kiln_c99_text(right);
     char *copy;
-    if (l.ptr == NULL || r.ptr == NULL || l.len > (size_t)-1 - r.len) {
+    if ((l.len != 0 && l.ptr == NULL) || (r.len != 0 && r.ptr == NULL) ||
+        l.len > (size_t)-1 - r.len) {
         return kiln_c99_undefined();
     }
     copy = (char *)malloc((l.len + r.len) == 0 ? 1 : l.len + r.len);
@@ -619,6 +620,7 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
         });
     }
     for (index, instruction) in program.code.iter().enumerate() {
+        validate_supported_instruction(instruction)?;
         match instruction {
             Instruction::Const(constant) if (*constant as usize) >= program.constants.len() => {
                 return Err(invalid(
@@ -691,6 +693,30 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
         }
     }
     Ok(max_height.max(1))
+}
+
+fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitError> {
+    match instruction {
+        Instruction::Binary(BinaryOp::In | BinaryOp::InstanceOf) => Err(EmitError::Unsupported {
+            feature: "reference operators in the native backend".to_string(),
+        }),
+        Instruction::Const(_)
+        | Instruction::LoadLocal(_)
+        | Instruction::StoreLocal(_)
+        | Instruction::Pop
+        | Instruction::Dup
+        | Instruction::Unary(_)
+        | Instruction::Binary(_)
+        | Instruction::Jump(_)
+        | Instruction::JumpIfFalse(_)
+        | Instruction::JumpIfTruthy(_)
+        | Instruction::JumpIfNotNullish(_)
+        | Instruction::HostCall { .. }
+        | Instruction::Return => Ok(()),
+        _ => Err(EmitError::Unsupported {
+            feature: "functions and objects in the native backend".to_string(),
+        }),
+    }
 }
 
 fn validate_module(module: &ModuleProgram) -> Result<usize, EmitError> {
@@ -2362,6 +2388,87 @@ int main(void) {{
     }
 
     #[test]
+    fn executable_concat_accepts_a_null_pointer_for_an_empty_host_string() {
+        let generated = emit(&program(
+            vec![Constant::String("x".into())],
+            vec![
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 0,
+                },
+                Instruction::Const(0),
+                Instruction::Binary(BinaryOp::Add),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("empty host string program emits");
+        let executable = std::env::temp_dir().join(format!(
+            "kiln-backend-c-empty-host-string-{}-{}",
+            std::process::id(),
+            generated.program_hash
+        ));
+        let wrapper = format!(
+            r#"
+static int calls = 0;
+
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || result == NULL) return KILN_C99_HOST_ERROR;
+    if (calls == 0 && argc == 0) {{
+        *result = kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
+    }} else if (calls == 1 && argc == 1 && arguments != NULL &&
+               arguments[0].tag == KILN_VALUE_STRING && arguments[0].len == 1 &&
+               arguments[0].ptr != NULL && arguments[0].ptr[0] == 'x') {{
+        *result = kiln_c99_undefined();
+    }} else {{
+        return KILN_C99_HOST_ERROR;
+    }}
+    ++calls;
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    if ({symbol}(&host, &result) != KILN_C99_OK) return 2;
+    return calls == 2 ? 0 : 3;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(&executable)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+            .expect("empty host string source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated empty host string C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated empty host string executable runs");
+        let _ = std::fs::remove_file(&executable);
+        assert!(run.status.success(), "empty host string concat failed");
+    }
+
+    #[test]
     fn reference_operators_are_refused_until_native_values_can_carry_references() {
         for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
             let result = emit(&program(
@@ -2379,6 +2486,24 @@ int main(void) {{
                 "{operator:?} must not emit a silent undefined result"
             );
         }
+    }
+
+    #[test]
+    fn unreachable_unsupported_instructions_are_refused_before_rendering() {
+        let result = emit(&program(
+            vec![Constant::Boolean(true)],
+            vec![
+                Instruction::Jump(2),
+                Instruction::MakeFunction(0),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            0,
+        ));
+        assert!(
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("functions and objects")),
+            "dead code must not bypass the native instruction allowlist"
+        );
     }
 
     #[test]
