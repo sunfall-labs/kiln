@@ -617,7 +617,7 @@ impl NativeBuilder {
         let link_options_digest = if dynamic_runtime {
             Digest::hash(
                 format!(
-                    "{}\0system-math\0dynamic-cli-runtime=true\0{}",
+                    "{}\0system-math\0dynamic-cli-runtime=true\0provider-linkage=static-executable-v1\0{}",
                     profile.as_str(),
                     shared_library_link_policy(),
                 )
@@ -668,11 +668,10 @@ impl NativeBuilder {
                             .runtime_libraries
                             .push(paths.runtime_dso.clone());
                         configure_cli_runtime_rpath(&mut link_options);
-                    } else {
-                        link_options
-                            .runtime_libraries
-                            .push(paths.number_provider_a.clone());
                     }
+                    link_options
+                        .runtime_libraries
+                        .push(paths.number_provider_a.clone());
                     let mut objects = vec![paths.module_o.clone(), paths.launcher_o.clone()];
                     if runtime_dso.is_none() {
                         objects.push(paths.runtime_o.clone());
@@ -1508,7 +1507,7 @@ impl NativeBuilder {
         let link_options_digest = if dynamic_runtime {
             Digest::hash(
                 format!(
-                    "{}\0system-math\0dynamic-cli-runtime=true\0{}",
+                    "{}\0system-math\0dynamic-cli-runtime=true\0provider-linkage=static-executable-v1\0{}",
                     profile.as_str(),
                     shared_library_link_policy(),
                 )
@@ -1570,11 +1569,10 @@ impl NativeBuilder {
                         .runtime_libraries
                         .push(paths.runtime_dso.clone());
                     configure_cli_runtime_rpath(&mut link_options);
-                } else {
-                    link_options
-                        .runtime_libraries
-                        .push(paths.number_provider_a.clone());
                 }
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
                 let report =
                     self.toolchain
                         .link_executable(&objects, &paths.executable, &link_options)?;
@@ -4022,9 +4020,20 @@ mod tests {
         let root = TestDirectory::new("kiln-native-runtime-dso");
         let output = root.path.join("bin").join("program");
         let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let mut program = stdout_program("dynamic", 7.0);
+        let pattern = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::String("dynamic".to_owned()));
+        let flags = program.constants.len() as u32;
+        program.constants.push(Constant::String(String::new()));
+        program.code.splice(
+            0..0,
+            [Instruction::NewRegExp { pattern, flags }, Instruction::Pop],
+        );
         let report = builder
             .run(
-                &stdout_program("dynamic", 7.0),
+                &program,
                 &NativeBuildOptions {
                     output: output.clone(),
                     profile: NativeProfile::Dev,
@@ -4432,8 +4441,17 @@ int main(void) {
         let dependency = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
-                constants: vec![Constant::Number(42.0_f64.to_bits())],
+                constants: vec![
+                    Constant::Number(42.0_f64.to_bits()),
+                    Constant::String("graph".to_owned()),
+                    Constant::String(String::new()),
+                ],
                 code: vec![
+                    Instruction::NewRegExp {
+                        pattern: 1,
+                        flags: 2,
+                    },
+                    Instruction::Pop,
                     Instruction::Const(0),
                     Instruction::StoreLocal(0),
                     Instruction::Const(0),
@@ -4549,8 +4567,17 @@ int main(void) {
         let edited_dependency = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
-                constants: vec![Constant::Number(43.0_f64.to_bits())],
+                constants: vec![
+                    Constant::Number(43.0_f64.to_bits()),
+                    Constant::String("graph".to_owned()),
+                    Constant::String(String::new()),
+                ],
                 code: vec![
+                    Instruction::NewRegExp {
+                        pattern: 1,
+                        flags: 2,
+                    },
+                    Instruction::Pop,
                     Instruction::Const(0),
                     Instruction::StoreLocal(0),
                     Instruction::Const(0),
