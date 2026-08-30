@@ -180,6 +180,9 @@ pub struct Class {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListElement {
     Item(Expression),
+    /// A hole: `[1, , 3]`. Not an element whose value is `undefined` -- it is *absent*, which
+    /// `in`, `Object.keys` and the array methods can all tell apart.
+    Hole,
     /// `...xs`, which contributes every element of an iterable rather than one value.
     Spread(Expression),
 }

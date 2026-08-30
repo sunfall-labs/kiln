@@ -9,12 +9,13 @@ use std::{collections::HashSet, fmt::Write as _};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
-use kiln_native_number::NUMBER_FORMAT_VERSION;
+use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
 
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
+const _: () = assert!(NUMBER_PARSE_VERSION == 1);
 
 /// A generated C99 translation unit and its deterministic exported entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,16 +162,6 @@ fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
 }
 
 const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
-#if defined(__linux__) && !defined(_GNU_SOURCE)
-#define _GNU_SOURCE 1
-#endif
-#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
-#define _DARWIN_C_SOURCE 1
-#endif
-#include <locale.h>
-#if defined(__APPLE__)
-#include <xlocale.h>
-#endif
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -179,6 +170,7 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
 
 /* C ABI version 1; HostOps ABI version 1. */
 #define KILN_NUMBER_FORMAT_VERSION 1
+#define KILN_NUMBER_PARSE_VERSION 1
 #define KILN_C99_OK 0
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_CONTROL_ERROR (-2)
@@ -214,6 +206,7 @@ typedef struct kiln_host {
 /* Internal link-time runtime contract. The final executable/shared library supplies this symbol
  * from kiln-native-number; it is not part of the public embedding ABI. */
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
+double kiln_string_to_number(const char *bytes, size_t len);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -247,26 +240,6 @@ static kiln_value kiln_c99_number_bits(uint64_t bits) {
     return kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0);
 }
 
-/* Native shared libraries inherit their embedding process's locale. Use an explicit C locale
- * for language-level numeric conversion instead of mutating process-global state with setlocale.
- * macOS and Linux are the supported shared-library targets; other C targets retain the libc
- * fallback until they gain an equivalent per-thread locale API. */
-static double kiln_c99_strtod_c(const char *text, char **end) {
-#if defined(__APPLE__) || defined(__linux__)
-    locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
-    double value;
-    if (c_locale == (locale_t)0) {
-        *end = (char *)text;
-        return NAN;
-    }
-    value = strtod_l(text, end, c_locale);
-    freelocale(c_locale);
-    return value;
-#else
-    return strtod(text, end);
-#endif
-}
-
 static double kiln_c99_as_number(kiln_value value) {
     double number;
     switch (value.tag) {
@@ -278,33 +251,7 @@ static double kiln_c99_as_number(kiln_value value) {
         memcpy(&number, &value.bits, sizeof(number));
         return number;
     case KILN_VALUE_STRING:
-        if (value.ptr == NULL || value.len == 0) {
-            return 0.0;
-        }
-        /* strtod requires NUL termination.  The temporary is bounded to keep malformed host
-         * values from requesting an unbounded allocation in this small scalar backend. */
-        if (value.len > (size_t)-1 - 1) {
-            return NAN;
-        }
-        {
-            char *copy = (char *)malloc(value.len + 1);
-            char *end;
-            double parsed;
-            if (copy == NULL) {
-                return NAN;
-            }
-            memcpy(copy, value.ptr, value.len);
-            copy[value.len] = '\0';
-            parsed = kiln_c99_strtod_c(copy, &end);
-            while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') {
-                ++end;
-            }
-            if (*end != '\0') {
-                parsed = NAN;
-            }
-            free(copy);
-            return parsed;
-        }
+        return kiln_string_to_number(value.ptr, value.len);
     default:
         return NAN;
     }
@@ -730,6 +677,7 @@ fn stack_effect(
         | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::PushHole
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -970,6 +918,7 @@ fn emit_instruction(
         | Instruction::MarkUninitialized(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::PushHole
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -1194,6 +1143,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::DeleteComputed => byte(&mut hash, 47),
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
+            Instruction::PushHole => byte(&mut hash, 55),
             Instruction::GetPrivate(value) => {
                 byte(&mut hash, 53);
                 word(&mut hash, u64::from(*value));
@@ -1433,7 +1383,7 @@ mod tests {
     fn linked_source(module_source: &str, wrapper: &str) -> String {
         format!(
             "{}\n{}\n{}",
-            kiln_native_number::source(),
+            kiln_native_number::runtime_source(),
             module_source,
             wrapper
         )
@@ -1737,8 +1687,13 @@ mod tests {
             0,
         );
         let generated = emit(&program).expect("locale probe emits");
-        assert!(generated.source.contains("strtod_l(text, end, c_locale)"));
+        assert!(generated
+            .source
+            .contains("kiln_string_to_number(value.ptr, value.len)"));
+        assert!(!generated.source.contains("strtod"));
+        assert!(!generated.source.contains("kiln_c99_strtod_c"));
         assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
+        assert!(generated.source.contains("KILN_NUMBER_PARSE_VERSION 1"));
         assert!(
             generated
                 .source
@@ -1748,6 +1703,8 @@ mod tests {
         assert!(!generated.source.contains("setlocale("));
         let wrapper = format!(
             r#"
+#include <locale.h>
+
 static int calls = 0;
 
 static int host_call(void *context, uint16_t operation, uint16_t argc,

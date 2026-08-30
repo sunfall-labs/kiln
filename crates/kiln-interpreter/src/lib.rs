@@ -258,6 +258,13 @@ pub enum Native {
     MapDelete,
     CollectionValues,
     CollectionIteratorNext,
+    /// An absent element of an array: the hole in `[1, , 3]`.
+    ///
+    /// Not `undefined`, because the two are distinguishable: `1 in [1, , 3]` is false while
+    /// `1 in [1, undefined, 3]` is true, and every method that walks elements skips a hole and
+    /// visits an undefined. Reading one still *yields* undefined, which is why the marker never
+    /// escapes into an expression.
+    Hole,
     /// What a `let` or `const` slot holds before its declaration runs.
     ///
     /// A marker rather than `undefined`, because the two are different answers: reading a binding
@@ -1668,7 +1675,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     // An array is already the right shape; anything else goes through the
                     // protocol, so `const [a, b] = someSet` binds what iterating it would yield.
                     let items = match &source {
-                        Value::Array(items) => items.borrow().clone(),
+                        Value::Array(items) => dense_items(&items.borrow()),
                         other => self.drain_iterable(other, current)?,
                     };
                     self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
@@ -1686,7 +1693,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     // protocol for anything else -- the same rule `for-of` follows.
                     match &source {
                         Value::Array(source) => {
-                            let appended = source.borrow().clone();
+                            let appended = dense_items(&source.borrow());
                             items.borrow_mut().extend(appended);
                         }
                         other => {
@@ -1989,6 +1996,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         None => return Err(ExecutionError::LocalOutOfBounds { index: slot }),
                     }
                 }
+                Instruction::PushHole => self.stack.push(Value::Native(Native::Hole)),
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
@@ -2698,7 +2706,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
 
         let mut items = match &source {
             // Already the right shape, and copying beats walking an iterator to the same elements.
-            Value::Array(items) => items.borrow().clone(),
+            Value::Array(items) => dense_items(&items.borrow()),
             other
                 if self
                     .property(other, WellKnown::Iterator.property_key())
@@ -2779,6 +2787,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             let Some(item) = items.borrow().get(index).cloned() else {
                 break;
             };
+            // Every element-walking method skips a hole and visits an undefined.
+            if Self::is_hole(&item) {
+                index += 1;
+                continue;
+            }
             let result = self.call_value(
                 &callback,
                 this_value.clone(),
@@ -4132,15 +4145,21 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     }
 
     /// `object[key]`. Array indices are numeric; everything else is a string key.
+    /// Whether an array slot is a hole rather than a value.
+    fn is_hole(value: &Value) -> bool {
+        matches!(value, Value::Native(Native::Hole))
+    }
+
     fn computed(&self, target: &Value, key: &Value) -> Value {
         if let Value::Array(items) = target
             && let Some(index) = array_index(key)
         {
-            return items
-                .borrow()
-                .get(index)
-                .cloned()
-                .unwrap_or(Value::Undefined);
+            // A hole *reads* as undefined even though it is not one, which is why the marker
+            // never escapes into an expression.
+            return match items.borrow().get(index) {
+                Some(value) if !Self::is_hole(value) => value.clone(),
+                _ => Value::Undefined,
+            };
         }
         self.property(target, &key.property_key())
     }
@@ -4528,7 +4547,8 @@ fn json_stringify(
     let colon = if indent.is_empty() { ":" } else { ": " };
 
     Ok(match value {
-        // Omitted rather than serialised: JSON has no way to spell any of these.
+        // Omitted rather than serialised: JSON has no way to spell any of these. An array
+        // element that is omitted becomes null, which is also what a hole serialises as.
         Value::Undefined | Value::Function(_) | Value::Native(_) | Value::Callback(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
         Value::Symbol(_) => None,
@@ -4669,9 +4689,14 @@ fn call_native(
                     .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
-                // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too.
-                Some(Value::Array(items)) => (0..items.borrow().len())
-                    .map(|index| Value::String(index.to_string()))
+                // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too, and a
+                // hole has no key at all.
+                Some(Value::Array(items)) => items
+                    .borrow()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                    .map(|(index, _)| Value::String(index.to_string()))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -4734,6 +4759,8 @@ fn call_native(
         // A marker, not a callable: every read of it is turned into a ReferenceError before it
         // can reach an expression, so calling one means a read slipped through.
         Native::Uninitialized => unreachable!("the dead-zone marker is never a value"),
+        // Reading a hole yields undefined, so the marker never reaches an expression either.
+        Native::Hole => unreachable!("an array hole is never a value"),
         // Peeled off the same way, for the same reason.
         Native::ArrayFrom => unreachable!("`Array.from` is dispatched by the interpreter"),
         Native::ArrayPush => match receiver {
@@ -5404,7 +5431,16 @@ fn call_native(
                     state
                         .borrow_mut()
                         .set("@@index", Value::Number(index as f64 + 1.0));
-                    iteration_result(value, false)
+                    // An iterator walks *indices*, so it visits a hole -- and what it yields
+                    // there is what a read yields, which is undefined.
+                    iteration_result(
+                        if matches!(value, Value::Native(Native::Hole)) {
+                            Value::Undefined
+                        } else {
+                            value
+                        },
+                        false,
+                    )
                 }
                 None => iteration_result(Value::Undefined, true),
             }
@@ -5518,6 +5554,16 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
 
 /// `key in target`.
 fn has_property(target: &Value, key: &Value) -> bool {
+    // `1 in [1, , 3]` is false and `1 in [1, undefined, 3]` is true: the one place the difference
+    // between a hole and an undefined element is directly observable.
+    if let Value::Array(items) = target
+        && let Some(index) = array_index(key)
+    {
+        return items
+            .borrow()
+            .get(index)
+            .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
+    }
     let name = key.property_key();
     match target {
         Value::Object(object) => object.borrow().get(&name).is_some(),
@@ -5735,11 +5781,13 @@ fn array_index(key: &Value) -> Option<usize> {
 }
 
 /// `Array.prototype.join` semantics: null and undefined become empty, everything else stringifies.
+/// A hole and `undefined` both render as nothing here, which is what `join` and `String()` do.
 fn join(items: &[Value], separator: &str) -> String {
     items
         .iter()
         .map(|item| match item {
             Value::Undefined | Value::Null => String::new(),
+            Value::Native(Native::Hole) => String::new(),
             other => other.to_display_string(),
         })
         .collect::<Vec<_>>()
@@ -5795,6 +5843,8 @@ fn own_properties(value: &Value) -> Vec<(String, Property)> {
             .borrow()
             .iter()
             .enumerate()
+            // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
+            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
             .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
             .collect(),
         Value::String(text) => text
@@ -6188,10 +6238,24 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             if items.is_empty() {
                 return "[]".to_owned();
             }
-            let parts = items
-                .iter()
-                .map(|item| inspect_nested(item, depth + 1, guard.seen))
-                .collect::<Vec<_>>();
+            // A run of holes is reported as a count rather than repeated, which is what node
+            // does and what makes a sparse array readable at all.
+            let mut parts: Vec<String> = Vec::new();
+            let mut holes = 0usize;
+            for item in items.iter() {
+                if matches!(item, Value::Native(Native::Hole)) {
+                    holes += 1;
+                    continue;
+                }
+                if holes > 0 {
+                    parts.push(empty_items(holes));
+                    holes = 0;
+                }
+                parts.push(inspect_nested(item, depth + 1, guard.seen));
+            }
+            if holes > 0 {
+                parts.push(empty_items(holes));
+            }
             format!("[ {} ]", parts.join(", "))
         }
         Value::Object(object) => {
@@ -6264,6 +6328,33 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         return "{}".to_owned();
     }
     format!("{{ {} }}", parts.join(", "))
+}
+
+/// An array's elements with every hole replaced by `undefined`.
+///
+/// Whatever *reads* an element gets undefined, so anything that copies elements out in bulk --
+/// spread, `Array.from`, an iterator -- has to do the same replacement a single read does, or
+/// the marker escapes into a value.
+fn dense_items(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .map(|item| {
+            if matches!(item, Value::Native(Native::Hole)) {
+                Value::Undefined
+            } else {
+                item.clone()
+            }
+        })
+        .collect()
+}
+
+/// How a console reports a run of holes: `<1 empty item>` or `<3 empty items>`.
+fn empty_items(count: usize) -> String {
+    if count == 1 {
+        "<1 empty item>".to_owned()
+    } else {
+        format!("<{count} empty items>")
+    }
 }
 
 /// A property name as a console writes it: bare when it is a plain identifier, quoted otherwise.
