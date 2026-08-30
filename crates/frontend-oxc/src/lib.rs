@@ -440,12 +440,22 @@ impl Lowerer {
             .map(|declarator| {
                 let declarator_span = span(declarator.span);
                 let pattern = self.pattern(&declarator.id, declarator_span);
+                let mut initializer = declarator
+                    .init
+                    .as_ref()
+                    .map(|expression| self.expression(expression));
+                // `const f = () => {}` gives the function the name `f`. The specification calls
+                // this named evaluation; the practical effect is that a bundle full of arrows
+                // assigned to variables produces a readable stack trace instead of a column of
+                // `<anonymous>`.
+                if let (kiln_hir::Pattern::Identifier(name), Some(value)) =
+                    (&pattern, &mut initializer)
+                {
+                    name_anonymous_function(value, name);
+                }
                 HirVariableDeclarator {
                     pattern,
-                    initializer: declarator
-                        .init
-                        .as_ref()
-                        .map(|expression| self.expression(expression)),
+                    initializer,
                     span: declarator_span,
                 }
             })
@@ -624,12 +634,11 @@ impl Lowerer {
                 }
                 HirExpressionKind::SuperCall { arguments }
             }
-            Expression::CallExpression(expression) if !expression.optional => {
-                HirExpressionKind::Call {
-                    callee: Box::new(self.expression(&expression.callee)),
-                    arguments: self.arguments(&expression.arguments),
-                }
-            }
+            Expression::CallExpression(expression) => HirExpressionKind::Call {
+                callee: Box::new(self.expression(&expression.callee)),
+                arguments: self.arguments(&expression.arguments),
+                optional: expression.optional,
+            },
             Expression::StaticMemberExpression(member)
                 if !member.optional && matches!(&member.object, Expression::Super(_)) =>
             {
@@ -805,16 +814,11 @@ impl Lowerer {
             // than inferred later from where the optional links happen to sit.
             Expression::ChainExpression(chain) => {
                 let inner = match &chain.expression {
-                    oxc_ast::ast::ChainElement::CallExpression(call) if call.optional => {
-                        // `a?.()` short-circuits on the *callee*, which for a method call would
-                        // have to keep the receiver alive across the jump. Refused rather than
-                        // silently calling with the wrong `this`.
-                        self.unsupported_expression("optional call", expression_span)
-                    }
                     oxc_ast::ast::ChainElement::CallExpression(call) => HirExpression {
                         kind: HirExpressionKind::Call {
                             callee: Box::new(self.expression(&call.callee)),
                             arguments: self.arguments(&call.arguments),
+                            optional: call.optional,
                         },
                         span: expression_span,
                     },
@@ -1293,9 +1297,15 @@ impl Lowerer {
                 };
                 kiln_hir::ObjectKey::Static(key.to_string())
             };
+            let mut value = self.expression(&property.value);
+            // `{ handle: () => {} }` names the function `handle`, for the same reason a
+            // variable initialiser does.
+            if let kiln_hir::ObjectKey::Static(name) = &key {
+                name_anonymous_function(&mut value, name);
+            }
             members.push(kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                 key,
-                value: self.expression(&property.value),
+                value,
                 span: span(property.span),
             }));
         }
@@ -1492,6 +1502,19 @@ fn span(value: Span) -> HirSpan {
     HirSpan::new(value.start, value.end)
 }
 
+/// Give an anonymous function expression the name of the binding it is being assigned to.
+///
+/// Only functions: a class expression's name becomes a binding inside its own body, so inventing
+/// one would invent a scope the program did not write. A function expression's name is metadata
+/// -- `f.name` and a stack frame -- which is exactly what is missing without this.
+fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
+    if let kiln_hir::ExpressionKind::Function(function) = &mut value.kind
+        && function.name.is_none()
+    {
+        function.name = Some(name.to_owned());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,7 +1664,10 @@ mod tests {
         // If a case here starts failing, the construct was implemented: delete the line.
         let cases = [
             ("const value = tag`x`;", "tagged template literal"),
-            ("const value = a?.();", "optional call"),
+            (
+                "const value = import(\"./x.js\");",
+                "dynamic import expression",
+            ),
         ];
         for (source, expected) in cases {
             let module = parse("module.js", source);

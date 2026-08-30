@@ -20,7 +20,7 @@ pub const MANIFEST_FILE_NAME: &str = "manifest.toml";
 
 /// One `[[test]]` entry.
 ///
-/// Fields the runner does not read — `catches`, `notes`, `effect_api`, `bundle` — are prose or
+/// Fields the runner does not read — `catches`, `notes`, `effect_api` — are prose or
 /// provenance for a human and are intentionally not modelled: parsing them would freeze an
 /// editorial convention into code that has no use for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,13 @@ pub struct ManifestTest {
     pub id: String,
     /// Program source, relative to the manifest's own directory.
     pub source: PathBuf,
+    /// A single-file build of `source`, relative to the manifest's own directory.
+    ///
+    /// Read, unlike `status`, because it names a *file* rather than an expectation: whether the
+    /// bundle is there is a fact about the working tree, and the runner checks it rather than
+    /// believing it. The bundles are not committed, so a checkout without them skips these tests
+    /// exactly as before and one that has run `conformance/effect/build.sh` runs them.
+    pub bundle: Option<PathBuf>,
     /// JavaScript semantics the test would stop passing without; the changed-test selector's key.
     pub features: Vec<String>,
     /// What the corpus records about the test's runnability.  The runner does not read this: an
@@ -87,6 +94,20 @@ impl Manifest {
         self.directory.join(&test.source)
     }
 
+    /// What to actually run: the built bundle when the working tree has one, else the source.
+    pub fn program_path(&self, test: &ManifestTest) -> PathBuf {
+        match &test.bundle {
+            Some(bundle) => {
+                let built = self.directory.join(bundle);
+                if built.is_file() {
+                    return built;
+                }
+                self.source_path(test)
+            }
+            None => self.source_path(test),
+        }
+    }
+
     /// The tests whose program lives at or below `root`.
     ///
     /// This is what lets one manifest at the top of a corpus serve `kiln test conformance/guard`
@@ -102,6 +123,7 @@ fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
     Ok(ManifestTest {
         id: required_string(table, "id")?.to_owned(),
         source: PathBuf::from(required_string(table, "source")?),
+        bundle: optional_string(table, "bundle")?.map(PathBuf::from),
         features: optional_strings(table, "features")?,
         status: optional_string(table, "status")?.map(str::to_owned),
         expected_stdout: required_string(table, "expected_stdout")?.to_owned(),

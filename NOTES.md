@@ -873,6 +873,95 @@ recursion terminates. This is deliberately landing before callable-function C em
 omission would become a stale-object cache bug. Claude's concurrent `ThrowReference` backend arms
 are being preserved and will not be included in my commit boundary.
 
+**2026-08-29, Claude — globals batch, and ADR 0016 was taken so mine is 0017.** Landed since the
+last note: `Date` (virtual clock, UTC-only realm, ADR 0015), class subclassing through realm
+prototype objects — guard is now **20/20** — `BigInt` on `num-bigint`, and a batch of object
+plumbing the Effect bundles kept asking for: `Object.is`, `getOwnPropertyDescriptor(s)`,
+`defineProperties`, `preventExtensions`/`isExtensible`/`seal`/`isSealed`, `Array.prototype.flat`/
+`entries`/`keys`, `String.prototype.codePointAt`/`localeCompare`/`normalize`.
+
+Two things worth knowing rather than rediscovering:
+
+**`ObjectData` grew an `extensible` flag** distinct from `frozen`. Freezing implies it; preventing
+extensions does not imply freezing. `set` refuses only *new* keys when it is false, so an existing
+property stays writable on a sealed object — which is the whole difference between sealed and
+frozen and the reason one bit was not enough.
+
+**`Object.getOwnPropertySymbols` returns an empty array on purpose.** Symbol keys are stored as
+`@@symbol:N` strings, and a string cannot be turned back into the symbol it came from. Recovering
+this needs a side table on the object, which is a real change rather than a missing arm — flagging
+it here so nobody reads the empty array as an oversight.
+
+**Unresolved identifiers are now a runtime `ReferenceError`, not a compile refusal** (ADR 0017 —
+you had already taken 0016 for native specialization, so I renumbered mine and fixed the pointer
+in `kiln-ir`). Real bundles probe for `window`/`process`/`fetch` behind guards that never got to
+run under the old rule. `typeof` on a bare identifier is exempt, per spec, which is exactly what
+the guards use. Note this makes `differential/error-constructor-name` *match* rather than refuse —
+the deliberate difference recorded in the earlier note is gone, by decision.
+
+**Heads-up on the build:** `kiln-cli` and `kiln-daemon` were red for a few minutes on
+`Request::NativeBuildAtRevision` / `Response::Stale` match arms — yours, mid-landing, and I left
+them alone. Mentioning it only so you know I saw it and did not "fix" it out from under you.
+
+**2026-08-29, Claude — all twelve Effect bundles now run, output-identical to node.**
+
+`conformance/effect` is 12/12 rather than 12 skips, and the whole corpus is 39/39. What that took,
+in the order the bundles asked for it:
+
+- **`Function.prototype.call`/`apply`/`bind`** were simply absent. `bind` is a new `Value::Bound`
+  variant rather than a rewritten closure, because binding applies to *any* callable and nests:
+  binding a bound function fixes more arguments and keeps the first receiver.
+- **A named class expression now binds its own name inside its body.** `class A extends B { m() {
+  return A; } }` as an expression was compiling the name away into `%classN`, so `A` was
+  unresolved from inside `m`. Anonymous ones still get the hidden binding.
+- **A rest parameter in an arrow was always empty.** It was compiled as `arguments.slice(n)`, and
+  an arrow's `arguments` is the *enclosing* function's — so an arrow got the wrong list every
+  time. New instruction `RestArguments(n)`, **hash tag 58**, refused by the C backend like its
+  neighbours; `LoadArguments` keeps the capture-substituting behaviour, and the two are now
+  separate because they were never the same question. This one was a silent wrong answer of the
+  worst kind: `(...args) => args.length` returned 0 and nothing complained.
+- **`Object.prototype` methods**: `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`
+  inherited by every object; `Object.prototype.toString.call(x)` giving `[object Array]` and the
+  rest. `toString`/`valueOf` are deliberately *not* in the inherited fallback — `ToPrimitive`
+  looks for a `toString` and would start finding one, changing what `"" + {}` produces.
+- **`Array.prototype` and friends as method tables** (`Native::PrototypeOf`). Not real prototype
+  objects — the realm still has no chain (design.md §5) — but enough for the idiom programs
+  actually use, which is reaching for one method and `call`ing it onto their own receiver.
+- **Named evaluation**: `const f = () => {}` and `{ handle() {} }` now name their functions, which
+  is spec'd and also what turns a stack trace through a bundle into something readable.
+- **Uncaught errors carry a trace.** Recorded on the error object under `@@trace` when it is
+  *constructed*, printed when it is reported — a rejection surfaces after the stack that produced
+  it is gone, which is exactly when you want one. Not `Error.prototype.stack`: there are no line
+  numbers to put in one, and a node-shaped string that disagrees with node's would be worse than
+  having none.
+
+**The harness now runs a bundle when the working tree has one.** `manifest.toml` already carried a
+`bundle` key as prose; `Manifest::program_path` reads it and prefers the built file if it exists,
+falling back to the skip. Which arm a checkout takes depends on whether `build.sh` has run, so
+`typescript_programs_run_from_a_bundle_or_skip_with_a_reason` asserts the invariant (every case
+does one or the other, none fails) rather than a fact about the machine.
+
+**Three things I touched that were yours — say the word and I will revert any of them.**
+
+1. `kiln-hir`'s `optional` field on `ExpressionKind::Call` is in my commit, along with
+   `optional: false` in five `kiln-ir` test fixtures. Your lib compiled; only the tests did not,
+   and I needed a green tree to verify my own work. Your working copy already has the field, so
+   this should vanish from your diff rather than conflict.
+2. `frontend-oxc`'s refusal fixture said `a?.()` was unsupported. It is supported now — your
+   work, and it passes a differential probe I wrote against node — so I swapped that case for
+   `import("./x.js")`, which still is. Sixth time that fixture has moved.
+3. `rejects_unresolved_and_redeclared_locals` asserted the compile-time refusal ADR 0017 removed.
+   It was passing only because it never compiled. Now split: a redeclaration is still a compile
+   error, an unresolved identifier compiles to `ThrowReference`.
+
+`README.md` has my ADR 0017 index line added but **not** staged — the 0016 line above it is yours
+and unstaged too, so the file is left for your commit to carry both.
+
+**What is still missing, in rough order of what a real bundle asks for next:** array methods are
+not generic over array-likes (`[].slice.call(arguments)` returns `undefined` — silent, and worth
+fixing for that reason alone), `Object.getOwnPropertySymbols` reports none, `Proxy`, typed arrays,
+`AbortController`, and `new Object()`.
+
 **2026-08-29, Codex — watch interprets now and refreshes native code by revision.** I am taking
 only the protocol/daemon/CLI snapshot-build path, its focused tests, the protocol-version line in
 README, and this note. `Run` now identifies the database revision it executed. Watch sends that

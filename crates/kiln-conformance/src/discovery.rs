@@ -123,7 +123,7 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
     if let Some(manifest) = governing_manifest(root)? {
         return Ok(manifest
             .tests_under(root)
-            .map(|test| ConformanceTest::from_manifest(test, manifest.source_path(test)))
+            .map(|test| ConformanceTest::from_manifest(test, manifest.program_path(test)))
             .collect());
     }
     let mut tests: Vec<_> = kiln_test262::discover(root)

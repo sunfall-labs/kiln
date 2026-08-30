@@ -357,6 +357,78 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
     return left.bits == right.bits;
 }
 
+static int kiln_c99_loose_equal(kiln_value left, kiln_value right) {
+    if (left.tag == right.tag) {
+        return kiln_c99_strict_equal(left, right);
+    }
+    if ((left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL) &&
+        (right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL)) {
+        return 1;
+    }
+    if (left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
+        right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL) {
+        return 0;
+    }
+    if (left.tag == KILN_VALUE_BOOLEAN) {
+        left = kiln_c99_number(left.bits != 0 ? 1.0 : 0.0);
+    }
+    if (right.tag == KILN_VALUE_BOOLEAN) {
+        right = kiln_c99_number(right.bits != 0 ? 1.0 : 0.0);
+    }
+    if ((left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_STRING) ||
+        (left.tag == KILN_VALUE_STRING && right.tag == KILN_VALUE_NUMBER)) {
+        return kiln_c99_as_number(left) == kiln_c99_as_number(right);
+    }
+    return kiln_c99_strict_equal(left, right);
+}
+
+static uint32_t kiln_c99_to_uint32(double value) {
+    double wrapped;
+    if (!isfinite(value) || value == 0.0) {
+        return UINT32_C(0);
+    }
+    wrapped = fmod(trunc(value), 4294967296.0);
+    if (wrapped < 0.0) {
+        wrapped += 4294967296.0;
+    }
+    return (uint32_t)wrapped;
+}
+
+static double kiln_c99_signed32(uint32_t value) {
+    return value <= UINT32_C(0x7fffffff)
+        ? (double)value
+        : (double)value - 4294967296.0;
+}
+
+static uint32_t kiln_c99_shift_right(uint32_t value, uint32_t count) {
+    count &= UINT32_C(31);
+    if (count == 0 || (value & UINT32_C(0x80000000)) == 0) {
+        return value >> count;
+    }
+    return (value >> count) | (~UINT32_C(0) << (UINT32_C(32) - count));
+}
+
+static kiln_value kiln_c99_typeof(kiln_value value) {
+    static const char undefined_text[] = "undefined";
+    static const char object_text[] = "object";
+    static const char boolean_text[] = "boolean";
+    static const char number_text[] = "number";
+    static const char string_text[] = "string";
+    switch (value.tag) {
+    case KILN_VALUE_NULL:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+    case KILN_VALUE_BOOLEAN:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, boolean_text, sizeof(boolean_text) - 1);
+    case KILN_VALUE_NUMBER:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
+    case KILN_VALUE_STRING:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
+    case KILN_VALUE_UNDEFINED:
+    default:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
+    }
+}
+
 /* Decode the UTF-8 used at the C boundary into Unicode scalar values.  Generated constants are
  * valid UTF-8, and host strings are required to use the same representation.  Treating malformed
  * bytes as U+FFFD keeps comparison bounded and deterministic if a host violates that contract. */
@@ -465,6 +537,9 @@ static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
     case 1: return kiln_c99_number(kiln_c99_as_number(value));
     case 2: return kiln_c99_number(-kiln_c99_as_number(value));
     case 3: return kiln_c99_boolean(!kiln_c99_truthy(value));
+    case 4: return kiln_c99_typeof(value);
+    case 5: return kiln_c99_number(kiln_c99_signed32(~kiln_c99_to_uint32(kiln_c99_as_number(value))));
+    case 6: return kiln_c99_undefined();
     default: return kiln_c99_undefined();
     }
 }
@@ -503,6 +578,26 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
             return kiln_c99_boolean(kiln_c99_string_compare(left, right) >= 0);
         }
         return kiln_c99_boolean(kiln_c99_as_number(left) >= kiln_c99_as_number(right));
+    case 15: return kiln_c99_boolean(kiln_c99_loose_equal(left, right));
+    case 16: return kiln_c99_boolean(!kiln_c99_loose_equal(left, right));
+    case 17: return kiln_c99_number(kiln_c99_signed32(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)) &
+        kiln_c99_to_uint32(kiln_c99_as_number(right))));
+    case 18: return kiln_c99_number(kiln_c99_signed32(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)) |
+        kiln_c99_to_uint32(kiln_c99_as_number(right))));
+    case 19: return kiln_c99_number(kiln_c99_signed32(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)) ^
+        kiln_c99_to_uint32(kiln_c99_as_number(right))));
+    case 20: return kiln_c99_number(kiln_c99_signed32(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)) <<
+        (kiln_c99_to_uint32(kiln_c99_as_number(right)) & UINT32_C(31))));
+    case 21: return kiln_c99_number(kiln_c99_signed32(kiln_c99_shift_right(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)),
+        kiln_c99_to_uint32(kiln_c99_as_number(right)))));
+    case 22: return kiln_c99_number((double)(
+        kiln_c99_to_uint32(kiln_c99_as_number(left)) >>
+        (kiln_c99_to_uint32(kiln_c99_as_number(right)) & UINT32_C(31))));
     default: return kiln_c99_undefined();
     }
 }
@@ -682,6 +777,7 @@ fn stack_effect(
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
+        | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -691,6 +787,7 @@ fn stack_effect(
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
         | Instruction::LoadArguments
+        | Instruction::RestArguments(_)
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
@@ -718,6 +815,9 @@ fn stack_effect(
                 ))
             }
         }
+        Instruction::Binary(BinaryOp::In | BinaryOp::InstanceOf) => Err(EmitError::Unsupported {
+            feature: "reference operators in the native backend".to_string(),
+        }),
         Instruction::Binary(_) => {
             if height < 2 {
                 Err(underflow(2))
@@ -924,6 +1024,7 @@ fn emit_instruction(
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
+        | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
@@ -933,6 +1034,7 @@ fn emit_instruction(
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
         | Instruction::LoadArguments
+        | Instruction::RestArguments(_)
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
@@ -1140,6 +1242,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::Yield => byte(&mut hash, 42),
             Instruction::Throw => byte(&mut hash, 40),
             Instruction::LoadArguments => byte(&mut hash, 37),
+            Instruction::RestArguments(count) => {
+                byte(&mut hash, 58);
+                word(&mut hash, u64::from(*count));
+            }
             Instruction::LoadThis => byte(&mut hash, 33),
             Instruction::Dup2 => byte(&mut hash, 27),
             Instruction::IterableToArray => byte(&mut hash, 44),
@@ -1149,6 +1255,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
             Instruction::PushHole => byte(&mut hash, 55),
+            Instruction::ThrowReference(value) => {
+                byte(&mut hash, 57);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::NewRegExp { pattern, flags } => {
                 byte(&mut hash, 56);
                 word(&mut hash, u64::from(*pattern));
@@ -2054,6 +2164,221 @@ int main(void) {{
             "generated C did not compile:\n{}",
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+
+    #[test]
+    fn executable_scalar_operators_match_javascript() {
+        fn push_constant(constants: &mut Vec<Constant>, value: Constant) -> u32 {
+            let index = constants.len() as u32;
+            constants.push(value);
+            index
+        }
+
+        fn check_unary(
+            constants: &mut Vec<Constant>,
+            code: &mut Vec<Instruction>,
+            failures: &mut Vec<usize>,
+            operator: UnaryOp,
+            input: Constant,
+            expected: Constant,
+        ) {
+            let input = push_constant(constants, input);
+            let expected = push_constant(constants, expected);
+            code.extend([
+                Instruction::Const(input),
+                Instruction::Unary(operator),
+                Instruction::Const(expected),
+                Instruction::Binary(BinaryOp::StrictEqual),
+            ]);
+            failures.push(code.len());
+            code.push(Instruction::JumpIfFalse(0));
+        }
+
+        fn check_binary(
+            constants: &mut Vec<Constant>,
+            code: &mut Vec<Instruction>,
+            failures: &mut Vec<usize>,
+            operator: BinaryOp,
+            left: Constant,
+            right: Constant,
+            expected: Constant,
+        ) {
+            let left = push_constant(constants, left);
+            let right = push_constant(constants, right);
+            let expected = push_constant(constants, expected);
+            code.extend([
+                Instruction::Const(left),
+                Instruction::Const(right),
+                Instruction::Binary(operator),
+                Instruction::Const(expected),
+                Instruction::Binary(BinaryOp::StrictEqual),
+            ]);
+            failures.push(code.len());
+            code.push(Instruction::JumpIfFalse(0));
+        }
+
+        let number = |value: f64| Constant::Number(value.to_bits());
+        let mut constants = Vec::new();
+        let mut code = Vec::new();
+        let mut failures = Vec::new();
+
+        for (input, expected) in [
+            (Constant::Undefined, "undefined"),
+            (Constant::Null, "object"),
+            (Constant::Boolean(true), "boolean"),
+            (number(1.0), "number"),
+            (Constant::String("x".into()), "string"),
+        ] {
+            check_unary(
+                &mut constants,
+                &mut code,
+                &mut failures,
+                UnaryOp::TypeOf,
+                input,
+                Constant::String(expected.into()),
+            );
+        }
+        check_unary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            UnaryOp::BitwiseNot,
+            number(5.0),
+            number(-6.0),
+        );
+        check_unary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            UnaryOp::BitwiseNot,
+            number(4_294_967_296.0),
+            number(-1.0),
+        );
+        check_unary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            UnaryOp::Void,
+            number(42.0),
+            Constant::Undefined,
+        );
+
+        for (left, right, expected) in [
+            (Constant::Null, Constant::Undefined, true),
+            (number(0.0), Constant::Boolean(false), true),
+            (Constant::String("42".into()), number(42.0), true),
+            (Constant::String(String::new()), number(0.0), true),
+            (Constant::Null, number(0.0), false),
+        ] {
+            check_binary(
+                &mut constants,
+                &mut code,
+                &mut failures,
+                BinaryOp::LooseEqual,
+                left,
+                right,
+                Constant::Boolean(expected),
+            );
+        }
+        check_binary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            BinaryOp::LooseNotEqual,
+            number(f64::NAN),
+            number(f64::NAN),
+            Constant::Boolean(true),
+        );
+
+        for (operator, left, right, expected) in [
+            (BinaryOp::BitwiseAnd, 5.0, 3.0, 1.0),
+            (BinaryOp::BitwiseOr, 5.0, 2.0, 7.0),
+            (BinaryOp::BitwiseXor, 5.0, 3.0, 6.0),
+            (BinaryOp::ShiftLeft, 1.0, 31.0, -2_147_483_648.0),
+            (BinaryOp::ShiftLeft, 1.0, 32.0, 1.0),
+            (BinaryOp::ShiftRight, -1.0, 1.0, -1.0),
+            (BinaryOp::UnsignedShiftRight, -1.0, 1.0, 2_147_483_647.0),
+            (BinaryOp::BitwiseOr, 4_294_967_296.0, 0.0, 0.0),
+            (BinaryOp::BitwiseOr, -1.9, 0.0, -1.0),
+            (BinaryOp::BitwiseOr, f64::INFINITY, 0.0, 0.0),
+        ] {
+            check_binary(
+                &mut constants,
+                &mut code,
+                &mut failures,
+                operator,
+                number(left),
+                number(right),
+                number(expected),
+            );
+        }
+
+        let success = push_constant(&mut constants, Constant::Boolean(true));
+        code.extend([Instruction::Const(success), Instruction::Return]);
+        let failure = code.len() as u32;
+        let failed = push_constant(&mut constants, Constant::Boolean(false));
+        code.extend([Instruction::Const(failed), Instruction::Return]);
+        for instruction in failures {
+            code[instruction] = Instruction::JumpIfFalse(failure);
+        }
+
+        let generated = emit(&program(constants, code, 0)).expect("scalar operators emit");
+        let executable = std::env::temp_dir().join(format!(
+            "kiln-backend-c-operators-{}-{}",
+            std::process::id(),
+            generated.program_hash
+        ));
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != 0) return 2; return !(result.tag == KILN_VALUE_BOOLEAN && result.bits == 1); }}\n",
+            generated.symbol
+        );
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(&executable)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+            .expect("operator source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated operator C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated operator executable runs");
+        let _ = std::fs::remove_file(&executable);
+        assert!(
+            run.status.success(),
+            "generated scalar operator returned the wrong result"
+        );
+    }
+
+    #[test]
+    fn reference_operators_are_refused_until_native_values_can_carry_references() {
+        for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
+            let result = emit(&program(
+                vec![Constant::Null],
+                vec![
+                    Instruction::Const(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(operator),
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            assert!(
+                matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("reference operators")),
+                "{operator:?} must not emit a silent undefined result"
+            );
+        }
     }
 
     #[test]
