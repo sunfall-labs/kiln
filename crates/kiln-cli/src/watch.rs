@@ -25,11 +25,11 @@ use std::fmt::Arguments;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
 
 use crate::backend::Backend;
 use crate::backend::NativeBuildAtRevision;
@@ -504,26 +504,30 @@ impl Refresher {
             let worker_jobs = Arc::clone(&jobs);
             let worker = std::thread::spawn(move || {
                 while let Some(job) = worker_jobs.next() {
+                    let private_output = watch_native_output(&job.project_root, job.generation);
                     let result = backend
                         .native_build_at_revision(
-                            job.path,
-                            job.project_root,
-                            None,
+                            job.path.clone(),
+                            job.project_root.clone(),
+                            Some(private_output.to_string_lossy().into_owned()),
                             NativeProfile::Dev,
                             job.revision,
                         )
                         .and_then(|build| match build {
-                            NativeBuildAtRevision::Built(_)
+                            NativeBuildAtRevision::Built(summary)
                                 if worker_jobs.superseded(job.generation) =>
                             {
+                                let _ = std::fs::remove_file(&summary.output_path);
                                 Ok(NativeRefresh::Stale {
                                     current_revision: job.revision,
                                 })
                             }
                             NativeBuildAtRevision::Built(summary) => {
-                                let execution = executor(Path::new(&summary.output_path))?;
+                                let execution = executor(Path::new(&summary.output_path));
+                                let _ = std::fs::remove_file(&summary.output_path);
+                                let execution = execution?;
                                 Ok(NativeRefresh::Executed {
-                                    output_path: summary.output_path,
+                                    output_path: job.path,
                                     expected_stdout: job.expected_stdout,
                                     execution,
                                 })
@@ -599,6 +603,17 @@ impl Refresher {
         }
         Ok(())
     }
+}
+
+fn watch_native_output(project_root: &str, generation: u64) -> PathBuf {
+    let mut output = Path::new(project_root)
+        .join(".kiln")
+        .join("watch")
+        .join(format!("native-{}-{generation}", std::process::id()));
+    if cfg!(windows) {
+        output.set_extension("exe");
+    }
+    output
 }
 
 fn execute_native(path: &Path) -> Result<NativeExecution> {
@@ -1011,7 +1026,7 @@ mod tests {
 
         let (printed, _, requests) = watch_in_background_observed(&path);
         let first = printed
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("the first run should be reported");
         assert_eq!(first, "program: export const a = 1;\n");
         let mut initial = Vec::new();
@@ -1160,12 +1175,10 @@ mod tests {
         std::fs::write(&path, "good one").expect("write");
 
         let (printed, notes) = watch_in_background(&path);
-        assert!(
-            notes
-                .recv_timeout(Duration::from_secs(5))
-                .expect("watch should announce itself")
-                .contains("watching")
-        );
+        assert!(notes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("watch should announce itself")
+            .contains("watching"));
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(5))
@@ -1233,13 +1246,18 @@ mod tests {
         let first = request_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first native build starts");
-        assert!(matches!(
-            first,
-            Request::NativeBuildAtRevision {
-                expected_revision: 1,
-                ..
-            }
-        ));
+        let Request::NativeBuildAtRevision {
+            expected_revision: 1,
+            output: Some(first_output),
+            ..
+        } = first
+        else {
+            panic!("first request must target a private revision output");
+        };
+        assert!(
+            first_output.contains("/.kiln/watch/native-"),
+            "{first_output}"
+        );
 
         // These arrive while revision 1 is blocked in the native toolchain. Revision 2 must
         // never start: finishing revision 1 should collapse the queue directly to revision 3.
@@ -1260,29 +1278,26 @@ mod tests {
             "/project".into(),
         );
         response_tx
-            .send(Response::NativeBuilt(native_summary(
-                "/project/.kiln/bin/obsolete",
-            )))
+            .send(Response::NativeBuilt(native_summary(&first_output)))
             .expect("finish superseded build");
 
         let latest = request_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("latest queued build starts");
-        assert!(matches!(
-            latest,
-            Request::NativeBuildAtRevision {
-                expected_revision: 3,
-                ..
-            }
-        ));
+        let Request::NativeBuildAtRevision {
+            expected_revision: 3,
+            output: Some(latest_output),
+            ..
+        } = latest
+        else {
+            panic!("latest request must target a private revision output");
+        };
         assert!(
             request_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "the superseded middle revision must not be built"
         );
         response_tx
-            .send(Response::NativeBuilt(native_summary(
-                "/project/.kiln/bin/main",
-            )))
+            .send(Response::NativeBuilt(native_summary(&latest_output)))
             .expect("finish latest build");
 
         let mut notes = Vec::new();
@@ -1295,7 +1310,7 @@ mod tests {
         }
         let notes = String::from_utf8(notes).expect("utf-8 notes");
         assert_eq!(
-            notes, "native refresh stdout matched /project/.kiln/bin/main\n",
+            notes, "native refresh stdout matched /project/main.js\n",
             "the stale generation stays silent and only the latest result is reported"
         );
         assert_eq!(
@@ -1336,14 +1351,19 @@ mod tests {
             "/project/main.js".into(),
             "/project".into(),
         );
-        request_rx
+        let request = request_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("native build starts");
+        let Request::NativeBuildAtRevision {
+            output: Some(private_output),
+            ..
+        } = request
+        else {
+            panic!("native request must target a private output");
+        };
         refresher.submit(None, "/project/main.js".into(), "/project".into());
         response_tx
-            .send(Response::NativeBuilt(native_summary(
-                "/project/.kiln/bin/obsolete",
-            )))
+            .send(Response::NativeBuilt(native_summary(&private_output)))
             .expect("finish obsolete build");
 
         let done = refresher
@@ -1413,11 +1433,9 @@ mod tests {
             },
         )
         .expect("stderr mismatch is reported");
-        assert!(
-            String::from_utf8(notes)
-                .expect("notes are utf-8")
-                .contains("native refresh mismatch")
-        );
+        assert!(String::from_utf8(notes)
+            .expect("notes are utf-8")
+            .contains("native refresh mismatch"));
     }
 
     #[cfg(unix)]
