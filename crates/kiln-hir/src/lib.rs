@@ -74,6 +74,10 @@ pub struct Function {
     pub arrow: bool,
     /// A generator. Calling it produces an object rather than running the body.
     pub generator: bool,
+    /// An `async` function. Calling it starts the body and hands back a promise, and each `await`
+    /// inside it suspends exactly the way a `yield` does -- which is why the two share a
+    /// representation from here down.
+    pub asynchronous: bool,
     pub parameters: Vec<Parameter>,
     /// `...rest`, which binds an array of the arguments beyond the declared parameters. Separate
     /// from `parameters` because it takes no positional slot and its arity is not fixed.
@@ -507,6 +511,12 @@ pub enum ExpressionKind {
         quasis: Vec<String>,
         expressions: Vec<Expression>,
     },
+    /// `await value`, which suspends until the value settles.
+    ///
+    /// Not lowered to `yield` in the frontend even though that is what it becomes: `await` and
+    /// `yield` are different in the source and a diagnostic that named the wrong one would be
+    /// confusing.
+    Await(Box<Expression>),
     /// `delete object.property`.
     ///
     /// Not a unary operator over a member expression: the operand must not be *read*, and a

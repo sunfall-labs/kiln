@@ -264,6 +264,10 @@ pub struct Program {
 /// One compiled function body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionProto {
+    /// An `async` function: calling it starts the body and hands back a promise. Its body is
+    /// compiled as a generator, because `await` suspends exactly as `yield` does -- the machine
+    /// difference is only in who resumes it.
+    pub asynchronous: bool,
     /// Diagnostics and stack traces only; calls go by index.
     pub name: Option<String>,
     /// An arrow function: it has no `this` of its own and captures the defining scope's.
@@ -2183,6 +2187,22 @@ impl Compiler {
                 }
                 self.expression(last);
             }
+            // `await` is a `yield` whose resumption the async driver supplies rather than the
+            // program: the same suspension, resumed by a promise settling instead of a `next`.
+            ExpressionKind::Await(value) => {
+                if !self.compiling_function() {
+                    // Top-level `await` needs the module itself to be resumable, which is a
+                    // different shape from a function that suspends.
+                    self.error(
+                        Some(expression.span),
+                        "top-level `await` is not supported yet",
+                    );
+                    self.push_constant(Constant::Undefined);
+                    return;
+                }
+                self.expression(value);
+                self.code.push(Instruction::Yield);
+            }
             ExpressionKind::Chain { expression: inner } => {
                 self.chains.push(Vec::new());
                 self.expression(inner);
@@ -2533,6 +2553,7 @@ impl Compiler {
             // classes that declared none.
             None => Function {
                 rest: None,
+                asynchronous: false,
                 name: Some(name.clone()),
                 arrow: false,
                 generator: false,
@@ -2879,7 +2900,11 @@ impl Compiler {
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
-            generator: function.generator,
+            asynchronous: function.asynchronous,
+            // An async body suspends at every `await`, which is a `yield` in every way the
+            // machine cares about -- so it is compiled as a generator and driven by the async
+            // driver rather than by the program.
+            generator: function.generator || function.asynchronous,
             parameter_count,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),
@@ -3742,7 +3767,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
         }
-        ExpressionKind::Chain { expression } => {
+        ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             collect_identifiers(expression, names, collecting);
         }
         ExpressionKind::Template { expressions, .. } => {
@@ -3839,7 +3864,9 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::SuperCall { arguments } => arguments
             .iter()
             .any(|argument| expression_references(argument, name)),
-        ExpressionKind::Chain { expression } => expression_references(expression, name),
+        ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
+            expression_references(expression, name)
+        }
         ExpressionKind::Template { expressions, .. } => expressions
             .iter()
             .any(|expression| expression_references(expression, name)),
@@ -3901,6 +3928,7 @@ mod tests {
 
     fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
         statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            asynchronous: false,
             name: Some(name.to_owned()),
             arrow: false,
             generator: false,
@@ -3929,6 +3957,7 @@ mod tests {
     fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
         Expression {
             kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
+                asynchronous: false,
                 name: None,
                 arrow: true,
                 generator: false,
@@ -5009,6 +5038,7 @@ mod tests {
         // the wrong one. Invisible until a module binding existed before the line declaring it.
         let program = compile(&module(vec![
             statement(StatementKind::Function(Box::new(kiln_hir::Function {
+                asynchronous: false,
                 name: Some("outer".into()),
                 arrow: false,
                 generator: false,
