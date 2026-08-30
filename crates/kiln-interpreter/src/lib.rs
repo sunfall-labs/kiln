@@ -12815,14 +12815,13 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
-            let offset = arguments.get(1).map_or(0.0, Value::as_number);
-            let offset = if offset.is_finite() && offset >= 0.0 {
-                offset as usize
-            } else {
-                0
-            };
+            let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
+            let items = typed_source(arguments.first());
+            if offset > view.len() || items.len() > view.len() - offset {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
             same_content_type(view.kind, arguments.first())?;
-            for (index, item) in typed_source(arguments.first()).into_iter().enumerate() {
+            for (index, item) in items.into_iter().enumerate() {
                 view.set(offset + index, &item)?;
             }
             Value::Undefined
@@ -16738,27 +16737,33 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
     Ok(match arguments.first() {
         Some(Value::ArrayBuffer(buffer)) => {
             let total = buffer.byte_length();
-            let offset = arguments.get(1).map_or(0.0, Value::as_number);
-            let offset = if offset.is_finite() && offset >= 0.0 {
-                (offset as usize).min(total)
-            } else {
-                0
-            };
+            let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
+            if offset > total || offset % width != 0 {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
             let length = match arguments.get(2) {
                 // No explicit length over a *resizable* buffer is the specification's
                 // length-tracking view: it has no count of its own, so a later resize moves its
                 // end rather than leaving it addressing bytes that no longer exist. Over a
                 // fixed buffer the two readings coincide, and the count is recorded because
                 // nothing can ever change it.
-                None | Some(Value::Undefined) if buffer.max_byte_length.is_some() => None,
-                None | Some(Value::Undefined) => Some(total.saturating_sub(offset) / width),
-                Some(value) => {
-                    let length = value.as_number();
-                    Some(if length.is_finite() && length >= 0.0 {
-                        (length as usize).min(total.saturating_sub(offset) / width)
+                None | Some(Value::Undefined) => {
+                    let remaining = total - offset;
+                    if remaining % width != 0 {
+                        return Err(ExecutionError::InvalidArrayLength);
+                    }
+                    if buffer.max_byte_length.is_some() {
+                        None
                     } else {
-                        0
-                    })
+                        Some(remaining / width)
+                    }
+                }
+                Some(value) => {
+                    let length = bounded_buffer(to_index(Some(value))?, width)?;
+                    if length > (total - offset) / width {
+                        return Err(ExecutionError::InvalidArrayLength);
+                    }
+                    Some(length)
                 }
             };
             Value::TypedArray(Rc::new(TypedArrayData {
@@ -16773,7 +16778,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
             let items = typed_source(arguments.first());
             let view = TypedArrayData {
                 kind,
-                buffer: BufferData::fixed(items.len() * width),
+                buffer: BufferData::fixed(bounded_buffer(items.len() as f64, width)? * width),
                 offset: 0,
                 length: Some(items.len()),
             };
@@ -16783,7 +16788,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
             Value::TypedArray(Rc::new(view))
         }
         other => {
-            let length = bounded_buffer(other.map_or(0.0, Value::as_number), width)?;
+            let length = bounded_buffer(to_index(other)?, width)?;
             Value::TypedArray(Rc::new(TypedArrayData {
                 kind,
                 buffer: BufferData::fixed(length * width),
@@ -20241,5 +20246,54 @@ mod tests {
         };
 
         assert_eq!(stdout_of(&program), "owner");
+    }
+
+    #[test]
+    fn typed_array_indices_fail_before_casting_or_allocating() {
+        assert!(matches!(
+            to_index(Some(&Value::Number(-1.0))),
+            Err(ExecutionError::BufferLengthOutOfRange { .. })
+        ));
+        assert!(matches!(
+            to_index(Some(&Value::Number(f64::INFINITY))),
+            Err(ExecutionError::BufferLengthOutOfRange { .. })
+        ));
+        assert!(matches!(
+            to_index(Some(&Value::Number(1e300))),
+            Err(ExecutionError::BufferLengthOutOfRange { .. })
+        ));
+        assert_eq!(to_index(Some(&Value::Number(f64::NAN))), Ok(0.0));
+        assert_eq!(to_index(Some(&Value::Number(3.9))), Ok(3.0));
+
+        let buffer = Value::ArrayBuffer(BufferData::fixed(4));
+        assert!(matches!(
+            construct_typed_array(TypedKind::Uint16, &[buffer.clone(), Value::Number(1.0)]),
+            Err(ExecutionError::InvalidArrayLength)
+        ));
+        assert!(matches!(
+            construct_typed_array(
+                TypedKind::Uint16,
+                &[buffer.clone(), Value::Number(0.0), Value::Number(3.0)]
+            ),
+            Err(ExecutionError::InvalidArrayLength)
+        ));
+
+        let inferred = construct_typed_array(
+            TypedKind::Uint16,
+            &[buffer, Value::Number(0.0), Value::Undefined],
+        )
+        .expect("undefined length infers the remaining buffer");
+        assert!(matches!(inferred, Value::TypedArray(view) if view.len() == 2));
+
+        let array = Value::Array(ArrayData::new(vec![Value::Number(7.0)]));
+        let ignored = construct_typed_array(
+            TypedKind::Uint8,
+            &[array, Value::Number(1e300), Value::Number(1e300)],
+        )
+        .expect("extra array-source arguments are ignored");
+        assert!(matches!(
+            ignored,
+            Value::TypedArray(view) if view.len() == 1 && view.get(0) == Some(Value::Number(7.0))
+        ));
     }
 }

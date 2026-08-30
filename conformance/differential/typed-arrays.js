@@ -79,3 +79,43 @@ console.log(reversed.reverse(), reversed.join(","));
 
 // The same methods on a plain array still produce plain arrays.
 console.log([3, 1, 2].sort(), [1, 2].map((x) => x), [1, 2].reverse(), [1, 2, 3].slice(1));
+
+function caughtName(operation) {
+  try {
+    operation();
+    return "none";
+  } catch (error) {
+    return error.name;
+  }
+}
+
+console.log(
+  caughtName(() => new ArrayBuffer(-1)),
+  caughtName(() => new Uint8Array(-1)),
+  caughtName(() => new ArrayBuffer(Infinity)),
+  caughtName(() => new Uint8Array(1e300)),
+);
+
+const indexedBuffer = new ArrayBuffer(4);
+console.log(
+  caughtName(() => new Uint16Array(indexedBuffer, -1)),
+  caughtName(() => new Uint16Array(indexedBuffer, 1)),
+  caughtName(() => new Uint16Array(indexedBuffer, 0, 3)),
+);
+console.log(
+  new ArrayBuffer(NaN).byteLength,
+  new ArrayBuffer(3.9).byteLength,
+  new Uint8Array(NaN).length,
+  new Uint8Array(indexedBuffer, 0, undefined).length,
+  new Uint8Array([5], 1e300).length,
+);
+
+const setBounds = new Uint8Array([1, 2]);
+console.log(
+  caughtName(() => setBounds.set([9], -1)),
+  caughtName(() => setBounds.set([9], Infinity)),
+  caughtName(() => setBounds.set([9, 8, 7])),
+  setBounds.join(","),
+);
+setBounds.set([9], 0.9);
+console.log(setBounds.join(","));
