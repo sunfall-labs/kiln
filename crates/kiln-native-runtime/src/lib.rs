@@ -171,7 +171,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 1;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 2;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -320,7 +320,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 
 #define KILN_NATIVE_RUNTIME_VERSION 8
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 1
+#define KILN_HOST_ABI_VERSION 2
 #define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0

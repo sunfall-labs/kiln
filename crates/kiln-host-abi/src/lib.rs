@@ -4,7 +4,7 @@
 //! services. Keep this crate dependency-free and make values crossing the boundary owned.
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 1;
+pub const HOST_ABI_VERSION: u32 = 2;
 
 /// Operations a compiled program can request from its host.
 #[repr(u16)]
@@ -12,6 +12,14 @@ pub const HOST_ABI_VERSION: u32 = 1;
 pub enum HostOp {
     /// Write one line to the host's standard output.
     WriteStdout = 1,
+    /// Wall-clock milliseconds since the Unix epoch for a host-clock realm.
+    ClockNow = 2,
+    /// One host-supplied entropy word for a host-entropy realm.
+    EntropyU64 = 3,
+    /// The host timezone identifier, such as `America/Denver`.
+    TimeZone = 4,
+    /// The host locale tag, such as `en-US`.
+    Locale = 5,
 }
 
 /// A scalar value that is safe to own at the host boundary.

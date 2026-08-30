@@ -156,6 +156,7 @@ impl ArtifactKey {
             encoded.extend_from_slice(&(field.len() as u64).to_le_bytes());
             encoded.extend_from_slice(field.as_bytes());
         }
+        self.realm_capabilities.encode(&mut encoded);
         Digest::hash(&encoded)
     }
 }
@@ -829,6 +830,9 @@ mod tests {
             |k: &mut ArtifactKey| k.cpu_features = "baseline".into(),
             |k: &mut ArtifactKey| k.profile = BuildProfile::Release,
             |k: &mut ArtifactKey| k.node_compatibility = "node-24".into(),
+            |k: &mut ArtifactKey| {
+                k.realm_capabilities.clock = crate::CapabilityIdentity::Host;
+            },
             |k: &mut ArtifactKey| k.backend = Backend::Custom("llvm".into()),
         ] {
             let mut bumped = generated.clone();

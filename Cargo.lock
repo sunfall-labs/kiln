@@ -886,6 +886,7 @@ dependencies = [
 name = "kiln-runtime"
 version = "0.0.0"
 dependencies = [
+ "kiln-artifact-cache",
  "kiln-host-abi",
  "tokio",
 ]

@@ -29,7 +29,7 @@ pub use eviction::{
 };
 
 /// Version of the serialized cache record and key canonicalization.
-pub const CACHE_FORMAT_VERSION: u16 = 1;
+pub const CACHE_FORMAT_VERSION: u16 = 2;
 
 const MAGIC: &[u8; 8] = b"KILNART\0";
 const HEADER_BYTES: usize = 8 + 2 + DIGEST_BYTES + DIGEST_BYTES + 8;
@@ -69,6 +69,68 @@ pub enum Backend {
     C,
     /// A forward-compatible backend name supplied by a caller.
     Custom(String),
+}
+
+/// Canonical environmental policy for one realm artifact.
+///
+/// This type belongs beside the key rather than in a caller-built string so every producer uses
+/// one unambiguous encoding. Values returned at runtime by `Host` variants are not artifact inputs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RealmCapabilityIdentity {
+    pub clock: CapabilityIdentity,
+    pub entropy: CapabilityIdentity,
+    pub timezone: CapabilityIdentity,
+    pub locale: CapabilityIdentity,
+}
+
+impl Default for RealmCapabilityIdentity {
+    fn default() -> Self {
+        Self {
+            clock: CapabilityIdentity::Virtual,
+            entropy: CapabilityIdentity::Fixed,
+            timezone: CapabilityIdentity::Utc,
+            locale: CapabilityIdentity::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CapabilityIdentity {
+    Virtual,
+    Fixed,
+    Utc,
+    Default,
+    Host,
+    Seeded(u64),
+    Named(String),
+}
+
+impl RealmCapabilityIdentity {
+    fn encode(&self, output: &mut Vec<u8>) {
+        for capability in [&self.clock, &self.entropy, &self.timezone, &self.locale] {
+            capability.encode(output);
+        }
+    }
+}
+
+impl CapabilityIdentity {
+    fn encode(&self, output: &mut Vec<u8>) {
+        match self {
+            Self::Virtual => put_text(output, "virtual"),
+            Self::Fixed => put_text(output, "fixed"),
+            Self::Utc => put_text(output, "utc"),
+            Self::Default => put_text(output, "default"),
+            Self::Host => put_text(output, "host"),
+            Self::Seeded(seed) => {
+                put_text(output, "seeded");
+                output.extend_from_slice(&seed.to_le_bytes());
+            }
+            Self::Named(value) => {
+                put_text(output, "named");
+                put_text(output, value);
+            }
+        }
+    }
 }
 
 impl Backend {
@@ -122,6 +184,8 @@ pub struct ArtifactKey {
     pub cpu_features: String,
     pub profile: BuildProfile,
     pub node_compatibility: String,
+    /// Realm environmental policy. Host values are runtime inputs and never appear here.
+    pub realm_capabilities: RealmCapabilityIdentity,
     pub options_hash: Digest,
     pub input_hashes: Vec<Digest>,
 }
@@ -151,6 +215,7 @@ impl ArtifactKey {
             cpu_features: cpu_features.into(),
             profile,
             node_compatibility: node_compatibility.into(),
+            realm_capabilities: RealmCapabilityIdentity::default(),
             options_hash,
             input_hashes: input_hashes.into_iter().collect(),
         }
@@ -169,6 +234,7 @@ impl ArtifactKey {
         put_text(&mut encoded, &self.cpu_features);
         put_text(&mut encoded, self.profile.as_str());
         put_text(&mut encoded, &self.node_compatibility);
+        self.realm_capabilities.encode(&mut encoded);
         put_digest(&mut encoded, self.options_hash);
         encoded.extend_from_slice(&(self.input_hashes.len() as u64).to_le_bytes());
         for input in &self.input_hashes {
@@ -777,6 +843,23 @@ mod tests {
             Digest::hash(b"options"),
             [Digest::hash(seed.as_bytes())],
         )
+    }
+
+    #[test]
+    fn realm_capability_policy_participates_in_artifact_identity() {
+        let deterministic = key("realm-capabilities");
+        assert_eq!(
+            deterministic.realm_capabilities,
+            RealmCapabilityIdentity::default()
+        );
+        let mut host = deterministic.clone();
+        host.realm_capabilities.clock = CapabilityIdentity::Host;
+        assert_ne!(deterministic.digest(), host.digest());
+
+        let mut named = deterministic.clone();
+        named.realm_capabilities.timezone = CapabilityIdentity::Named("America/Denver".into());
+        assert_ne!(deterministic.digest(), named.digest());
+        assert_ne!(host.digest(), named.digest());
     }
 
     fn scratch(name: &str) -> PathBuf {
