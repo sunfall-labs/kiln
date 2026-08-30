@@ -446,7 +446,9 @@ true 1
 # programs hit. See README.md, "Why the real programs are a separate gate".
 #
 # `source` is the TypeScript entry point. `bundle` is the single-file ESM output build.sh
-# produces from it; the bundles are not committed (see .gitignore) except the one noted in
+# produces from it; `bundle_inputs` names the shared build inputs whose exact bytes join the
+# source in the adjacent `.kiln-inputs` provenance record. The runner rejects a bundle unless
+# that record matches. Bundles are not committed (see .gitignore) except the fixture noted in
 # [[fixture]] at the end of this file.
 #
 # `features` names JavaScript semantics, because that is what a selector over compiler changes
@@ -459,6 +461,7 @@ id = "effect/01-core"
 group = "effect"
 source = "effect/src/01-core.ts"
 bundle = "effect/bundle/01-core.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain", "object-spread", "symbol-keys"]
 effect_api = ["Effect.succeed", "Effect.map", "Effect.flatMap", "pipe", "Effect.runSync", "Effect.runPromise"]
@@ -473,6 +476,7 @@ id = "effect/02-gen"
 group = "effect"
 source = "effect/src/02-gen.ts"
 bundle = "effect/bundle/02-gen.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "object-spread", "symbol-keys", "closures"]
 effect_api = ["Effect.gen", "Effect.succeed", "Effect.runSync"]
@@ -490,6 +494,7 @@ id = "effect/03-ref"
 group = "effect"
 source = "effect/src/03-ref.ts"
 bundle = "effect/bundle/03-ref.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "closures", "arrow-functions", "prototype-chain"]
 effect_api = ["Ref.make", "Ref.update", "Ref.get", "Effect.flatMap", "Effect.runPromise"]
@@ -502,6 +507,7 @@ id = "effect/04-all-foreach"
 group = "effect"
 source = "effect/src/04-all-foreach.ts"
 bundle = "effect/bundle/04-all-foreach.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "builtin-statics", "global-object", "well-known-symbols", "iterator-protocol", "in-operator", "array-methods", "promises", "microtasks"]
 effect_api = ["Effect.all", "Effect.forEach", "Effect.succeed", "Effect.runPromise"]
@@ -520,6 +526,7 @@ id = "effect/05-concurrency"
 group = "effect"
 source = "effect/src/05-concurrency.ts"
 bundle = "effect/bundle/05-concurrency.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "promises", "microtasks", "event-loop", "iterator-protocol", "closures", "callback-ordering"]
 effect_api = ["Effect.forEach", "Effect.runPromise"]
@@ -538,6 +545,7 @@ id = "effect/06-sleep"
 group = "effect"
 source = "effect/src/06-sleep.ts"
 bundle = "effect/bundle/06-sleep.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "timers", "event-loop", "promises", "microtasks"]
 effect_api = ["Effect.sleep", "Effect.andThen", "Effect.succeed", "Effect.runPromise"]
@@ -554,6 +562,7 @@ id = "effect/07-interruption"
 group = "effect"
 source = "effect/src/07-interruption.ts"
 bundle = "effect/bundle/07-interruption.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "timers", "event-loop", "set", "mutation-during-iteration", "iterator-protocol", "generator-return", "try-finally", "abrupt-completion", "promises", "microtasks", "error-objects"]
 effect_api = ["Effect.race", "Effect.timeout", "Effect.sleep", "Effect.flatMap", "Effect.runPromise"]
@@ -579,6 +588,7 @@ id = "effect/08-scope"
 group = "effect"
 source = "effect/src/08-scope.ts"
 bundle = "effect/bundle/08-scope.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "generators", "yield-delegation", "closures", "lexical-environments", "try-finally", "promises", "microtasks"]
 effect_api = ["Effect.scoped", "Effect.acquireRelease", "Effect.gen", "Effect.sync", "Effect.runPromise"]
@@ -595,6 +605,7 @@ id = "effect/09-fiber"
 group = "effect"
 source = "effect/src/09-fiber.ts"
 bundle = "effect/bundle/09-fiber.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "global-object", "in-operator", "timers", "event-loop", "promises", "microtasks", "closures"]
 effect_api = ["Effect.forkChild", "Fiber.join", "Effect.flatMap", "Effect.runPromise"]
@@ -614,6 +625,7 @@ id = "effect/10-tagged-error"
 group = "effect"
 source = "effect/src/10-tagged-error.ts"
 bundle = "effect/bundle/10-tagged-error.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "classes", "class-fields", "closures", "inheritance", "derived-constructors", "error-objects", "error-subclassing", "instanceof", "promises"]
 effect_api = ["Data.TaggedError", "Effect.fail", "Effect.catchTag", "Effect.succeed", "Effect.runSync"]
@@ -633,6 +645,7 @@ id = "effect/11-stream"
 group = "effect"
 source = "effect/src/11-stream.ts"
 bundle = "effect/bundle/11-stream.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "iterator-protocol", "array-from", "well-known-symbols", "generators", "promises", "microtasks", "closures"]
 effect_api = ["Stream.fromIterable", "Stream.map", "Stream.runCollect", "Effect.map", "Effect.runPromise"]
@@ -649,6 +662,7 @@ id = "effect/12-service-layer"
 group = "effect"
 source = "effect/src/12-service-layer.ts"
 bundle = "effect/bundle/12-service-layer.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
 features = ["modules", "module-semantics", "set-prototype-of", "prototype-chain", "function-objects", "static-inheritance", "classes", "inheritance", "generators", "yield-delegation", "iterator-protocol", "well-known-symbols", "timers", "event-loop", "promises", "microtasks"]
 effect_api = ["Context.Service", "Layer.succeed", "Effect.provide", "Effect.gen", "Effect.forEach", "Effect.sleep", "Effect.runPromise"]

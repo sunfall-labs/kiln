@@ -9,10 +9,13 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use kiln_test262::TestCase;
 
-use crate::case::{RunMode, VariantResult};
+use crate::case::{
+    CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, Variant, VariantResult,
+};
 use crate::manifest::{MANIFEST_FILE_NAME, Manifest, ManifestError, ManifestTest};
 use crate::{program, test262};
 
@@ -32,6 +35,7 @@ pub struct ConformanceTest {
     id: String,
     source_path: PathBuf,
     path: PathBuf,
+    bundle_input_paths: Vec<PathBuf>,
     features: Vec<String>,
     declaration: Declaration,
 }
@@ -43,7 +47,10 @@ enum Declaration {
     /// Boxed so that a manifest test does not carry the footprint of a whole parsed Test262 case.
     Frontmatter(Box<TestCase>),
     /// The program must run to completion and write exactly this.
-    ExpectedStdout(String),
+    ExpectedStdout {
+        expected: String,
+        unavailable_reason: Option<String>,
+    },
 }
 
 impl ConformanceTest {
@@ -69,6 +76,11 @@ impl ConformanceTest {
         &self.source_path
     }
 
+    /// Additional files whose changes invalidate a generated bundle for this test.
+    pub fn bundle_input_paths(&self) -> &[PathBuf] {
+        &self.bundle_input_paths
+    }
+
     /// Feature tags, per `docs/design.md` §9; the changed-test selector keys on these.
     pub fn features(&self) -> &[String] {
         &self.features
@@ -77,7 +89,7 @@ impl ConformanceTest {
     pub fn provenance(&self) -> Provenance {
         match self.declaration {
             Declaration::Frontmatter(_) => Provenance::Frontmatter,
-            Declaration::ExpectedStdout(_) => Provenance::Manifest,
+            Declaration::ExpectedStdout { .. } => Provenance::Manifest,
         }
     }
 
@@ -89,21 +101,35 @@ impl ConformanceTest {
     pub fn run(&self, mode: RunMode) -> Vec<VariantResult> {
         match &self.declaration {
             Declaration::Frontmatter(case) => test262::run_case_variants(case, mode),
-            Declaration::ExpectedStdout(expected) => {
-                vec![program::run_against_expected_stdout(
-                    &self.path, expected, mode,
-                )]
-            }
+            Declaration::ExpectedStdout {
+                expected: _,
+                unavailable_reason: Some(reason),
+            } => vec![skip_build_requirement(reason)],
+            Declaration::ExpectedStdout {
+                expected,
+                unavailable_reason: None,
+            } => vec![program::run_against_expected_stdout(
+                &self.path, expected, mode,
+            )],
         }
     }
 
-    fn from_manifest(test: &ManifestTest, source_path: PathBuf, path: PathBuf) -> Self {
+    fn from_manifest(
+        test: &ManifestTest,
+        source_path: PathBuf,
+        bundle_input_paths: Vec<PathBuf>,
+        resolution: crate::manifest::ProgramResolution,
+    ) -> Self {
         Self {
             id: test.id.clone(),
             source_path,
-            path,
+            path: resolution.path,
+            bundle_input_paths,
             features: test.features.clone(),
-            declaration: Declaration::ExpectedStdout(test.expected_stdout.clone()),
+            declaration: Declaration::ExpectedStdout {
+                expected: test.expected_stdout.clone(),
+                unavailable_reason: resolution.unavailable_reason,
+            },
         }
     }
 
@@ -118,9 +144,22 @@ impl ConformanceTest {
             id,
             source_path: case.path.clone(),
             path: case.path.clone(),
+            bundle_input_paths: Vec::new(),
             features: case.metadata.features.clone(),
             declaration: Declaration::Frontmatter(Box::new(case)),
         }
+    }
+}
+
+fn skip_build_requirement(reason: &str) -> VariantResult {
+    VariantResult {
+        variant: Variant::Sloppy,
+        result: CaseResult::new(
+            Outcome::Skipped,
+            vec![Diagnostic::new(DiagnosticPhase::Harness, reason, None)],
+            String::new(),
+            Instant::now(),
+        ),
     }
 }
 
@@ -138,7 +177,8 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
                 ConformanceTest::from_manifest(
                     test,
                     manifest.source_path(test),
-                    manifest.program_path(test),
+                    manifest.bundle_input_paths(test),
+                    manifest.resolve_program(test),
                 )
             })
             .collect());

@@ -65,6 +65,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: conformance
+      # The manifest's Effect entries are authored TypeScript and deliberately run only from
+      # reproducible single-file bundles. Build them in the blocking gate so a clean checkout
+      # measures all twelve real programs instead of recording twelve honest-but-useless skips.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: conformance/effect/package-lock.json
+      - run: npm ci --prefix conformance/effect
+      - run: npm run build --prefix conformance/effect
       - run: bash scripts/ci-conformance.sh
       # Uploaded even when the comparison failed: a run that just tripped the gate is exactly the
       # one whose per-test detail is worth reading. `ignore` rather than `warn` because a runner

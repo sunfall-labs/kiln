@@ -144,6 +144,10 @@ where
             (
                 normalize_path(test.source_path()),
                 normalize_path(test.path()),
+                test.bundle_input_paths()
+                    .iter()
+                    .map(|path| normalize_path(path))
+                    .collect::<Vec<_>>(),
                 TestId::new(test.id()),
             )
         })
@@ -184,8 +188,13 @@ where
         if normalized.contains("host-ops") || normalized.contains("host_ops") {
             changes.add_host_op("console.log");
         }
-        for (source_path, program_path, test_id) in &test_paths {
-            if path_matches(&normalized, source_path) || path_matches(&normalized, program_path) {
+        for (source_path, program_path, bundle_input_paths, test_id) in &test_paths {
+            if path_matches(&normalized, source_path)
+                || path_matches(&normalized, program_path)
+                || bundle_input_paths
+                    .iter()
+                    .any(|input| path_matches(&normalized, input))
+            {
                 changes.add_changed_test(test_id.clone());
             }
         }
@@ -263,19 +272,31 @@ mod tests {
             ));
             fs::create_dir_all(path.join("effect/src")).expect("create authored source directory");
             fs::create_dir_all(path.join("effect/bundle")).expect("create bundle directory");
-            fs::write(path.join("effect/src/one.ts"), "console.log('source');\n")
-                .expect("write authored source");
-            fs::write(
-                path.join("effect/bundle/one.js"),
-                "console.log('bundle');\n",
-            )
-            .expect("write executable bundle");
+            let source = b"console.log('source');\n";
+            let bundle = b"console.log('bundle');\n";
+            let package = b"{\"name\":\"fixture\"}\n";
+            let lock = b"fixture lock\n";
+            let build = b"#!/bin/sh\n";
+            fs::write(path.join("effect/src/one.ts"), source).expect("write authored source");
+            fs::write(path.join("effect/bundle/one.js"), bundle).expect("write executable bundle");
+            fs::write(path.join("effect/package.json"), package).expect("write package metadata");
+            fs::write(path.join("effect/package-lock.json"), lock).expect("write package lock");
+            fs::write(path.join("effect/build.sh"), build).expect("write build script");
+            let mut provenance = b"kiln-bundle-provenance-v2\n".to_vec();
+            for input in [bundle.as_slice(), source, package, lock, build] {
+                provenance.extend_from_slice(input.len().to_string().as_bytes());
+                provenance.push(b'\n');
+                provenance.extend_from_slice(input);
+            }
+            fs::write(path.join("effect/bundle/one.js.kiln-inputs"), provenance)
+                .expect("write bundle provenance");
             fs::write(
                 path.join("manifest.toml"),
                 r#"[[test]]
 id = "effect/one"
 source = "effect/src/one.ts"
 bundle = "effect/bundle/one.js"
+bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 expected_stdout = "bundle\n"
 "#,
             )
@@ -407,6 +428,32 @@ expected_stdout = "bundle\n"
         );
         assert_eq!(selection.tests.len(), 1);
         assert_eq!(selection.tests[0].id, TestId::new("effect/one"));
+
+        for build_input in [
+            "effect/package.json",
+            "effect/package-lock.json",
+            "effect/build.sh",
+        ] {
+            let changes = change_set_for_tests(&[build_input.to_owned()], discovered.iter());
+            assert!(
+                changes.changed_tests.contains(&TestId::new("effect/one")),
+                "changing shared bundle input {build_input} selects every dependent test"
+            );
+        }
+
+        fs::write(
+            corpus.path.join("effect/src/one.ts"),
+            "console.log('edited source');\n",
+        )
+        .expect("edit authored source without rebuilding");
+        let stale = kiln_conformance::discover(&corpus.path).expect("rediscover stale bundle");
+        assert!(stale[0].path().ends_with("effect/src/one.ts"));
+        let result = stale[0].run(kiln_conformance::RunMode::Parse);
+        assert_eq!(result[0].result.outcome, Outcome::Skipped);
+        assert!(
+            result[0].result.diagnostics[0].message.contains("stale"),
+            "a stale bundle is an explicit harness decision"
+        );
     }
 
     #[test]
