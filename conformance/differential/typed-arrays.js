@@ -57,3 +57,16 @@ console.log(target.join(","));
 console.log(list instanceof Uint8Array, list instanceof Int8Array, buffer instanceof ArrayBuffer);
 console.log(list === list, new Uint8Array(1) === new Uint8Array(1));
 console.log(Object.prototype.toString.call(list), list.constructor === Uint8Array);
+
+// A method that builds a new array from a view builds a *view* of the same kind, and one that
+// rearranges in place answers with the view it changed.
+const kinds = new Uint8Array([3, 1, 2]);
+console.log(kinds.map((x) => x * 2), kinds.filter((x) => x > 1), kinds.slice(0, 2));
+console.log(new Int16Array([1, 2]).map((x) => x + 1000));
+const sorted = new Uint8Array([3, 1, 2]);
+console.log(sorted.sort(), sorted.join(","));
+const reversed = new Uint8Array([1, 2, 3]);
+console.log(reversed.reverse(), reversed.join(","));
+
+// The same methods on a plain array still produce plain arrays.
+console.log([3, 1, 2].sort(), [1, 2].map((x) => x), [1, 2].reverse(), [1, 2, 3].slice(1));

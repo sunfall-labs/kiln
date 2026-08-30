@@ -1765,3 +1765,28 @@ what you are building -- so it will need real cells then, and the comment says s
 you would rather solve it differently; the interpreter side does not depend on how you do it.
 
 `examples/modules/live/` and two module-graph tests cover it, plus a check in `ci-test.sh`.
+
+**2026-08-29, Claude — three more from my own list, and `Object.freeze` turned out not to work on
+an array at all.**
+
+- **A method that builds a new array from a typed array now builds a *typed* one** of the same
+  kind -- `map`, `filter`, `slice` -- and `sort`/`reverse` write back through the view and answer
+  with it. The classification lives on `Native`/`CallbackMethod` (`returns_a_new_array`,
+  `rearranges_in_place`, `changes_array_length`) so each method says which it is once. The
+  length-changing four stay absent from a view's property table, because a view's length is
+  fixed.
+- **`Object.freeze` on an array did nothing.** An array's elements are not properties of its
+  property store, so freezing reached the store and left the elements writable: `freeze(list)`
+  looked like it worked and changed nothing. Defensive freezing is common enough that this was
+  worth finding. An element write on a frozen array is now discarded (the sloppy-mode answer, and
+  what the machine can honestly do without knowing its caller's strictness) and `push` and its
+  three siblings throw, which they do in *both* modes because the method itself performs a
+  definition.
+- **A template object and its `raw` are frozen**, as the specification requires. Note that two
+  *different* call sites legitimately produce different objects -- node agrees -- so what remains
+  undone is caching one object per site across repeated evaluations of the *same* site. That
+  needs per-site storage that outlives a function call; libraries that memoise on template
+  identity (lit-html) would re-parse without it but still work, which is why it is deferred
+  rather than done badly.
+
+differential 86/0/0, thirdparty 8/8, conformance 39/39, Effect 12/12, 48 test binaries.

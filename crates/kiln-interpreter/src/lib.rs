@@ -427,6 +427,30 @@ impl Native {
         )
     }
 
+    /// Whether this built-in changes how many elements its array has.
+    ///
+    /// A typed array's length is fixed, so these are the ones it does not have. The other
+    /// mutators -- `reverse`, `fill` -- keep the length and are fine on one.
+    fn changes_array_length(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayPush | Self::ArrayPop | Self::ArrayShift | Self::ArrayUnshift
+        )
+    }
+
+    /// Whether this built-in hands back a *new* array rather than a value out of the old one.
+    ///
+    /// Called on a typed array, such a method returns a typed array of the same kind. That is
+    /// the difference a console shows, and the reason this classification exists.
+    fn returns_a_new_array(self) -> bool {
+        matches!(self, Self::ArraySlice | Self::ArrayConcat | Self::ArrayFlat)
+    }
+
+    /// Whether this built-in rearranges its array in place, keeping the length.
+    fn rearranges_in_place(self) -> bool {
+        matches!(self, Self::ArrayReverse)
+    }
+
     /// Whether this built-in reads its receiver as an array, and so should accept an array-like
     /// one when it is redirected through `call` or `apply`.
     ///
@@ -1747,6 +1771,8 @@ pub enum ExecutionError {
     InvalidArrayLength,
     /// A percent-escape that is not two hex digits, or that decodes to invalid UTF-8.
     MalformedUri,
+    /// `push` and its siblings on a frozen array.
+    FrozenArray,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -1828,6 +1854,7 @@ impl fmt::Display for ExecutionError {
             ),
             Self::InvalidArrayLength => write!(formatter, "invalid array length"),
             Self::MalformedUri => write!(formatter, "URI malformed"),
+            Self::FrozenArray => write!(formatter, "cannot change the length of a frozen array"),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -1903,6 +1930,10 @@ impl ExecutionError {
             // The specification has a `URIError` for this; this realm's nearest kind is used
             // rather than adding one nothing else would ever raise.
             Self::MalformedUri => (ErrorKind::Type, "URI malformed".to_owned()),
+            Self::FrozenArray => (
+                ErrorKind::Type,
+                "Cannot add property, object is not extensible".to_owned(),
+            ),
             Self::ProxyNotSerialisable => (
                 ErrorKind::Type,
                 "Cannot serialise a proxy nested inside a value".to_owned(),
@@ -6323,6 +6354,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(answer)
     }
 
+    /// Put the result of a generic array method back into the shape a typed array expects.
+    ///
+    /// A method that builds a *new* array builds a typed one of the same kind; one that
+    /// rearranges in place writes back through the view and answers with it. Everything else --
+    /// `join`, `indexOf`, `reduce` -- produces something that is not an array and passes through.
+    fn typed_result(
+        &self,
+        original: &Value,
+        produced: Value,
+        in_place: bool,
+        new_array: bool,
+    ) -> Value {
+        let Value::TypedArray(view) = original else {
+            return produced;
+        };
+        let Value::Array(items) = &produced else {
+            return produced;
+        };
+        if in_place {
+            for (index, item) in items.borrow().iter().enumerate() {
+                view.set(index, item.as_number());
+            }
+            return original.clone();
+        }
+        if new_array {
+            let elements = dense_items(&items.borrow());
+            return construct_typed_array(view.kind, &[Value::Array(ArrayData::new(elements))]);
+        }
+        produced
+    }
+
     /// The key a trap is handed.
     ///
     /// A symbol stays a symbol: a handler that special-cases one -- `if (key === MY_SYMBOL)` --
@@ -6550,7 +6612,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // one is a TypeError in the specification and would silently push into a copy
                 // here.
                 other => match array_property(other) {
-                    Value::Native(native) if native.mutates_an_array() => Value::Undefined,
+                    // A view has a fixed length, so the methods that change one are not there:
+                    // `push` on a typed array is a TypeError in the specification.
+                    Value::Native(native) if native.changes_array_length() => Value::Undefined,
                     method => method,
                 },
             },
@@ -6643,13 +6707,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => {
                 // A typed array reached through one of the generic array methods walks as its
                 // elements, the same coercion `call_value` applies to a redirected one.
+                let original = receiver.clone();
                 let receiver = if native.walks_an_array() {
                     self.as_array_like(&Value::Native(native), receiver, instruction)?
                 } else {
                     receiver
                 };
-                self.dispatch_native(native, &receiver, &arguments, instruction)
-                    .map(Some)
+                let produced = self.dispatch_native(native, &receiver, &arguments, instruction)?;
+                Ok(Some(self.typed_result(
+                    &original,
+                    produced,
+                    native.rearranges_in_place(),
+                    native.returns_a_new_array(),
+                )))
             }
             // `next` on an async generator answers with a promise rather than a result: the
             // body may await any number of times before it reaches the value the consumer asked
@@ -6704,18 +6774,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Some)
             }
             Value::Callback(CallbackMethod::Sort) => {
+                let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
-                self.array_sort(&receiver, &arguments, instruction)
-                    .map(Some)
+                let produced = self.array_sort(&receiver, &arguments, instruction)?;
+                Ok(Some(self.typed_result(&original, produced, true, false)))
             }
             Value::Callback(callback) => {
+                let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
-                Ok(Some(self.array_callback(
-                    callback,
-                    &receiver,
-                    &arguments,
-                    instruction,
-                )?))
+                let produced = self.array_callback(callback, &receiver, &arguments, instruction)?;
+                // `map` and `filter` on a view produce a view of the same kind; the other walks
+                // produce a value that is not an array and pass through untouched.
+                Ok(Some(self.typed_result(
+                    &original,
+                    produced,
+                    false,
+                    matches!(callback, CallbackMethod::Map | CallbackMethod::Filter),
+                )))
             }
             // A bound function ignores the receiver the call site offers, whichever way it is
             // reached, so both go through one path.
@@ -6937,6 +7012,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(());
         }
         match target {
+            // A frozen array ignores an element write, the same way a frozen object ignores a
+            // property write. Sloppy mode discards it and strict mode throws; the machine does
+            // not know which it is in, and discarding is the one that cannot invent an error.
+            Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
             Value::Array(items) => match array_index(key) {
                 Some(index) => {
                     let mut items = items.borrow_mut();
@@ -7603,11 +7682,24 @@ fn json_quote(text: &str) -> String {
 /// Natives take their receiver explicitly rather than through a `this` binding, because there is
 /// no `this` yet. When there is, these become ordinary functions and this dispatch disappears --
 /// which is the point of keeping the set small.
+/// Whether this value is a frozen array, which the length-changing methods must refuse.
+///
+/// `push` on a frozen array is a TypeError in *both* modes, unlike an element assignment: the
+/// method itself performs a definition, and a definition on a non-extensible object throws
+/// whatever the caller's strictness.
+fn is_frozen_array(value: &Value) -> bool {
+    matches!(value, Value::Array(items) if items.properties.borrow().is_frozen())
+}
+
 fn call_native(
     native: Native,
     receiver: &Value,
     arguments: &[Value],
 ) -> Result<Value, ExecutionError> {
+    // Checked once rather than in each of the four, and before any of them has taken a borrow.
+    if native.changes_array_length() && is_frozen_array(receiver) {
+        return Err(ExecutionError::FrozenArray);
+    }
     Ok(match native {
         // A proxy of an array *is* an array: `isArray` looks through as many proxies as it
         // takes, which is what lets a library wrap one and still branch on the shape.
@@ -7820,16 +7912,23 @@ fn call_native(
                 .collect::<Vec<_>>(),
         )),
         Native::ObjectFreeze => {
-            if let Value::Object(object) = arguments.first().unwrap_or(&Value::Undefined) {
-                object.borrow_mut().freeze();
+            match arguments.first().unwrap_or(&Value::Undefined) {
+                Value::Object(object) => object.borrow_mut().freeze(),
+                // An array's *elements* are not properties of its property store, so freezing
+                // has to reach them separately. Without this, `Object.freeze(list)` looked like
+                // it worked and changed nothing at all.
+                Value::Array(items) => items.properties.borrow_mut().freeze(),
+                Value::Function(closure) => closure.properties.borrow_mut().freeze(),
+                _ => {}
             }
             // Returns its argument, which is what makes `const o = Object.freeze({…})` read well.
             arguments.first().cloned().unwrap_or(Value::Undefined)
         }
         Native::ObjectIsFrozen => Value::Boolean(match arguments.first() {
             Some(Value::Object(object)) => object.borrow().is_frozen(),
+            Some(Value::Array(items)) => items.properties.borrow().is_frozen(),
+            Some(Value::Function(closure)) => closure.properties.borrow().is_frozen(),
             // A primitive cannot be changed at all, so it is frozen by definition.
-            Some(Value::Array(_)) => false,
             _ => true,
         }),
         Native::ObjectHasOwn => Value::Boolean(match arguments.first() {
