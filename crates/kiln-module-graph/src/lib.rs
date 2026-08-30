@@ -474,6 +474,32 @@ impl ModuleGraph {
             .get(name)
     }
 
+    /// Return the sorted names that are visibly exported by `module`.
+    ///
+    /// Ambiguous star exports are intentionally omitted: they remain available through
+    /// [`Self::resolved_export`] so named-import callers can report the distinction from a missing
+    /// name, but they are not part of a namespace's visible surface. The lookup accepts either a
+    /// canonical graph path or a path that canonicalizes to one; an unknown module returns `None`.
+    pub fn resolved_export_names(&self, module: impl AsRef<Path>) -> Option<Vec<String>> {
+        let module = module.as_ref();
+        let resolutions = self.export_resolutions.get(module).or_else(|| {
+            fs::canonicalize(module)
+                .ok()
+                .and_then(|canonical| self.export_resolutions.get(&canonical))
+        })?;
+        Some(
+            resolutions
+                .iter()
+                .filter_map(|(name, resolution)| match resolution {
+                    ResolvedExport::Local { .. } | ResolvedExport::Namespace { .. } => {
+                        Some(name.clone())
+                    }
+                    ResolvedExport::Ambiguous => None,
+                })
+                .collect(),
+        )
+    }
+
     /// Execute every module once, dependencies first, and return the entry's value.
     ///
     /// The returned `steps` is the total across the graph; its `value` is the entry module's
@@ -1100,7 +1126,7 @@ mod tests {
              export const shared = 'base';\n\
              export default 'delta';",
         );
-        project.write(
+        let wide = project.write(
             "wide.js",
             "export * from './base.js';\nexport const shared = 'wide';",
         );
@@ -1112,6 +1138,14 @@ mod tests {
              console.log(Object.keys(wide).join(','));",
         );
         let graph = project.graph(&entry).expect("build graph");
+        assert_eq!(
+            graph.resolved_export_names(project.root.join(".").join("wide.js")),
+            Some(vec!["alpha".to_owned(), "shared".to_owned()])
+        );
+        assert_eq!(
+            graph.resolved_export_names(&wide),
+            Some(vec!["alpha".to_owned(), "shared".to_owned()])
+        );
         let mut host = TestHost::default();
         graph
             .execute(&mut host, ExecutionLimits::default())
@@ -1150,7 +1184,7 @@ mod tests {
         let project = TempProject::new();
         project.write("a.js", "export const shared = 'a'; export const onlyA = 1;");
         project.write("b.js", "export const shared = 'b'; export const onlyB = 2;");
-        project.write(
+        let barrel = project.write(
             "barrel.js",
             "export * from './a.js';\nexport * from './b.js';",
         );
@@ -1164,6 +1198,14 @@ mod tests {
         let graph = project
             .graph(&entry)
             .expect("ambiguous names do not poison a namespace");
+        assert_eq!(
+            graph.resolved_export_names(&barrel),
+            Some(vec!["onlyA".to_owned(), "onlyB".to_owned()])
+        );
+        assert_eq!(
+            graph.resolved_export_names(project.root.join("does-not-exist.js")),
+            None
+        );
         let mut host = TestHost::default();
         graph
             .execute(&mut host, ExecutionLimits::default())
