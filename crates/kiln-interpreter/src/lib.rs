@@ -273,6 +273,11 @@ pub enum Native {
     StringRaw,
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
+    /// `Proxy`, which is only ever reached through `new`.
+    ProxyConstructor,
+    ProxyRevocable,
+    /// The `revoke` half of a revocable pair. Its receiver is the proxy it turns off.
+    ProxyRevoke,
     /// `Function.prototype.toString`.
     FunctionToString,
     FunctionCall,
@@ -386,6 +391,22 @@ pub enum Native {
 }
 
 impl Native {
+    /// Whether this built-in *changes* the array it is given, rather than only reading it.
+    ///
+    /// Redirected onto an array-like, such a method has nowhere to write; onto a proxy it does,
+    /// through the `set` trap, and the write is the whole point of calling it.
+    fn mutates_an_array(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayPush
+                | Self::ArrayPop
+                | Self::ArrayShift
+                | Self::ArrayUnshift
+                | Self::ArrayReverse
+                | Self::ArrayFill
+        )
+    }
+
     /// Whether this built-in reads its receiver as an array, and so should accept an array-like
     /// one when it is redirected through `call` or `apply`.
     ///
@@ -473,6 +494,9 @@ impl Native {
             }
             // A method read off one of these tables is unbound, exactly as reading it off an
             // instance is: `call` and `apply` are what supply the receiver.
+            // `Proxy.revocable(target, handler)` hands back the proxy and the switch that turns
+            // it off, as a pair.
+            (Self::ProxyConstructor, "revocable") => Some(Value::Native(Self::ProxyRevocable)),
             (Self::FunctionConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Function)))
             }
@@ -881,6 +905,23 @@ pub enum PrototypeTable {
     Function,
 }
 
+/// A proxy's two halves.
+///
+/// Both are held as ordinary values: a handler is a plain object whose properties are the traps,
+/// and a target is whatever was proxied -- including another proxy, which is why neither is
+/// narrowed to a type here.
+#[derive(Debug, PartialEq)]
+pub struct ProxyData {
+    target: Value,
+    handler: Value,
+    /// `Proxy.revocable`'s second half was called.
+    ///
+    /// A revoked proxy is not an empty one: every operation on it is a TypeError, which is the
+    /// entire point -- the capability it represented has been withdrawn, and a program holding a
+    /// stale reference has to find out rather than see a plausible answer.
+    revoked: std::cell::Cell<bool>,
+}
+
 /// What `bind` captured: the function to run, the receiver to run it with, and the arguments to
 /// put in front of the call's own.
 #[derive(Clone, Debug, PartialEq)]
@@ -1096,6 +1137,13 @@ pub enum Value {
     Array(Rc<ArrayData>),
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
     Callback(CallbackMethod),
+    /// A `new Proxy(target, handler)`.
+    ///
+    /// Its own value kind rather than an object carrying reserved state, because *every*
+    /// operation on it has to consult the handler first -- a read, a write, `in`, `delete`,
+    /// enumerating keys, calling it. Modelling it as an object would make each of those places
+    /// have to remember to check, and forgetting one is a silently wrong answer.
+    Proxy(Rc<ProxyData>),
     /// The result of `f.bind(this, ...args)`.
     ///
     /// A wrapper rather than a rewritten closure, because binding is defined on *any* callable --
@@ -1146,6 +1194,9 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
+            // a proxied function still read as a function.
+            Self::Proxy(proxy) => proxy.target.type_of(),
             Self::Array(_)
             | Self::Generator(_)
             | Self::Promise(_)
@@ -1170,6 +1221,7 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            Self::Proxy(proxy) => proxy.target.type_name(),
             Self::Array(_) => "array",
             Self::Generator(_) => "generator",
             Self::Promise(_) => "promise",
@@ -1206,6 +1258,9 @@ impl Value {
             | Self::RegExp(_)
             | Self::Settler(..)
             | Self::Bound(_) => f64::NAN,
+            // Coercion is defined on the target: the traps that could change it are `get` on
+            // `valueOf` and `toString`, which this pure path cannot call anyway.
+            Self::Proxy(proxy) => proxy.target.as_number(),
             // A date converts to its instant, which is what makes `end - start` a duration.
             Self::Date(time) => time.get(),
             // Only where a number is explicitly asked for; arithmetic refuses the mix.
@@ -1239,6 +1294,7 @@ impl Value {
             | Self::Date(_)
             | Self::Settler(..)
             | Self::Bound(_)
+            | Self::Proxy(_)
             | Self::Symbol(_) => true,
             Self::BigInt(value) => !num_traits::Zero::is_zero(value.as_ref()),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -1275,6 +1331,7 @@ impl Value {
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
             Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
+            Self::Proxy(proxy) => proxy.target.to_display_string(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
             Self::Array(items) => join(&items.borrow(), ","),
@@ -1480,6 +1537,10 @@ pub enum ExecutionError {
     /// thrown value. It exists because a rejection carries a value and an `ExecutionError`
     /// carries a message, and a promise needs the value.
     CaughtByHost,
+    /// Any operation on a proxy whose `revoke` has been called.
+    RevokedProxy,
+    /// A proxy nested inside a value being serialised.
+    ProxyNotSerialisable,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -1555,6 +1616,13 @@ impl fmt::Display for ExecutionError {
             }
             Self::EmptyReduce => write!(formatter, "reduce of empty array with no initial value"),
             Self::InvalidJson => write!(formatter, "unexpected token in JSON"),
+            Self::RevokedProxy => write!(
+                formatter,
+                "cannot perform this operation on a revoked proxy"
+            ),
+            Self::ProxyNotSerialisable => {
+                write!(formatter, "cannot serialise a proxy nested inside a value")
+            }
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
             Self::GeneratorReturned => write!(formatter, "generator returned"),
             Self::Uncaught { message, trace, .. } => {
@@ -1618,6 +1686,14 @@ impl ExecutionError {
             Self::NotAnObject { value, .. } => (
                 ErrorKind::Type,
                 format!("cannot set a property on a {value}"),
+            ),
+            Self::RevokedProxy => (
+                ErrorKind::Type,
+                "Cannot perform this operation on a revoked proxy".to_owned(),
+            ),
+            Self::ProxyNotSerialisable => (
+                ErrorKind::Type,
+                "Cannot serialise a proxy nested inside a value".to_owned(),
             ),
             Self::CyclicJson => (
                 ErrorKind::Type,
@@ -2174,6 +2250,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     self.stack.push(unary(*operator, value));
                 }
+                // `in` consults a proxy's `has` trap, so it cannot go through the pure operator
+                // table the way the arithmetic ones do.
+                Instruction::Binary(BinaryOp::In)
+                    if matches!(self.stack.last(), Some(Value::Proxy(_))) =>
+                {
+                    let right = self.pop(current)?;
+                    let left = self.pop(current)?;
+                    let found = self.has(&right, &left, current);
+                    let Some(found) = self.catchable(found, current)? else {
+                        continue;
+                    };
+                    self.stack.push(Value::Boolean(found));
+                }
                 Instruction::Binary(BinaryOp::InstanceOf) => {
                     let right = self.pop(current)?;
                     let left = self.pop(current)?;
@@ -2266,7 +2355,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant(*name, current)?;
                     let arguments = self.take_call_arguments(*argc, current)?;
                     let receiver = self.pop(current)?;
-                    let method = self.read_property(&receiver, &name, current)?;
+                    let read = self.read_property(&receiver, &name, current);
+                    let Some(method) = self.catchable(read, current)? else {
+                        continue;
+                    };
                     // Named, because "undefined is not a function" is the least useful message a
                     // runtime produces and the name is right here.
                     if !is_callable(&method) {
@@ -2375,7 +2467,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    self.stack.push(self.computed(&target, &key));
+                    let read = self.read_computed(&target, &key, current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    self.stack.push(value);
                 }
                 Instruction::SetComputed => {
                     let value = self.pop(current)?;
@@ -2528,6 +2624,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Reflect => Native::Reflect,
                         kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
                         kiln_ir::Builtin::Function => Native::FunctionConstructor,
+                        kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -2610,9 +2707,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // internal slots, and neither is enumerable; inherited properties are absent
                     // because nothing here can yet make one enumerable -- a class puts its
                     // methods on the prototype, and those are not.
-                    let keys = own_properties(&target)
+                    let keys = if matches!(target, Value::Proxy(_)) {
+                        self.own_keys(&target, current)?
+                    } else {
+                        own_properties(&target)
+                            .into_iter()
+                            .map(|(key, _)| key)
+                            .collect()
+                    };
+                    let keys = keys
                         .into_iter()
-                        .map(|(key, _)| key)
                         .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                         .map(Value::String)
                         .collect();
@@ -2774,13 +2878,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let removed = delete_property(&target, &key);
+                    let removed = self.delete(&target, &key, current);
+                    let Some(removed) = self.catchable(removed, current)? else {
+                        continue;
+                    };
                     self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::DeleteProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
-                    let removed = delete_property(&target, &Value::String(name));
+                    let removed = self.delete(&target, &Value::String(name), current);
+                    let Some(removed) = self.catchable(removed, current)? else {
+                        continue;
+                    };
                     self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::GetProperty(name) => {
@@ -2797,7 +2907,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    let value = self.read_property(&target, &name, current)?;
+                    // Catchable: a proxy trap and a getter are both ordinary code, and what
+                    // they throw is the program's to handle.
+                    let read = self.read_property(&target, &name, current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
                     self.stack.push(value);
                 }
                 Instruction::SetProperty(name) => {
@@ -2885,9 +3000,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             };
                             self.stack.push(result);
                         }
-                        // A bound function called with no receiver of its own: `bind` already
-                        // decided what `this` is, so the call site has nothing to add.
-                        Value::Bound(_) => {
+                        // Both defer to `call_value`: a bound function knows its own receiver,
+                        // and a proxy has to consult its `apply` trap before anything else can
+                        // happen.
+                        Value::Bound(_) | Value::Proxy(_) => {
                             let callee = callee.clone();
                             let arguments = self.take_arguments(argc, current)?;
                             let called =
@@ -3257,6 +3373,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // A built-in that inspects a value's *shape* rather than its properties has no trap to
+        // consult, so it looks through a proxy to what is being proxied. This is the honest
+        // reading of "the trap is absent": the operation falls through to the target, which is
+        // what every trapped operation does too.
+        if matches!(arguments.first(), Some(Value::Proxy(_)))
+            && matches!(
+                native,
+                Native::ObjectIsFrozen
+                    | Native::ObjectIsExtensible
+                    | Native::ObjectIsSealed
+                    | Native::ObjectFreeze
+                    | Native::ObjectSeal
+                    | Native::ObjectPreventExtensions
+                    | Native::ObjectGetPrototypeOf
+                    | Native::ObjectGetOwnPropertyDescriptor
+                    | Native::ObjectGetOwnPropertyDescriptors
+                    | Native::ObjectAssign
+                    | Native::ObjectHasOwn
+                    // Serialising walks the value without the machine, so it cannot run a `get`
+                    // trap. Unwrapping the outermost proxy makes the common case -- a wrapper
+                    // whose traps only observe -- work; a proxy *nested* inside is still
+                    // refused rather than serialised as whatever the target holds.
+                    | Native::JsonStringify
+            )
+        {
+            let mut unwrapped = arguments.to_vec();
+            unwrapped[0] = unwrap_proxy(&arguments[0]).clone();
+            return self.dispatch_native(native, receiver, &unwrapped, instruction);
+        }
         match native {
             Native::ArrayFrom => self.array_from(arguments, instruction),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
@@ -3417,6 +3562,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectEntries | Native::ObjectValues | Native::ReflectOwnKeys => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // A proxy answers "what keys do you have" with a trap, not with a property
+                // store, so the walk below has nothing to read.
+                if matches!(source, Value::Proxy(_)) {
+                    let mut items = Vec::new();
+                    for key in self.own_keys(&source, instruction)? {
+                        if key.starts_with(RESERVED_KEY_PREFIX) {
+                            continue;
+                        }
+                        items.push(match native {
+                            Native::ReflectOwnKeys => Value::String(key),
+                            Native::ObjectValues => {
+                                self.read_property(&source, &key, instruction)?
+                            }
+                            _ => Value::Array(ArrayData::new(vec![
+                                Value::String(key.clone()),
+                                self.read_property(&source, &key, instruction)?,
+                            ])),
+                        });
+                    }
+                    return Ok(Value::Array(ArrayData::new(items)));
+                }
                 let mut items = Vec::new();
                 for (key, property) in own_properties(&source) {
                     if key.starts_with(RESERVED_KEY_PREFIX) {
@@ -3494,6 +3660,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Ok(Value::String(out))
+            }
+            // `Object.keys` on a proxy is the `ownKeys` trap; the pure implementation reads a
+            // property store the proxy does not have.
+            Native::ObjectKeys if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let keys = self.own_keys(&target, instruction)?;
+                Ok(Value::Array(ArrayData::new(
+                    keys.into_iter()
+                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                        .map(Value::String)
+                        .collect(),
+                )))
             }
             Native::FunctionCall | Native::FunctionApply => {
                 let this_value = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -4232,6 +4410,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         match callee {
             Value::Native(native) => {
+                // A method that changes its array, given a proxy, has to change what is behind
+                // the proxy: the snapshot it would otherwise work on is thrown away, and the
+                // program's `push` would silently do nothing.
+                if native.mutates_an_array() && matches!(this_value, Value::Proxy(_)) {
+                    return self.mutate_through_proxy(
+                        *native,
+                        &this_value,
+                        &arguments,
+                        instruction,
+                    );
+                }
                 let this_value = self.as_array_like(callee, this_value, instruction)?;
                 self.dispatch_native(*native, &this_value, &arguments, instruction)
             }
@@ -4255,6 +4444,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(self
                     .invoke(callee.clone(), this_value, arguments, instruction)?
                     .unwrap_or(Value::Undefined))
+            }
+            // A proxied function runs its `apply` trap, or the target when there is none.
+            Value::Proxy(proxy) => {
+                let proxy = Rc::clone(proxy);
+                let inner = proxy.target.clone();
+                match self.proxy_trap(&proxy, "apply", instruction)? {
+                    Some(trap) => {
+                        let handler = proxy.handler.clone();
+                        let list = Value::Array(ArrayData::new(arguments));
+                        self.call_value(&trap, handler, vec![inner, this_value, list], instruction)
+                    }
+                    None => self.call_value(&inner, this_value, arguments, instruction),
+                }
             }
             // Binding is transparent to the call: the receiver is the one `bind` fixed and the
             // bound arguments come first, whatever the target turns out to be.
@@ -5075,6 +5277,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set("Number", Value::Native(Native::NumberConstructor));
         globals.set("Boolean", Value::Native(Native::BooleanConstructor));
         globals.set("Function", Value::Native(Native::FunctionConstructor));
+        globals.set("Proxy", Value::Native(Native::ProxyConstructor));
         globals.set("NaN", Value::Number(f64::NAN));
         globals.set("Infinity", Value::Number(f64::INFINITY));
         let value = Value::Object(Rc::new(RefCell::new(globals)));
@@ -5236,6 +5439,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         current: usize,
     ) -> Result<(), ExecutionError> {
         match callee {
+            // `new Proxy(target, handler)` is the constructor; a proxy *of* something
+            // constructible is the `construct` trap.
+            Value::Native(Native::ProxyConstructor) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let handler = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                self.stack.push(Value::Proxy(Rc::new(ProxyData {
+                    target,
+                    handler,
+                    revoked: std::cell::Cell::new(false),
+                })));
+            }
+            Value::Proxy(proxy) => {
+                let inner = proxy.target.clone();
+                match self.proxy_trap(&proxy, "construct", current)? {
+                    Some(trap) => {
+                        let handler = proxy.handler.clone();
+                        let list = Value::Array(ArrayData::new(arguments));
+                        let built = self.call_value(
+                            &trap,
+                            handler,
+                            vec![inner, list, Value::Proxy(Rc::clone(&proxy))],
+                            current,
+                        )?;
+                        self.stack.push(built);
+                    }
+                    None => return self.construct(inner, arguments, current),
+                }
+            }
             Value::Native(Native::Error(kind)) => {
                 let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
@@ -5574,12 +5805,94 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Separate from [`Vm::property`], which answers with the slot's contents, because reading an
     /// accessor is a *call* and only the machine can make one. Every program-visible read goes
     /// through this; the VM's own reads of reserved slots do not need to.
+    /// Run a mutating array method against a proxy, writing the result back through its traps.
+    ///
+    /// The elements are read out, the method runs on that array, and every element plus `length`
+    /// goes back through `set`. Not the specification's element-by-element algorithm -- that one
+    /// interleaves reads and writes in an order a handler can observe -- but the same end state,
+    /// which is what a copy-on-write handler such as immer's is watching for.
+    fn mutate_through_proxy(
+        &mut self,
+        native: Native,
+        target: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let length = self
+            .proxy_get(target, &Value::String("length".to_owned()), instruction)?
+            .as_number();
+        let length = if length.is_finite() {
+            length.max(0.0) as usize
+        } else {
+            0
+        };
+        let mut items = Vec::with_capacity(length);
+        for index in 0..length {
+            items.push(self.proxy_get(target, &Value::Number(index as f64), instruction)?);
+        }
+        let scratch = Value::Array(ArrayData::new(items));
+        let answer = self.dispatch_native(native, &scratch, arguments, instruction)?;
+        let Value::Array(updated) = &scratch else {
+            unreachable!("just built as an array");
+        };
+        let updated = updated.borrow().clone();
+        for (index, item) in updated.iter().enumerate() {
+            self.set_computed(
+                target,
+                &Value::Number(index as f64),
+                item.clone(),
+                instruction,
+            )?;
+        }
+        // The length last, so a handler watching it sees a consistent array when it fires.
+        self.set_computed(
+            target,
+            &Value::String("length".to_owned()),
+            Value::Number(updated.len() as f64),
+            instruction,
+        )?;
+        Ok(answer)
+    }
+
+    /// The key a trap is handed.
+    ///
+    /// A symbol stays a symbol: a handler that special-cases one -- `if (key === MY_SYMBOL)` --
+    /// is the standard way a library hides its own state behind a proxy, and stringifying the
+    /// key breaks exactly that. Everything else is a string, as the specification says, so a
+    /// numeric index arrives as `"0"`.
+    fn trap_key(key: &Value) -> Value {
+        match key {
+            Value::Symbol(_) => key.clone(),
+            other => Value::String(other.property_key()),
+        }
+    }
+
+    /// The trap `name` names on a proxy's handler, or `None` when the handler does not have one.
+    ///
+    /// A missing trap means the operation falls through to the target, which is what makes a
+    /// handler with one trap a useful thing to write.
+    fn proxy_trap(
+        &mut self,
+        proxy: &Rc<ProxyData>,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if proxy.revoked.get() {
+            return Err(ExecutionError::RevokedProxy);
+        }
+        let trap = self.read_property(&proxy.handler, name, instruction)?;
+        Ok(is_callable(&trap).then_some(trap))
+    }
+
     fn read_property(
         &mut self,
         target: &Value,
         name: &str,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            return self.proxy_get(target, &Value::String(name.to_owned()), instruction);
+        }
         let accessor = match target {
             Value::Object(object) => object.borrow().lookup(name),
             Value::Function(closure) if name != "prototype" => {
@@ -5823,6 +6136,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         match method {
+            // The same rule as in `call_value`: a mutating array method given a proxy has to
+            // write through it, not into a snapshot.
+            Value::Native(native)
+                if native.mutates_an_array() && matches!(receiver, Value::Proxy(_)) =>
+            {
+                self.mutate_through_proxy(native, &receiver, &arguments, instruction)
+                    .map(Some)
+            }
             Value::Native(native) => self
                 .dispatch_native(native, &receiver, &arguments, instruction)
                 .map(Some),
@@ -5955,6 +6276,117 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.property(target, &key.property_key())
     }
 
+    /// `delete target[key]`, running a proxy's `deleteProperty` trap when there is one.
+    fn delete(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(delete_property(target, key));
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        match self.proxy_trap(&proxy, "deleteProperty", instruction)? {
+            Some(trap) => {
+                let handler = proxy.handler.clone();
+                let arguments = vec![inner, Self::trap_key(key)];
+                let answered = self.call_value(&trap, handler, arguments, instruction)?;
+                Ok(answered.is_truthy())
+            }
+            None => self.delete(&inner, key, instruction),
+        }
+    }
+
+    /// The own enumerable string keys of a value, running a proxy's `ownKeys` trap.
+    fn own_keys(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Vec<String>, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(own_property_keys(target));
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        match self.proxy_trap(&proxy, "ownKeys", instruction)? {
+            Some(trap) => {
+                let handler = proxy.handler.clone();
+                let listed = self.call_value(&trap, handler, vec![inner], instruction)?;
+                Ok(match listed {
+                    Value::Array(items) => dense_items(&items.borrow())
+                        .into_iter()
+                        .map(|key| key.property_key())
+                        .collect(),
+                    _ => Vec::new(),
+                })
+            }
+            None => self.own_keys(&inner, instruction),
+        }
+    }
+
+    /// Does `target` have `key`, running a proxy's `has` trap.
+    fn has(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(has_property(target, key));
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        match self.proxy_trap(&proxy, "has", instruction)? {
+            Some(trap) => {
+                let handler = proxy.handler.clone();
+                let arguments = vec![inner, Self::trap_key(key)];
+                let answered = self.call_value(&trap, handler, arguments, instruction)?;
+                Ok(answered.is_truthy())
+            }
+            None => self.has(&inner, key, instruction),
+        }
+    }
+
+    /// A computed read that can run a proxy's `get` trap.
+    ///
+    /// `computed` itself is pure and cannot call anything, which is fine for every other kind of
+    /// value and not fine for a proxy: reading one *is* a call.
+    fn read_computed(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            return self.proxy_get(target, key, instruction);
+        }
+        Ok(self.computed(target, key))
+    }
+
+    /// Read `key` from a proxy, through its `get` trap or through its target.
+    fn proxy_get(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return self.read_computed(target, key, instruction);
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        match self.proxy_trap(&proxy, "get", instruction)? {
+            Some(trap) => {
+                let handler = proxy.handler.clone();
+                let arguments = vec![inner, Self::trap_key(key), target.clone()];
+                self.call_value(&trap, handler, arguments, instruction)
+            }
+            None => self.read_computed(&inner, key, instruction),
+        }
+    }
+
     fn set_computed(
         &mut self,
         target: &Value,
@@ -5962,6 +6394,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        if let Value::Proxy(proxy) = target {
+            let proxy = Rc::clone(proxy);
+            let inner = proxy.target.clone();
+            return match self.proxy_trap(&proxy, "set", instruction)? {
+                Some(trap) => {
+                    let handler = proxy.handler.clone();
+                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
+                    self.call_value(&trap, handler, arguments, instruction)?;
+                    Ok(())
+                }
+                None => self.set_computed(&inner, key, value, instruction),
+            };
+        }
         match target {
             Value::Array(items) => match array_index(key) {
                 Some(index) => {
@@ -6518,6 +6963,9 @@ fn json_stringify(
         }),
         // A function has no JSON spelling, and a settler is one.
         Value::Settler(..) | Value::Bound(_) => None,
+        // Serialising a proxy means reading its properties, which means running its traps, which
+        // this pure walk cannot do. Refused rather than silently serialising the target.
+        Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
         // Neither has a BigInt: the specification makes serialising one a TypeError rather than
         // an omission, and it is fatal here for the same reason a cycle is.
         Value::BigInt(_) => return Err(ExecutionError::CyclicJson),
@@ -6587,7 +7035,12 @@ fn call_native(
     arguments: &[Value],
 ) -> Result<Value, ExecutionError> {
     Ok(match native {
-        Native::ArrayIsArray => Value::Boolean(matches!(arguments.first(), Some(Value::Array(_)))),
+        // A proxy of an array *is* an array: `isArray` looks through as many proxies as it
+        // takes, which is what lets a library wrap one and still branch on the shape.
+        Native::ArrayIsArray => Value::Boolean(matches!(
+            arguments.first().map(unwrap_proxy),
+            Some(Value::Array(_))
+        )),
         Native::BigIntConstructor => {
             let Some(value) = arguments.first() else {
                 return Ok(Value::BigInt(Rc::new(num_bigint::BigInt::from(0))));
@@ -6692,6 +7145,35 @@ fn call_native(
         // `Function` is here for its prototype and its `toString`; building a function from a
         // string would need the compiler at run time, which is a different kind of realm.
         Native::FunctionConstructor => Value::Undefined,
+        // `Proxy()` without `new` is a TypeError in the specification; there is nothing useful
+        // to return either way.
+        Native::ProxyConstructor => Value::Undefined,
+        Native::ProxyRevocable => {
+            let proxy = Value::Proxy(Rc::new(ProxyData {
+                target: arguments.first().cloned().unwrap_or(Value::Undefined),
+                handler: arguments.get(1).cloned().unwrap_or(Value::Undefined),
+                revoked: std::cell::Cell::new(false),
+            }));
+            let mut pair = ObjectData::default();
+            // The revoke function carries the proxy as its receiver, which is what a bound
+            // native is for: there is no other way to give a built-in a captured value.
+            pair.set(
+                "revoke",
+                Value::Bound(Rc::new(BoundFunction {
+                    target: Value::Native(Native::ProxyRevoke),
+                    this_value: proxy.clone(),
+                    arguments: Vec::new(),
+                })),
+            );
+            pair.set("proxy", proxy);
+            Value::Object(Rc::new(RefCell::new(pair)))
+        }
+        Native::ProxyRevoke => {
+            if let Value::Proxy(proxy) = receiver {
+                proxy.revoked.set(true);
+            }
+            Value::Undefined
+        }
         // A method table is not itself callable, and nothing reaches here by calling one.
         Native::PrototypeOf(_) => Value::Undefined,
         // `Object.is` is SameValue: `===` except that NaN equals itself and the two zeroes do
@@ -8624,6 +9106,9 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
+        // Node shows what the traps produce; this shows the target, and says so, rather than
+        // running a program's code because something was printed.
+        Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
         Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
         Value::Date(time) => iso_string(time.get()).unwrap_or_else(|| "Invalid Date".to_owned()),
         // A console shows the literal's spelling, which is how it is told from a number.
@@ -9070,6 +9555,7 @@ fn is_callable(value: &Value) -> bool {
             | Value::Callback(_)
             | Value::Settler(..)
             | Value::Bound(_)
+            | Value::Proxy(_)
     )
 }
 
@@ -9275,6 +9761,21 @@ fn prototype_object(closure: &Rc<Closure>) -> Value {
     let prototype = Value::Object(Rc::new(RefCell::new(data)));
     *slot = Some(prototype.clone());
     prototype
+}
+
+/// What a proxy ultimately wraps, following a chain of them.
+///
+/// For the operations that are defined on the *shape* of a value rather than on its properties
+/// -- `Array.isArray`, `instanceof` -- and which therefore have no trap to consult.
+fn unwrap_proxy(value: &Value) -> &Value {
+    let mut current = value;
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        match current {
+            Value::Proxy(proxy) => current = &proxy.target,
+            other => return other,
+        }
+    }
+    current
 }
 
 /// The built-in that constructs values of this kind, for `x.constructor`.

@@ -11,8 +11,10 @@ than a missing feature:
 - **date-fns** found that `s[0]` on a string was `undefined`, that a `Date` had no setters, and
   that no intrinsic value answered `constructor`.
 - **immer** found that `globalThis` was a fresh object on every read, so anything stored on it
-  vanished and `globalThis === globalThis` was false. It is the one that does not pass yet: its
-  whole implementation is `Proxy`.
+  vanished and `globalThis === globalThis` was false. It is the one that does not pass yet. `Proxy` exists now
+  and immer gets much further with it -- drafts are created, writes go through -- but its
+  finalise path uses the `getOwnPropertyDescriptor` and `defineProperty` traps, which are not
+  implemented.
 - **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
   instead of defining an own property, that a named function expression could not call itself,
   and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
