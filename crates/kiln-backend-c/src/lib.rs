@@ -216,12 +216,30 @@ enum kiln_value_tag {
     /* bits holds a kiln_object*.  Objects and arrays are separate tags because `typeof` and the
      * two index paths differ; they share nothing but the tag space. */
     KILN_VALUE_OBJECT = 9,
-    KILN_VALUE_ARRAY = 10
+    KILN_VALUE_ARRAY = 10,
+    /* A method the runtime supplies.  bits holds its code, and *not* its receiver: `a.map` and
+     * `b.map` are the same function object in the language, which is what makes
+     * `a.map === b.map` true, and `CallMethod` keeps the receiver on the stack anyway. */
+    KILN_VALUE_METHOD = 11
 };
 
 /* `String(x)`.  A template's `${x}` lowers to a call to it rather than to `+`, because the two
  * use different hints: `${x}` asks `toString` first and `+` asks `valueOf` first. */
 #define KILN_C99_BUILTIN_STRING 1
+
+/* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
+ * tags, none of these reaches a cache key. */
+#define KILN_C99_METHOD_PUSH 1
+#define KILN_C99_METHOD_POP 2
+#define KILN_C99_METHOD_JOIN 3
+#define KILN_C99_METHOD_INDEX_OF 4
+#define KILN_C99_METHOD_INCLUDES 5
+#define KILN_C99_METHOD_SLICE 6
+#define KILN_C99_METHOD_CONCAT 7
+#define KILN_C99_METHOD_MAP 8
+#define KILN_C99_METHOD_FILTER 9
+#define KILN_C99_METHOD_FOR_EACH 10
+#define KILN_C99_METHOD_REDUCE 11
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -443,6 +461,43 @@ static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln
     return KILN_C99_OK;
 }
 
+static kiln_value kiln_c99_method(uint64_t code) {
+    return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
+}
+
+/* The name a console shows, which is the JavaScript name rather than the implementation's --
+ * `[Function: push]`, the same text the interpreter produces. */
+static const char *kiln_c99_method_name(uint64_t code) {
+    switch (code) {
+    case KILN_C99_METHOD_PUSH: return "push";
+    case KILN_C99_METHOD_POP: return "pop";
+    case KILN_C99_METHOD_JOIN: return "join";
+    case KILN_C99_METHOD_INDEX_OF: return "indexOf";
+    case KILN_C99_METHOD_INCLUDES: return "includes";
+    case KILN_C99_METHOD_SLICE: return "slice";
+    case KILN_C99_METHOD_CONCAT: return "concat";
+    case KILN_C99_METHOD_MAP: return "map";
+    case KILN_C99_METHOD_FILTER: return "filter";
+    case KILN_C99_METHOD_FOR_EACH: return "forEach";
+    case KILN_C99_METHOD_REDUCE: return "reduce";
+    default: return NULL;
+    }
+}
+
+/* The array method a name resolves to, or 0.  One table, so a read and a call cannot disagree
+ * about which names exist. */
+static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
+    uint64_t code;
+    for (code = 1; kiln_c99_method_name(code) != NULL; ++code) {
+        const char *name = kiln_c99_method_name(code);
+        size_t len = strlen(name);
+        if (len == key_len && memcmp(name, key, len) == 0) {
+            return code;
+        }
+    }
+    return 0;
+}
+
 static kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
@@ -450,7 +505,8 @@ static kiln_value kiln_c99_builtin(uint64_t code) {
 /* A closure and a builtin are both callable, and every operator that coerces treats them alike:
  * `valueOf` hands the object back, so `toString` decides. */
 static int kiln_c99_is_callable(kiln_value value) {
-    return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN;
+    return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
+           value.tag == KILN_VALUE_METHOD;
 }
 
 /* Every reference value reduces to a primitive before a coercing operator, and none of them can
@@ -546,6 +602,9 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
 }
 
 static kiln_value kiln_c99_text(kiln_value value);
+static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth);
 
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
@@ -559,6 +618,9 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     }
     if (depth >= KILN_C99_MAX_CALL_DEPTH) {
         return KILN_C99_CALL_DEPTH_ERROR;
+    }
+    if (callee.tag == KILN_VALUE_METHOD) {
+        return kiln_c99_invoke_method(host, result, callee.bits, receiver, args, argc, depth);
     }
     if (callee.tag == KILN_VALUE_BUILTIN) {
         static const char empty[] = "";
@@ -618,6 +680,7 @@ static int kiln_c99_truthy(kiln_value value) {
         return value.len != 0;
     case KILN_VALUE_FUNCTION:
     case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_METHOD:
     /* An object is always truthy, empty or not. */
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
@@ -721,7 +784,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
     case KILN_VALUE_BUILTIN: {
         /* The interpreter names a runtime-supplied callable by the native it resolves to, and
          * this has to be the same text for the same program. */
-        static const char string_constructor[] = "[Function StringConstructor]";
+        static const char string_constructor[] = "[Function: String]";
         if (value.bits == KILN_C99_BUILTIN_STRING) {
             return kiln_c99_value(KILN_VALUE_STRING, 0, string_constructor,
                                   sizeof(string_constructor) - 1);
@@ -983,15 +1046,21 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
     }
-    case KILN_VALUE_ARRAY:
+    case KILN_VALUE_ARRAY: {
+        uint64_t code;
         if (is_length) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
         }
-        /* Every other name on an array is a method this backend does not have.  Answering
-         * undefined would turn `a.map(f)` into "undefined is not a function" three frames from
-         * the cause, so it says so here instead. */
+        code = kiln_c99_array_method(key, key_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        /* A method this backend does not have.  Answering undefined would turn `a.sort(f)` into
+         * "undefined is not a function" three frames from the cause, so it says so here. */
         return KILN_C99_CONTROL_ERROR;
+    }
     case KILN_VALUE_STRING:
         if (is_length) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
@@ -1271,7 +1340,18 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         return kiln_c99_text_append_c(text, "]");
     }
     case KILN_VALUE_BUILTIN:
-        return kiln_c99_text_append_c(text, "[Function: StringConstructor]");
+        return kiln_c99_text_append_c(text, "[Function: String]");
+    case KILN_VALUE_METHOD: {
+        const char *name = kiln_c99_method_name(value.bits);
+        if (name == NULL) {
+            return kiln_c99_text_append_c(text, "[Function (anonymous)]");
+        }
+        if (kiln_c99_text_append_c(text, "[Function: ") != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, name) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append_c(text, "]");
+    }
     case KILN_VALUE_OBJECT:
         if (depth > KILN_C99_INSPECT_DEPTH) {
             return kiln_c99_text_append_c(text, "[Object]");
@@ -1307,6 +1387,252 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
 }
 
+/* `includes` uses SameValueZero, which differs from `===` in exactly one place: NaN matches
+ * itself.  `indexOf` uses `===` and so never finds one. */
+static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
+    if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {
+        double a = kiln_c99_as_number(left);
+        double b = kiln_c99_as_number(right);
+        if (isnan(a) && isnan(b)) {
+            return 1;
+        }
+    }
+    return kiln_c99_strict_equal(left, right);
+}
+
+/* A relative index: negative counts from the end, and the result is clamped into range.  This is
+ * `slice`'s rule and it is shared by every method that takes one. */
+static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
+    double index;
+    if (value.tag == KILN_VALUE_UNDEFINED) {
+        return fallback;
+    }
+    index = kiln_c99_as_number(value);
+    if (isnan(index)) {
+        return 0;
+    }
+    if (index < 0.0) {
+        index += (double)length;
+        return index < 0.0 ? 0 : (size_t)index;
+    }
+    return index > (double)length ? length : (size_t)index;
+}
+
+static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth) {
+    kiln_array *array;
+    size_t index;
+    int status;
+    if (receiver.tag != KILN_VALUE_ARRAY) {
+        /* A method detached from its array has no receiver to work on, which is a TypeError in
+         * the language for the same reason. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    array = kiln_c99_array_of(receiver);
+    switch (code) {
+    case KILN_C99_METHOD_PUSH:
+        for (index = 0; index < argc; ++index) {
+            status = kiln_c99_array_push(receiver, args[index]);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        *result = kiln_c99_number((double)array->count);
+        return KILN_C99_OK;
+    case KILN_C99_METHOD_POP:
+        if (array->count == 0) {
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        array->count -= 1;
+        *result = array->elements[array->count];
+        return KILN_C99_OK;
+    case KILN_C99_METHOD_JOIN: {
+        kiln_text joined = {NULL, 0, 0};
+        kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
+        const char *bytes = ",";
+        size_t len = 1;
+        if (separator.tag != KILN_VALUE_UNDEFINED) {
+            kiln_value shown = kiln_c99_text(separator);
+            if (shown.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            bytes = shown.ptr;
+            len = shown.len;
+        }
+        for (index = 0; index < array->count; ++index) {
+            kiln_value element = array->elements[index];
+            if (index != 0 && kiln_c99_text_append(&joined, bytes, len) != KILN_C99_OK) {
+                free(joined.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            /* A nullish element contributes nothing, which is what makes `[1, , 3].join()`
+             * produce "1,,3" rather than "1,undefined,3". */
+            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL) {
+                continue;
+            }
+            {
+                kiln_value shown = kiln_c99_text(element);
+                if (shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+        }
+        *result = kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_METHOD_INDEX_OF:
+    case KILN_C99_METHOD_INCLUDES: {
+        kiln_value needle = argc > 0 ? args[0] : kiln_c99_undefined();
+        int found = 0;
+        for (index = 0; index < array->count; ++index) {
+            found = code == KILN_C99_METHOD_INCLUDES
+                        ? kiln_c99_same_value_zero(array->elements[index], needle)
+                        : kiln_c99_strict_equal(array->elements[index], needle);
+            if (found) {
+                break;
+            }
+        }
+        if (code == KILN_C99_METHOD_INCLUDES) {
+            *result = kiln_c99_boolean(found);
+        } else {
+            *result = kiln_c99_number(found ? (double)index : -1.0);
+        }
+        return KILN_C99_OK;
+    }
+    case KILN_C99_METHOD_SLICE: {
+        size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                               array->count, 0);
+        size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                             array->count, array->count);
+        kiln_value built;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = start; index < end && index < array->count; ++index) {
+            status = kiln_c99_array_push(built, array->elements[index]);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
+    case KILN_C99_METHOD_CONCAT: {
+        kiln_value built;
+        size_t argument;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = 0; index < array->count; ++index) {
+            status = kiln_c99_array_push(built, array->elements[index]);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        for (argument = 0; argument < argc; ++argument) {
+            /* An array argument contributes its elements, one level deep; anything else
+             * contributes itself. */
+            if (args[argument].tag == KILN_VALUE_ARRAY) {
+                kiln_array *other = kiln_c99_array_of(args[argument]);
+                for (index = 0; index < other->count; ++index) {
+                    status = kiln_c99_array_push(built, other->elements[index]);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+            } else {
+                status = kiln_c99_array_push(built, args[argument]);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
+    case KILN_C99_METHOD_MAP:
+    case KILN_C99_METHOD_FILTER:
+    case KILN_C99_METHOD_FOR_EACH: {
+        kiln_value built = kiln_c99_undefined();
+        kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
+        if (code != KILN_C99_METHOD_FOR_EACH) {
+            status = kiln_c99_new_array(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        /* The length is read once, so an element the callback appends is not visited -- which is
+         * what the specification says and what stops an appending callback from looping. */
+        {
+            size_t length = array->count;
+            for (index = 0; index < length && index < array->count; ++index) {
+                kiln_value visit[3];
+                kiln_value produced;
+                visit[0] = array->elements[index];
+                visit[1] = kiln_c99_number((double)index);
+                visit[2] = receiver;
+                status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (code == KILN_C99_METHOD_MAP) {
+                    status = kiln_c99_array_push(built, produced);
+                } else if (code == KILN_C99_METHOD_FILTER && kiln_c99_truthy(produced)) {
+                    status = kiln_c99_array_push(built, visit[0]);
+                } else {
+                    status = KILN_C99_OK;
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
+    case KILN_C99_METHOD_REDUCE: {
+        kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value accumulator;
+        size_t length = array->count;
+        index = 0;
+        if (argc > 1) {
+            accumulator = args[1];
+        } else {
+            /* Without a seed the first element is the accumulator, and an empty array is a
+             * TypeError rather than undefined -- there is no answer to give. */
+            if (length == 0) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            accumulator = array->elements[0];
+            index = 1;
+        }
+        for (; index < length && index < array->count; ++index) {
+            kiln_value visit[4];
+            visit[0] = accumulator;
+            visit[1] = array->elements[index];
+            visit[2] = kiln_c99_number((double)index);
+            visit[3] = receiver;
+            status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,
+                                   depth);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        *result = accumulator;
+        return KILN_C99_OK;
+    }
+    default:
+        return KILN_C99_CONTROL_ERROR;
+    }
+}
+
 static kiln_value kiln_c99_typeof(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char object_text[] = "object";
@@ -1325,6 +1651,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
     case KILN_VALUE_FUNCTION:
     case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_METHOD:
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:

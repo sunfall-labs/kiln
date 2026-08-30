@@ -2118,14 +2118,33 @@ becomes `this` in the body -- so `{ n: 0, bump() { this.n += 1 } }` runs nativel
 module is undefined, because a module is strict and strict mode does not substitute the global
 object; the entry point declares a receiver only if the body asks for one.
 
-**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, the array
-and string *methods* (`a.push(x)` still refuses, though the runtime has the primitive), accessors,
-`delete`, `EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
+**Array methods came next**, eleven of them: `push`, `pop`, `join`, `indexOf`, `includes`,
+`slice`, `concat`, `map`, `filter`, `forEach`, `reduce`. The callback four are the interesting
+ones -- the runtime calls back into a closure the generated unit made, so the call machinery now
+runs in both directions rather than only outward from emitted code.
+
+A method value carries its **code and not its receiver**, which is not a shortcut: `a.map` and
+`b.map` are the same function object in the language, so `a.map === b.map` is true, and carrying
+the receiver would make it false. `CallMethod` keeps the receiver on the stack anyway, so a
+detached method has none -- and calling one is a TypeError, which is what the language says.
+
+**A related fix in your file, `kiln-interpreter`.** A console printed `[Function: ArrayPush]`
+where node prints `[Function: push]`, and `String([].push)` was `[Function ArrayPush]`. Both now
+derive the JavaScript name from the variant: the variants are spelled `<Type><Method>`, so
+removing the type and lowering the first letter recovers it, with a constructor named for its
+type and `ObjectToStringTag` the single exception. I checked it against node for fifty-five
+builtins spanning every family before writing it, and
+`conformance/differential/builtin-names.js` keeps checking. A table of two hundred names would
+have been two hundred chances to disagree with the property table that resolves the name.
+
+**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, string
+methods, `sort` and the array methods with awkward callbacks (`find`, `some`, `every`),
+accessors, `delete`, `EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 5/5, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 6/6, differential 90/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.

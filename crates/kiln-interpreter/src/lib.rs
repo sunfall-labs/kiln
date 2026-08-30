@@ -1555,8 +1555,15 @@ impl Value {
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
-            Self::Native(native) => format!("[Function {native:?}]"),
-            Self::Callback(method) => format!("[Function {method:?}]"),
+            // The same name a console shows. `String(f)` in node is the source text, which a
+            // backend does not have; naming the function beats an invented body, and naming it
+            // the way the program does beats naming it the way the implementation does.
+            Self::Native(native) => {
+                format!("[Function: {}]", builtin_js_name(&format!("{native:?}")))
+            }
+            Self::Callback(method) => {
+                format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
+            }
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
