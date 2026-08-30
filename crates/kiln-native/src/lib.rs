@@ -32,8 +32,8 @@ use kiln_native_runtime::{
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
-    BuildProfile as ToolchainProfile, CompileOptions, LinkOptions, ToolIdentity, Toolchain,
-    ToolchainError,
+    BuildProfile as ToolchainProfile, CompileOptions, CompilerKind, LinkOptions, ToolIdentity,
+    Toolchain, ToolchainError,
 };
 use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
 
@@ -41,6 +41,15 @@ static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Inherited variables every supported C driver may consult for C11 search policy.
+///
+/// `SDKROOT` and `MACOSX_DEPLOYMENT_TARGET` live in [`target_identity`] instead. Ordinary shell
+/// variables such as `CFLAGS` and `LDFLAGS` are not included because Kiln invokes the compiler
+/// directly rather than through a build system that interprets them.
+const C_COMPILER_ENVIRONMENT: [&str; 3] = ["CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH"];
+const GCC_COMPILER_ENVIRONMENT: [&str; 2] = ["COMPILER_PATH", "GCC_EXEC_PREFIX"];
+const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
@@ -1641,7 +1650,54 @@ fn target_identity(identity: &ToolIdentity) -> String {
 }
 
 fn compiler_identity(identity: &ToolIdentity) -> String {
-    identity.stable_key()
+    compiler_identity_from_parts(
+        &identity.stable_key(),
+        compiler_environment_digest(identity.kind),
+    )
+}
+
+fn compiler_identity_from_parts(tool: &str, environment: Digest) -> String {
+    format!(
+        "{}:{tool}|compiler-environment-sha256:{}",
+        tool.len(),
+        environment.to_hex()
+    )
+}
+
+fn compiler_environment_digest(kind: CompilerKind) -> Digest {
+    compiler_environment_digest_with(kind, |name| std::env::var_os(name))
+}
+
+fn compiler_environment_digest_with(
+    kind: CompilerKind,
+    mut value: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Digest {
+    fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
+        output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        output.extend_from_slice(bytes);
+    }
+
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"kiln-native-compiler-environment-v1\0");
+    let driver_environment: &[&str] = match kind {
+        CompilerKind::Zig => &ZIG_COMPILER_ENVIRONMENT,
+        CompilerKind::Gcc | CompilerKind::Cc => &GCC_COMPILER_ENVIRONMENT,
+        CompilerKind::Clang => &[],
+    };
+    for name in C_COMPILER_ENVIRONMENT
+        .into_iter()
+        .chain(driver_environment.iter().copied())
+    {
+        frame(&mut encoded, name.as_bytes());
+        match value(name) {
+            Some(value) => {
+                encoded.push(1);
+                frame(&mut encoded, value.as_os_str().as_encoded_bytes());
+            }
+            None => encoded.push(0),
+        }
+    }
+    Digest::hash(&encoded)
 }
 
 fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> {
@@ -2768,6 +2824,116 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn environment_digest(kind: CompilerKind, entries: &[(&str, &str)]) -> Digest {
+        let values = entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), std::ffi::OsString::from(value)))
+            .collect::<std::collections::HashMap<_, _>>();
+        compiler_environment_digest_with(kind, |name| values.get(name).cloned())
+    }
+
+    #[test]
+    fn compiler_environment_identity_is_allowlisted_and_unambiguously_framed() {
+        let clang_baseline = environment_digest(CompilerKind::Clang, &[]);
+        for name in C_COMPILER_ENVIRONMENT {
+            assert_ne!(
+                environment_digest(CompilerKind::Clang, &[(name, "changed")]),
+                clang_baseline,
+                "{name} must participate in native cache identity"
+            );
+        }
+        for name in GCC_COMPILER_ENVIRONMENT {
+            assert_ne!(
+                environment_digest(CompilerKind::Gcc, &[(name, "changed")]),
+                environment_digest(CompilerKind::Gcc, &[]),
+                "{name} must participate in GCC cache identity"
+            );
+        }
+        for kind in [CompilerKind::Clang, CompilerKind::Zig] {
+            assert_eq!(
+                environment_digest(kind, &[("GCC_EXEC_PREFIX", "ignored")]),
+                environment_digest(kind, &[]),
+                "GCC-only policy must not invalidate {kind} artifacts"
+            );
+        }
+        assert_ne!(
+            environment_digest(CompilerKind::Zig, &[("ZIG_LIB_DIR", "changed")]),
+            environment_digest(CompilerKind::Zig, &[]),
+            "Zig's library override must participate in Zig cache identity"
+        );
+        assert_eq!(
+            compiler_environment_digest_with(CompilerKind::Clang, |name| {
+                (name == "KILN_UNRELATED").then(|| "ignored".into())
+            }),
+            clang_baseline,
+            "variables outside the compiler allowlist do not affect artifacts"
+        );
+        for name in ["CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH"] {
+            assert_eq!(
+                environment_digest(CompilerKind::Clang, &[(name, "ignored")]),
+                clang_baseline,
+                "{name} does not affect a C11 translation unit"
+            );
+        }
+        assert_ne!(
+            environment_digest(CompilerKind::Clang, &[("CPATH", "")]),
+            clang_baseline,
+            "an empty search path is not the same compiler policy as an unset one"
+        );
+        assert_ne!(
+            environment_digest(
+                CompilerKind::Clang,
+                &[("CPATH", "a"), ("C_INCLUDE_PATH", "bc")]
+            ),
+            environment_digest(
+                CompilerKind::Clang,
+                &[("CPATH", "ab"), ("C_INCLUDE_PATH", "c")]
+            ),
+            "length framing must distinguish adjacent values"
+        );
+    }
+
+    #[test]
+    fn compiler_environment_changes_miss_native_artifact_keys() {
+        let root = TestDirectory::new("kiln-native-environment-key");
+        let cache = ArtifactCache::new(root.path.join("cache"));
+        let options = Digest::hash(b"same options");
+        let inputs = [Digest::hash(b"same generated C")];
+        let make_key = |environment| {
+            key(
+                ArtifactKind::NativeObject,
+                compiler_identity_from_parts("same tool", environment),
+                Backend::C,
+                "same ABI",
+                "same target",
+                CacheProfile::Debug,
+                options,
+                inputs,
+            )
+        };
+        let first = make_key(environment_digest(
+            CompilerKind::Clang,
+            &[("CPATH", "/first/include")],
+        ));
+        let second = make_key(environment_digest(
+            CompilerKind::Clang,
+            &[("CPATH", "/second/include")],
+        ));
+
+        cache.put(&first, b"object").expect("seed first identity");
+        assert_eq!(
+            cache.lookup(&first).expect("first lookup"),
+            Lookup::Hit(kiln_artifact_cache::Artifact {
+                bytes: b"object".to_vec(),
+                digest: Digest::hash(b"object"),
+                key_digest: first.digest(),
+                layer_index: 0,
+                path: cache.path_for(&first).expect("first path"),
+            })
+        );
+        assert_eq!(cache.lookup(&second).expect("second lookup"), Lookup::Miss);
     }
 
     #[test]
