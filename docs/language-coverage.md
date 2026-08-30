@@ -570,6 +570,26 @@ conformance cases that exercise a builtin with nothing else in the program, and
 reason recorded in the manifest. A one-line probe that names only its subject is not a stylistic
 preference; it is the only kind of probe that can catch a laziness bug.
 
+### On `Intl`, when it eventually arrives
+
+**Not scheduled, and not on the ladder.** No step in §4 needs it, no probe in §3 asks for it, and
+the statics measured off the Effect bundle in §5 contain nothing locale-sensitive. This note exists
+for one reason: so that whoever first meets `toLocaleString` does not start writing a bespoke
+`Intl.NumberFormat`.
+
+When `Intl`, `toLocaleString`, `localeCompare` and `Intl.Segmenter` do come into scope, the answer
+should be **`icu4x`** — the `icu` crate and its components, where `icu_decimal`, `icu_collator` and
+`icu_segmenter` map onto those surfaces almost one to one — rather than hand-rolled locale data. It
+is modular, so a program that never formats a date carries no date data; it is `no_std`, so it can
+live where the number provider already does; and `icu4x-datagen` bakes a chosen locale set into the
+build through `icu_provider_baked`, which is the shape an AOT compiler wants — data resolved at
+compile time against a known locale set rather than looked up in the host's environment. That is
+the same decision already made about locale-free numerics (ADR 0013, ADR 0014) and about the realm
+having one clock and one timezone that are not the host's (ADR 0015): locale, like time, is
+something the artifact should carry rather than inherit. Which locales get baked in is a packaging
+question rather than a language one, and belongs with the per-target artifacts of ADR 0018 when it
+is asked.
+
 ---
 
 ## 7. What is measured, what is inferred, and what is guessed

@@ -8,6 +8,9 @@ Evaluated against salsa 0.28.2, published 3 August 2026, which is the current re
 below that describes salsa's behaviour should be re-checked before acting on it, because salsa
 is moving fast and broke its public API twice in the eight weeks before this was written.
 
+Re-checked 30 August 2026, verdict unchanged. Re-takes are logged under "Re-evaluation log" below
+rather than by editing the evaluation, so the history of the answer stays visible.
+
 ## Context
 
 Design.md §2 names salsa directly: "Salsa is worth evaluating for this because it memoizes query
@@ -370,6 +373,76 @@ requirement turns out to need a property salsa has and cutoff-plus-memoization c
 demand-driven cycle resolution in the type checker is the candidate — then we adopt, take the
 compile-time hit, and contain it by keeping the query-declaring crate off the hot edit path.
 
+## Re-evaluation log
+
+"When to revisit" is only worth writing if somebody actually revisits, and a criterion nobody
+re-takes is indistinguishable from no criterion. This section is where each re-take goes, newest
+first. Adding an entry should be cheap; if it ever stops being cheap, that is itself information.
+
+### 2026-08-30 — no change to the verdict
+
+Taken one day after the evaluation above, which makes this entry a check on the *procedure* rather
+than on salsa: nothing about a dependency moves in a day. It is here so the log exists with an
+entry in it and the next person is copying a format rather than inventing one.
+
+- **The current release is still 0.28.2**, published 3 August 2026, unchanged. Worth stating
+  because it is the number most likely to be misremembered: 0.26.0 is February 2026, three minor
+  versions back, and predates both of the 0.28.0 breaking changes described under "Which salsa
+  this is". Anyone re-reading this ADR against an older version number is reading about a
+  different API, which is the same trap "Which salsa this is" exists to warn about.
+- **Still pre-1.0, and there is still no 1.0 milestone.** The open milestones are `Salsa 3.0`
+  (3 open / 14 closed, no due date) and `Far future` (1 open / 2 closed). Neither is a
+  stable-release plan, and no published version has crossed 1.0.
+- **Two of the three maturity signals in "Which salsa this is" are unchanged.** The crate
+  description is still "A generic framework for on-demand, incrementalized computation
+  (experimental)", and `salsa_unstable` is still in the default feature set, still carrying
+  `# FIXME: remove salsa_unstable before 1.0.`
+- **The third has moved, and the detail matters.** The README's "Obligatory warning — Very much a
+  WORK IN PROGRESS at this point" is still present in the published 0.28.2 artifact, and was
+  **removed from `master`** on 17 August 2026 by "docs: remove work-in-progress warning" (#1296).
+  So it is gone from the repository and not yet gone from any release. This points at reopening
+  criterion 1 without satisfying it: that criterion asks for 1.0 *and* the dropped
+  `salsa_unstable` feature *and* the dropped warning, and only the last has happened. Deleting a
+  sentence is much cheaper than stabilising an API, so this is a thing to watch rather than a
+  thing to act on — and it is exactly the kind of signal that would read as "salsa is stable now"
+  to someone skimming the repository instead of the release.
+
+**Verdict unchanged: adopt later, behind the trait. Not now.** None of the six reopening criteria
+moved. In particular the compile-time cost in §4 is untouched, and that is the objection that
+decides this, because it is charged against design.md §12's priority 2 while everything salsa
+offers is priority 4.
+
+Note what the re-take cost: four HTTP requests, no build, no code read, and no change to anything
+in the workspace — because ADR 0001 put the query layer behind kiln's own trait and nothing here
+names a salsa type. That is the trait boundary doing the work it was drawn to do, in a form that
+is easy to overlook. Had the frontend been written against salsa's types, "is this still the right
+dependency" would not be a question anyone could afford to ask, and the answer would drift by
+default instead of being decided. **A boundary that keeps a question cheap to re-ask is the
+boundary paying for itself**, and it is why this can be a paragraph a year rather than a project.
+
+### How to re-take it
+
+Cheap signals first; only re-run §4's benchmark if one of them moves. Note the `-A`: crates.io
+rejects a request with no user agent, and returns HTML rather than an error, so a script that
+omits it fails by parsing garbage instead of by failing.
+
+    UA="kiln re-checking ADR 0002"
+    curl -s -A "$UA" https://crates.io/api/v1/crates/salsa \
+      | python3 -c 'import sys,json; c=json.load(sys.stdin)["crate"]; print(c["max_version"], "|", c["description"])'
+    curl -s https://api.github.com/repos/salsa-rs/salsa/milestones?state=all | grep '"title"'
+    curl -s https://raw.githubusercontent.com/salsa-rs/salsa/master/Cargo.toml | grep -B1 -A1 salsa_unstable
+    curl -s https://raw.githubusercontent.com/salsa-rs/salsa/master/README.md | grep -i "work in progress"
+
+The expensive signal is criterion 5, and it is expensive on purpose: it means rebuilding the two
+scratch crates from §4's method and re-measuring `cargo check` and incremental `cargo build`
+against the then-current release. Half a day, and only worth spending once a cheap signal says
+something changed. The other three criteria — query count, second scaling feature, concurrent
+queries — are facts about this repository rather than about salsa, so they are answered by looking
+at `MemoEngine` and not by looking at crates.io.
+
+Cadence: annually, or immediately when any reopening criterion visibly moves. **Next scheduled
+check: August 2027.**
+
 ## Sources
 
 Checked 29 August 2026. Where a claim is about behaviour rather than about a document, it was
@@ -391,3 +464,12 @@ verified against the 0.28.2 source or by running the port described in §1 and �
 - Both consumers on 0.28.2 with `salsa.opt-level = 3` in the dev profile, and rust-analyzer's
   "ideally we'd not enable the macros feature" comment: the workspace `Cargo.toml` of
   <https://github.com/rust-lang/rust-analyzer> and <https://github.com/astral-sh/ruff>
+
+Added by the 30 August 2026 re-take. The version, description and milestone claims came from the
+first three commands under "How to re-take it"; the README claim was checked against both `master`
+and the README bundled inside the published `salsa-0.28.2.crate`, which is why it has two answers.
+
+- The removal of the work-in-progress warning from `master`:
+  [PR #1296](https://github.com/salsa-rs/salsa/pull/1296), merged 17 August 2026
+- Milestones, including the absence of a 1.0 one:
+  <https://github.com/salsa-rs/salsa/milestones?state=all>
