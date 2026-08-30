@@ -27,6 +27,7 @@ usage:
 options:
   --workload <name|all>   which reference workload to run (default: all)
   --examples-dir <dir>    where the workloads are materialised (default: <repo>/examples)
+  --kiln <file>           CLI binary used for daemon startup (default: sibling `kiln` binary)
   --regenerate            rewrite the workloads even if they are already up to date
   --warmup <n>            override the discarded warmup iterations of every scenario
   --iterations <n>        override the measured iterations of every scenario
@@ -98,6 +99,9 @@ fn run(args: &Args) -> Result<Outcome, String> {
     }
 
     let mut report = Report::new(scenarios::WARM_PIPELINE);
+    report
+        .measurements
+        .push(scenarios::daemon_startup(&args.kiln, args.budget)?);
     for w in &workloads {
         report.workloads.push(WorkloadInfo::of(w));
         report
@@ -167,6 +171,7 @@ struct Args {
     json: bool,
     specs: Vec<&'static WorkloadSpec>,
     examples_dir: PathBuf,
+    kiln: PathBuf,
     out: PathBuf,
     compare: Option<PathBuf>,
     /// Fractional, e.g. 0.15 for the default 15%.
@@ -184,6 +189,7 @@ impl Args {
             json: false,
             specs: ALL.to_vec(),
             examples_dir: root.join("examples"),
+            kiln: sibling_kiln_binary()?,
             out: root.join("bench/results/latest.json"),
             compare: None,
             threshold: 0.15,
@@ -208,6 +214,7 @@ impl Args {
                     };
                 }
                 "--examples-dir" => args.examples_dir = PathBuf::from(next(&mut it, arg)?),
+                "--kiln" => args.kiln = PathBuf::from(next(&mut it, arg)?),
                 "--out" => args.out = PathBuf::from(next(&mut it, arg)?),
                 "--compare" => args.compare = Some(PathBuf::from(next(&mut it, arg)?)),
                 "--threshold" => args.threshold = number(next(&mut it, arg)?, arg)? / 100.0,
@@ -251,6 +258,29 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The performance scripts build `kiln-bench` and `kiln` into the same Cargo profile directory.
+/// Cargo test binaries live one level deeper under `deps`, which keeps the same derivation useful
+/// for unit tests that explicitly build the CLI first.
+fn sibling_kiln_binary() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("locating the benchmark executable: {error}"))?;
+    let mut directory = executable.parent().ok_or_else(|| {
+        format!(
+            "benchmark executable has no parent: {}",
+            executable.display()
+        )
+    })?;
+    if directory.file_name().is_some_and(|name| name == "deps") {
+        directory = directory.parent().ok_or_else(|| {
+            format!(
+                "benchmark dependency directory has no parent: {}",
+                executable.display()
+            )
+        })?;
+    }
+    Ok(directory.join(format!("kiln{}", std::env::consts::EXE_SUFFIX)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +296,10 @@ mod tests {
         assert_eq!(args.specs.len(), ALL.len());
         assert!(args.out.ends_with("bench/results/latest.json"));
         assert!(args.examples_dir.ends_with("examples"));
+        assert_eq!(
+            args.kiln.file_name().and_then(|name| name.to_str()),
+            Some(if cfg!(windows) { "kiln.exe" } else { "kiln" })
+        );
         assert!(!args.generate_only);
     }
 
@@ -287,6 +321,14 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_cli_binary_overrides_the_sibling_default() {
+        let args = parse(&["--kiln", "/tmp/custom-kiln"])
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(args.kiln, Path::new("/tmp/custom-kiln"));
+    }
+
+    #[test]
     fn gen_is_only_a_subcommand_in_first_position() {
         assert!(
             parse(&["gen"])
@@ -302,6 +344,7 @@ mod tests {
         assert!(parse(&["--workload", "enormous"]).is_err());
         assert!(parse(&["--iterations"]).is_err());
         assert!(parse(&["--iterations", "lots"]).is_err());
+        assert!(parse(&["--kiln"]).is_err());
         assert!(parse(&["--nope"]).is_err());
     }
 

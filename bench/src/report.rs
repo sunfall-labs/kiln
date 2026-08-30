@@ -244,6 +244,7 @@ pub fn render_human(report: &Report) -> String {
         );
     }
 
+    render_standalone(&mut out, report, "daemon", "daemon");
     for info in &report.workloads {
         render_workload(&mut out, report, info);
     }
@@ -256,9 +257,12 @@ pub fn render_human(report: &Report) -> String {
 /// Everything a reader needs in order not to over-read the table above.
 const NOTES: &str = "\
 notes
-  \"daemon startup\" is measured in-process: engine construction plus ingesting every source,
-  deriving nothing. The harness does not spawn the daemon binary, so binary load and the socket
-  handshake are not in that number and it is a floor, not the real figure.
+  \"daemon process startup + socket handshake\" launches the sibling `kiln` CLI with a unique
+  socket, waits through daemon process creation and the protocol handshake, and stops that daemon
+  outside the timed region. A failed start, handshake, or cleanup fails the harness.
+
+  \"engine ingest floor\" constructs the query engine and installs every workload source while
+  deriving nothing. It isolates source-database population and is not labelled daemon startup.
 
   \"cache hit rate\" is validated / (validated + recomputed) over every memo the pipeline
   touched, so a query validated on the way down a dependency walk counts as a hit.
@@ -460,6 +464,8 @@ fn measurement_kind(measurement: &Measurement) -> &'static str {
         }
     } else if is_linked(measurement) {
         "linked interpreter"
+    } else if measurement.workload == "daemon" {
+        "process lifecycle"
     } else if measurement.workload == "conformance" {
         "conformance"
     } else {

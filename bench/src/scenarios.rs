@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kiln_db::{FileId, MemoEngine, QueryEngine, Stats as DbStats};
@@ -44,6 +45,8 @@ const NATIVE_COLD_ITERS: usize = 3;
 const NATIVE_CACHE_WARMUP: usize = 2;
 const NATIVE_CACHE_ITERS: usize = 15;
 
+static DAEMON_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Overrides from the command line, applied to every scenario when present.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Budget {
@@ -66,13 +69,147 @@ pub fn run_all(
     examples_dir: &Path,
 ) -> Result<Vec<Measurement>, String> {
     Ok(vec![
-        startup(w, budget),
+        engine_ingest_floor(w, budget),
         cold(w, budget),
         warm(w, EditKind::Implementation, budget)?,
         warm_execution(w, budget)?,
         warm(w, EditKind::Interface, budget)?,
         warm_linked_execution(w, examples_dir, budget)?,
     ])
+}
+
+/// Measure the process boundary the persistent-service design actually asks users to cross:
+/// launch the CLI, spawn the daemon, and complete the protocol handshake. Each sample owns a
+/// unique socket and stops the daemon outside the timed region.
+pub fn daemon_startup(kiln: &Path, budget: Budget) -> Result<Measurement, String> {
+    let (warmup, iters) = budget.apply(STARTUP_WARMUP, STARTUP_ITERS);
+    let mut durations = Vec::with_capacity(iters);
+
+    for iteration in 0..warmup + iters {
+        let mut fixture = DaemonFixture::new(kiln)?;
+        let elapsed = fixture.start()?;
+        fixture.stop()?;
+        if iteration >= warmup {
+            durations.push(elapsed);
+        }
+    }
+
+    Ok(Measurement::new(
+        Scenario {
+            workload: "daemon",
+            slug: "startup",
+            operation: "daemon process startup + socket handshake",
+            goal_ms: None,
+        },
+        warmup,
+        Samples::from(&durations),
+        DbStats::default(),
+        true,
+    ))
+}
+
+struct DaemonFixture {
+    kiln: PathBuf,
+    root: PathBuf,
+    socket: PathBuf,
+    running: bool,
+}
+
+impl DaemonFixture {
+    fn new(kiln: &Path) -> Result<Self, String> {
+        let mut root = None;
+        for _ in 0..128 {
+            let sequence = DAEMON_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate =
+                std::env::temp_dir().join(format!("kb-{}-{sequence}", std::process::id()));
+            match fs::create_dir(&candidate) {
+                Ok(()) => {
+                    root = Some(candidate);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "creating daemon benchmark directory {}: {error}",
+                        candidate.display()
+                    ));
+                }
+            }
+        }
+        let root = root.ok_or_else(|| {
+            "could not reserve a unique daemon benchmark directory after 128 attempts".to_owned()
+        })?;
+        let socket = root.join("daemon.sock");
+        Ok(Self {
+            kiln: kiln.to_path_buf(),
+            root,
+            socket,
+            running: false,
+        })
+    }
+
+    fn start(&mut self) -> Result<Duration, String> {
+        let started = Instant::now();
+        let output = self.command("start").output().map_err(|error| {
+            format!(
+                "starting daemon benchmark through {}: {error}; build both binaries with scripts/ci-perf.sh or pass --kiln <path>",
+                self.kiln.display()
+            )
+        })?;
+        let elapsed = started.elapsed();
+        // A child can launch the daemon and still fail while formatting or flushing its report.
+        // Once the CLI ran, always attempt cleanup; `daemon stop` is intentionally idempotent.
+        self.running = true;
+        require_lifecycle_output(&output, "start", "started  pid ")?;
+        Ok(elapsed)
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        if !self.running {
+            return Ok(());
+        }
+        let output = self
+            .command("stop")
+            .output()
+            .map_err(|error| format!("stopping daemon benchmark: {error}"))?;
+        require_lifecycle_output(&output, "stop", "stopped  pid ")?;
+        self.running = false;
+        Ok(())
+    }
+
+    fn command(&self, action: &str) -> Command {
+        let mut command = Command::new(&self.kiln);
+        command
+            .current_dir(&self.root)
+            .arg("daemon")
+            .arg(action)
+            .arg("--socket")
+            .arg(&self.socket);
+        command
+    }
+}
+
+impl Drop for DaemonFixture {
+    fn drop(&mut self) {
+        let _ = self.stop();
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn require_lifecycle_output(
+    output: &std::process::Output,
+    action: &str,
+    expected_prefix: &str,
+) -> Result<(), String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() && stdout.starts_with(expected_prefix) {
+        return Ok(());
+    }
+    Err(format!(
+        "daemon benchmark `{action}` failed (status {}): stdout={stdout:?}, stderr={stderr:?}",
+        output.status
+    ))
 }
 
 /// Targeted Test262 latency for the current parser/interpreter slice. The sources are parsed
@@ -517,11 +654,9 @@ impl Drop for TempTree {
     }
 }
 
-/// Cost of standing a session up: intern every path and ingest every source, deriving nothing.
-///
-/// This is the closest v0 analogue of "daemon startup"; see `report`'s footnote for why it is
-/// not yet the real thing.
-fn startup(w: &Workload, budget: Budget) -> Measurement {
+/// In-process lower bound for populating an empty query engine: intern every path and ingest every
+/// source, deriving nothing. This remains useful, but is deliberately not called daemon startup.
+fn engine_ingest_floor(w: &Workload, budget: Budget) -> Measurement {
     let (warmup, iters) = budget.apply(STARTUP_WARMUP, STARTUP_ITERS);
     let paths = paths(w);
     let mut ids = Vec::with_capacity(paths.len());
@@ -535,7 +670,7 @@ fn startup(w: &Workload, budget: Budget) -> Measurement {
         acc.push(start.elapsed(), e.stats());
     }
 
-    acc.finish(w, "startup", "daemon startup", None)
+    acc.finish(w, "engine-ingest", "engine ingest floor", None)
 }
 
 /// Everything from an empty database to a whole-project answer.
@@ -926,6 +1061,82 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_nanos())
         ))
+    }
+
+    #[cfg(unix)]
+    fn fake_kiln(root: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = root.join("kiln-fixture");
+        fs::write(
+            &binary,
+            r#"#!/bin/sh
+case "$2" in
+  start)
+    printf 'start\n' >> "$4.calls"
+    printf 'started  pid 4242  %s\n' "$4"
+    ;;
+  stop)
+    printf 'stop\n' >> "$4.calls"
+    printf 'stopped  pid 4242\n'
+    ;;
+  *)
+    printf 'unexpected lifecycle action: %s\n' "$2" >&2
+    exit 2
+    ;;
+esac
+"#,
+        )
+        .expect("write fake kiln CLI");
+        let mut permissions = fs::metadata(&binary)
+            .expect("fake kiln CLI metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).expect("make fake kiln CLI executable");
+        binary
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_startup_requires_the_handshake_report_and_stops_outside_the_sample() {
+        let root = temp_root();
+        let _cleanup = TempTree(root.clone());
+        fs::create_dir_all(&root).expect("create daemon fixture root");
+        let kiln = fake_kiln(&root);
+        let mut fixture = DaemonFixture::new(&kiln).expect("construct daemon fixture");
+        let calls = PathBuf::from(format!("{}.calls", fixture.socket.display()));
+
+        fixture.start().expect("start and handshake");
+        fixture.stop().expect("stop daemon after timed sample");
+
+        assert_eq!(
+            fs::read_to_string(calls).expect("read lifecycle calls"),
+            "start\nstop\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_startup_is_a_standalone_process_measurement() {
+        let root = temp_root();
+        let _cleanup = TempTree(root.clone());
+        fs::create_dir_all(&root).expect("create daemon fixture root");
+        let measurement = daemon_startup(
+            &fake_kiln(&root),
+            Budget {
+                warmup: Some(0),
+                iterations: Some(1),
+            },
+        )
+        .expect("measure daemon startup");
+
+        assert_eq!(measurement.id, "daemon/startup");
+        assert_eq!(
+            measurement.operation,
+            "daemon process startup + socket handshake"
+        );
+        assert_eq!(measurement.iterations, 1);
+        assert_eq!(measurement.stats, kiln_proto::Stats::default());
     }
 
     #[test]

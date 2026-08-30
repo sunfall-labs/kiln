@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_unix_secs": 1788042722,
+  "generated_unix_secs": 1788133442,
   "machine": {
     "os": "macos",
     "arch": "aarch64",
@@ -30,16 +30,45 @@
   ],
   "measurements": [
     {
-      "id": "small/startup",
-      "workload": "small",
-      "operation": "daemon startup",
+      "id": "daemon/startup",
+      "workload": "daemon",
+      "operation": "daemon process startup + socket handshake",
       "goal_ms": null,
       "warmup_iterations": 3,
       "iterations": 12,
-      "median_ms": 0.000792,
-      "min_ms": 0.0006670000000000001,
-      "p90_ms": 0.0020829999999999998,
-      "max_ms": 0.0025830000000000002,
+      "median_ms": 17.0025835,
+      "min_ms": 14.718292,
+      "p90_ms": 19.307833,
+      "max_ms": 19.697542,
+      "stats": {
+        "revision": 0,
+        "parse_computed": 0,
+        "ir_computed": 0,
+        "interface_computed": 0,
+        "project_computed": 0,
+        "validated": 0,
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
+      },
+      "cache_hit_rate": 0.0,
+      "steady_state": true
+    },
+    {
+      "id": "small/engine-ingest",
+      "workload": "small",
+      "operation": "engine ingest floor",
+      "goal_ms": null,
+      "warmup_iterations": 3,
+      "iterations": 12,
+      "median_ms": 0.0006670000000000001,
+      "min_ms": 0.000625,
+      "p90_ms": 0.001792,
+      "max_ms": 0.001958,
       "stats": {
         "revision": 8,
         "parse_computed": 0,
@@ -47,7 +76,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true
@@ -59,10 +94,10 @@
       "goal_ms": null,
       "warmup_iterations": 2,
       "iterations": 10,
-      "median_ms": 0.031417,
-      "min_ms": 0.030833000000000003,
-      "p90_ms": 0.033042,
-      "max_ms": 0.034125,
+      "median_ms": 0.0550415,
+      "min_ms": 0.052834000000000006,
+      "p90_ms": 0.0605,
+      "max_ms": 0.063709,
       "stats": {
         "revision": 8,
         "parse_computed": 8,
@@ -70,7 +105,13 @@
         "interface_computed": 8,
         "project_computed": 1,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true
@@ -82,10 +123,10 @@
       "goal_ms": 200.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.0052499999999999995,
-      "min_ms": 0.005083000000000001,
-      "p90_ms": 0.006667,
-      "max_ms": 0.007583,
+      "median_ms": 0.008208,
+      "min_ms": 0.007958000000000002,
+      "p90_ms": 0.009082999999999999,
+      "max_ms": 0.010125,
       "stats": {
         "revision": 14,
         "parse_computed": 1,
@@ -93,7 +134,13 @@
         "interface_computed": 1,
         "project_computed": 0,
         "validated": 17,
-        "early_cutoff": 1
+        "early_cutoff": 1,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.8947368421052632,
       "steady_state": true
@@ -105,10 +152,10 @@
       "goal_ms": 200.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.005667,
-      "min_ms": 0.005458,
-      "p90_ms": 0.007083,
-      "max_ms": 0.009167,
+      "median_ms": 0.012459000000000001,
+      "min_ms": 0.012208,
+      "p90_ms": 0.013834,
+      "max_ms": 0.014124999999999999,
       "stats": {
         "revision": 7,
         "parse_computed": 1,
@@ -116,7 +163,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 1,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.3333333333333333,
       "steady_state": true
@@ -128,20 +181,26 @@
       "goal_ms": 200.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.005667,
-      "min_ms": 0.005582999999999999,
-      "p90_ms": 0.005834000000000001,
-      "max_ms": 0.007125,
+      "median_ms": 0.01175,
+      "min_ms": 0.011583000000000001,
+      "p90_ms": 0.01325,
+      "max_ms": 0.013375,
       "stats": {
         "revision": 14,
         "parse_computed": 1,
         "ir_computed": 0,
         "interface_computed": 1,
         "project_computed": 1,
-        "validated": 18,
-        "early_cutoff": 0
+        "validated": 24,
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
-      "cache_hit_rate": 0.8571428571428571,
+      "cache_hit_rate": 0.8888888888888888,
       "steady_state": true
     },
     {
@@ -151,10 +210,10 @@
       "goal_ms": null,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.30562500000000004,
-      "min_ms": 0.29891599999999996,
-      "p90_ms": 0.338333,
-      "max_ms": 0.389959,
+      "median_ms": 0.933083,
+      "min_ms": 0.39375,
+      "p90_ms": 1.304417,
+      "max_ms": 1.615125,
       "stats": {
         "revision": 15,
         "parse_computed": 1,
@@ -162,22 +221,28 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 17,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.8947368421052632,
       "steady_state": true
     },
     {
-      "id": "medium/startup",
+      "id": "medium/engine-ingest",
       "workload": "medium",
-      "operation": "daemon startup",
+      "operation": "engine ingest floor",
       "goal_ms": null,
       "warmup_iterations": 3,
       "iterations": 12,
-      "median_ms": 0.021500000000000002,
-      "min_ms": 0.020667,
-      "p90_ms": 0.022584,
-      "max_ms": 0.022792,
+      "median_ms": 0.021917,
+      "min_ms": 0.021333,
+      "p90_ms": 0.024042,
+      "max_ms": 0.025332999999999998,
       "stats": {
         "revision": 320,
         "parse_computed": 0,
@@ -185,7 +250,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true
@@ -197,10 +268,10 @@
       "goal_ms": null,
       "warmup_iterations": 2,
       "iterations": 10,
-      "median_ms": 2.1228749999999996,
-      "min_ms": 2.0855829999999997,
-      "p90_ms": 2.253209,
-      "max_ms": 2.384791,
+      "median_ms": 3.5835835,
+      "min_ms": 3.449667,
+      "p90_ms": 3.84675,
+      "max_ms": 4.097458,
       "stats": {
         "revision": 320,
         "parse_computed": 320,
@@ -208,7 +279,13 @@
         "interface_computed": 320,
         "project_computed": 1,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true
@@ -220,10 +297,10 @@
       "goal_ms": 500.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.023,
-      "min_ms": 0.022042,
-      "p90_ms": 0.024375,
-      "max_ms": 0.026333,
+      "median_ms": 0.029249999999999998,
+      "min_ms": 0.027875,
+      "p90_ms": 0.029917,
+      "max_ms": 0.030542,
       "stats": {
         "revision": 326,
         "parse_computed": 1,
@@ -231,7 +308,13 @@
         "interface_computed": 1,
         "project_computed": 0,
         "validated": 641,
-        "early_cutoff": 1
+        "early_cutoff": 1,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.9968895800933126,
       "steady_state": true
@@ -243,10 +326,10 @@
       "goal_ms": 500.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.0052499999999999995,
-      "min_ms": 0.005084,
-      "p90_ms": 0.005917,
-      "max_ms": 0.006,
+      "median_ms": 0.013125000000000001,
+      "min_ms": 0.012374999999999999,
+      "p90_ms": 0.013542,
+      "max_ms": 0.014708,
       "stats": {
         "revision": 7,
         "parse_computed": 1,
@@ -254,7 +337,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 1,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.3333333333333333,
       "steady_state": true
@@ -266,20 +355,26 @@
       "goal_ms": 500.0,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.026125000000000002,
-      "min_ms": 0.025332999999999998,
-      "p90_ms": 0.027208,
-      "max_ms": 0.031542,
+      "median_ms": 0.147083,
+      "min_ms": 0.142125,
+      "p90_ms": 0.18395799999999998,
+      "max_ms": 0.28049999999999997,
       "stats": {
         "revision": 326,
         "parse_computed": 1,
         "ir_computed": 0,
         "interface_computed": 1,
         "project_computed": 1,
-        "validated": 783,
-        "early_cutoff": 0
+        "validated": 703,
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
-      "cache_hit_rate": 0.9961832061068703,
+      "cache_hit_rate": 0.9957507082152974,
       "steady_state": true
     },
     {
@@ -289,10 +384,10 @@
       "goal_ms": null,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 27.280667,
-      "min_ms": 24.456875,
-      "p90_ms": 32.568625,
-      "max_ms": 33.7785,
+      "median_ms": 59.656167,
+      "min_ms": 43.341625,
+      "p90_ms": 67.710167,
+      "max_ms": 71.072375,
       "stats": {
         "revision": 327,
         "parse_computed": 1,
@@ -300,7 +395,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 641,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.9968895800933126,
       "steady_state": true
@@ -312,10 +413,10 @@
       "goal_ms": null,
       "warmup_iterations": 5,
       "iterations": 25,
-      "median_ms": 0.0015409999999999998,
-      "min_ms": 0.0015,
-      "p90_ms": 0.001666,
-      "max_ms": 0.005417,
+      "median_ms": 0.0036669999999999997,
+      "min_ms": 0.003542,
+      "p90_ms": 0.003917,
+      "max_ms": 0.004333,
       "stats": {
         "revision": 0,
         "parse_computed": 0,
@@ -323,7 +424,13 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true
@@ -335,10 +442,10 @@
       "goal_ms": null,
       "warmup_iterations": 1,
       "iterations": 3,
-      "median_ms": 396.0515,
-      "min_ms": 366.050333,
-      "p90_ms": 399.654,
-      "max_ms": 399.654,
+      "median_ms": 735.542334,
+      "min_ms": 727.230917,
+      "p90_ms": 756.092125,
+      "max_ms": 756.092125,
       "stats": {
         "revision": 0,
         "parse_computed": 0,
@@ -346,15 +453,21 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true,
       "native": {
         "cache_hit": false,
-        "generated_c_bytes": 27930,
-        "object_bytes": 39184,
-        "executable_bytes": 702440
+        "generated_c_bytes": 970419,
+        "object_bytes": 63040,
+        "executable_bytes": 11639064
       }
     },
     {
@@ -364,10 +477,10 @@
       "goal_ms": null,
       "warmup_iterations": 2,
       "iterations": 15,
-      "median_ms": 6.656667,
-      "min_ms": 4.38175,
-      "p90_ms": 11.283375,
-      "max_ms": 13.123,
+      "median_ms": 97.943083,
+      "min_ms": 93.144041,
+      "p90_ms": 110.437458,
+      "max_ms": 116.456166,
       "stats": {
         "revision": 0,
         "parse_computed": 0,
@@ -375,15 +488,21 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true,
       "native": {
         "cache_hit": true,
-        "generated_c_bytes": 27930,
-        "object_bytes": 39184,
-        "executable_bytes": 702440
+        "generated_c_bytes": 970419,
+        "object_bytes": 63040,
+        "executable_bytes": 11639064
       }
     },
     {
@@ -393,10 +512,10 @@
       "goal_ms": null,
       "warmup_iterations": 2,
       "iterations": 15,
-      "median_ms": 316.29425,
-      "min_ms": 269.343458,
-      "p90_ms": 459.258542,
-      "max_ms": 475.620625,
+      "median_ms": 447.430084,
+      "min_ms": 425.02991699999995,
+      "p90_ms": 459.255292,
+      "max_ms": 476.272791,
       "stats": {
         "revision": 0,
         "parse_computed": 0,
@@ -404,15 +523,21 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true,
       "native": {
         "cache_hit": false,
-        "generated_c_bytes": 27930,
-        "object_bytes": 39184,
-        "executable_bytes": 702456
+        "generated_c_bytes": 970419,
+        "object_bytes": 63056,
+        "executable_bytes": 11639064
       }
     },
     {
@@ -422,10 +547,10 @@
       "goal_ms": null,
       "warmup_iterations": 0,
       "iterations": 1,
-      "median_ms": 177.13662499999998,
-      "min_ms": 177.13662499999998,
-      "p90_ms": 177.13662499999998,
-      "max_ms": 177.13662499999998,
+      "median_ms": 230.40508300000002,
+      "min_ms": 230.40508300000002,
+      "p90_ms": 230.40508300000002,
+      "max_ms": 230.40508300000002,
       "stats": {
         "revision": 0,
         "parse_computed": 0,
@@ -433,15 +558,21 @@
         "interface_computed": 0,
         "project_computed": 0,
         "validated": 0,
-        "early_cutoff": 0
+        "early_cutoff": 0,
+        "graph_cache_hits": 0,
+        "graph_cache_misses": 0,
+        "graph_cache_evictions": 0,
+        "graph_cache_invalidations": 0,
+        "graph_cache_entries": 0,
+        "graph_cache_modules": 0
       },
       "cache_hit_rate": 0.0,
       "steady_state": true,
       "native": {
         "cache_hit": true,
-        "generated_c_bytes": 27930,
-        "object_bytes": 39184,
-        "executable_bytes": 702440
+        "generated_c_bytes": 970419,
+        "object_bytes": 63040,
+        "executable_bytes": 11639064
       }
     }
   ]

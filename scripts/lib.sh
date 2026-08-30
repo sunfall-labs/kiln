@@ -25,10 +25,11 @@ kiln_say() {
 	printf '%s\n' "$*" | kiln_block
 }
 
-# Build the timing harness and echo the path to its binary. Release, because a debug build of
-# a benchmark measures the wrong thing.
+# Build the timing harness and the sibling CLI it launches for the real daemon-startup scenario,
+# then echo the harness path. Release, because a debug build of a benchmark measures the wrong
+# thing.
 kiln_build_bench() {
-	cargo build --release --locked -p kiln-bench >&2
+	cargo build --release --locked -p kiln-bench -p kiln-cli >&2
 	printf '%s\n' "$(kiln_repo_root)/target/release/kiln-bench"
 }
 
