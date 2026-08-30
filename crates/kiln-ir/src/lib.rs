@@ -350,6 +350,7 @@ pub enum Builtin {
     QueueMicrotask,
     Promise,
     RegExp,
+    Date,
 }
 
 impl Builtin {
@@ -385,6 +386,7 @@ impl Builtin {
             "queueMicrotask" => Some(Self::QueueMicrotask),
             "Promise" => Some(Self::Promise),
             "RegExp" => Some(Self::RegExp),
+            "Date" => Some(Self::Date),
             _ => None,
         }
     }
@@ -420,6 +422,7 @@ impl Builtin {
             Self::QueueMicrotask => "queueMicrotask",
             Self::Promise => "Promise",
             Self::RegExp => "RegExp",
+            Self::Date => "Date",
         }
     }
 }

@@ -210,6 +210,15 @@ pub enum Native {
     /// the id it was given, and the language does not distinguish which kind it was.
     ClearTimer,
     QueueMicrotask,
+    DateConstructor,
+    DateNow,
+    DateUtc,
+    DateParse,
+    /// Every reader of a date part. One native with the field it reads, because they differ only
+    /// in which number they take out of the same decomposition.
+    DateField(DateField),
+    DateToIso,
+    DateToString,
     RegExpConstructor,
     RegExpTest,
     RegExpExec,
@@ -366,6 +375,9 @@ impl Native {
                 Some(Value::Number(f64::NEG_INFINITY))
             }
             (Self::NumberConstructor, "NaN") => Some(Value::Number(f64::NAN)),
+            (Self::DateConstructor, "now") => Some(Value::Native(Self::DateNow)),
+            (Self::DateConstructor, "UTC") => Some(Value::Native(Self::DateUtc)),
+            (Self::DateConstructor, "parse") => Some(Value::Native(Self::DateParse)),
             (Self::PromiseConstructor, "resolve") => Some(Value::Native(Self::PromiseResolve)),
             (Self::PromiseConstructor, "reject") => Some(Value::Native(Self::PromiseReject)),
             (Self::PromiseConstructor, "all") => Some(Value::Native(Self::PromiseAll)),
@@ -717,6 +729,9 @@ pub enum Value {
     Generator(Rc<RefCell<GeneratorState>>),
     Promise(Rc<RefCell<PromiseState>>),
     RegExp(Rc<RegExpData>),
+    /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same
+    /// instant are still two objects and `===` has to say so.
+    Date(Rc<std::cell::Cell<f64>>),
     /// The `resolve` or `reject` handed to a promise executor.
     ///
     /// A function bound to one promise, which no other value kind here can express: a `Native`
@@ -771,7 +786,11 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) => "function",
-            Self::Array(_) | Self::Generator(_) | Self::Promise(_) | Self::RegExp(_) => "object",
+            Self::Array(_)
+            | Self::Generator(_)
+            | Self::Promise(_)
+            | Self::RegExp(_)
+            | Self::Date(_) => "object",
             // A settler is a function the program can call, hold and pass on, so it says so.
             Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
@@ -794,6 +813,7 @@ impl Value {
             Self::Generator(_) => "generator",
             Self::Promise(_) => "promise",
             Self::RegExp(_) => "regexp",
+            Self::Date(_) => "date",
             Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
@@ -823,6 +843,8 @@ impl Value {
             | Self::Promise(_)
             | Self::RegExp(_)
             | Self::Settler(..) => f64::NAN,
+            // A date converts to its instant, which is what makes `end - start` a duration.
+            Self::Date(time) => time.get(),
             // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
             Self::Symbol(_) => f64::NAN,
             // `Number([])` is 0 and `Number([2])` is 2: ToPrimitive joins, then parses.
@@ -847,6 +869,7 @@ impl Value {
             | Self::Generator(_)
             | Self::Promise(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Settler(..)
             | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -879,6 +902,7 @@ impl Value {
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
+            Self::Date(time) => date_to_string(time.get()),
             Self::Settler(..) => "function () { [native code] }".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
@@ -1913,6 +1937,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             globals.set("Math", Value::Native(Native::Math));
                             globals.set("Promise", Value::Native(Native::PromiseConstructor));
                             globals.set("RegExp", Value::Native(Native::RegExpConstructor));
+                            globals.set("Date", Value::Native(Native::DateConstructor));
                             globals.set("Number", Value::Native(Native::NumberConstructor));
                             globals.set("Boolean", Value::Native(Native::BooleanConstructor));
                             globals.set("NaN", Value::Number(f64::NAN));
@@ -1939,6 +1964,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
                         kiln_ir::Builtin::Promise => Native::PromiseConstructor,
                         kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
+                        kiln_ir::Builtin::Date => Native::DateConstructor,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -2761,6 +2787,37 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         None => Value::Undefined,
                     },
                 )
+            }
+            // The *virtual* clock, not the host's. A program that asks the time twice with no
+            // timer in between gets the same answer, which is what makes a run repeatable --
+            // and is the whole point of the clock being the machine's. ADR 0015.
+            Native::DateNow => Ok(Value::Number(self.now)),
+            Native::DateConstructor => {
+                let time = match arguments.len() {
+                    0 => self.now,
+                    1 => match arguments.first() {
+                        // `new Date(otherDate)` copies the instant rather than stringifying it.
+                        Some(Value::Date(existing)) => existing.get(),
+                        Some(Value::String(text)) => parse_date(text),
+                        Some(value) => {
+                            let primitive = self.as_primitive(value, false, instruction)?;
+                            match primitive {
+                                Value::String(text) => parse_date(&text),
+                                other => other.as_number(),
+                            }
+                        }
+                        None => unreachable!("length checked above"),
+                    },
+                    _ => date_from_fields(arguments),
+                };
+                // Every instant outside the representable range collapses to one invalid date,
+                // which is why the readers only have to test for NaN.
+                let time = if time.abs() <= 8.64e15 {
+                    time
+                } else {
+                    f64::NAN
+                };
+                Ok(Value::Date(Rc::new(std::cell::Cell::new(time))))
             }
             Native::RegExpConstructor => {
                 let pattern = match arguments.first() {
@@ -3977,6 +4034,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
             }
+            Value::Native(Native::DateConstructor) => {
+                let date = self.dispatch_native(
+                    Native::DateConstructor,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(date);
+            }
             Value::Native(Native::RegExpConstructor) => {
                 let regexp = self.dispatch_native(
                     Native::RegExpConstructor,
@@ -4398,6 +4464,31 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             },
             // A regexp's own properties. `lastIndex` is the mutable one, and the reason two
             // evaluations of one literal must not share an object.
+            Value::Date(_) => match name {
+                "getTime" | "valueOf" => Value::Native(Native::DateField(DateField::Time)),
+                // The local readers are the UTC ones: the realm's zone is UTC, which
+                // `getTimezoneOffset` reports honestly rather than leaving to be discovered.
+                "getFullYear" | "getUTCFullYear" => {
+                    Value::Native(Native::DateField(DateField::FullYear))
+                }
+                "getMonth" | "getUTCMonth" => Value::Native(Native::DateField(DateField::Month)),
+                "getDate" | "getUTCDate" => Value::Native(Native::DateField(DateField::Day)),
+                "getDay" | "getUTCDay" => Value::Native(Native::DateField(DateField::Weekday)),
+                "getHours" | "getUTCHours" => Value::Native(Native::DateField(DateField::Hours)),
+                "getMinutes" | "getUTCMinutes" => {
+                    Value::Native(Native::DateField(DateField::Minutes))
+                }
+                "getSeconds" | "getUTCSeconds" => {
+                    Value::Native(Native::DateField(DateField::Seconds))
+                }
+                "getMilliseconds" | "getUTCMilliseconds" => {
+                    Value::Native(Native::DateField(DateField::Milliseconds))
+                }
+                "getTimezoneOffset" => Value::Native(Native::DateField(DateField::TimezoneOffset)),
+                "toISOString" | "toJSON" => Value::Native(Native::DateToIso),
+                "toString" => Value::Native(Native::DateToString),
+                _ => Value::Undefined,
+            },
             Value::RegExp(regexp) => match name {
                 "test" => Value::Native(Native::RegExpTest),
                 "exec" => Value::Native(Native::RegExpExec),
@@ -5023,6 +5114,12 @@ fn json_stringify(
         // which is also what a real engine produces for them.
         // A regexp has no own enumerable properties either, so `JSON.stringify(/a/)` is `{}`.
         Value::Generator(_) | Value::Promise(_) | Value::RegExp(_) => Some("{}".to_owned()),
+        // A date serialises through `toJSON`, which is its ISO form -- or null when it is invalid,
+        // since there is no ISO spelling for that.
+        Value::Date(time) => Some(match iso_string(time.get()) {
+            Some(text) => json_quote(&text),
+            None => "null".to_owned(),
+        }),
         // A function has no JSON spelling, and a settler is one.
         Value::Settler(..) => None,
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -5146,6 +5243,10 @@ fn call_native(
                 .unwrap_or(Value::Null),
             _ => Value::Null,
         },
+        // Both read the clock, which lives on the machine and is virtual -- see ADR 0015.
+        Native::DateConstructor | Native::DateNow => {
+            unreachable!("the clock built-ins are dispatched by the interpreter")
+        }
         // A regexp operation reads and writes `lastIndex`, builds result arrays, and may call a
         // replacement function -- so none of them is a pure function of its arguments either.
         Native::RegExpConstructor
@@ -5227,6 +5328,58 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
+        // Every reader takes the same decomposition apart, so they share one arm.
+        Native::DateField(field) => {
+            let Value::Date(time) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            let time = time.get();
+            if matches!(field, DateField::Time) {
+                return Ok(Value::Number(time));
+            }
+            if matches!(field, DateField::TimezoneOffset) {
+                return Ok(Value::Number(0.0));
+            }
+            let Some(parts) = date_parts(time) else {
+                // Every reader on an invalid date is NaN, which is what makes one propagate.
+                return Ok(Value::Number(f64::NAN));
+            };
+            Value::Number(match field {
+                // `getMonth` is zero-based and `getDate` is one-based, which is the language's
+                // oldest wart and is not this compiler's to fix.
+                DateField::FullYear => parts.year as f64,
+                DateField::Month => f64::from(parts.month) - 1.0,
+                DateField::Day => f64::from(parts.day),
+                DateField::Weekday => f64::from(parts.weekday),
+                DateField::Hours => f64::from(parts.hour),
+                DateField::Minutes => f64::from(parts.minute),
+                DateField::Seconds => f64::from(parts.second),
+                DateField::Milliseconds => f64::from(parts.millisecond),
+                DateField::Time | DateField::TimezoneOffset => unreachable!("handled above"),
+            })
+        }
+        Native::DateToIso => {
+            let Value::Date(time) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            match iso_string(time.get()) {
+                Some(text) => Value::String(text),
+                // An instant with no ISO spelling is a RangeError, not a placeholder string.
+                None => return Err(ExecutionError::RadixOutOfRange),
+            }
+        }
+        Native::DateToString => {
+            let Value::Date(time) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            Value::String(date_to_string(time.get()))
+        }
+        Native::DateParse => Value::Number(parse_date(
+            &arguments
+                .first()
+                .map_or_else(String::new, Value::to_display_string),
+        )),
+        Native::DateUtc => Value::Number(date_from_fields(arguments)),
         Native::ArrayAt => match receiver {
             Value::Array(items) => {
                 let items = items.borrow();
@@ -5949,11 +6102,14 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             Some(prototype) => prototype.clone(),
             None => return false,
         },
-        // A promise has no prototype object to walk -- it is its own value kind -- so the test
-        // is what the chain would have answered.
+        // These have no prototype object to walk -- each is its own value kind -- so the test is
+        // what the chain would have answered.
         Value::Native(Native::PromiseConstructor) => {
             return matches!(value, Value::Promise(_));
         }
+        Value::Native(Native::DateConstructor) => return matches!(value, Value::Date(_)),
+        Value::Native(Native::RegExpConstructor) => return matches!(value, Value::RegExp(_)),
+        Value::Native(Native::ArrayConstructor) => return matches!(value, Value::Array(_)),
         _ => return false,
     };
 
@@ -6642,6 +6798,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
         Value::Settler(..) => "[Function (anonymous)]".to_owned(),
         Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
+        Value::Date(time) => iso_string(time.get()).unwrap_or_else(|| "Invalid Date".to_owned()),
         Value::Promise(promise) => match &promise.borrow().settled {
             None => "Promise { <pending> }".to_owned(),
             Some(Settled::Fulfilled(value)) => {
@@ -6783,6 +6940,216 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
     }
     let groups = found.groups().collect();
     Some((found.range(), groups))
+}
+
+/// The civil date a count of days since the epoch names.
+///
+/// Hinnant's algorithm, which is exact for the whole range a `f64` instant can reach and needs no
+/// tables. Shifting the year to start in March is what makes the leap day the last day of the
+/// year and removes every special case from the month arithmetic.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    } as u32;
+    (year + i64::from(month <= 2), month, day)
+}
+
+/// The inverse of [`civil_from_days`], for `Date.UTC` and the constructor's field form.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Which part of an instant a reader returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateField {
+    Time,
+    FullYear,
+    Month,
+    Day,
+    Weekday,
+    Hours,
+    Minutes,
+    Seconds,
+    Milliseconds,
+    /// Always zero: the realm has no zone but UTC, so there is nothing to offset by.
+    TimezoneOffset,
+}
+
+/// The parts of an instant, all in UTC -- see ADR 0015 for why the realm has no other zone.
+struct DateParts {
+    year: i64,
+    month: u32,
+    day: u32,
+    weekday: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    millisecond: u32,
+}
+
+fn date_parts(time: f64) -> Option<DateParts> {
+    if !time.is_finite() {
+        return None;
+    }
+    let millis = time as i64;
+    // Floor division, not truncation: an instant before the epoch is a negative count and must
+    // round *down* to the day containing it.
+    let days = millis.div_euclid(86_400_000);
+    let within = millis.rem_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    Some(DateParts {
+        year,
+        month,
+        day,
+        // 1970-01-01 was a Thursday, which is day 4.
+        weekday: (days + 4).rem_euclid(7) as u32,
+        hour: (within / 3_600_000) as u32,
+        minute: (within / 60_000 % 60) as u32,
+        second: (within / 1000 % 60) as u32,
+        millisecond: (within % 1000) as u32,
+    })
+}
+
+/// `toISOString`, or `None` for an instant that has no ISO spelling.
+fn iso_string(time: f64) -> Option<String> {
+    let parts = date_parts(time)?;
+    // A year outside four digits is written with a sign and six, which is the only shape that
+    // stays unambiguous.
+    let year = if (0..=9999).contains(&parts.year) {
+        format!("{:04}", parts.year)
+    } else {
+        format!(
+            "{}{:06}",
+            if parts.year < 0 { '-' } else { '+' },
+            parts.year.abs()
+        )
+    };
+    Some(format!(
+        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        parts.month, parts.day, parts.hour, parts.minute, parts.second, parts.millisecond
+    ))
+}
+
+/// `String(date)`: the human form, which is UTC here because the realm has no other zone.
+fn date_to_string(time: f64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(parts) = date_parts(time) else {
+        return "Invalid Date".to_owned();
+    };
+    format!(
+        "{} {} {:02} {} {:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)",
+        WEEKDAYS[parts.weekday as usize],
+        MONTHS[(parts.month - 1) as usize],
+        parts.day,
+        parts.year,
+        parts.hour,
+        parts.minute,
+        parts.second
+    )
+}
+
+/// The instant named by `(year, month, day, hours, minutes, seconds, milliseconds)`.
+///
+/// Out-of-range fields roll over rather than failing -- month 13 is January of the next year --
+/// which is why the arithmetic is done in milliseconds rather than validated field by field.
+fn date_from_fields(arguments: &[Value]) -> f64 {
+    let field = |index: usize, default: f64| -> f64 {
+        arguments.get(index).map_or(default, Value::as_number)
+    };
+    let year = field(0, f64::NAN);
+    if !year.is_finite() {
+        return f64::NAN;
+    }
+    // A two-digit year means 19xx, which is the one piece of legacy the constructor keeps.
+    let year = if (0.0..=99.0).contains(&year) {
+        year + 1900.0
+    } else {
+        year
+    };
+    let (month, day) = (field(1, 0.0), field(2, 1.0));
+    let (hours, minutes) = (field(3, 0.0), field(4, 0.0));
+    let (seconds, millis) = (field(5, 0.0), field(6, 0.0));
+    if [month, day, hours, minutes, seconds, millis]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return f64::NAN;
+    }
+    // The month is zero-based and may sit outside 0..12, so it is folded into the year first.
+    let months = year as i64 * 12 + month as i64;
+    let days = days_from_civil(months.div_euclid(12), months.rem_euclid(12) + 1, day as i64);
+    (days * 86_400_000) as f64
+        + hours * 3_600_000.0
+        + minutes * 60_000.0
+        + seconds * 1000.0
+        + millis
+}
+
+/// Parse the ISO forms `Date.parse` and the string constructor accept.
+///
+/// Deliberately only ISO 8601. The specification also allows an implementation-defined set of
+/// other formats, and guessing at one silently turns a typo into a date.
+fn parse_date(text: &str) -> f64 {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let read =
+        |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse::<i64>().ok() };
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return f64::NAN;
+    }
+    let (Some(year), Some(month), Some(day)) = (read(0..4), read(5..7), read(8..10)) else {
+        return f64::NAN;
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return f64::NAN;
+    }
+    let mut millis = days_from_civil(year, month, day) * 86_400_000;
+    if bytes.len() > 10 {
+        if bytes.get(10) != Some(&b'T') || bytes.len() < 16 {
+            return f64::NAN;
+        }
+        let (Some(hour), Some(minute)) = (read(11..13), read(14..16)) else {
+            return f64::NAN;
+        };
+        millis += hour * 3_600_000 + minute * 60_000;
+        if bytes.len() >= 19 && bytes.get(16) == Some(&b':') {
+            let Some(second) = read(17..19) else {
+                return f64::NAN;
+            };
+            millis += second * 1000;
+            if bytes.len() >= 23 && bytes.get(19) == Some(&b'.') {
+                let Some(fraction) = read(20..23) else {
+                    return f64::NAN;
+                };
+                millis += fraction;
+            }
+        }
+    }
+    millis as f64
 }
 
 /// One match: where it landed, and where each capture group did.

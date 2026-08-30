@@ -26,10 +26,18 @@
 # Probes are ordinary JavaScript that prints to stdout and exits 0 under node. Add one whenever
 # you want to know what kiln does with a piece of the language; it costs nothing to be refused.
 #
-# ONE TRAP. node sleeps for real and kiln's clock is virtual, so a probe that schedules something
-# an hour out finishes instantly here and hangs the reference implementation there. Keep timer
-# delays to a few milliseconds and assert *ordering*; the fact that the delay's magnitude is free
-# is covered by unit tests, where there is no node to wait for. See ADR 0012.
+# TWO TRAPS, both about the clock.
+#
+# node sleeps for real and kiln's clock is virtual, so a probe that schedules something an hour
+# out finishes instantly here and hangs the reference implementation there. Keep timer delays to a
+# few milliseconds and assert *ordering*; the fact that the delay's magnitude is free is covered by
+# unit tests, where there is no node to wait for. See ADR 0012.
+#
+# And kiln's realm is always UTC, deliberately -- a timezone is host state, and a program that
+# reads it is not reproducible. node takes its zone from the environment, so it is run under
+# TZ=UTC below to make the two comparable. A probe must therefore not print `Date.now()` or an
+# unqualified `new Date()`: those are the *current* instant, which is real time there and virtual
+# time here and can never agree. See ADR 0015.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
@@ -59,7 +67,8 @@ declare -a DIVERGENCES=()
 
 for probe in "$PROBES"/*.js; do
 	name="$(basename -- "$probe" .js)"
-	expected="$(node "$probe" 2>&1 || true)"
+	# TZ pinned so the reference implementation is in the same zone this realm is.
+	expected="$(TZ=UTC node "$probe" 2>&1 || true)"
 	# --one-shot so a stale daemon can never answer for a build that no longer exists.
 	actual="$("$KILN" --one-shot run "$probe" 2>&1 || true)"
 
