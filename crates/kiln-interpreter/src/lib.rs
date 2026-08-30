@@ -21,10 +21,8 @@ use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, 
 /// prototypes and a loader, so the handful the conformance corpus needs first live here.
 /// The well-known symbols, which are the only symbols that exist so far.
 ///
-/// Symbol-keyed properties are stored under a reserved string key (`@@iterator`), the same
-/// convention engines use internally. It is not airtight -- a program could write that string as
-/// a literal key -- but a separate key space costs a second lookup path everywhere for a
-/// collision nobody writes by accident, and the corpus is what would catch it.
+/// Property keys have separate string, symbol, and VM-private namespaces. In particular, a string
+/// beginning with `@@` is still an ordinary program-visible string; it must never alias a symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WellKnown {
     Iterator,
@@ -106,9 +104,97 @@ impl PartialEq for Symbol {
     }
 }
 
-/// Any string key beginning with this is the VM's own: a symbol-keyed property or an internal
-/// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
+impl Eq for Symbol {}
+
+/// Keys used by the object store. `Internal` is inaccessible through JavaScript syntax and is
+/// used for iterator state and other VM bookkeeping. Symbols remain values here (rather than
+/// being converted to printable strings), preserving identity for unique symbols.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropertyKey {
+    String(String),
+    Symbol(Symbol),
+    Internal(InternalKey),
+}
+
+impl PartialEq<&str> for PropertyKey {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, Self::String(value) if value == *other)
+    }
+}
+impl PartialEq<PropertyKey> for &str {
+    fn eq(&self, other: &PropertyKey) -> bool {
+        other == self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InternalKey {
+    Slot(String),
+    /// An engine-private alias can retain a symbol's identity without exposing it to JavaScript.
+    Symbol(Symbol),
+}
+
+impl From<&str> for PropertyKey {
+    fn from(key: &str) -> Self {
+        Self::String(key.to_owned())
+    }
+}
+impl From<&&str> for PropertyKey {
+    fn from(key: &&str) -> Self {
+        Self::String((*key).to_owned())
+    }
+}
+impl From<String> for PropertyKey {
+    fn from(key: String) -> Self {
+        Self::String(key)
+    }
+}
+impl From<&String> for PropertyKey {
+    fn from(key: &String) -> Self {
+        Self::String(key.clone())
+    }
+}
+impl From<Symbol> for PropertyKey {
+    fn from(key: Symbol) -> Self {
+        Self::Symbol(key)
+    }
+}
+impl From<InternalKey> for PropertyKey {
+    fn from(key: InternalKey) -> Self {
+        Self::Internal(key)
+    }
+}
+impl From<&PropertyKey> for PropertyKey {
+    fn from(key: &PropertyKey) -> Self {
+        key.clone()
+    }
+}
+
+/// VM-private bookkeeping never enters the program-visible string namespace.
+#[cfg(test)]
 const RESERVED_KEY_PREFIX: &str = "@@";
+fn internal_key(name: &str) -> PropertyKey {
+    PropertyKey::Internal(InternalKey::Slot(name.to_owned()))
+}
+
+fn iterator_key() -> PropertyKey {
+    PropertyKey::Symbol(Symbol::WellKnown(WellKnown::Iterator))
+}
+
+fn key_value(key: &PropertyKey) -> Value {
+    match key {
+        PropertyKey::String(text) => Value::String(text.clone()),
+        PropertyKey::Symbol(symbol) => Value::Symbol(symbol.clone()),
+        PropertyKey::Internal(_) => Value::Undefined,
+    }
+}
+
+fn string_key(key: &PropertyKey) -> Option<&str> {
+    match key {
+        PropertyKey::String(text) => Some(text),
+        _ => None,
+    }
+}
 
 /// The error constructors a realm provides.
 ///
@@ -785,7 +871,7 @@ pub enum Property {
 
 #[derive(Clone, Debug)]
 pub struct ObjectData {
-    properties: Vec<(String, Property)>,
+    properties: Vec<(PropertyKey, Property)>,
     /// Own properties that exist but are not *enumerated*: readable by name, invisible to
     /// `Object.keys`, `for...in`, spread and JSON.
     ///
@@ -793,7 +879,7 @@ pub struct ObjectData {
     /// only an error carries one today. `entries` is the enumeration accessor and filters here,
     /// so every caller that walks an object inherits the rule; `keys` does not, because
     /// `getOwnPropertyNames` is supposed to see them.
-    non_enumerable: Vec<String>,
+    non_enumerable: Vec<PropertyKey>,
     /// `Object.preventExtensions` and `Object.seal`. Weaker than frozen: the properties that
     /// are already there stay writable, only the shape is closed.
     extensible: bool,
@@ -828,10 +914,11 @@ const MAX_PROTOTYPE_DEPTH: usize = 10_000;
 
 impl ObjectData {
     /// An own property slot, ignoring the prototype chain.
-    pub fn get_own_property(&self, key: &str) -> Option<&Property> {
+    pub fn get_own_property<K: Into<PropertyKey>>(&self, key: K) -> Option<&Property> {
+        let key = key.into();
         self.properties
             .iter()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| name == &key)
             .map(|(_, property)| property)
     }
 
@@ -839,7 +926,7 @@ impl ObjectData {
     ///
     /// For the VM's own slots, which are always data and never reached by program syntax. A
     /// program-visible read has to go through the interpreter, because an accessor is a call.
-    pub fn get_own(&self, key: &str) -> Option<&Value> {
+    pub fn get_own<K: Into<PropertyKey>>(&self, key: K) -> Option<&Value> {
         match self.get_own_property(key) {
             Some(Property::Value(value)) => Some(value),
             _ => None,
@@ -852,8 +939,9 @@ impl ObjectData {
     /// length is the program's business -- but the recursion was on the *Rust* stack, where
     /// running out is an abort rather than an error, and a chain long enough to do that is
     /// reachable from ordinary code.
-    pub fn lookup(&self, key: &str) -> Option<Property> {
-        if let Some(own) = self.get_own_property(key) {
+    pub fn lookup<K: Into<PropertyKey>>(&self, key: K) -> Option<Property> {
+        let key = key.into();
+        if let Some(own) = self.get_own_property(key.clone()) {
             return Some(own.clone());
         }
         let mut current = self.prototype.clone();
@@ -862,14 +950,14 @@ impl ObjectData {
                 Some(Value::Object(parent)) => {
                     let parent = parent.borrow();
                     parent
-                        .get_own_property(key)
+                        .get_own_property(key.clone())
                         .cloned()
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 Some(Value::Function(parent)) => {
                     let parent = parent.properties.borrow();
                     parent
-                        .get_own_property(key)
+                        .get_own_property(key.clone())
                         .cloned()
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -889,11 +977,12 @@ impl ObjectData {
     /// *defines*, where an assignment *assigns*, and the difference is exactly the idiom where a
     /// prototype getter replaces itself with an own value on first read. Routing that through
     /// the prototype's setter calls it again, and again.
-    pub fn define_value(&mut self, key: &str, value: Value) {
+    pub fn define_value<K: Into<PropertyKey>>(&mut self, key: K, value: Value) {
+        let key = key.into();
         if self.frozen {
             return;
         }
-        match self.properties.iter_mut().find(|(name, _)| name == key) {
+        match self.properties.iter_mut().find(|(name, _)| name == &key) {
             Some((_, slot)) => *slot = Property::Value(value),
             None => self.set(key, value),
         }
@@ -903,8 +992,14 @@ impl ObjectData {
     ///
     /// Merging matters because `get x()` and `set x()` are written separately and describe one
     /// property; defining the second must not discard the first.
-    pub fn define_accessor(&mut self, key: &str, getter: Option<Value>, setter: Option<Value>) {
-        let existing = match self.get_own_property(key) {
+    pub fn define_accessor<K: Into<PropertyKey>>(
+        &mut self,
+        key: K,
+        getter: Option<Value>,
+        setter: Option<Value>,
+    ) {
+        let key = key.into();
+        let existing = match self.get_own_property(key.clone()) {
             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
             _ => (None, None),
         };
@@ -912,9 +1007,9 @@ impl ObjectData {
             get: getter.or(existing.0),
             set: setter.or(existing.1),
         };
-        match self.properties.iter_mut().find(|(name, _)| name == key) {
+        match self.properties.iter_mut().find(|(name, _)| name == &key) {
             Some((_, slot)) => *slot = property,
-            None => self.properties.push((key.to_owned(), property)),
+            None => self.properties.push((key, property)),
         }
     }
 
@@ -922,7 +1017,7 @@ impl ObjectData {
     ///
     /// Returns an owned value rather than a reference because the answer may live in another
     /// object behind an `Rc<RefCell<_>>`, whose borrow cannot outlive this call.
-    pub fn get(&self, key: &str) -> Option<Value> {
+    pub fn get<K: Into<PropertyKey>>(&self, key: K) -> Option<Value> {
         // Same walk as `lookup`, and data-only: this is what the VM's own reads use.
         match self.lookup(key) {
             Some(Property::Value(value)) => Some(value),
@@ -963,30 +1058,30 @@ impl ObjectData {
     /// array index comes before every string key, in ascending numeric order, however it was
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
-    pub fn set(&mut self, key: &str, value: Value) {
+    pub fn set<K: Into<PropertyKey>>(&mut self, key: K, value: Value) {
+        let key = key.into();
         if self.frozen {
             return;
         }
-        if let Some((_, existing)) = self.properties.iter_mut().find(|(name, _)| name == key) {
+        if let Some((_, existing)) = self.properties.iter_mut().find(|(name, _)| name == &key) {
             *existing = Property::Value(value);
             return;
         }
         if !self.extensible {
             return;
         }
-        let Some(index) = index_key(key) else {
-            self.properties
-                .push((key.to_owned(), Property::Value(value)));
+        let Some(index) = string_index(&key) else {
+            self.properties.push((key, Property::Value(value)));
             return;
         };
         // The indices already form a sorted prefix, so this is where the new one joins it.
         let position = self
             .properties
             .iter()
-            .position(|(name, _)| index_key(name).is_none_or(|other| other > index))
+            .position(|(name, _)| string_index(name).is_none_or(|other| other > index))
             .unwrap_or(self.properties.len());
         self.properties
-            .insert(position, (key.to_owned(), Property::Value(value)));
+            .insert(position, (key, Property::Value(value)));
     }
 
     /// Refuse every further change to this object.
@@ -1009,15 +1104,19 @@ impl ObjectData {
     }
 
     /// Remove an own property, keeping the order of the rest.
-    pub fn remove(&mut self, key: &str) {
+    pub fn remove<K: Into<PropertyKey>>(&mut self, key: K) {
+        let key = key.into();
         if self.frozen {
             return;
         }
-        self.properties.retain(|(name, _)| name != key);
+        self.properties.retain(|(name, _)| name != &key);
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.properties.iter().map(|(name, _)| name.as_str())
+        self.properties.iter().filter_map(|(name, _)| match name {
+            PropertyKey::String(name) => Some(name.as_str()),
+            _ => None,
+        })
     }
 
     /// Own *enumerable* property slots in insertion order, which is the order JavaScript
@@ -1026,15 +1125,33 @@ impl ObjectData {
         self.properties
             .iter()
             .filter(|(name, _)| !self.non_enumerable.iter().any(|hidden| hidden == name))
-            .map(|(name, property)| (name.as_str(), property))
+            .filter_map(|(name, property)| match name {
+                PropertyKey::String(name) => Some((name.as_str(), property)),
+                _ => None,
+            })
+    }
+
+    /// All own keys, including symbols and VM-private slots, in insertion order.
+    pub fn own_keys(&self) -> impl Iterator<Item = &PropertyKey> {
+        self.properties.iter().map(|(key, _)| key)
+    }
+
+    /// Enumerable own properties in the typed key space. Symbols are included for spread and
+    /// `Object.assign`, while callers implementing `Object.keys` can filter to strings.
+    pub fn enumerable_entries(&self) -> impl Iterator<Item = (&PropertyKey, &Property)> {
+        self.properties
+            .iter()
+            .filter(|(key, _)| !self.non_enumerable.iter().any(|hidden| hidden == key))
+            .map(|(key, property)| (key, property))
     }
 
     /// Define a property that reads by name but is never enumerated, which is what every own
     /// property of an error is: `e.message` works and `Object.keys(e)` is empty.
-    pub fn set_non_enumerable(&mut self, key: &str, value: Value) {
-        self.set(key, value);
-        if !self.non_enumerable.iter().any(|hidden| hidden == key) {
-            self.non_enumerable.push(key.to_owned());
+    pub fn set_non_enumerable<K: Into<PropertyKey>>(&mut self, key: K, value: Value) {
+        let key = key.into();
+        self.set(key.clone(), value);
+        if !self.non_enumerable.iter().any(|hidden| hidden == &key) {
+            self.non_enumerable.push(key);
         }
     }
 }
@@ -1471,6 +1588,13 @@ impl Value {
         match self {
             Self::Symbol(symbol) => symbol.property_key(),
             other => other.to_display_string(),
+        }
+    }
+
+    pub fn to_property_key(&self) -> PropertyKey {
+        match self {
+            Self::Symbol(symbol) => PropertyKey::Symbol(symbol.clone()),
+            other => PropertyKey::String(other.property_key()),
         }
     }
 
@@ -3191,7 +3315,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // property read converts one, so `{ [Symbol.iterator]: f }` and
                         // `o[Symbol.iterator]` name the same property. A duplicate key keeps
                         // the last value and the first position, which is what `set` does.
-                        object.set(&pair[0].property_key(), pair[1].clone());
+                        object.set(pair[0].to_property_key(), pair[1].clone());
                     }
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(object))));
@@ -3223,7 +3347,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 self.call_value(&getter, source.clone(), Vec::new(), current)?
                             }
                         };
-                        object.borrow_mut().set(&key, value);
+                        object.borrow_mut().set(key, value);
                     }
                     self.stack.push(target);
                 }
@@ -3243,8 +3367,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     let keys = keys
                         .into_iter()
-                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
-                        .map(Value::String)
+                        .filter_map(|key| string_key(&key).map(str::to_owned).map(Value::String))
                         .collect();
                     self.stack.push(Value::Array(ArrayData::new(keys)));
                 }
@@ -3325,11 +3448,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Own-only, and a miss is a TypeError. That own-only rule *is* the brand
                     // check: an object of another class does not carry the name, however much
                     // of the rest of the shape it shares.
+                    let private_key = internal_key(&name);
                     let found = match &target {
-                        Value::Object(object) => object.borrow().get_own(&name).cloned(),
-                        Value::Function(closure) => {
-                            closure.properties.borrow().get_own(&name).cloned()
+                        Value::Object(object) => {
+                            object.borrow().get_own(private_key.clone()).cloned()
                         }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow()
+                            .get_own(private_key.clone())
+                            .cloned(),
                         _ => None,
                     };
                     let Some(value) = found else {
@@ -3350,10 +3478,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
                     let present = match &target {
-                        Value::Object(object) => object.borrow().get_own(&name).is_some(),
-                        Value::Function(closure) => {
-                            closure.properties.borrow().get_own(&name).is_some()
+                        Value::Object(object) => {
+                            object.borrow().get_own(internal_key(&name)).is_some()
                         }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow()
+                            .get_own(internal_key(&name))
+                            .is_some(),
                         _ => false,
                     };
                     if !present {
@@ -3367,14 +3499,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    self.set_computed(&target, &Value::String(name), value.clone(), current)?;
+                    match target {
+                        Value::Object(object) => {
+                            object.borrow_mut().set(internal_key(&name), value.clone())
+                        }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow_mut()
+                            .set(internal_key(&name), value.clone()),
+                        _ => {}
+                    }
                     self.stack.push(value);
                 }
                 Instruction::DefineAccessor { setter } => {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let name = key.property_key();
+                    let name = key.to_property_key();
                     let (getter, setter) = if *setter {
                         (None, Some(function))
                     } else {
@@ -4142,7 +4283,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 None => continue,
                             },
                         };
-                        self.set_computed(&target, &Value::String(key), value, instruction)?;
+                        self.set_computed(&target, &key_value(&key), value, instruction)?;
                     }
                 }
                 Ok(target)
@@ -4154,17 +4295,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(source, Value::Proxy(_)) {
                     let mut items = Vec::new();
                     for key in self.own_keys(&source, instruction)? {
-                        if key.starts_with(RESERVED_KEY_PREFIX) {
-                            continue;
-                        }
                         items.push(match native {
-                            Native::ReflectOwnKeys => Value::String(key),
+                            Native::ReflectOwnKeys => key_value(&key),
                             Native::ObjectValues => {
-                                self.read_property(&source, &key, instruction)?
+                                if !matches!(key, PropertyKey::String(_)) {
+                                    continue;
+                                }
+                                self.read_property(&source, key.clone(), instruction)?
                             }
                             _ => Value::Array(ArrayData::new(vec![
-                                Value::String(key.clone()),
-                                self.read_property(&source, &key, instruction)?,
+                                key_value(&key),
+                                self.read_property(&source, key.clone(), instruction)?,
                             ])),
                         });
                     }
@@ -4172,11 +4313,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let mut items = Vec::new();
                 for (key, property) in own_properties(&source) {
-                    if key.starts_with(RESERVED_KEY_PREFIX) {
+                    if !matches!(key, PropertyKey::String(_))
+                        && !matches!(native, Native::ReflectOwnKeys)
+                    {
                         continue;
                     }
                     if matches!(native, Native::ReflectOwnKeys) {
-                        items.push(Value::String(key));
+                        items.push(key_value(&key));
                         continue;
                     }
                     let value = match property {
@@ -4191,7 +4334,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     items.push(if matches!(native, Native::ObjectValues) {
                         value
                     } else {
-                        Value::Array(ArrayData::new(vec![Value::String(key), value]))
+                        Value::Array(ArrayData::new(vec![key_value(&key), value]))
                     });
                 }
                 Ok(Value::Array(ArrayData::new(items)))
@@ -4202,7 +4345,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for entry in self.drain_iterable(&source, instruction)? {
                     let key = self.computed(&entry, &Value::Number(0.0));
                     let value = self.computed(&entry, &Value::Number(1.0));
-                    data.set(&key.property_key(), value);
+                    data.set(key.to_property_key(), value);
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
             }
@@ -4229,7 +4372,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         for index in 0..length {
                             segments.push(self.read_property(
                                 other,
-                                &index.to_string(),
+                                index.to_string(),
                                 instruction,
                             )?);
                         }
@@ -4268,6 +4411,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Undefined | Value::Null
                 )))
             }
+            Native::ObjectGetOwnPropertySymbols
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let symbols = self
+                    .own_keys(&target, instruction)?
+                    .into_iter()
+                    .filter_map(|key| match key {
+                        PropertyKey::Symbol(symbol) => Some(Value::Symbol(symbol)),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Value::Array(ArrayData::new(symbols)))
+            }
             // Describing and defining a property are trapped operations of their own. A library
             // that copies a proxy into a plain object -- which is what a copy-on-write layer
             // does when it finalises -- goes through exactly this pair.
@@ -4285,7 +4442,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut data = ObjectData::default();
                 for key in self.own_keys(&target, instruction)? {
                     let descriptor =
-                        self.proxy_descriptor(&target, &Value::String(key.clone()), instruction)?;
+                        self.proxy_descriptor(&target, &key_value(&key), instruction)?;
                     if !matches!(descriptor, Value::Undefined) {
                         data.set(&key, descriptor);
                     }
@@ -4325,8 +4482,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let keys = self.own_keys(&target, instruction)?;
                 Ok(Value::Array(ArrayData::new(
                     keys.into_iter()
-                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
-                        .map(Value::String)
+                        .filter_map(|key| string_key(&key).map(str::to_owned).map(Value::String))
                         .collect(),
                 )))
             }
@@ -4389,7 +4545,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             }) {
                                 list.push(self.read_property(
                                     other,
-                                    &index.to_string(),
+                                    index.to_string(),
                                     instruction,
                                 )?);
                             }
@@ -4428,7 +4584,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.dispatch_native(
                         Native::ObjectDefineProperty,
                         &Value::Undefined,
-                        &[target.clone(), Value::String(key), descriptor],
+                        &[target.clone(), key_value(&key), descriptor],
                         instruction,
                     )?;
                 }
@@ -4436,9 +4592,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectDefineProperty => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let key = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::property_key);
+                let key = arguments.get(1).map_or_else(
+                    || PropertyKey::String(String::new()),
+                    Value::to_property_key,
+                );
                 let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let getter = self.read_property(&descriptor, "get", instruction)?;
                 let setter = self.read_property(&descriptor, "set", instruction)?;
@@ -4469,16 +4626,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::Function(closure) => {
                             closure.properties.borrow_mut().define_value(&key, value);
                         }
-                        Value::Array(items) => match key.parse::<usize>() {
-                            Ok(index) => {
-                                let mut items = items.borrow_mut();
-                                if index >= items.len() {
-                                    items.resize(index + 1, Value::Native(Native::Hole));
+                        Value::Array(items) => {
+                            match string_key(&key).and_then(|key| key.parse::<usize>().ok()) {
+                                Some(index) => {
+                                    let mut items = items.borrow_mut();
+                                    if index >= items.len() {
+                                        items.resize(index + 1, Value::Native(Native::Hole));
+                                    }
+                                    items[index] = value;
                                 }
-                                items[index] = value;
+                                None => items.properties.borrow_mut().define_value(&key, value),
                             }
-                            Err(_) => items.properties.borrow_mut().define_value(&key, value),
-                        },
+                        }
                         // A primitive has nowhere to put one; the specification throws, and
                         // there is no more information in doing so here.
                         _ => {}
@@ -4488,9 +4647,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectGet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let key = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::property_key);
+                let key = arguments.get(1).map_or_else(
+                    || PropertyKey::String(String::new()),
+                    Value::to_property_key,
+                );
                 self.read_property(&target, &key, instruction)
             }
             Native::ReflectSet => {
@@ -4780,11 +4940,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut items = match &source {
             // Already the right shape, and copying beats walking an iterator to the same elements.
             Value::Array(items) => dense_items(&items.borrow()),
-            other
-                if self
-                    .property(other, WellKnown::Iterator.property_key())
-                    .is_nullish() =>
-            {
+            other if self.property_key(other, &iterator_key()).is_nullish() => {
                 let length = match self.property(other, "length") {
                     Value::Number(length) if length >= 1.0 => length as usize,
                     _ => 0,
@@ -4816,7 +4972,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<Vec<Value>, ExecutionError> {
-        let method = self.property(value, WellKnown::Iterator.property_key());
+        let method = self.property_key(value, &iterator_key());
         let iterator = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
 
         let mut collected = Vec::new();
@@ -6128,7 +6284,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     for index in 0..length as usize {
                         items.push(self.read_property(
                             &receiver,
-                            &index.to_string(),
+                            index.to_string(),
                             instruction,
                         )?);
                     }
@@ -6315,12 +6471,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::WeakMapConstructor | Native::WeakSetConstructor
         );
         let mut data = ObjectData::default();
-        data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
+        data.set(
+            internal_key("entries"),
+            Value::Array(ArrayData::new(Vec::new())),
+        );
         if is_map {
-            data.set("@@map", Value::Boolean(true));
+            data.set(internal_key("map"), Value::Boolean(true));
         }
         if weak {
-            data.set("@@weak", Value::Boolean(true));
+            data.set(internal_key("weak"), Value::Boolean(true));
         }
         data.set("size", Value::Number(0.0));
         let collection = Value::Object(Rc::new(RefCell::new(data)));
@@ -6526,7 +6685,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // surfaces after the stack that produced it is gone, and that is exactly the case
             // where a trace is worth having.
             object.set(
-                "@@trace",
+                internal_key("trace"),
                 Value::Array(ArrayData::new(
                     self.trace().into_iter().map(Value::String).collect(),
                 )),
@@ -6936,23 +7095,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(is_callable(&trap).then_some(trap))
     }
 
-    fn read_property(
+    fn read_property<K: Into<PropertyKey>>(
         &mut self,
         target: &Value,
-        name: &str,
+        name: K,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let name = name.into();
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get(target, &Value::String(name.to_owned()), instruction);
+            return self.proxy_get(target, &key_value(&name), instruction);
         }
         let accessor = match target {
-            Value::Object(object) => object.borrow().lookup(name),
-            Value::Function(closure) if name != "prototype" => {
-                closure.properties.borrow().lookup(name)
+            Value::Object(object) => object.borrow().lookup(name.clone()),
+            Value::Function(closure) if name != PropertyKey::String("prototype".to_owned()) => {
+                closure.properties.borrow().lookup(name.clone())
             }
             // An array's non-element properties live in an ordinary store with an ordinary
             // chain, so a subclass's accessor is reachable the same way.
-            Value::Array(items) => items.properties.borrow().lookup(name),
+            Value::Array(items) => items.properties.borrow().lookup(name.clone()),
             _ => None,
         };
         match accessor {
@@ -6961,7 +7121,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Setter-only, so there is nothing to read.
                 None => Ok(Value::Undefined),
             },
-            _ => Ok(self.property(target, name)),
+            _ => Ok(self.property_key(target, &name)),
         }
     }
 
@@ -6976,13 +7136,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         store: &RefCell<ObjectData>,
         target: &Value,
-        name: &str,
+        name: &PropertyKey,
         value: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         // Bound out of the `if let`: the borrow would otherwise still be alive at the setter
         // call, which is ordinary code that may touch this very object.
-        let existing = store.borrow().lookup(name);
+        let existing = store.borrow().lookup(name.clone());
         let Some(Property::Accessor { set, .. }) = existing else {
             return Ok(false);
         };
@@ -6996,6 +7156,52 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn property(&self, target: &Value, name: &str) -> Value {
+        self.property_key(target, &PropertyKey::String(name.to_owned()))
+    }
+
+    fn property_key(&self, target: &Value, key: &PropertyKey) -> Value {
+        let Some(name) = string_key(key) else {
+            let found = match target {
+                Value::Object(object) => object.borrow().get(key.clone()),
+                Value::Function(closure) => closure.properties.borrow().get(key.clone()),
+                Value::Array(items) => items.properties.borrow().get(key.clone()),
+                _ => None,
+            };
+            if found.is_some() {
+                return found.unwrap_or(Value::Undefined);
+            }
+            if *key == PropertyKey::Symbol(Symbol::WellKnown(WellKnown::Iterator)) {
+                return match target {
+                    Value::Array(_) => Value::Native(Native::ArrayValues),
+                    Value::String(_) => Value::Native(Native::StringValues),
+                    Value::Generator(state) if is_async_generator(state) => Value::Undefined,
+                    Value::Generator(_) => Value::Native(Native::IteratorSelf),
+                    Value::Object(object)
+                        if object.borrow().get_own(internal_key("entries")).is_some() =>
+                    {
+                        let is_map = matches!(
+                            object.borrow().get_own(internal_key("map")),
+                            Some(&Value::Boolean(true))
+                        );
+                        Value::Native(if is_map {
+                            Native::CollectionEntries
+                        } else {
+                            Native::CollectionValues
+                        })
+                    }
+                    _ => Value::Undefined,
+                };
+            }
+            if *key == PropertyKey::Symbol(Symbol::WellKnown(WellKnown::AsyncIterator)) {
+                return match target {
+                    Value::Generator(state) if is_async_generator(state) => {
+                        Value::Native(Native::IteratorSelf)
+                    }
+                    _ => Value::Undefined,
+                };
+            }
+            return Value::Undefined;
+        };
         // Every intrinsic kind answers `constructor` with the built-in that makes it. Handled
         // here rather than in each table because the answer is the same question for all of
         // them, and because `new x.constructor(...)` is how a library clones a value whose type
@@ -7009,12 +7215,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A Set or Map instance is an object whose reserved state marks it. Its methods come
             // from one table shared with `in`, so the two cannot disagree -- and this arm has to
             // precede the ordinary object case, which would otherwise answer `undefined` first.
-            Value::Object(object) if object.borrow().get_own("@@entries").is_some() => {
+            Value::Object(object) if object.borrow().get_own(internal_key("entries")).is_some() => {
                 let (is_map, weak) = {
                     let object = object.borrow();
                     (
-                        matches!(object.get_own("@@map"), Some(&Value::Boolean(true))),
-                        matches!(object.get_own("@@weak"), Some(&Value::Boolean(true))),
+                        matches!(
+                            object.get_own(internal_key("map")),
+                            Some(&Value::Boolean(true))
+                        ),
+                        matches!(
+                            object.get_own(internal_key("weak")),
+                            Some(&Value::Boolean(true))
+                        ),
                     )
                 };
                 // `size` is an ordinary stored property for a strong collection and absent for a
@@ -7241,9 +7453,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // avoid, so it is left to fail rather than half-work.
             Value::Generator(state) if is_async_generator(state) => match name {
                 "next" => Value::Callback(CallbackMethod::AsyncGeneratorNext),
-                key if key == WellKnown::AsyncIterator.property_key() => {
-                    Value::Native(Native::IteratorSelf)
-                }
                 _ => Value::Undefined,
             },
             // A generator object is its own iterator, which is what lets one be used directly in
@@ -7251,9 +7460,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Generator(_) => match name {
                 "next" => Value::Callback(CallbackMethod::GeneratorNext),
                 "return" => Value::Callback(CallbackMethod::GeneratorReturn),
-                key if key == WellKnown::Iterator.property_key() => {
-                    Value::Native(Native::IteratorSelf)
-                }
                 _ => Value::Undefined,
             },
             _ => Value::Undefined,
@@ -7464,7 +7670,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => Value::Undefined,
             };
         }
-        self.property(target, &key.property_key())
+        self.property_key(target, &key.to_property_key())
     }
 
     /// `delete target[key]`, running a proxy's `deleteProperty` trap when there is one.
@@ -7495,7 +7701,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         target: &Value,
         instruction: usize,
-    ) -> Result<Vec<String>, ExecutionError> {
+    ) -> Result<Vec<PropertyKey>, ExecutionError> {
         let Value::Proxy(proxy) = target else {
             return Ok(own_property_keys(target));
         };
@@ -7508,7 +7714,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(match listed {
                     Value::Array(items) => dense_items(&items.borrow())
                         .into_iter()
-                        .map(|key| key.property_key())
+                        .map(|key| key.to_property_key())
                         .collect(),
                     _ => Vec::new(),
                 })
@@ -7628,7 +7834,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `length` is derived, not stored: writing it truncates or extends. This is how
                 // a program empties an array in place -- `arr.length = 0` -- and storing it as an
                 // ordinary property left the array untouched while the write appeared to work.
-                None if key.property_key() == "length" => {
+                None if matches!(key.to_property_key(), PropertyKey::String(ref name) if name == "length") =>
+                {
                     let length = value.as_number();
                     // A length that is not a whole number in range is a RangeError, not a
                     // silently ignored write: `arr.length = -1` is a bug in the program.
@@ -7650,7 +7857,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // Not an index, so it is an ordinary named property of the array.
                 None => {
-                    let name = key.property_key();
+                    let name = key.to_property_key();
                     if self.inherited_setter(
                         &items.properties,
                         target,
@@ -7678,27 +7885,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             Value::Object(object) => {
-                let name = key.property_key();
+                let name = key.to_property_key();
                 if self.inherited_setter(object, target, &name, &value, instruction)? {
                     return Ok(());
                 }
-                object.borrow_mut().set(&name, value);
+                object.borrow_mut().set(name, value);
                 Ok(())
             }
             Value::Function(closure) => {
-                let name = key.property_key();
+                let name = key.to_property_key();
                 // `f.prototype = {...}` replaces the object `new f()` will link instances to,
                 // which is a slot on the closure rather than an ordinary property -- so a write
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
-                if name == "prototype" {
+                if name == PropertyKey::String("prototype".to_owned()) {
                     *closure.prototype.borrow_mut() = Some(value);
                     return Ok(());
                 }
                 if self.inherited_setter(&closure.properties, target, &name, &value, instruction)? {
                     return Ok(());
                 }
-                closure.properties.borrow_mut().set(&name, value);
+                closure.properties.borrow_mut().set(name, value);
                 Ok(())
             }
             other => Err(ExecutionError::NotAnObject {
@@ -8194,11 +8401,11 @@ fn json_stringify(
             let entries = own_properties(value);
             let mut parts = Vec::new();
             for (key, property) in entries {
-                // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
-                // own enumerable string property, so it is not part of the object's JSON.
-                if key.starts_with(RESERVED_KEY_PREFIX) {
+                // JSON only includes enumerable string keys. Symbols and VM-private slots are
+                // intentionally invisible, while an ordinary string beginning with `@@` is not.
+                let Some(key) = string_key(&key) else {
                     continue;
-                }
+                };
                 let property = match property {
                     Property::Value(value) => value,
                     // The specification reads the property, which for an accessor is a call.
@@ -8210,7 +8417,7 @@ fn json_stringify(
                 };
                 if let Some(part) = json_stringify(&property, indent, &nested, guard.seen, resolve)?
                 {
-                    parts.push(format!("{}{colon}{part}", json_quote(&key)));
+                    parts.push(format!("{}{colon}{part}", json_quote(key)));
                 }
             }
             let _ = object;
@@ -8403,10 +8610,10 @@ fn call_native(
         Native::ObjectHasOwnProperty => Value::Boolean(match receiver {
             Value::Object(object) => object
                 .borrow()
-                .get_own_property(
-                    &arguments
+                    .get_own_property(
+                    arguments
                         .first()
-                        .map_or_else(String::new, |key| key.clone().property_key()),
+                        .map_or_else(|| PropertyKey::String(String::new()), Value::to_property_key),
                 )
                 .is_some(),
             other => has_property(other, arguments.first().unwrap_or(&Value::Undefined)),
@@ -8433,7 +8640,7 @@ fn call_native(
         // Every property this realm stores is enumerable, so this is `hasOwnProperty` under
         // another name until attributes are tracked per property.
         Native::ObjectPropertyIsEnumerable => {
-            call_native(Native::ObjectHasOwnProperty, receiver, arguments)?
+            Value::Boolean(own_enumerable(receiver, arguments.first().unwrap_or(&Value::Undefined)))
         }
         // `Object.prototype.toString.call(x)`, the oldest type test there is.
         Native::ObjectToStringTag => Value::String(format!(
@@ -8593,9 +8800,9 @@ fn call_native(
             Some(Value::Object(object)) => object
                 .borrow()
                 .get_own_property(
-                    &arguments
+                    arguments
                         .get(1)
-                        .map_or_else(String::new, Value::property_key),
+                        .map_or_else(|| PropertyKey::String(String::new()), Value::to_property_key),
                 )
                 .is_some(),
             Some(target) => has_property(
@@ -8640,14 +8847,18 @@ fn call_native(
                 extensible
             })
         }
-        // Symbol keys are stored as reserved strings, and a string cannot be turned back into
-        // the symbol it came from -- so this reports none rather than inventing any.
-        Native::ObjectGetOwnPropertySymbols => Value::Array(ArrayData::new(Vec::new())),
+        Native::ObjectGetOwnPropertySymbols => Value::Array(ArrayData::new(
+            own_property_keys(arguments.first().unwrap_or(&Value::Undefined))
+                .into_iter()
+                .filter_map(|key| match key { PropertyKey::Symbol(symbol) => Some(Value::Symbol(symbol)), _ => None })
+                .collect(),
+        )),
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
-            let key = arguments
-                .get(1)
-                .map_or_else(String::new, Value::property_key);
+            let key = arguments.get(1).map_or_else(
+                || PropertyKey::String(String::new()),
+                Value::to_property_key,
+            );
             own_descriptor(target, &key).unwrap_or(Value::Undefined)
         }
         Native::ObjectGetOwnPropertyDescriptors => {
@@ -8669,7 +8880,7 @@ fn call_native(
             Value::Array(ArrayData::new(
                 own_property_keys(arguments.first().unwrap_or(&Value::Undefined))
                     .into_iter()
-                    .map(Value::String)
+                    .filter_map(|key| string_key(&key).map(str::to_owned).map(Value::String))
                     .collect(),
             ))
         }
@@ -8683,7 +8894,6 @@ fn call_native(
                     .properties
                     .borrow()
                     .keys()
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
@@ -8693,7 +8903,6 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
                 // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too, and a
@@ -8704,6 +8913,7 @@ fn call_native(
                     .enumerate()
                     .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
                     .map(|(index, _)| Value::String(index.to_string()))
+                    .chain(items.properties.borrow().keys().map(|key| Value::String(key.to_owned())))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -9502,13 +9712,13 @@ fn call_native(
         Native::ArrayValues => match receiver {
             Value::Array(_) => {
                 let mut iterator = ObjectData::default();
-                iterator.set("@@iterated", receiver.clone());
-                iterator.set("@@index", Value::Number(0.0));
+                iterator.set(internal_key("iterated"), receiver.clone());
+                iterator.set(internal_key("index"), Value::Number(0.0));
                 iterator.set("next", Value::Native(Native::ArrayIteratorNext));
                 // An iterator is itself iterable, which is what lets one be passed straight to
                 // another `for-of` or to `Array.from`.
                 iterator.set(
-                    WellKnown::Iterator.property_key(),
+                    iterator_key(),
                     Value::Native(Native::IteratorSelf),
                 );
                 Value::Object(Rc::new(RefCell::new(iterator)))
@@ -9873,13 +10083,13 @@ fn call_native(
                 .collect::<Vec<_>>();
             let mut iterator = ObjectData::default();
             iterator.set(
-                "@@iterated",
+                internal_key("iterated"),
                 Value::Array(ArrayData::new(characters)),
             );
-            iterator.set("@@index", Value::Number(0.0));
+            iterator.set(internal_key("index"), Value::Number(0.0));
             iterator.set("next", Value::Native(Native::StringIteratorNext));
             iterator.set(
-                WellKnown::Iterator.property_key(),
+                iterator_key(),
                 Value::Native(Native::IteratorSelf),
             );
             Value::Object(Rc::new(RefCell::new(iterator)))
@@ -9973,12 +10183,12 @@ fn call_native(
                 return Ok(Value::Undefined);
             };
             let mut iterator = ObjectData::default();
-            iterator.set("@@iterated", Value::Array(entries));
-            iterator.set("@@index", Value::Number(0.0));
+            iterator.set(internal_key("iterated"), Value::Array(entries));
+            iterator.set(internal_key("index"), Value::Number(0.0));
             // What to hand back for each stored entry. Decided here, where the collection's kind
             // is known, so the iterator itself needs no reference back to it.
             iterator.set(
-                "@@part",
+                internal_key("part"),
                 Value::String(
                     match (is_map, native) {
                         (true, Native::CollectionKeys) => "key",
@@ -9991,7 +10201,7 @@ fn call_native(
             );
             iterator.set("next", Value::Native(Native::CollectionIteratorNext));
             iterator.set(
-                WellKnown::Iterator.property_key(),
+                iterator_key(),
                 Value::Native(Native::IteratorSelf),
             );
             Value::Object(Rc::new(RefCell::new(iterator)))
@@ -10003,9 +10213,9 @@ fn call_native(
             let (iterated, mut index) = {
                 let state = state.borrow();
                 (
-                    state.get("@@iterated").unwrap_or(Value::Undefined),
+                    state.get(internal_key("iterated")).unwrap_or(Value::Undefined),
                     state
-                        .get("@@index")
+                        .get(internal_key("index"))
                         .unwrap_or(Value::Number(0.0))
                         .as_number() as usize,
                 )
@@ -10015,7 +10225,7 @@ fn call_native(
             };
             let part = state
                 .borrow()
-                .get("@@part")
+                .get(internal_key("part"))
                 .map_or_else(String::new, |value| value.to_display_string());
             // Skip holes left by deletion, and re-read the length each step so entries added
             // during iteration are seen -- both are observable and both are what a Set does.
@@ -10025,14 +10235,14 @@ fn call_native(
                     None => {
                         state
                             .borrow_mut()
-                            .set("@@index", Value::Number(index as f64));
+                            .set(internal_key("index"), Value::Number(index as f64));
                         return Ok(iteration_result(Value::Undefined, true));
                     }
                     Some(Value::Native(Native::Tombstone)) => index += 1,
                     Some(value) => {
                         state
                             .borrow_mut()
-                            .set("@@index", Value::Number(index as f64 + 1.0));
+                            .set(internal_key("index"), Value::Number(index as f64 + 1.0));
                         let projected = match (part.as_str(), &value) {
                             ("key", Value::Array(pair)) => {
                                 pair.borrow().first().cloned().unwrap_or(Value::Undefined)
@@ -10059,9 +10269,9 @@ fn call_native(
             let (iterated, index) = {
                 let state = state.borrow();
                 (
-                    state.get("@@iterated").unwrap_or(Value::Undefined),
+                    state.get(internal_key("iterated")).unwrap_or(Value::Undefined),
                     state
-                        .get("@@index")
+                        .get(internal_key("index"))
                         .unwrap_or(Value::Number(0.0))
                         .as_number(),
                 )
@@ -10078,7 +10288,7 @@ fn call_native(
                 Some(value) => {
                     state
                         .borrow_mut()
-                        .set("@@index", Value::Number(index as f64 + 1.0));
+                        .set(internal_key("index"), Value::Number(index as f64 + 1.0));
                     // An iterator walks *indices*, so it visits a hole -- and what it yields
                     // there is what a read yields, which is undefined.
                     iteration_result(
@@ -10128,7 +10338,7 @@ fn captured_trace(thrown: &Value) -> Vec<String> {
     let Value::Object(object) = thrown else {
         return Vec::new();
     };
-    match object.borrow().get_own("@@trace") {
+    match object.borrow().get_own(internal_key("trace")) {
         Some(Value::Array(frames)) => frames
             .borrow()
             .iter()
@@ -10224,8 +10434,9 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
                 return false;
             };
             let object = object.borrow();
-            return object.get_own("@@entries").is_some()
-                && object.get_own("@@map").is_some() == matches!(kind, Native::MapConstructor);
+            return object.get_own(internal_key("entries")).is_some()
+                && object.get_own(internal_key("map")).is_some()
+                    == matches!(kind, Native::MapConstructor);
         }
         // Any other built-in that has a `prototype`: the chain is walked against it, which is
         // what makes `Object instanceof Object` true -- `Object` is a function, so its chain
@@ -10299,7 +10510,18 @@ fn has_property(target: &Value, key: &Value) -> bool {
             .get(index)
             .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
     }
-    let name = key.property_key();
+    let typed = key.to_property_key();
+    let Some(name) = string_key(&typed) else {
+        return match target {
+            Value::Object(object) => object.borrow().lookup(typed).is_some(),
+            Value::Array(items) => {
+                items.properties.borrow().lookup(typed.clone()).is_some() || typed == iterator_key()
+            }
+            Value::String(_) => typed == iterator_key(),
+            Value::Generator(state) => typed == iterator_key() && !is_async_generator(state),
+            _ => false,
+        };
+    };
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
     // agree with the read rather than only with the property store.
     if name == "constructor"
@@ -10313,8 +10535,8 @@ fn has_property(target: &Value, key: &Value) -> bool {
         // feature-detects in the wild are written as. Answering from the own store alone made
         // both false, which is a wrong answer that reads like a deliberate one.
         Value::Object(object) => {
-            object.borrow().lookup(&name).is_some()
-                || !matches!(inherited_object_property(&name), Value::Undefined)
+            object.borrow().lookup(typed.clone()).is_some()
+                || !matches!(inherited_object_property(name), Value::Undefined)
         }
         Value::Array(items) => {
             if let Some(index) = array_index(key) {
@@ -10323,10 +10545,39 @@ fn has_property(target: &Value, key: &Value) -> bool {
             // Methods and `length` live on the prototype in a real engine; here the property
             // lookup answers for both, so `in` has to agree with it.
             name == "length"
-                || !matches!(array_property(&name), Value::Undefined)
-                || !matches!(inherited_object_property(&name), Value::Undefined)
+                || !matches!(array_property(name), Value::Undefined)
+                || !matches!(inherited_object_property(name), Value::Undefined)
         }
-        Value::Native(native) => native.property(&name).is_some(),
+        Value::Native(native) => native.property(name).is_some(),
+        _ => false,
+    }
+}
+
+fn own_enumerable(target: &Value, key: &Value) -> bool {
+    let key = key.to_property_key();
+    match target {
+        Value::Object(object) => object
+            .borrow()
+            .enumerable_entries()
+            .any(|(name, _)| name == &key),
+        Value::Function(closure) => closure
+            .properties
+            .borrow()
+            .enumerable_entries()
+            .any(|(name, _)| name == &key),
+        Value::Array(items) => {
+            if let Some(index) = array_index(&key_value(&key)) {
+                return items
+                    .borrow()
+                    .get(index)
+                    .is_some_and(|v| !matches!(v, Value::Native(Native::Hole)));
+            }
+            items
+                .properties
+                .borrow()
+                .enumerable_entries()
+                .any(|(name, _)| name == &key)
+        }
         _ => false,
     }
 }
@@ -10374,7 +10625,6 @@ fn bump_size(receiver: &Value, delta: f64) {
 fn string_property(name: &str) -> Value {
     match name {
         "values" => Value::Native(Native::StringValues),
-        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::StringValues),
         "toUpperCase" => Value::Native(Native::StringToUpperCase),
         "toLowerCase" => Value::Native(Native::StringToLowerCase),
         "includes" => Value::Native(Native::StringIncludes),
@@ -10427,9 +10677,6 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
     if weak && matches!(name, "values" | "keys" | "entries" | "forEach") {
         return Value::Undefined;
     }
-    if weak && name == WellKnown::Iterator.property_key() {
-        return Value::Undefined;
-    }
     match (is_map, name) {
         (false, "add") => Value::Native(Native::SetAdd),
         (false, "has") => Value::Native(Native::SetHas),
@@ -10447,12 +10694,6 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
         (_, "values") => Value::Native(Native::CollectionValues),
         (_, "keys") => Value::Native(Native::CollectionKeys),
         (_, "entries") => Value::Native(Native::CollectionEntries),
-        // The default iteration of a Map is its entries and of a Set is its values.
-        (is_map, key) if key == WellKnown::Iterator.property_key() => Value::Native(if is_map {
-            Native::CollectionEntries
-        } else {
-            Native::CollectionValues
-        }),
         _ => Value::Undefined,
     }
 }
@@ -10463,10 +10704,13 @@ fn collection_state(receiver: &Value) -> Option<(Rc<ArrayData>, bool)> {
         return None;
     };
     let object = object.borrow();
-    let Some(Value::Array(entries)) = object.get_own("@@entries").cloned() else {
+    let Some(Value::Array(entries)) = object.get_own(internal_key("entries")).cloned() else {
         return None;
     };
-    let is_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+    let is_map = matches!(
+        object.get_own(internal_key("map")),
+        Some(&Value::Boolean(true))
+    );
     Some((entries, is_map))
 }
 
@@ -10576,7 +10820,6 @@ fn array_property(name: &str) -> Value {
         // `Array.prototype.toString` is `join(",")`, which is why `String([1, 2])` is `"1,2"`.
         "toString" => Value::Native(Native::ArrayJoinDefault),
         "values" => Value::Native(Native::ArrayValues),
-        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,
     }
 }
@@ -10620,7 +10863,7 @@ fn join(items: &[Value], separator: &str) -> String {
 fn delete_property(target: &Value, key: &Value) -> bool {
     match target {
         Value::Object(object) => {
-            object.borrow_mut().remove(&key.property_key());
+            object.borrow_mut().remove(key.to_property_key());
             true
         }
         // Removing an element leaves a *hole* rather than shortening the array: the slot reads
@@ -10632,13 +10875,15 @@ fn delete_property(target: &Value, key: &Value) -> bool {
                 && let Some(slot) = items.borrow_mut().get_mut(index)
             {
                 *slot = Value::Native(Native::Hole);
+            } else {
+                items.properties.borrow_mut().remove(key.to_property_key());
             }
             true
         }
         Value::String(text) => {
             let key = key.property_key();
-            let indexed =
-                index_key(&key).is_some_and(|index| (index as usize) < text.encode_utf16().count());
+            let indexed = string_index(&PropertyKey::String(key.clone()))
+                .is_some_and(|index| (index as usize) < text.encode_utf16().count());
             !(key == "length" || indexed)
         }
         // Nothing else carries own properties, so there is nothing to fail to remove.
@@ -10652,27 +10897,43 @@ fn delete_property(target: &Value, key: &Value) -> bool {
 /// spread carries symbol keys across and `Object.keys` does not. An array or a string contributes
 /// its indices, which is what makes `{ ...[1, 2] }` an object with keys "0" and "1"; a primitive
 /// with nothing of its own contributes nothing, and so does `null` or `undefined`.
-fn own_properties(value: &Value) -> Vec<(String, Property)> {
+fn own_properties(value: &Value) -> Vec<(PropertyKey, Property)> {
     match value {
         Value::Object(object) => object
             .borrow()
-            .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .enumerable_entries()
+            .filter(|(key, _)| !matches!(key, PropertyKey::Internal(_)))
+            .map(|(key, property)| (key.clone(), property.clone()))
             .collect(),
-        Value::Array(items) => items
-            .borrow()
-            .iter()
-            .enumerate()
-            // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
-            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
-            .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
-            .collect(),
+        Value::Array(items) => {
+            let mut properties = items
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                .map(|(index, item)| {
+                    (
+                        PropertyKey::String(index.to_string()),
+                        Property::Value(item.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            properties.extend(
+                items
+                    .properties
+                    .borrow()
+                    .enumerable_entries()
+                    .filter(|(key, _)| !matches!(key, PropertyKey::Internal(_)))
+                    .map(|(key, property)| (key.clone(), property.clone())),
+            );
+            properties
+        }
         Value::String(text) => text
             .chars()
             .enumerate()
             .map(|(index, character)| {
                 (
-                    index.to_string(),
+                    PropertyKey::String(index.to_string()),
                     Property::Value(Value::String(character.to_string())),
                 )
             })
@@ -11183,8 +11444,8 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             let named: Vec<String> = items
                 .properties
                 .borrow()
-                .entries()
-                .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+                .enumerable_entries()
+                .filter(|(key, _)| !matches!(key, PropertyKey::Internal(_)))
                 .map(|(key, property)| {
                     let shown = match property {
                         Property::Value(value) => inspect_nested(value, depth + 1, guard.seen),
@@ -11234,8 +11495,11 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
 fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> String {
     // A Set or Map is an object carrying reserved state, and a console shows what it holds
     // rather than the bookkeeping that makes it work.
-    if let Some(Value::Array(entries)) = object.get_own("@@entries") {
-        let is_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+    if let Some(Value::Array(entries)) = object.get_own(internal_key("entries")) {
+        let is_map = matches!(
+            object.get_own(internal_key("map")),
+            Some(&Value::Boolean(true))
+        );
         let live: Vec<_> = entries
             .borrow()
             .iter()
@@ -11266,10 +11530,8 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
     }
 
     let parts = object
-        .entries()
-        // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
-        // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
-        .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+        .enumerable_entries()
+        .filter(|(key, _)| !matches!(key, PropertyKey::Internal(_)))
         .map(|(key, property)| {
             let shown = match property {
                 Property::Value(value) => inspect_nested(value, depth + 1, seen),
@@ -12062,23 +12324,23 @@ fn function_property(name: &str) -> Value {
 }
 
 /// The own, program-visible keys of a value, in insertion order.
-fn own_property_keys(target: &Value) -> Vec<String> {
-    let from_object = |data: &ObjectData| -> Vec<String> {
-        data.keys()
-            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
-            .map(str::to_owned)
+fn own_property_keys(target: &Value) -> Vec<PropertyKey> {
+    let from_object = |data: &ObjectData| -> Vec<PropertyKey> {
+        data.own_keys()
+            .filter(|key| !matches!(key, PropertyKey::Internal(_)))
+            .cloned()
             .collect()
     };
     match target {
         Value::Object(object) => from_object(&object.borrow()),
         Value::Function(closure) => from_object(&closure.properties.borrow()),
         Value::Array(items) => {
-            let mut keys: Vec<String> = items
+            let mut keys: Vec<PropertyKey> = items
                 .borrow()
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
-                .map(|(index, _)| index.to_string())
+                .map(|(index, _)| PropertyKey::String(index.to_string()))
                 .collect();
             keys.extend(from_object(&items.properties.borrow()));
             keys
@@ -12093,7 +12355,7 @@ fn own_property_keys(target: &Value) -> Vec<String> {
 /// `configurable` report the whole object's state. That is right for the two shapes programs
 /// actually build -- a plain object and a frozen one -- and wrong only for a property made
 /// non-writable on its own, which nothing can express yet.
-fn own_descriptor(target: &Value, key: &str) -> Option<Value> {
+fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
     let frozen = match target {
         Value::Object(object) => object.borrow().is_frozen(),
         Value::Function(closure) => closure.properties.borrow().is_frozen(),
@@ -12103,12 +12365,16 @@ fn own_descriptor(target: &Value, key: &str) -> Option<Value> {
     let property = match target {
         Value::Object(object) => object.borrow().get_own_property(key).cloned(),
         Value::Function(closure) => closure.properties.borrow().get_own_property(key).cloned(),
-        Value::Array(items) => match key.parse::<usize>() {
-            Ok(index) => match items.borrow().get(index) {
+        Value::Array(items) => match string_key(key).and_then(|key| key.parse::<usize>().ok()) {
+            Some(index) => match items.borrow().get(index) {
                 Some(Value::Native(Native::Hole)) | None => None,
                 Some(item) => Some(Property::Value(item.clone())),
             },
-            Err(_) => items.properties.borrow().get_own_property(key).cloned(),
+            None => items
+                .properties
+                .borrow()
+                .get_own_property(key.clone())
+                .cloned(),
         },
         _ => None,
     };
@@ -12281,7 +12547,15 @@ fn builtin_js_name(variant: &str) -> String {
     }
 }
 
-fn inspect_key(key: &str) -> String {
+fn inspect_key<K: Into<PropertyKey>>(key: K) -> String {
+    let key = key.into();
+    let PropertyKey::String(key) = &key else {
+        return match &key {
+            PropertyKey::Symbol(symbol) => format!("[Symbol({})]", symbol.description()),
+            PropertyKey::Internal(_) => "[Internal]".to_owned(),
+            PropertyKey::String(_) => unreachable!(),
+        };
+    };
     let mut characters = key.chars();
     let identifier = characters
         .next()
@@ -12359,9 +12633,17 @@ impl Drop for InspectGuard<'_> {
 /// An index is a canonical decimal in `0 ..= 2^32 - 2`; `"01"`, `"1.0"`, `"-1"` and `"4294967295"`
 /// are ordinary string keys. Checking the round trip rather than just parsing is what draws that
 /// line, and the line is observable: only an index enumerates early.
-fn index_key(key: &str) -> Option<u32> {
+fn string_index(key: &PropertyKey) -> Option<u32> {
+    let PropertyKey::String(key) = key else {
+        return None;
+    };
     let index: u32 = key.parse().ok()?;
-    (index != u32::MAX && index.to_string() == key).then_some(index)
+    (index != u32::MAX && index.to_string() == *key).then_some(index)
+}
+
+#[cfg(test)]
+fn index_key(key: &str) -> Option<u32> {
+    string_index(&PropertyKey::String(key.to_owned()))
 }
 
 fn strict_equal(left: &Value, right: &Value) -> bool {
