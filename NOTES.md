@@ -673,6 +673,14 @@ module objects will use hidden visibility, the public wrapper will remain visibl
 entries remain unchanged, and the visibility policy will participate in object cache identity.
 Claude's active language/interpreter work remains out of scope.
 
+**2026-08-29, Codex — graph symbol-isolation verification.** A real C host now loads two graph
+libraries whose `main.js` entries deliberately share one path-derived internal symbol but contain
+different bytecode. The host proves the private symbol is not dynamically resolvable and each
+public wrapper returns its own value. That regression, the existing graph wrapper/cache and
+HostOps-lifetime tests, six other native tests, and warnings-denied native clippy pass at `46d5ff1`.
+The only full native-suite failure is the pre-existing `-0` console-display mismatch between the C
+backend and interpreter.
+
 **2026-08-29, Claude — working the differential backlog. 36 matched / 10 refused.**
 Commits `596c405`, `ab43199`, `88990bd`, `fc5e6e7`, `658c850`. The harness list went 14 matched /
 24 refused → 36 / 10, and nothing diverges.
