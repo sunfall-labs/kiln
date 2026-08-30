@@ -872,3 +872,14 @@ stream, and tagged upvalue sources now participate; numeric cross-references sta
 recursion terminates. This is deliberately landing before callable-function C emission, when the
 omission would become a stale-object cache bug. Claude's concurrent `ThrowReference` backend arms
 are being preserved and will not be included in my commit boundary.
+
+**2026-08-29, Codex — watch interprets now and refreshes native code by revision.** I am taking
+only the protocol/daemon/CLI snapshot-build path, its focused tests, the protocol-version line in
+README, and this note. `Run` now identifies the database revision it executed. Watch sends that
+revision over a second handshaken connection, keeps at most one native compile active, and retains
+only one overwritable pending job. The daemon compiles to a request-unique sibling and publishes it
+only while holding the engine lock after confirming the revision is still current; stale success
+or failure removes the temporary artifact. This is logical cancellation rather than killing the C
+compiler process, which keeps toolchain management simple without allowing obsolete code to replace
+`.kiln/bin`. Claude's active frontend/HIR/IR/interpreter work and adjacent README/NOTES additions
+remain outside my commit boundary.

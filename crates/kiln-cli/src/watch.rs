@@ -24,15 +24,17 @@ use std::ffi::OsString;
 use std::fmt::Arguments;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
 use crate::backend::Backend;
+use crate::backend::NativeBuildAtRevision;
 use crate::commands;
 use crate::error::{Error, Result};
+use kiln_proto::NativeProfile;
 
 pub fn run(
     backend: &mut dyn Backend,
@@ -66,9 +68,17 @@ pub fn run(
     // landing between the read and the watch is never reported and never noticed.
     let mut text: Option<String> = None;
     let mut missing = false;
+    let peer = match backend.peer() {
+        Ok(peer) => Some(peer),
+        Err(error) => {
+            note(notes, format_args!("native refresh unavailable: {error}"))?;
+            None
+        }
+    };
+    let mut refresher = Refresher::new(peer);
     match commands::read_source(path) {
         Ok(current) => {
-            run_once(
+            let revision = run_once(
                 backend,
                 path,
                 project_root,
@@ -77,6 +87,11 @@ pub fn run(
                 out,
                 notes,
             )?;
+            refresher.submit(
+                revision,
+                target.canonical.clone(),
+                project_root.to_string_lossy().into_owned(),
+            );
             text = Some(current);
         }
         // Being handed a path that is not there yet is the same state the loop already has to
@@ -90,9 +105,19 @@ pub fn run(
     }
 
     loop {
-        let batch = incoming.recv().map_err(|_| {
-            watcher_failed("the filesystem watcher stopped", "its event thread ended")
-        })?;
+        let batch = match incoming.recv_timeout(debounce) {
+            Ok(batch) => batch,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                refresher.drain(notes)?;
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(watcher_failed(
+                    "the filesystem watcher stopped",
+                    "its event thread ended",
+                ));
+            }
+        };
         match batch {
             Ok(batch) => {
                 if !batch.iter().any(|event| target.matches(event)) {
@@ -110,7 +135,7 @@ pub fn run(
                             missing = false;
                         }
                         if text.as_deref() != Some(current.as_str()) {
-                            run_once(
+                            let revision = run_once(
                                 backend,
                                 path,
                                 project_root,
@@ -119,6 +144,11 @@ pub fn run(
                                 out,
                                 notes,
                             )?;
+                            refresher.submit(
+                                revision,
+                                target.canonical.clone(),
+                                project_root.to_string_lossy().into_owned(),
+                            );
                             text = Some(current);
                         }
                     }
@@ -145,6 +175,7 @@ pub fn run(
                 }
             }
         }
+        refresher.drain(notes)?;
     }
 }
 
@@ -215,7 +246,7 @@ fn run_once(
     current: String,
     out: &mut dyn Write,
     notes: &mut dyn Write,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     // `commands::run_source` owns the warm source-sync and interpreter request path while
     // preserving the exact snapshot that the watcher compared for this save.
     let output = commands::run_source(backend, path, project_root, canonical, current)?;
@@ -227,7 +258,168 @@ fn run_once(
     }
     // A failed compile/runtime execution is a normal watch iteration. Its diagnostics have
     // already been emitted above; keep the watcher alive so the next save can recover.
-    Ok(())
+    Ok(output.revision)
+}
+
+struct RefreshJob {
+    generation: u64,
+    revision: u64,
+    path: String,
+    project_root: String,
+}
+
+struct RefreshResult {
+    generation: u64,
+    result: Result<NativeBuildAtRevision>,
+}
+
+#[derive(Default)]
+struct RefreshQueueState {
+    latest: Option<RefreshJob>,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct RefreshQueue {
+    state: Mutex<RefreshQueueState>,
+    ready: Condvar,
+}
+
+impl RefreshQueue {
+    fn replace(&self, job: RefreshJob) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.closed {
+            state.latest = Some(job);
+            self.ready.notify_one();
+        }
+    }
+
+    fn next(&self) -> Option<RefreshJob> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        loop {
+            if let Some(job) = state.latest.take() {
+                return Some(job);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.closed = true;
+        state.latest = None;
+        self.ready.notify_one();
+    }
+}
+
+/// A single worker and a latest-only queue. The interpreter remains on the caller thread;
+/// native compilation gets its own daemon connection and cannot delay the next save.
+struct Refresher {
+    jobs: Option<Arc<RefreshQueue>>,
+    results: mpsc::Receiver<RefreshResult>,
+    generation: u64,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Refresher {
+    fn new(peer: Option<Box<dyn Backend>>) -> Refresher {
+        let (result_tx, result_rx) = mpsc::channel::<RefreshResult>();
+        if let Some(mut backend) = peer {
+            let jobs = Arc::new(RefreshQueue::default());
+            let worker_jobs = Arc::clone(&jobs);
+            let worker = std::thread::spawn(move || {
+                while let Some(job) = worker_jobs.next() {
+                    let result = backend.native_build_at_revision(
+                        job.path,
+                        job.project_root,
+                        None,
+                        NativeProfile::Dev,
+                        job.revision,
+                    );
+                    if result_tx
+                        .send(RefreshResult {
+                            generation: job.generation,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            Refresher {
+                jobs: Some(jobs),
+                results: result_rx,
+                generation: 0,
+                worker: Some(worker),
+            }
+        } else {
+            Refresher {
+                jobs: None,
+                results: result_rx,
+                generation: 0,
+                worker: None,
+            }
+        }
+    }
+
+    fn submit(&mut self, revision: Option<u64>, path: String, project_root: String) {
+        let Some(revision) = revision else { return };
+        self.generation += 1;
+        if let Some(jobs) = &self.jobs {
+            jobs.replace(RefreshJob {
+                generation: self.generation,
+                revision,
+                path,
+                project_root,
+            });
+        }
+    }
+
+    fn drain(&mut self, notes: &mut dyn Write) -> Result<()> {
+        while let Ok(done) = self.results.try_recv() {
+            if done.generation != self.generation {
+                continue;
+            }
+            match done.result {
+                Ok(NativeBuildAtRevision::Built(summary)) => note(
+                    notes,
+                    format_args!("native refresh built {}", summary.output_path),
+                )?,
+                Ok(NativeBuildAtRevision::Stale { current_revision }) => {
+                    let _ = current_revision;
+                }
+                Err(error) => note(notes, format_args!("native refresh unavailable: {error}"))?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Refresher {
+    fn drop(&mut self) {
+        if let Some(jobs) = self.jobs.take() {
+            jobs.close();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn note(notes: &mut dyn Write, message: Arguments<'_>) -> Result<()> {
@@ -253,7 +445,9 @@ mod tests {
     use std::io;
     use std::sync::mpsc::Sender;
 
-    use kiln_proto::{Diagnostic, FileId, Request, Response, RunSummary, Stats};
+    use kiln_proto::{
+        Diagnostic, FileId, NativeBuildSummary, Request, Response, RunSummary, Stats,
+    };
 
     /// Answers like the daemon would, echoing the source as program output so tests can tell a
     /// real execution from a wake-up that found nothing to do.
@@ -263,6 +457,10 @@ mod tests {
     }
 
     impl Backend for Fake {
+        fn peer(&self) -> Result<Box<dyn Backend>> {
+            Ok(Box::new(NativeFake))
+        }
+
         fn request(&mut self, request: Request) -> Result<Response> {
             Ok(match request {
                 Request::Stats => Response::Stats(self.stats.clone()),
@@ -277,6 +475,7 @@ mod tests {
                 Request::Run { path, .. } => {
                     let failed = self.source.starts_with("fail");
                     Response::Ran(RunSummary {
+                        revision: self.stats.revision,
                         path,
                         file: FileId(1),
                         succeeded: !failed,
@@ -294,8 +493,66 @@ mod tests {
                         },
                     })
                 }
+                Request::NativeBuildAtRevision { .. } => Response::Stale {
+                    current_revision: self.stats.revision,
+                },
                 other => panic!("unexpected request {other:?}"),
             })
+        }
+    }
+
+    struct NativeFake;
+
+    impl Backend for NativeFake {
+        fn request(&mut self, request: Request) -> Result<Response> {
+            Ok(match request {
+                Request::NativeBuildAtRevision {
+                    expected_revision, ..
+                } => Response::Stale {
+                    current_revision: expected_revision,
+                },
+                other => panic!("unexpected native request {other:?}"),
+            })
+        }
+    }
+
+    struct ScriptedNativeBackend {
+        requests: Sender<Request>,
+        responses: mpsc::Receiver<Response>,
+    }
+
+    impl Backend for ScriptedNativeBackend {
+        fn request(&mut self, request: Request) -> Result<Response> {
+            self.requests
+                .send(request)
+                .map_err(|_| Error::Protocol("native request observer stopped".into()))?;
+            let response = self
+                .responses
+                .recv()
+                .map_err(|_| Error::Protocol("native response script stopped".into()))?;
+            crate::backend::interpret(response)
+        }
+    }
+
+    fn native_summary(output_path: &str) -> NativeBuildSummary {
+        NativeBuildSummary {
+            module_symbol: "kiln_module_watch".into(),
+            output_path: output_path.into(),
+            compiler_identity: "test-cc".into(),
+            generated_c_cache_hit: false,
+            app_object_cache_hit: false,
+            runtime_object_cache_hit: false,
+            launcher_object_cache_hit: false,
+            executable_cache_hit: false,
+            generated_c_bytes: 1,
+            app_object_bytes: 1,
+            runtime_object_bytes: 1,
+            launcher_object_bytes: 1,
+            executable_bytes: 1,
+            emit_millis: 1,
+            compile_millis: 1,
+            link_millis: 1,
+            total_millis: 3,
         }
     }
 
@@ -493,5 +750,72 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_refresh_keeps_one_build_in_flight_and_runs_only_the_latest_queued_revision() {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        let backend = ScriptedNativeBackend {
+            requests: request_tx,
+            responses: response_rx,
+        };
+        let mut refresher = Refresher::new(Some(Box::new(backend)));
+
+        refresher.submit(Some(1), "/project/main.js".into(), "/project".into());
+        let first = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first native build starts");
+        assert!(matches!(
+            first,
+            Request::NativeBuildAtRevision {
+                expected_revision: 1,
+                ..
+            }
+        ));
+
+        // These arrive while revision 1 is blocked in the native toolchain. Revision 2 must
+        // never start: finishing revision 1 should collapse the queue directly to revision 3.
+        refresher.submit(Some(2), "/project/main.js".into(), "/project".into());
+        refresher.submit(Some(3), "/project/main.js".into(), "/project".into());
+        response_tx
+            .send(Response::Stale {
+                current_revision: 3,
+            })
+            .expect("finish stale build");
+
+        let latest = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("latest queued build starts");
+        assert!(matches!(
+            latest,
+            Request::NativeBuildAtRevision {
+                expected_revision: 3,
+                ..
+            }
+        ));
+        assert!(
+            request_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "the superseded middle revision must not be built"
+        );
+        response_tx
+            .send(Response::NativeBuilt(native_summary(
+                "/project/.kiln/bin/main",
+            )))
+            .expect("finish latest build");
+
+        let mut notes = Vec::new();
+        for _ in 0..100 {
+            refresher.drain(&mut notes).expect("drain native result");
+            if !notes.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let notes = String::from_utf8(notes).expect("utf-8 notes");
+        assert_eq!(
+            notes, "native refresh built /project/.kiln/bin/main\n",
+            "the stale generation stays silent and only the latest result is reported"
+        );
     }
 }

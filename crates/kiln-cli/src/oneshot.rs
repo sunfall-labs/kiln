@@ -25,6 +25,7 @@ use crate::error::{Error, Result};
 
 pub struct OneShot {
     client: DaemonClient,
+    socket: PathBuf,
     stop: ShutdownHandle,
     serving: Option<JoinHandle<()>>,
     dir: PathBuf,
@@ -45,9 +46,13 @@ impl OneShot {
         let serving = std::thread::spawn(move || daemon.serve());
 
         // `bind` already returned, so the socket is accepting: no polling needed here.
-        match DaemonClient::connect(&socket) {
+        match DaemonClient::connect(&socket).and_then(|mut client| {
+            client.handshake()?;
+            Ok(client)
+        }) {
             Ok(client) => Ok(OneShot {
                 client,
+                socket,
                 stop,
                 serving: Some(serving),
                 dir,
@@ -63,6 +68,12 @@ impl OneShot {
 }
 
 impl Backend for OneShot {
+    fn peer(&self) -> Result<Box<dyn Backend>> {
+        let mut peer = DaemonClient::connect(&self.socket)?;
+        peer.handshake()?;
+        Ok(Box::new(peer))
+    }
+
     fn request(&mut self, request: Request) -> Result<Response> {
         self.client.request(request)
     }

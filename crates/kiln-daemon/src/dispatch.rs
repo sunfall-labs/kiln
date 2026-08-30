@@ -73,6 +73,12 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             },
             Next::Continue,
         ),
+        Request::NativeBuildAtRevision { .. } => (
+            Response::Error {
+                message: "revision-pinned native builds require daemon snapshot handling".into(),
+            },
+            Next::Continue,
+        ),
         Request::NativeSharedBuild {
             path,
             project_root,
@@ -273,6 +279,7 @@ fn run_graph<E: QueryEngine>(
     };
     match result {
         Ok(execution) => Response::Ran(RunSummary {
+            revision: engine.revision().0,
             path,
             file: FileId(file.0),
             succeeded: true,
@@ -282,6 +289,7 @@ fn run_graph<E: QueryEngine>(
             diagnostics: Vec::new(),
         }),
         Err(error) => Response::Ran(RunSummary {
+            revision: engine.revision().0,
             path,
             file: FileId(file.0),
             succeeded: false,
@@ -360,6 +368,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
         Ok(program) => program,
         Err(diagnostics) => {
             return Response::Ran(RunSummary {
+                revision: engine.revision().0,
                 path,
                 file: FileId(file.0),
                 succeeded: false,
@@ -381,6 +390,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
     let mut host = kiln_runtime::CaptureHost::new();
     match kiln_interpreter::execute(&program, &mut host, Default::default()) {
         Ok(execution) => Response::Ran(RunSummary {
+            revision: engine.revision().0,
             path,
             file: FileId(file.0),
             succeeded: true,
@@ -390,6 +400,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
             diagnostics: Vec::new(),
         }),
         Err(error) => Response::Ran(RunSummary {
+            revision: engine.revision().0,
             path,
             file: FileId(file.0),
             succeeded: false,
@@ -445,6 +456,18 @@ pub(crate) fn native_build_program(
             message: error.to_string(),
         },
     }
+}
+
+/// Resolve the requested executable output using the same defaults as NativeBuild.
+pub(crate) fn native_build_output(
+    project_root: &str,
+    path: &str,
+    output: Option<String>,
+) -> PathBuf {
+    output.map_or_else(
+        || default_native_output(Path::new(project_root), path),
+        PathBuf::from,
+    )
 }
 
 pub(crate) fn native_build_shared_program(

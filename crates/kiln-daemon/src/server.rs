@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, native_build_graph, native_build_program, native_build_shared_graph,
-    native_build_shared_program, native_graph, native_program, native_run_graph,
-    native_run_program,
+    Next, dispatch, native_build_graph, native_build_output, native_build_program,
+    native_build_shared_graph, native_build_shared_program, native_graph, native_program,
+    native_run_graph, native_run_program,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
@@ -388,6 +388,20 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
 /// recomputable, so the next query rebuilds them.
 fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
     match request {
+        Request::NativeBuildAtRevision {
+            path,
+            project_root,
+            output,
+            profile,
+            expected_revision,
+        } => handle_native_build_at_revision(
+            engine,
+            path,
+            project_root,
+            output,
+            profile,
+            expected_revision,
+        ),
         Request::NativeBuild {
             path,
             project_root,
@@ -464,6 +478,122 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
         }
         request => handle_engine_request(engine, request),
     }
+}
+
+/// Prepare a native build against one exact engine snapshot, compile without the lock, and
+/// publish atomically only if no source edit occurred while the toolchain was running.
+fn handle_native_build_at_revision<E: QueryEngine>(
+    engine: &Mutex<E>,
+    path: String,
+    project_root: String,
+    output: Option<String>,
+    profile: kiln_proto::NativeProfile,
+    expected_revision: u64,
+) -> (Response, Next) {
+    let (revision, prepared) = {
+        let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+        let revision = guard.revision().0;
+        if revision != expected_revision {
+            return (
+                Response::Stale {
+                    current_revision: revision,
+                },
+                Next::Continue,
+            );
+        }
+        let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
+            let graph = native_graph(&mut *guard, &path, &project_root)?;
+            match graph {
+                Some(graph) => Ok(PreparedNative::Graph(graph)),
+                None => native_program(&mut *guard, &path).map(PreparedNative::Program),
+            }
+        })) {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
+            Err(payload) => {
+                return (internal_error(&*payload), Next::Continue);
+            }
+        };
+        (revision, prepared)
+    };
+
+    let final_output = native_build_output(&project_root, &path, output);
+    let source = PathBuf::from(&path);
+    let project_source = if source.is_absolute() {
+        source.clone()
+    } else {
+        PathBuf::from(&project_root).join(&source)
+    };
+    let canonical_source = std::fs::canonicalize(&project_source).ok();
+    if final_output == source
+        || final_output == project_source
+        || std::fs::canonicalize(&final_output)
+            .ok()
+            .zip(canonical_source.as_ref())
+            .is_some_and(|(output, source)| output == *source)
+    {
+        return (
+            Response::Error {
+                message: format!("native output would overwrite source file {path}"),
+            },
+            Next::Continue,
+        );
+    }
+    let temp_output = snapshot_temp_output(&final_output);
+    let response = run_without_engine_lock(|| match prepared {
+        PreparedNative::Graph(graph) => native_build_graph(
+            graph,
+            path.clone(),
+            project_root.clone(),
+            Some(temp_output.to_string_lossy().into_owned()),
+            profile,
+        ),
+        PreparedNative::Program(program) => native_build_program(
+            program,
+            path.clone(),
+            project_root.clone(),
+            Some(temp_output.to_string_lossy().into_owned()),
+            profile,
+        ),
+    })
+    .0;
+
+    let guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+    let current_revision = guard.revision().0;
+    if current_revision != revision {
+        let _ = std::fs::remove_file(&temp_output);
+        return (Response::Stale { current_revision }, Next::Continue);
+    }
+    let Response::NativeBuilt(mut summary) = response else {
+        let _ = std::fs::remove_file(&temp_output);
+        return (response, Next::Continue);
+    };
+    if let Err(error) = std::fs::rename(&temp_output, &final_output) {
+        let _ = std::fs::remove_file(&temp_output);
+        return (
+            Response::Error {
+                message: format!("cannot publish native output: {error}"),
+            },
+            Next::Continue,
+        );
+    }
+    summary.output_path = final_output.to_string_lossy().into_owned();
+    (Response::NativeBuilt(summary), Next::Continue)
+}
+
+enum PreparedNative {
+    Graph(ModuleGraph),
+    Program(kiln_ir::Program),
+}
+
+fn snapshot_temp_output(final_output: &Path) -> PathBuf {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let name = final_output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("native-output");
+    final_output.with_file_name(format!(".kiln-{name}-{}-{id}.tmp", std::process::id()))
 }
 
 fn prepare_native_graph<E: QueryEngine>(

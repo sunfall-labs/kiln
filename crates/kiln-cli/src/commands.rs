@@ -23,6 +23,7 @@ pub struct Output {
     pub text: String,
     pub notes: Vec<String>,
     pub exit_code: i32,
+    pub revision: Option<u64>,
 }
 
 impl Output {
@@ -31,6 +32,7 @@ impl Output {
             text,
             notes: Vec::new(),
             exit_code: 0,
+            revision: None,
         }
     }
 }
@@ -78,6 +80,7 @@ pub(crate) fn run_source(
         text: summary.stdout,
         notes,
         exit_code: if summary.succeeded { 0 } else { 1 },
+        revision: Some(summary.revision),
     })
 }
 
@@ -114,6 +117,7 @@ pub fn build(
             text: render::native_shared_build(&display, &summary),
             notes: project_notes,
             exit_code: 0,
+            revision: None,
         });
     }
     let summary = backend.native_build(canonical, project_root, Some(output), profile)?;
@@ -121,6 +125,7 @@ pub fn build(
         text: render::native_build(&display, &summary),
         notes: project_notes,
         exit_code: 0,
+        revision: None,
     })
 }
 
@@ -146,6 +151,7 @@ pub fn native_run(
         text: summary.stdout,
         notes,
         exit_code: summary.exit_code.unwrap_or(1),
+        revision: None,
     })
 }
 
@@ -233,6 +239,7 @@ pub fn check_source(
         text: render::check(display, &summary, &work, after.revision, elapsed),
         notes,
         exit_code: 0,
+        revision: None,
     })
 }
 
@@ -259,6 +266,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
         text: render::project(&summary, &work, after.revision, elapsed),
         notes,
         exit_code: 0,
+        revision: None,
     })
 }
 
@@ -389,6 +397,7 @@ pub fn test(
         text: render_test(&corpus, &summary),
         notes: Vec::new(),
         exit_code: test_exit_code(&summary),
+        revision: None,
     })
 }
 
@@ -742,6 +751,7 @@ mod tests {
                     Request::Check { .. } => "Check",
                     Request::Run { .. } => "Run",
                     Request::NativeBuild { .. } => "NativeBuild",
+                    Request::NativeBuildAtRevision { .. } => "NativeBuildAtRevision",
                     Request::NativeSharedBuild { .. } => "NativeSharedBuild",
                     Request::NativeRun { .. } => "NativeRun",
                     Request::Test { .. } => "Test",
@@ -784,6 +794,7 @@ mod tests {
                     })
                 }
                 Request::Run { path, .. } => Response::Ran(RunSummary {
+                    revision: self.stats.revision,
                     path,
                     file: FileId(1),
                     succeeded: self.diagnostics.is_empty(),
@@ -811,6 +822,11 @@ mod tests {
                     link_millis: 1,
                     total_millis: 3,
                 }),
+                Request::NativeBuildAtRevision {
+                    expected_revision, ..
+                } => Response::Stale {
+                    current_revision: expected_revision,
+                },
                 Request::NativeSharedBuild { output, .. } => {
                     let output_path = output.unwrap_or_default();
                     Response::NativeSharedBuilt(NativeSharedLibrarySummary {
