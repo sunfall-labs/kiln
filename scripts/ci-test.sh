@@ -78,3 +78,16 @@ if [[ $KILN_CI_MODULE_INTERPRETER_STDOUT != "$KILN_CI_MODULE_EXPECTED" || \
 		"$KILN_CI_MODULE_INTERPRETER_STDOUT" "$KILN_CI_MODULE_NATIVE_STDOUT" >&2
 	exit 1
 fi
+
+# A function value that crosses a module boundary. Interpreter only: the C backend is still
+# scalars-only, so asking it to link this would be testing a refusal rather than the seam.
+# What is being gated is that an exported function, class, arrow and default all run, and that
+# each reads its *own* module's bindings rather than the importer's same-numbered slot.
+KILN_CI_EXPORTS_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/exports/main.ts)"
+KILN_CI_EXPORTS_EXPECTED=$'3cm\nbox 4cm\n42\n0cm in'
+if [[ $KILN_CI_EXPORTS_STDOUT != "$KILN_CI_EXPORTS_EXPECTED" ]]; then
+	echo "an exported function did not see its own module" >&2
+	printf 'expected: %s\nactual: %s\n' "$KILN_CI_EXPORTS_EXPECTED" "$KILN_CI_EXPORTS_STDOUT" >&2
+	exit 1
+fi

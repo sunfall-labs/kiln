@@ -115,7 +115,7 @@ fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     };
 
     let mut host = CaptureHost::new();
-    if let Err(error) = execute(&program, &mut host, ExecutionLimits::default()) {
+    if let Err(error) = execute(std::rc::Rc::new(program), &mut host, ExecutionLimits::default()) {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
         result.stdout = host.into_stdout();
         return result;

@@ -770,6 +770,65 @@ mod tests {
         assert!(result.steps > 0);
     }
 
+    /// A function value survives the module boundary it was exported across.
+    ///
+    /// A closure indexes its own program's function table, and every module compiles to its own
+    /// program -- so calling an imported function used to reach into the *importer's* table and
+    /// find someone else's body or nothing at all. The closure carries its program now, which is
+    /// what makes `export function` mean anything.
+    #[test]
+    fn exported_functions_and_classes_are_callable_by_the_importer() {
+        let project = TempProject::new();
+        project.write(
+            "lib.js",
+            "export function greet(name) { return 'hi ' + name; }\n\
+             export class Box { constructor(v) { this.v = v; } get() { return this.v; } }\n\
+             export const twice = (n) => n * 2;\n\
+             export default function main() { return 'default'; }",
+        );
+        let entry = project.write(
+            "main.js",
+            "import main, { greet, Box, twice } from './lib.js';\n\
+             console.log(greet('x'));\n\
+             console.log(new Box(7).get());\n\
+             console.log(twice(21));\n\
+             console.log(main());",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["hi x", "7", "42", "default"]);
+    }
+
+    /// An imported function still sees the module it was written in, not the one calling it.
+    ///
+    /// The captured binding and the constant both live in the exporter's program; reading either
+    /// through the importer's tables would give the wrong answer rather than no answer, which is
+    /// the failure worth a test of its own.
+    #[test]
+    fn an_imported_function_closes_over_its_own_module() {
+        let project = TempProject::new();
+        project.write(
+            "lib.js",
+            "const secret = 'lib';\n\
+             export function reveal() { return secret + '/' + 'constant'; }",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { reveal } from './lib.js';\n\
+             const secret = 'main';\n\
+             console.log(reveal(), secret);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["lib/constant main"]);
+    }
+
     #[test]
     fn default_scalar_import_links_to_default_export() {
         let project = TempProject::new();
