@@ -224,8 +224,14 @@ enum kiln_value_tag {
     /* A method the runtime supplies.  bits holds its code, and *not* its receiver: `a.map` and
      * `b.map` are the same function object in the language, which is what makes
      * `a.map === b.map` true, and `CallMethod` keeps the receiver on the stack anyway. */
-    KILN_VALUE_METHOD = 11
+    KILN_VALUE_METHOD = 11,
+    /* bits holds a kiln_generator*: a body that has been started and not finished. */
+    KILN_VALUE_GENERATOR = 12
 };
+
+/* A body that yielded rather than returned.  Not an error: the caller is the generator's `next`,
+ * which turns it into `{ value, done: false }`. */
+#define KILN_C99_YIELDED 1
 
 /* `String(x)`.  A template's `${x}` lowers to a call to it rather than to `+`, because the two
  * use different hints: `${x}` asks `toString` first and `+` asks `valueOf` first. */
@@ -314,6 +320,9 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_OBJECT_CREATE 68
 #define KILN_C99_METHOD_JSON_STRINGIFY 69
 #define KILN_C99_METHOD_JSON_PARSE 70
+#define KILN_C99_METHOD_GENERATOR_NEXT 71
+#define KILN_C99_METHOD_GENERATOR_RETURN 72
+#define KILN_C99_METHOD_GENERATOR_SELF 73
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -343,11 +352,17 @@ typedef struct kiln_host {
  * table.  `proto` is kept only to name the function in text -- it is the same index the
  * interpreter uses, so both engines print `[Function 3]` for the same function. */
 struct kiln_closure;
+struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
                             kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                            kiln_value *thrown);
+                            kiln_value *thrown, struct kiln_generator *frame);
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* Calling this builds a generator object instead of running the body. */
+    int generator;
+    /* What a generator's frame has to be big enough for, known when the body is emitted. */
+    uint32_t local_count;
+    uint32_t stack_size;
     /* The object `new f()` links instances to, and the store `f.x = 1` writes into. Both are
      * created on first use: an ordinary function that is never used as a constructor and never
      * carries a property allocates neither. */
@@ -407,6 +422,32 @@ typedef struct kiln_array {
     size_t count;
     size_t capacity;
 } kiln_array;
+
+/* A suspended body.
+ *
+ * A generator does not run when it is called: it hands back this, and each `next` resumes the
+ * body where it left off. An automatic C frame cannot be suspended -- it is gone the moment the
+ * function returns -- so a generator's locals and operand stack live here instead, and the body
+ * is emitted to read them from here rather than from its own frame.
+ *
+ * Re-entry is a `switch` on `resume` at the top of the body, jumping to a label emitted directly
+ * after the `Yield` that produced it. That works because the emitted body is already a flat
+ * sequence of labels with `goto` between them: the shape a bytecode interpreter has, and the
+ * shape that makes resuming possible at all. */
+typedef struct kiln_generator {
+    kiln_value function;
+    kiln_value receiver;
+    kiln_value *locals;
+    kiln_value *stack;
+    size_t sp;
+    /* Which `Yield` to come back to. Zero before the first `next`, when the body starts at its
+     * beginning rather than resuming. */
+    size_t resume;
+    /* What `next(v)` passed in, which becomes the result of the `yield` that suspended. */
+    kiln_value sent;
+    int started;
+    int done;
+} kiln_generator;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
@@ -694,6 +735,49 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
     return KILN_C99_OK;
 }
 
+static kiln_generator *kiln_c99_generator_of(kiln_value value) {
+    return (kiln_generator *)(uintptr_t)value.bits;
+}
+
+/* The frame a generator will run in, filled with its arguments and nothing else.
+ *
+ * Both arrays are sized from the body's own counts, so a suspension has somewhere to put every
+ * local and every operand the verifier proved it can hold. */
+static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
+                                  const kiln_value *args, size_t argc) {
+    kiln_closure *closure = kiln_c99_closure_of(function);
+    kiln_generator *frame = (kiln_generator *)malloc(sizeof *frame);
+    size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
+    size_t depth = closure->stack_size == 0 ? 1 : closure->stack_size;
+    size_t index;
+    if (frame == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    frame->locals = (kiln_value *)malloc(locals * sizeof *frame->locals);
+    frame->stack = (kiln_value *)malloc(depth * sizeof *frame->stack);
+    if (frame->locals == NULL || frame->stack == NULL) {
+        free(frame->locals);
+        free(frame->stack);
+        free(frame);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = 0; index < locals; ++index) {
+        frame->locals[index] = kiln_c99_undefined();
+    }
+    for (index = 0; index < argc && index < locals; ++index) {
+        frame->locals[index] = args[index];
+    }
+    frame->function = function;
+    frame->receiver = receiver;
+    frame->sp = 0;
+    frame->resume = 0;
+    frame->sent = kiln_c99_undefined();
+    frame->started = 0;
+    frame->done = 0;
+    *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
+    return KILN_C99_OK;
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -772,6 +856,12 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_CREATE: return "create";
     case KILN_C99_METHOD_JSON_STRINGIFY: return "stringify";
     case KILN_C99_METHOD_JSON_PARSE: return "parse";
+    case KILN_C99_METHOD_GENERATOR_NEXT: return "next";
+    case KILN_C99_METHOD_GENERATOR_RETURN: return "return";
+    /* `[Symbol.iterator]()` on a generator hands back the generator, which is what lets one be
+     * spread, destructured or walked by `for...of` -- and what makes walking it twice walk a
+     * generator that is already finished. */
+    case KILN_C99_METHOD_GENERATOR_SELF: return "@@iterator";
     default: return NULL;
     }
 }
@@ -848,7 +938,7 @@ static int kiln_c99_is_callable(kiln_value value) {
  * function is refused at the point it would be called. So reduction is conversion to text. */
 static int kiln_c99_is_reference(kiln_value value) {
     return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
-           value.tag == KILN_VALUE_ARRAY;
+           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR;
 }
 
 /* Negative zero compares equal to zero, so the sign is the only thing that tells them apart --
@@ -907,8 +997,9 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, uint32_t proto, const kiln_value *captured,
-                                 uint32_t count) {
+                                 size_t name_len, uint32_t proto, int generator,
+                                 uint32_t local_count, uint32_t stack_size,
+                                 const kiln_value *captured, uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
@@ -926,6 +1017,9 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
         }
     }
     closure->body = body;
+    closure->generator = generator;
+    closure->local_count = local_count;
+    closure->stack_size = stack_size;
     closure->prototype = kiln_c99_undefined();
     closure->properties = kiln_c99_undefined();
     closure->name = name;
@@ -968,8 +1062,12 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
-    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
-                         thrown);
+    if (closure->generator) {
+        /* Calling a generator function does not run it: it builds the object that will. */
+        return kiln_c99_new_generator(result, callee, receiver, args, argc);
+    }
+    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1, thrown,
+                         NULL);
 }
 
 static kiln_value kiln_c99_number(double value) {
@@ -1018,6 +1116,7 @@ static int kiln_c99_truthy(kiln_value value) {
     /* An object is always truthy, empty or not. */
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
+    case KILN_VALUE_GENERATOR:
         return 1;
     default:
         return 0;
@@ -1478,6 +1577,15 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_GENERATOR: {
+        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
+                                               KILN_C99_METHOD_GENERATOR_SELF);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
+    }
     case KILN_VALUE_BUILTIN: {
         uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
         if (code != 0) {
@@ -1814,6 +1922,8 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         }
         return kiln_c99_text_append_c(text, "]");
     }
+    case KILN_VALUE_GENERATOR:
+        return kiln_c99_text_append_c(text, "Object [Generator] {}");
     case KILN_VALUE_BUILTIN:
         return kiln_c99_text_append_c(text, "[Function: String]");
     case KILN_VALUE_METHOD: {
@@ -2469,6 +2579,63 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = target;
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_GENERATOR_SELF:
+            if (receiver.tag != KILN_VALUE_GENERATOR) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_GENERATOR_NEXT:
+        case KILN_C99_METHOD_GENERATOR_RETURN: {
+            kiln_generator *frame;
+            kiln_closure *closure;
+            kiln_value produced = kiln_c99_undefined();
+            int finished = 1;
+            if (receiver.tag != KILN_VALUE_GENERATOR) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            frame = kiln_c99_generator_of(receiver);
+            /* `.return(v)` finishes the generator without resuming it, so the body never runs
+             * again and the value is the caller's rather than the body's. */
+            if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
+                frame->done = 1;
+                produced = argc > 0 ? args[0] : kiln_c99_undefined();
+            } else if (!frame->done) {
+                frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
+                closure = kiln_c99_closure_of(frame->function);
+                status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL,
+                                       0, depth + 1, thrown, frame);
+                if (status == KILN_C99_YIELDED) {
+                    frame->started = 1;
+                    finished = 0;
+                } else if (status != KILN_C99_OK) {
+                    frame->done = 1;
+                    return status;
+                } else {
+                    frame->done = 1;
+                }
+            }
+            {
+                /* A step is an object, not a pair: `{ value, done }` is what the iteration
+                 * protocol is written against. */
+                kiln_value step;
+                status = kiln_c99_new_object(&step);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                status = kiln_c99_put(host, step, "done", 4,
+                                      kiln_c99_boolean(finished || frame->done), depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                *result = step;
+                return KILN_C99_OK;
+            }
+        }
         case KILN_C99_METHOD_JSON_STRINGIFY: {
             kiln_text text = {NULL, 0, 0};
             kiln_text indent = {NULL, 0, 0};
@@ -2796,6 +2963,107 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     default:
         return KILN_C99_CONTROL_ERROR;
+    }
+}
+
+/* Append everything `source` yields to `target`, which is what array spread, `for...of` and
+ * destructuring all reduce to.
+ *
+ * An array and a string are walked directly rather than through their iterators. That is a
+ * shortcut the specification does not take, and it is visible to a program that replaces
+ * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
+ * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
+                            kiln_value *thrown) {
+    kiln_value iterator;
+    size_t index;
+    int status;
+    if (source.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(source);
+        size_t length = array->count;
+        for (index = 0; index < length && index < array->count; ++index) {
+            status = kiln_c99_array_push(target, array->elements[index]);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_STRING) {
+        /* A string iterates as its *characters*, not its code units: an astral character is one
+         * step, which is the difference between iterating a string and indexing it. */
+        uint16_t *units = NULL;
+        size_t count = 0;
+        status = kiln_c99_to_units(source, &units, &count);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = 0; index < count; ++index) {
+            size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                            index + 1 < count && units[index + 1] >= 0xDC00 &&
+                            units[index + 1] <= 0xDFFF)
+                               ? 2
+                               : 1;
+            status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
+            if (status != KILN_C99_OK) {
+                free(units);
+                return status;
+            }
+            index += width - 1;
+        }
+        free(units);
+        return KILN_C99_OK;
+    }
+    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
+    if (source.tag == KILN_VALUE_GENERATOR) {
+        iterator = source;
+    } else {
+        kiln_value method;
+        status = kiln_c99_get(host, source, "@@iterator", 10, &method, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!kiln_c99_is_callable(method)) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        status = kiln_c99_call(host, &iterator, method, source, NULL, 0, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    for (;;) {
+        kiln_value next;
+        kiln_value step;
+        kiln_value done;
+        kiln_value value;
+        status = kiln_c99_get(host, iterator, "next", 4, &next, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!kiln_c99_is_callable(next)) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        status = kiln_c99_call(host, &step, next, iterator, NULL, 0, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        status = kiln_c99_get(host, step, "done", 4, &done, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (kiln_c99_truthy(done)) {
+            /* The value that comes back with `done` is the iterator's *return* value, which
+             * spread and `for...of` both discard. */
+            return KILN_C99_OK;
+        }
+        status = kiln_c99_get(host, step, "value", 5, &value, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        status = kiln_c99_array_push(target, value);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
 }
 
@@ -3539,6 +3807,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
+    case KILN_VALUE_GENERATOR:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -3708,9 +3977,22 @@ fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
         // each resumption picking up where the last left off. That is a suspended frame, which
         // an automatic C frame cannot be. An `async` function is compiled as one for the same
         // reason -- `await` suspends exactly as `yield` does.
-        if proto.generator || proto.asynchronous || proto.async_generator {
+        if proto.asynchronous || proto.async_generator {
             return Err(EmitError::Unsupported {
-                feature: "generator and async functions in the native backend".to_string(),
+                feature: "async functions in the native backend".to_string(),
+            });
+        }
+        // A generator's state survives its own suspension, and a handler stack is part of that
+        // state. Refused rather than half-supported: a `try` that silently stopped catching
+        // across a `yield` is the kind of thing that shows up three frames away.
+        if proto.generator
+            && proto
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::PushHandler(_)))
+        {
+            return Err(EmitError::Unsupported {
+                feature: "a `try` inside a generator in the native backend".to_string(),
             });
         }
         if proto.parameter_count > proto.local_count {
@@ -3964,6 +4246,9 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::SpreadObject
+        | Instruction::SpreadInto
+        | Instruction::IterableToArray
+        | Instruction::Yield
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -4038,7 +4323,6 @@ fn stack_effect(
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Dup2
-        | Instruction::SpreadInto
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
         | Instruction::Apply
@@ -4049,12 +4333,10 @@ fn stack_effect(
         | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
-        | Instruction::IterableToArray
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
-        | Instruction::Yield
         | Instruction::Await
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
@@ -4136,8 +4418,16 @@ fn stack_effect(
                 Ok((height - 2, false))
             }
         }
+        // Replaces the value with an array of what it yields.
+        Instruction::IterableToArray => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
         // The source is consumed and the target stays, the same shape `SetPrototype` uses.
-        Instruction::SpreadObject => {
+        Instruction::SpreadObject | Instruction::SpreadInto => {
             if height < 2 {
                 Err(underflow(2))
             } else {
@@ -4176,6 +4466,15 @@ fn stack_effect(
         // Registering and retiring a handler leave the stack alone; the *target* is reached with
         // one more value on it, which the dataflow walk below accounts for.
         Instruction::PushHandler(_) | Instruction::PopHandler => Ok((height, false)),
+        // A yield consumes the value and leaves one behind: what the caller sends back becomes
+        // the result of the `yield` expression.
+        Instruction::Yield => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
         // A throw consumes the value and does not fall through: control leaves for a handler.
         Instruction::Throw => {
             if height < 1 {
@@ -4354,6 +4653,8 @@ fn needs_call_context(program: &Program) -> bool {
                     | Instruction::NewObject { .. }
                     | Instruction::DefineAccessor { .. }
                     | Instruction::SpreadObject
+                    | Instruction::SpreadInto
+                    | Instruction::IterableToArray
             )
         })
     };
@@ -4400,7 +4701,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);"
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
         )
         .unwrap();
     }
@@ -4415,7 +4716,15 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
         }
     }
     for (index, proto) in program.functions.iter().enumerate() {
-        render_function(output, program, proto, plan.functions[index], index, symbol);
+        render_function(
+            output,
+            program,
+            proto,
+            &plan.functions,
+            plan.functions[index],
+            index,
+            symbol,
+        );
     }
 }
 
@@ -4454,6 +4763,7 @@ fn render_function(
     output: &mut String,
     program: &Program,
     proto: &FunctionProto,
+    frame_stacks: &[usize],
     max_stack: usize,
     index: usize,
     symbol: &str,
@@ -4471,36 +4781,72 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown) {{"
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
-    writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
-    writeln!(output, "    kiln_value locals[{locals}];").unwrap();
     let handlers = handler_targets(&proto.code);
-    render_handler_prologue(output, &handlers, proto.code.len());
-    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-    output.push_str("    (void)thrown;\n");
-    output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
-    writeln!(
-        output,
-        "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
-    )
-    .unwrap();
-    if proto.parameter_count == 0 {
-        output.push_str("    (void)args; (void)argc;\n");
+    let yields: Vec<usize> = proto
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| matches!(instruction, Instruction::Yield))
+        .map(|(position, _)| position)
+        .collect();
+    if proto.generator {
+        // The frame outlives this call, so neither array can be automatic: both belong to the
+        // generator, and every `locals[i]` and `stack[sp]` below reads through them unchanged.
+        output.push_str("    kiln_value *stack = frame->stack;\n");
+        output.push_str("    kiln_value *locals = frame->locals;\n");
+        render_handler_prologue(output, &handlers, proto.code.len());
+        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+        output.push_str("    (void)thrown;\n");
+        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        output.push_str("    (void)args; (void)argc; (void)slot;\n");
+        // Re-entry. A generator that has not started begins at its first instruction; one that
+        // has jumps back to just after the `Yield` that suspended it, with the operand stack
+        // restored to the height it had there.
+        if !yields.is_empty() {
+            output.push_str(
+                "    if (frame->started) {\n        sp = frame->sp;\n        switch (frame->resume) {\n",
+            );
+            for position in &yields {
+                writeln!(
+                    output,
+                    "        case {position}: goto kiln_resume_{position};"
+                )
+                .unwrap();
+            }
+            output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
+        }
     } else {
-        // Parameters occupy the first slots in declaration order. An argument that was not
-        // passed leaves its slot undefined, which is what a missing argument is.
+        writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
+        writeln!(output, "    kiln_value locals[{locals}];").unwrap();
+        render_handler_prologue(output, &handlers, proto.code.len());
+        output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+        output.push_str("    (void)thrown; (void)frame;\n");
+        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
         writeln!(
             output,
-            "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
-            proto.parameter_count
+            "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
         )
         .unwrap();
+        if proto.parameter_count == 0 {
+            output.push_str("    (void)args; (void)argc;\n");
+        } else {
+            // Parameters occupy the first slots in declaration order. An argument that was not
+            // passed leaves its slot undefined, which is what a missing argument is.
+            writeln!(
+                output,
+                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
+                proto.parameter_count
+            )
+            .unwrap();
+        }
     }
     let emitter = Emitter {
         constants: &program.constants,
+        frame_stacks,
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
@@ -4588,6 +4934,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     }
     let emitter = Emitter {
         constants: &program.constants,
+        frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
@@ -4705,6 +5052,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     }
     let emitter = Emitter {
         constants: &program.constants,
+        frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
@@ -4730,6 +5078,9 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
 /// so the caller can call it.
 struct Emitter<'a> {
     constants: &'a [Constant],
+    /// How deep each compiled body's operand stack can get, so a generator over it can allocate
+    /// one that never overflows.
+    frame_stacks: &'a [usize],
     /// The handler labels this body can unwind to, empty when it catches nothing. A body that
     /// catches nothing propagates a throw by returning it, which needs no machinery at all.
     handlers: Vec<u32>,
@@ -4757,9 +5108,9 @@ fn emit_instruction(
     index: usize,
     emitter: &Emitter<'_>,
 ) {
-    let _ = index;
     let Emitter {
         constants,
+        frame_stacks,
         functions,
         symbol,
         callables,
@@ -4771,7 +5122,6 @@ fn emit_instruction(
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::Dup2
-        | Instruction::SpreadInto
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
         | Instruction::Apply
@@ -4782,12 +5132,10 @@ fn emit_instruction(
         | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
-        | Instruction::IterableToArray
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
-        | Instruction::Yield
         | Instruction::Await
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
@@ -4857,11 +5205,16 @@ fn emit_instruction(
                 Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
                 None => ("NULL".to_owned(), 0),
             };
+            // A generator's frame is sized here rather than at the call, because this is where
+            // the body's own counts are in scope.
+            let generator = i32::from(target.generator);
+            let frame_locals = target.local_count.max(1);
+            let frame_stack = frame_stacks[*proto as usize].max(1);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -4881,7 +5234,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -5028,6 +5381,22 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::SpreadInto => {
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_iterate(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
+        Instruction::IterableToArray => {
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_iterate(host, built, stack[sp - 1], depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = built; }}"
+            )
+            .unwrap();
+        }
         Instruction::SpreadObject => {
             let unwind = unwind_or_return(handlers);
             writeln!(
@@ -5053,6 +5422,17 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::PopHandler => output.push_str("    --kiln_handler_top;\n"),
+        Instruction::Yield => {
+            writeln!(
+                output,
+                "    frame->sp = sp - 1; frame->resume = {index}; *result = stack[sp - 1]; return KILN_C99_YIELDED;"
+            )
+            .unwrap();
+            // Where `next` comes back to. What the caller sent becomes the value of the `yield`
+            // expression, which is why the height here is one more than it was at the suspension.
+            writeln!(output, "kiln_resume_{index}:;").unwrap();
+            output.push_str("    stack[sp++] = frame->sent;\n");
+        }
         Instruction::Throw => {
             output.push_str("    *thrown = stack[--sp];\n");
             if handlers.is_empty() {

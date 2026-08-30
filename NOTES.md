@@ -2197,18 +2197,45 @@ every other engine spells an emoji in JSON -- came back as two replacement chara
 two escapes and one character. `conformance/differential/json-surrogates.js` covers it, unpaired
 halves included.
 
-**Still refused, and this is the queue in order:** `Date` (6), generators and `async` (6),
-`NewRegExp` (4), `Map`/`Set` (3), `in` (3), array spread and `IterableToArray` (3 each), then
-`delete`, `EnumerateKeys` and `SuperCall`/`SuperForward` (so `class D extends C` still refuses).
-Generators need a suspended frame, which an automatic C frame cannot be, so they are a different
-shape rather than more of the same.
+**Generators work natively, and the design question turned out to be already answered.**
+
+I had this filed as the item needing a decision before code, because a suspended frame cannot be
+an automatic C frame. It cannot -- but the emitted body is *already* a flat sequence of labels
+with `goto` between them, which is the shape a bytecode interpreter has and exactly the shape
+that makes resuming possible. So the whole change is three things:
+
+- a generator's `locals` and `stack` are pointers into a heap frame rather than automatic arrays,
+  which means **every `locals[i]` and `stack[sp]` the emitter already writes works unchanged**;
+- `Yield` saves `sp` and a resume index, hands the value out, and returns a distinct status;
+- the prologue is a `switch (frame->resume)` jumping to a label emitted directly after the
+  `Yield` that produced it, where the sent value is pushed.
+
+No CPS transform, no state-machine rewrite of the body, no second emitter. It is worth saying
+plainly because I expected this to be the hard one and it was the cheapest slice since objects.
+
+**A `try` inside a generator is refused**, by name. A handler stack is part of the state that has
+to survive a suspension, and a `try` that silently stopped catching across a `yield` is exactly
+the kind of thing that surfaces three frames away.
+
+**The iteration protocol came with it** -- `SpreadInto` and `IterableToArray` -- so `for...of`,
+`[...gen()]` and destructuring all work over anything with `@@iterator`. An array and a string
+are walked directly rather than through their iterators, which is a shortcut the specification
+does not take; it is unobservable here because nothing can replace `Array.prototype[Symbol
+.iterator]`, and it is written down at the site so it stops being unobservable the day something
+can.
+
+**Still refused, and this is the queue in order:** `Date` (6), `async` (4), `NewRegExp` (4),
+`Map`/`Set` (3), `in` (3), `delete` (3), `Apply` (3), then `EnumerateKeys` and
+`SuperCall`/`SuperForward` (so `class D extends C` still refuses). `async` is now the only one
+with a real design question left: it needs promises and a microtask queue, and the queue is the
+part that has nowhere obvious to live in a program that just returns from `main`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 12/12, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 13/13, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
