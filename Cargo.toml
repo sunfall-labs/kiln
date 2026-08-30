@@ -40,6 +40,7 @@ libc = { version = "0.2", default-features = false }
 oxc_allocator = { version = "0.147.0", default-features = false }
 oxc_ast = { version = "0.147.0", default-features = false }
 oxc_parser = { version = "0.147.0", default-features = false }
+oxc_resolver = { version = "11.24.3", default-features = false }
 oxc_span = { version = "0.147.0", default-features = false }
 oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
@@ -72,6 +73,12 @@ rustc-hash = { version = "2.1", default-features = false, features = ["std"] }
 # `colors` (its default) is dropped: the diff is read in CI logs and in a plain terminal, and
 # pulling `console` into the workspace graph to tint it is not worth the edge.
 insta = { version = "1.48", default-features = false }
+# Work-stealing for independent compiler and native-build CPU work. JavaScript realm ordering stays
+# in kiln's realm scheduler; Rayon never schedules observable language jobs (ADR 0029).
+rayon = { version = "1.12", default-features = false }
+# The one realm scheduler. `test-util` is required for deterministic paused-time execution;
+# keep Tokio's surface minimal because its types never cross `kiln-runtime`'s public seam.
+tokio = { version = "1.48", default-features = false, features = ["rt", "time", "test-util"] }
 
 [profile.release]
 debug = 1
