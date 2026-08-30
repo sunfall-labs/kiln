@@ -10,6 +10,12 @@ One `RealmRuntime` owns one current-thread Tokio runtime, the realm's resource t
 request table, and environmental capability policy. JavaScript heap state stays on its one realm
 task. Tokio polls infrastructure futures; explicit realm queues order JavaScript jobs.
 
+The runtime also owns one Tokio `LocalSet`. Realm futures use `spawn_local`: socket handles and
+JavaScript continuations remain non-`Send`, matching the realm's thread affinity instead of adding
+cross-thread synchronization merely to satisfy `Handle::spawn`. Background futures return private
+completion outcomes; only the realm owner allocates public `ResourceId`s or mutates the resource
+table.
+
 There is no event-loop driver trait and no second executor. There is one service boundary:
 `AsyncHostOps`. Production implements it with Tokio filesystem, socket, process, signal, and DNS
 facilities. Deterministic conformance implements it with a script of requests and completions. The

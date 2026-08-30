@@ -118,6 +118,52 @@ pub enum AsyncHostOp {
     WriteFile { path: String, data: Vec<u8> },
     /// Read metadata without opening a persistent file resource.
     Stat { path: String },
+    /// Close a persistent host resource.
+    CloseResource { resource: ResourceId },
+    /// Change whether a persistent resource keeps its realm alive.
+    SetResourceReferenced {
+        resource: ResourceId,
+        referenced: bool,
+    },
+    /// Bind a TCP listener. Port zero asks the host to select an ephemeral port.
+    TcpListen { host: String, port: u16 },
+    /// Wait for one connection and return its stream resource.
+    TcpAccept { listener: ResourceId },
+    /// Connect a TCP stream.
+    TcpConnect { host: String, port: u16 },
+    /// Read up to `max_bytes` from a stream. Empty bytes represent EOF.
+    TcpRead {
+        stream: ResourceId,
+        max_bytes: usize,
+    },
+    /// Write the complete byte buffer to a stream.
+    TcpWrite { stream: ResourceId, data: Vec<u8> },
+    /// Shut down the write half of a stream.
+    TcpShutdown { stream: ResourceId },
+}
+
+/// Stable resource category that does not expose executor or operating-system types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceKind {
+    TcpListener,
+    TcpStream,
+}
+
+/// Portable information returned when the host creates a persistent resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceInfo {
+    pub id: ResourceId,
+    pub kind: ResourceKind,
+    pub address: Option<String>,
+    pub port: Option<u16>,
+}
+
+/// Result of accepting a TCP connection, including both local and peer endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedTcpStream {
+    pub resource: ResourceInfo,
+    pub peer_address: String,
+    pub peer_port: u16,
 }
 
 /// Portable file metadata needed by the first Node filesystem slice.
@@ -141,7 +187,9 @@ pub enum AsyncHostValue {
     /// Portable filesystem metadata.
     FileStat(FileStat),
     /// A persistent resource inserted into the realm's resource table.
-    Resource(ResourceId),
+    Resource(ResourceInfo),
+    /// A newly accepted TCP stream.
+    AcceptedTcpStream(AcceptedTcpStream),
 }
 
 /// Stable error information that a Node compatibility Adapter can turn into a JavaScript error.
@@ -195,7 +243,11 @@ pub struct Completion {
 
 /// Starts and controls asynchronous operations without exposing an executor implementation.
 pub trait AsyncHostOps {
-    /// Start an operation and return its opaque request identity immediately.
+    /// Start a non-resource operation and return its opaque request identity immediately.
+    ///
+    /// Persistent-resource operations are started by the runtime owner so creation and table
+    /// mutation stay on the realm task; this trait remains the provider seam used by filesystem
+    /// operations and deterministic scripted hosts.
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
 
     /// Cancel a pending operation, returning whether it was still owned by this host.
