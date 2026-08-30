@@ -900,8 +900,10 @@ void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
                            int64_t *out_ranges, size_t out_capacity);
 size_t kiln_regexp_group_count(const void *handle);
-int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
-                               size_t capacity);
+/* ABI v2 enumerates unique named entries, so duplicate-name collision policy remains in the
+ * provider. The name buffer may be retried at a larger capacity after -1. */
+int32_t kiln_regexp_named_group(const void *handle, size_t index, unsigned char *buffer,
+                                size_t capacity, int64_t *out_range);
 
 
 /* Forward declarations.
@@ -957,10 +959,15 @@ static kiln_value kiln_c99_property_key(kiln_value key);
 static uint32_t kiln_c99_to_uint32(double value);
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
-                                       size_t subject_count, const int64_t *ranges, size_t groups);
+                                       size_t subject_count, const int64_t *ranges, size_t groups,
+                                       kiln_regexp *regexp);
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value);
 static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
                                const char *flags, size_t flags_len, kiln_value *thrown);
+static int kiln_c99_named_group(kiln_regexp *regexp, size_t index, char **name, size_t *name_len,
+                                int64_t range[2]);
+static int kiln_c99_named_groups_object(kiln_host *host, kiln_value *out, kiln_regexp *regexp,
+                                        const uint16_t *units, int depth, kiln_value *thrown);
 static int kiln_c99_string_compare(kiln_value left, kiln_value right);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len);
@@ -1922,7 +1929,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
                                        size_t subject_count, const int64_t *ranges,
-                                       size_t groups) {
+                                       size_t groups, kiln_regexp *regexp) {
     size_t at = 0;
     while (at < pattern_count) {
         uint16_t unit = pattern[at];
@@ -1946,6 +1953,53 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                 piece = subject + (size_t)ranges[1];
                 piece_count = subject_count - (size_t)ranges[1];
                 taken = 2;
+            } else if (next == (uint16_t)'<' && regexp != NULL) {
+                size_t close = at + 2;
+                while (close < pattern_count && pattern[close] != (uint16_t)'>') {
+                    close += 1;
+                }
+                if (close < pattern_count) {
+                    kiln_value wanted = kiln_c99_from_units(pattern + at + 2, close - at - 2);
+                    size_t named_index = 0;
+                    int has_named = 0;
+                    int found_named = 0;
+                    int64_t named_range[2] = {-1, -1};
+                    if (wanted.tag != KILN_VALUE_STRING) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    for (;;) {
+                        char *name = NULL;
+                        size_t name_len = 0;
+                        int64_t range[2] = {-1, -1};
+                        int named_status = kiln_c99_named_group(regexp, named_index, &name,
+                                                                  &name_len, range);
+                        if (named_status == 1) {
+                            break;
+                        }
+                        if (named_status != KILN_C99_OK) {
+                            return named_status;
+                        }
+                        has_named = 1;
+                        if (name_len == wanted.len && memcmp(name, wanted.ptr, name_len) == 0) {
+                            named_range[0] = range[0];
+                            named_range[1] = range[1];
+                            found_named = 1;
+                        }
+                        free(name);
+                        named_index += 1;
+                    }
+                    if (!has_named) {
+                        taken = 1;
+                    } else {
+                        piece = subject;
+                        piece_count = 0;
+                        if (found_named && named_range[0] >= 0) {
+                            piece = subject + (size_t)named_range[0];
+                            piece_count = (size_t)(named_range[1] - named_range[0]);
+                        }
+                        taken = close - at + 1;
+                    }
+                }
             } else if (next >= (uint16_t)'0' && next <= (uint16_t)'9') {
                 /* Two digits when two would name a group that exists, one otherwise -- so `$12`
                  * is group 12 in a pattern with twelve and group 1 followed by a `2` in one
@@ -2059,6 +2113,42 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
     }
     *matched = 1;
     return KILN_C99_OK;
+}
+
+/* Read one unique named entry from the provider. Names are unbounded by the ABI: begin with a
+ * modest heap buffer and retry until the provider accepts it. On success ownership of `*name`
+ * transfers to the caller (property keys retain their storage); a return of 1 means there is no
+ * entry at `index`, while the normal runtime statuses report allocation/provider failures. */
+static int kiln_c99_named_group(kiln_regexp *regexp, size_t index, char **name, size_t *name_len,
+                                int64_t range[2]) {
+    size_t capacity = 32;
+    char *buffer = (char *)malloc(capacity);
+    int32_t written;
+    if (buffer == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (;;) {
+        written = kiln_regexp_named_group(regexp->handle, index, (unsigned char *)buffer, capacity,
+                                          range);
+        if (written >= 0) {
+            if (written == 0) {
+                free(buffer);
+                return 1;
+            }
+            *name = buffer;
+            *name_len = (size_t)written;
+            return KILN_C99_OK;
+        }
+        free(buffer);
+        if (capacity > (size_t)-1 / 2) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        capacity *= 2;
+        buffer = (char *)malloc(capacity);
+        if (buffer == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
 }
 
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
@@ -4416,7 +4506,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             ranges[1] = (int64_t)at + (int64_t)needle_count;
             if (kiln_c99_text_append(&built, head.ptr, head.len) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
-                                            ranges, 1) != KILN_C99_OK) {
+                                            ranges, 1, NULL) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
                 break;
             }
@@ -4478,11 +4568,54 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
     return status;
 }
 
+/* Build the null-prototype groups object. It remains undefined when the pattern has no named
+ * captures, as required by the replacer and match result contracts. */
+static int kiln_c99_named_groups_object(kiln_host *host, kiln_value *out, kiln_regexp *regexp,
+                                        const uint16_t *units, int depth, kiln_value *thrown) {
+    size_t named_index = 0;
+    *out = kiln_c99_undefined();
+    for (;;) {
+        char *name = NULL;
+        size_t name_len = 0;
+        int64_t range[2] = {-1, -1};
+        int named_status = kiln_c99_named_group(regexp, named_index, &name, &name_len, range);
+        if (named_status == 1) {
+            break;
+        }
+        if (named_status != KILN_C99_OK) {
+            return named_status;
+        }
+        if (out->tag == KILN_VALUE_UNDEFINED) {
+            int status = kiln_c99_new_object(out);
+            if (status != KILN_C99_OK) {
+                free(name);
+                return status;
+            }
+            kiln_c99_object_of(*out)->prototype = kiln_c99_null();
+        }
+        {
+            kiln_value value = range[0] < 0
+                                   ? kiln_c99_undefined()
+                                   : kiln_c99_from_units(units + (size_t)range[0],
+                                                         (size_t)(range[1] - range[0]));
+            int status = kiln_c99_put(host, *out, name, name_len, value, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(name);
+                return status;
+            }
+        }
+        /* The object retains this allocation as its property key. */
+        named_index += 1;
+    }
+    return KILN_C99_OK;
+}
+
 /* One `exec`-shaped array: the match, then each group, with `index`, `input` and `groups`. */
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
-                                 size_t count, const int64_t *ranges, size_t groups, int depth,
-                                 kiln_value *thrown) {
+                                 size_t count, const int64_t *ranges, size_t groups,
+                                 kiln_regexp *regexp, int depth, kiln_value *thrown) {
     kiln_value built;
+    kiln_value named_object = kiln_c99_undefined();
     size_t group;
     int status = kiln_c99_new_array(&built);
     for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
@@ -4500,8 +4633,11 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
         status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count), depth,
                               thrown);
     }
+    if (status == KILN_C99_OK && regexp != NULL) {
+        status = kiln_c99_named_groups_object(host, &named_object, regexp, units, depth, thrown);
+    }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth, thrown);
+        status = kiln_c99_put(host, built, "groups", 6, named_object, depth, thrown);
     }
     *out = built;
     return status;
@@ -4605,8 +4741,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             return KILN_C99_OK;
         }
         if (code == KILN_C99_METHOD_STRING_MATCH && !regexp->global) {
-            status = kiln_c99_match_result(host, result, units, count, ranges, groups, depth,
-                                           thrown);
+            status = kiln_c99_match_result(host, result, units, count, ranges, groups, regexp,
+                                           depth, thrown);
             free(units);
             free(replacement);
             return status;
@@ -4619,8 +4755,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                                                              (size_t)(ranges[1] - ranges[0])));
         } else if (code == KILN_C99_METHOD_STRING_MATCH_ALL) {
             kiln_value entry;
-            status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, depth,
-                                           thrown);
+            status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, regexp,
+                                           depth, thrown);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_array_push(collected, entry);
             }
@@ -4660,20 +4796,48 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 /* The callback is handed the match, then each group, then the index and the whole
                  * subject -- which is why it cannot live in the string block. */
                 kiln_value produced;
-                kiln_value handed[64];
+                kiln_value callback_groups = kiln_c99_undefined();
+                kiln_value *handed;
                 size_t group;
-                size_t handed_count = groups + 2 > 64 ? 64 : groups + 2;
-                for (group = 0; group + 2 < handed_count; ++group) {
+                size_t handed_count = groups + 2;
+                if (regexp != NULL) {
+                    status = kiln_c99_named_groups_object(host, &callback_groups, regexp, units,
+                                                          depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        break;
+                    }
+                    if (callback_groups.tag != KILN_VALUE_UNDEFINED) {
+                        if (handed_count == (size_t)-1) {
+                            status = KILN_C99_OUT_OF_MEMORY;
+                            break;
+                        }
+                        handed_count += 1;
+                    }
+                }
+                if (handed_count > (size_t)-1 / sizeof *handed) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                handed = (kiln_value *)malloc(handed_count * sizeof *handed);
+                if (handed == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                for (group = 0; group < groups; ++group) {
                     handed[group] = ranges[group * 2] < 0
                                         ? kiln_c99_undefined()
                                         : kiln_c99_from_units(units + (size_t)ranges[group * 2],
                                                               (size_t)(ranges[group * 2 + 1] -
                                                                        ranges[group * 2]));
                 }
-                handed[handed_count - 2] = kiln_c99_number((double)ranges[0]);
-                handed[handed_count - 1] = kiln_c99_from_units(units, count);
+                handed[groups] = kiln_c99_number((double)ranges[0]);
+                handed[groups + 1] = kiln_c99_from_units(units, count);
+                if (callback_groups.tag != KILN_VALUE_UNDEFINED) {
+                    handed[groups + 2] = callback_groups;
+                }
                 status = kiln_c99_call(host, &produced, with, kiln_c99_undefined(), handed,
                                        handed_count, depth, thrown);
+                free(handed);
                 if (status == KILN_C99_OK) {
                     kiln_value text = kiln_c99_text(produced);
                     status = text.tag == KILN_VALUE_STRING &&
@@ -4684,7 +4848,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 }
             } else {
                 status = kiln_c99_expand_replacement(&built, replacement, replacement_count, units,
-                                                     count, ranges, groups);
+                                                     count, ranges, groups, regexp);
             }
             from = (size_t)ranges[1];
         }
@@ -5313,36 +5477,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_OK;
             }
             {
-                /* The array `exec` produces: the whole match, then each group, with `index`,
-                 * `input` and `groups` alongside -- properties *of the array*, which is why an
-                 * array needs somewhere to keep something that is not an element. */
                 kiln_value built;
-                size_t group;
-                status = kiln_c99_new_array(&built);
-                for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
-                    int64_t from = ranges[group * 2];
-                    int64_t to = ranges[group * 2 + 1];
-                    /* A group that did not participate is undefined rather than empty. */
-                    status = kiln_c99_array_push(
-                        built, from < 0 ? kiln_c99_undefined()
-                                        : kiln_c99_from_units(units + (size_t)from,
-                                                              (size_t)(to - from)));
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "index", 5,
-                                          kiln_c99_number((double)ranges[0]), depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count),
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    /* Present and undefined rather than absent: a program reads `m.groups?.name`,
-                     * and the key being there is what stops that from looking like a different
-                     * shape. Named groups themselves are not collected on either side yet. */
-                    status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth,
-                                          thrown);
-                }
+                status = kiln_c99_match_result(host, &built, units, count, ranges, groups, regexp,
+                                               depth, thrown);
                 free(units);
                 *result = built;
                 return status;
@@ -11810,9 +11947,9 @@ int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject
     return -1;
 }
 size_t kiln_regexp_group_count(const void *handle) { (void)handle; return 0; }
-int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
-                               size_t capacity) {
-    (void)handle; (void)index; (void)buffer; (void)capacity;
+int32_t kiln_regexp_named_group(const void *handle, size_t index, unsigned char *buffer,
+                                size_t capacity, int64_t *out_range) {
+    (void)handle; (void)index; (void)buffer; (void)capacity; (void)out_range;
     return -1;
 }
 "#;
