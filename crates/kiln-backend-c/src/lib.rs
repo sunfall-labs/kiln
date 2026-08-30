@@ -8,7 +8,10 @@
 use std::{collections::HashSet, fmt::Write as _};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
-use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
+use kiln_ir::{
+    BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
+    UnaryOp, Upvalue,
+};
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
@@ -1281,7 +1284,77 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
         }
     }
     word(&mut hash, u64::from(program.local_count));
+    // Functions are a flat, stable table.  Keep the table marker and count even when it is
+    // empty: otherwise an empty table and a stream ending at local_count could be confused by
+    // future extensions.  MakeFunction operands are table indices, so hashing the table in
+    // order also handles cyclic references without recursive traversal.
+    byte(&mut hash, 0x60);
+    word(&mut hash, program.functions.len() as u64);
+    for function in &program.functions {
+        hash_function_proto(&mut hash, function);
+    }
     hash
+}
+
+fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
+    fn byte(hash: &mut u64, value: u8) {
+        *hash ^= u64::from(value);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    fn word(hash: &mut u64, value: u64) {
+        for value in value.to_le_bytes() {
+            byte(hash, value);
+        }
+    }
+
+    byte(hash, 0x61);
+    byte(hash, u8::from(function.asynchronous));
+    match &function.name {
+        Some(name) => {
+            byte(hash, 1);
+            word(hash, name.len() as u64);
+            for value in name.bytes() {
+                byte(hash, value);
+            }
+        }
+        None => byte(hash, 0),
+    }
+    byte(hash, u8::from(function.arrow));
+    byte(hash, u8::from(function.generator));
+    word(hash, u64::from(function.parameter_count));
+    word(hash, u64::from(function.local_count));
+
+    // Reuse the canonical instruction encoder, including its persisted tag assignments. Seed it
+    // with the hash accumulated so far and retain the resulting state directly: reducing the
+    // function body to an independently seeded 64-bit digest here would introduce an avoidable
+    // collision boundary inside the program identity. The synthetic program's empty function
+    // table is also what makes numeric MakeFunction cycles terminate without recursive hashing.
+    byte(hash, 0x62);
+    *hash = hash_program_with_seed(
+        &Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: function.code.clone(),
+            local_count: 0,
+            functions: Vec::new(),
+        },
+        *hash,
+    );
+
+    byte(hash, 0x63);
+    word(hash, function.upvalues.len() as u64);
+    for upvalue in &function.upvalues {
+        match upvalue {
+            Upvalue::ParentLocal(index) => {
+                byte(hash, 0);
+                word(hash, u64::from(*index));
+            }
+            Upvalue::ParentUpvalue(index) => {
+                byte(hash, 1);
+                word(hash, u64::from(*index));
+            }
+        }
+    }
 }
 
 fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
@@ -1394,6 +1467,95 @@ mod tests {
             module_source,
             wrapper
         )
+    }
+
+    fn function(code: Vec<Instruction>) -> FunctionProto {
+        FunctionProto {
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            parameter_count: 0,
+            local_count: 0,
+            code,
+            upvalues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn program_hash_covers_function_table_and_proto_contents() {
+        let base = program(Vec::new(), vec![Instruction::Return], 0);
+        let with_function = |functions| Program {
+            functions,
+            ..base.clone()
+        };
+        let empty_hash = hash_program(&with_function(Vec::new()));
+        let one_hash = hash_program(&with_function(vec![function(vec![Instruction::Return])]));
+        assert_ne!(
+            empty_hash, one_hash,
+            "empty and nonempty tables must differ"
+        );
+
+        let mut changed_body = function(vec![Instruction::Return]);
+        changed_body.code = vec![Instruction::Pop, Instruction::Return];
+        assert_ne!(one_hash, hash_program(&with_function(vec![changed_body])));
+
+        for change in [
+            FunctionProto {
+                asynchronous: true,
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                name: Some("named".into()),
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                name: Some(String::new()),
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                arrow: true,
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                generator: true,
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                parameter_count: 1,
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                local_count: 1,
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                upvalues: vec![Upvalue::ParentLocal(0)],
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                upvalues: vec![Upvalue::ParentUpvalue(0)],
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                upvalues: vec![Upvalue::ParentLocal(1)],
+                ..function(vec![Instruction::Return])
+            },
+            FunctionProto {
+                upvalues: vec![Upvalue::ParentUpvalue(1)],
+                ..function(vec![Instruction::Return])
+            },
+        ] {
+            assert_ne!(one_hash, hash_program(&with_function(vec![change])));
+        }
+
+        // Table order is semantic because MakeFunction stores stable table indices.  Referencing
+        // each entry from the other function also exercises cyclic references without recursion.
+        let first = function(vec![Instruction::MakeFunction(1), Instruction::Return]);
+        let second = function(vec![Instruction::MakeFunction(0), Instruction::Return]);
+        let cyclic = hash_program(&with_function(vec![first.clone(), second.clone()]));
+        let reordered = hash_program(&with_function(vec![second, first]));
+        assert_ne!(cyclic, reordered);
     }
 
     #[test]

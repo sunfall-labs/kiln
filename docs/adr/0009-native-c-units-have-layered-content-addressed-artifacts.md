@@ -27,8 +27,13 @@ absolute checkout path. The graph rejects any symbol collision before invoking t
 distinction lets a body-only edit change the module C/object keys without changing the launcher
 source that names the module. Artifact integrity and ABI compatibility remain content-addressed in
 the versioned native cache keys; a symbol is a link identity, not a cache proof. The backend
-validates bytecode version, control flow, indices, and stack shape before emission. The translation
-unit calls the numeric HostOps callback and contains no stdout, process, or command-line behavior.
+validates bytecode version, control flow, indices, and stack shape before emission. Its canonical
+program identity includes the complete ordered function-prototype table as well as top-level code:
+function metadata, instruction streams, and tagged upvalue sources all participate, while numeric
+`MakeFunction` references remain flat so recursive function graphs cannot recurse during hashing.
+This identity rule lands before callable functions reach C emission, preventing that future backend
+from reusing an object after only a nested function changed. The translation unit calls the numeric
+HostOps callback and contains no stdout, process, or command-line behavior.
 
 The command-line runtime is a separate, program-independent C translation unit. A tiny generated
 launcher binds that runtime to one standalone module or an ordered linked graph. This split lets an
