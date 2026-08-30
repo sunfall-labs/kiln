@@ -248,6 +248,13 @@ pub enum Native {
     MapDelete,
     CollectionValues,
     CollectionIteratorNext,
+    /// What a `let` or `const` slot holds before its declaration runs.
+    ///
+    /// A marker rather than `undefined`, because the two are different answers: reading a binding
+    /// in its dead zone is an error, and reading one initialised to `undefined` is not. The
+    /// compiler catches a *direct* read at compile time; this catches the read a nested function
+    /// makes when it is called too early, which no compile-time check can see.
+    Uninitialized,
     /// The value thrown into a generator by `.return()`.
     ///
     /// A marker rather than a flag because the unwinding it needs is exactly the unwinding an
@@ -1714,6 +1721,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         continue;
                     }
                 }
+                Instruction::MarkUninitialized(slot) => {
+                    let slot = *slot as usize;
+                    let marker = Value::Native(Native::Uninitialized);
+                    match self.locals.get_mut(slot) {
+                        // A cell may already be in the slot, because the binding is captured and
+                        // the cell has to exist before anything captures it.
+                        Some(Value::Cell(cell)) => *cell.borrow_mut() = marker,
+                        Some(local) => *local = marker,
+                        None => return Err(ExecutionError::LocalOutOfBounds { index: slot }),
+                    }
+                }
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -1768,6 +1786,14 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::LoadCell(slot) => {
                     let cell = self.cell(*slot as usize)?;
                     let value = cell.borrow().clone();
+                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            "cannot access a binding before its declaration".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
                     self.stack.push(value);
                 }
                 Instruction::StoreCell(slot) => {
@@ -1777,6 +1803,14 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();
+                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            "cannot access a binding before its declaration".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
                     self.stack.push(value);
                 }
                 Instruction::StoreUpvalue(index) => {
@@ -1826,6 +1860,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 Instruction::LoadGlobal(slot) => {
                     let value = self.global(*slot as usize)?;
+                    // A module binding read from inside a function that ran too early: the one
+                    // dead-zone read the compiler cannot see, because whether the function is
+                    // called before the declaration is a question about the run, not the text.
+                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            "cannot access a binding before its declaration".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
                     self.stack.push(value);
                 }
                 Instruction::StoreGlobal(slot) => {
@@ -3588,6 +3633,9 @@ fn call_native(
         | Native::QueueMicrotask => {
             unreachable!("the scheduling built-ins are dispatched by the interpreter")
         }
+        // A marker, not a callable: every read of it is turned into a ReferenceError before it
+        // can reach an expression, so calling one means a read slipped through.
+        Native::Uninitialized => unreachable!("the dead-zone marker is never a value"),
         // Peeled off the same way, for the same reason.
         Native::ArrayFrom => unreachable!("`Array.from` is dispatched by the interpreter"),
         Native::ArrayPush => match receiver {

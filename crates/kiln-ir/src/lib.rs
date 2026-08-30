@@ -202,6 +202,12 @@ pub enum Instruction {
     DeleteProperty(u32),
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
+    ///
+    /// Reading it is a `ReferenceError`. Emitted only where a read could actually reach it --
+    /// a captured binding or a module-scope one -- because a plain local can only be read by
+    /// code the compiler already checked.
+    MarkUninitialized(u32),
     /// Replace a value with an array of its own enumerable string keys, in enumeration order.
     ///
     /// A snapshot, which is what the language specifies: a key *added* during the loop may or may
@@ -612,6 +618,15 @@ struct Local {
     slot: u32,
     kind: VariableKind,
     imported: bool,
+    /// False between the point a block's bindings are created and the point this one's
+    /// declaration runs -- the temporal dead zone.
+    ///
+    /// Every name a block declares exists from the moment the block is entered, because a
+    /// function declared at the top of it can be called immediately and its body may refer to a
+    /// `const` written further down. Reading such a name *directly*, before its declaration, is
+    /// the mistake this flag catches; reading it from inside a nested function is not, and
+    /// resolves as an upvalue rather than a local, so the check never sees it.
+    initialized: bool,
     /// The slot holds a cell rather than the value, because a nested function refers to this
     /// name. Reads and writes go through `LoadCell`/`StoreCell` so every closure sharing the
     /// binding sees the same mutations.
@@ -737,9 +752,7 @@ impl Compiler {
     }
 
     fn compile_body(&mut self, module: &Module) {
-        for statement in &module.body {
-            self.statement(statement);
-        }
+        self.statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
     }
@@ -771,6 +784,8 @@ impl Compiler {
                 slot,
                 kind: VariableKind::Const,
                 imported: true,
+                // An import is bound before the module body runs, so it is never in a dead zone.
+                initialized: true,
                 celled: false,
             },
         );
@@ -821,9 +836,7 @@ impl Compiler {
             }
             StatementKind::Block(statements) => {
                 self.scopes.push(HashMap::new());
-                for statement in statements {
-                    self.statement(statement);
-                }
+                self.statements(statements);
                 self.scopes.pop().expect("block scope was just pushed");
             }
             StatementKind::If {
@@ -877,7 +890,7 @@ impl Compiler {
             }
             StatementKind::Empty => {}
             StatementKind::Function(function) => {
-                self.function_declaration(function, statement.span)
+                self.emit_function_declaration(function, statement.span)
             }
             StatementKind::Return(value) => self.return_statement(value.as_ref(), statement.span),
             StatementKind::Class(class) => self.class_declaration(class),
@@ -1019,21 +1032,45 @@ impl Compiler {
             self.scopes.len() - 1
         };
         if let Some(existing) = self.scopes[scope_index].get(name).copied() {
-            if kind == VariableKind::Var && existing.kind == VariableKind::Var {
-                if let Some(initializer) = initializer {
-                    self.expression(initializer);
-                    self.code.push(if existing.celled {
-                        Instruction::StoreCell(existing.slot)
-                    } else {
-                        Instruction::StoreLocal(existing.slot)
-                    });
-                }
+            // A `var` re-declaration is an assignment, and the hoisting pass has already created
+            // the slot for every declaration in the block -- so reaching an existing binding is
+            // the normal path now, and a *second* declaration of the same `let` is the error.
+            // Two `var`s of one name are an assignment, not a redeclaration. Every other pairing
+            // is an error -- including `var` after `let`, which is why the kinds of *both* are
+            // consulted rather than only the one being declared now.
+            let redeclaration = existing.initialized
+                && !(kind == VariableKind::Var && existing.kind == VariableKind::Var);
+            if redeclaration {
+                self.error(
+                    Some(span),
+                    format!("redeclaration of local `{name}` is not supported"),
+                );
                 return;
             }
-            self.error(
-                Some(span),
-                format!("redeclaration of local `{name}` is not supported"),
-            );
+            if kind == VariableKind::Const && initializer.is_none() && !bound_from_stack {
+                self.error(
+                    Some(span),
+                    format!("const local `{name}` requires an initializer"),
+                );
+            }
+            self.initialize(name);
+            if bound_from_stack {
+                return;
+            }
+            if let Some(initializer) = initializer {
+                self.expression(initializer);
+            } else if kind != VariableKind::Var {
+                // A `let` with no initializer is undefined; a `var` keeps what it already had,
+                // which is what makes `var x = 1; var x;` leave 1 in place.
+                self.push_constant(Constant::Undefined);
+            } else {
+                return;
+            }
+            self.code.push(if existing.celled {
+                Instruction::StoreCell(existing.slot)
+            } else {
+                Instruction::StoreLocal(existing.slot)
+            });
             return;
         }
         if kind == VariableKind::Const && initializer.is_none() && !bound_from_stack {
@@ -1057,6 +1094,7 @@ impl Compiler {
                 slot,
                 kind,
                 imported: false,
+                initialized: true,
                 celled,
             },
         );
@@ -1078,6 +1116,124 @@ impl Compiler {
         } else {
             Instruction::StoreLocal(slot)
         });
+    }
+
+    /// Compile a run of statements sharing one scope, hoisting what the language hoists.
+    ///
+    /// `f(); function f() {}` is ordinary JavaScript, so a function declaration's value has to
+    /// exist before the line that writes it. Emitting those first is not enough on its own: a
+    /// hoisted body would then compile before the `const`s below it are in scope, and a closure
+    /// legitimately sees those. So the block's *names* are all created first and only the
+    /// function declarations' *values* are emitted early -- which is what the language does, and
+    /// is where its temporal dead zone comes from.
+    fn statements(&mut self, list: &[Statement]) {
+        for statement in list {
+            self.hoist_names(statement);
+        }
+        for statement in list {
+            if let StatementKind::Function(function) = &statement.kind {
+                self.emit_function_declaration(function, statement.span);
+            }
+        }
+        for statement in list {
+            // Emitted above; running it again would rebuild the closure and overwrite the
+            // binding with an identical one.
+            if matches!(statement.kind, StatementKind::Function(_)) {
+                continue;
+            }
+            self.statement(statement);
+        }
+    }
+
+    /// Create the bindings one statement declares, without running its initializer.
+    fn hoist_names(&mut self, statement: &Statement) {
+        match &statement.kind {
+            // A function declaration is usable immediately; a class is not, which is the whole
+            // difference between the two for hoisting purposes.
+            StatementKind::Function(function) => {
+                if let Some(name) = &function.name {
+                    self.predeclare(VariableKind::Let, name, true);
+                }
+            }
+            StatementKind::Class(class) => {
+                if let Some(name) = &class.name {
+                    self.predeclare(VariableKind::Let, name, false);
+                }
+            }
+            StatementKind::Variable { kind, declarations } => {
+                for declaration in declarations {
+                    let mut names = Vec::new();
+                    pattern_names_in_order(&declaration.pattern, &mut names);
+                    for name in names {
+                        // `var` is initialised to undefined when the scope is entered; `let` and
+                        // `const` are not, and reading one before its declaration is an error.
+                        self.predeclare(*kind, &name, *kind == VariableKind::Var);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Allocate a slot for a name the block declares, leaving its value for the declaration.
+    ///
+    /// Silent when the name is already there: a genuine redeclaration is reported by the
+    /// declaration itself, where the span points at the second one rather than at the block.
+    fn predeclare(&mut self, kind: VariableKind, name: &str, initialized: bool) {
+        if name.is_empty() {
+            return;
+        }
+        let scope_index = if kind == VariableKind::Var {
+            0
+        } else {
+            self.scopes.len() - 1
+        };
+        if self.scopes[scope_index].contains_key(name) {
+            return;
+        }
+        let slot = self.local_count;
+        self.local_count += 1;
+        let in_module_scope = !self.compiling_function() && scope_index == 0;
+        let celled = self.captured.contains(name) && !in_module_scope;
+        self.scopes[scope_index].insert(
+            name.to_owned(),
+            Local {
+                slot,
+                kind,
+                imported: false,
+                initialized,
+                celled,
+            },
+        );
+        // The cell has to exist before a hoisted function captures it, which is why this is here
+        // rather than at the declaration.
+        if celled {
+            self.code.push(Instruction::NewCell(slot));
+        }
+        if initialized {
+            // `var` reads as undefined before its declaration rather than throwing.
+            self.push_constant(Constant::Undefined);
+            self.code.push(if celled {
+                Instruction::StoreCell(slot)
+            } else {
+                Instruction::StoreLocal(slot)
+            });
+        } else if celled || in_module_scope {
+            // Only these can be read before the declaration without the compiler seeing it: a
+            // captured binding through a cell or upvalue, and a module binding through a
+            // function that was called too early. A plain local cannot, so it pays nothing.
+            self.code.push(Instruction::MarkUninitialized(slot));
+        }
+    }
+
+    /// Mark a name as past its dead zone, now that its declaration has run.
+    fn initialize(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(local) = scope.get_mut(name) {
+                local.initialized = true;
+                return;
+            }
+        }
     }
 
     fn if_statement(
@@ -1123,9 +1279,7 @@ impl Compiler {
         self.handler_depth += 1;
 
         self.scopes.push(HashMap::new());
-        for statement in block {
-            self.statement(statement);
-        }
+        self.statements(block);
         self.scopes.pop().expect("try scope was just pushed");
         self.code.push(Instruction::PopHandler);
         self.handler_depth -= 1;
@@ -1151,9 +1305,7 @@ impl Compiler {
                     // `catch { }` discards the value rather than binding it.
                     None => self.code.push(Instruction::Pop),
                 }
-                for statement in &clause.body {
-                    self.statement(statement);
-                }
+                self.statements(&clause.body);
                 self.scopes.pop().expect("catch scope was just pushed");
                 if has_finalizer {
                     self.finalizers.pop();
@@ -1182,9 +1334,7 @@ impl Compiler {
         match cleanup {
             Cleanup::Finally(statements) => {
                 self.scopes.push(HashMap::new());
-                for statement in statements {
-                    self.statement(statement);
-                }
+                self.statements(statements);
                 self.scopes.pop().expect("finalizer scope was just pushed");
             }
             Cleanup::CloseIterator { binding } => self.emit_iterator_close(&binding.clone()),
@@ -1826,6 +1976,13 @@ impl Compiler {
             handler_depth: self.handler_depth,
             ..LoopContext::default()
         });
+        // Every arm shares the switch's scope, so the hoisting pass spans all of them -- a
+        // function declared in one case is callable from another, which is what one scope means.
+        for case in cases {
+            for statement in &case.body {
+                self.hoist_names(statement);
+            }
+        }
         let mut starts = Vec::with_capacity(cases.len());
         for case in cases {
             starts.push(self.code.len() as u32);
@@ -1861,6 +2018,15 @@ impl Compiler {
         match &expression.kind {
             ExpressionKind::Literal(literal) => self.push_literal(literal),
             ExpressionKind::Identifier(name) => match self.resolve_or_capture(name) {
+                // Reading a binding whose declaration has not run yet is the temporal dead zone.
+                // Refused rather than read as undefined, which is what pre-declaring every name
+                // in a block would otherwise turn a loud mistake into. A nested function reading
+                // the same name resolves as an upvalue and never reaches this arm, which is
+                // correct: it runs later, by which time the declaration has.
+                Resolution::Local(local) if !local.initialized => self.error(
+                    Some(expression.span),
+                    format!("cannot access `{name}` before its declaration"),
+                ),
                 Resolution::Local(local) if local.celled => {
                     self.code.push(Instruction::LoadCell(local.slot))
                 }
@@ -2512,16 +2678,23 @@ impl Compiler {
     /// function textually above its declaration is an unresolved identifier rather than a call
     /// to `undefined`. That is a smaller lie than hoisting half-way would be, and it is a
     /// diagnostic rather than a wrong answer.
-    fn function_declaration(&mut self, function: &Function, span: Span) {
+    /// Compile a function declaration and store it in its already-created binding.
+    ///
+    /// The binding exists before the body is compiled, which is what makes a function able to
+    /// call itself and to be called from above its own text: the body resolves its own name
+    /// through the enclosing scope, and the slot it reads is filled by the `MakeFunction` here
+    /// before any call can reach it.
+    fn emit_function_declaration(&mut self, function: &Function, span: Span) {
         let Some(name) = function.name.clone() else {
             self.error(Some(span), "a function declaration requires a name");
             return;
         };
-
-        // The binding exists before the body is compiled, which is what makes a function able
-        // to call itself: the body resolves its own name through the enclosing scope, and the
-        // slot it reads is filled by the `MakeFunction` below before any call can reach it.
-        self.variable(VariableKind::Let, &name, None, span);
+        // Normally created by the hoisting pass. A function declaration can also appear where a
+        // single statement is expected -- `if (x) function f() {}` -- and there is no block to
+        // have hoisted it.
+        if !matches!(self.resolve(&name), Resolution::Local(_)) {
+            self.predeclare(VariableKind::Let, &name, true);
+        }
 
         let Some(index) = self.compile_function(function, span) else {
             return;
@@ -2530,10 +2703,14 @@ impl Compiler {
         match self.resolve(&name) {
             Resolution::Local(local) => {
                 self.code.push(Instruction::MakeFunction(index));
-                self.code.push(Instruction::StoreLocal(local.slot));
+                self.code.push(if local.celled {
+                    Instruction::StoreCell(local.slot)
+                } else {
+                    Instruction::StoreLocal(local.slot)
+                });
             }
-            // `declare_variable` just inserted this into the current function's innermost scope,
-            // so any other resolution means the scope bookkeeping is inconsistent.
+            // The binding was just created in the current function's innermost scope, so any
+            // other resolution means the scope bookkeeping is inconsistent.
             _ => self.error(Some(span), format!("could not bind function `{name}`")),
         }
     }
@@ -2613,6 +2790,7 @@ impl Compiler {
                     slot,
                     kind: VariableKind::Let,
                     imported: false,
+                    initialized: true,
                     celled,
                 },
             );
@@ -2684,9 +2862,7 @@ impl Compiler {
             }
             self.code.push(Instruction::Pop);
         }
-        for statement in &function.body {
-            self.statement(statement);
-        }
+        self.statements(&function.body);
         // Falling off the end of a function returns undefined. Emitted unconditionally rather
         // than only when the body cannot fall through: proving that needs flow analysis, and an
         // unreachable epilogue costs two instructions.
@@ -3077,14 +3253,19 @@ impl Compiler {
     /// must not have that side effect -- the `console` check in [`Compiler::call`] above all,
     /// which asks whether a name exists and would otherwise capture one by asking.
     fn resolve_or_capture(&mut self, name: &str) -> Resolution {
-        match self.resolve(name) {
-            Resolution::Unresolved => {}
-            resolved => return resolved,
+        if let Some(local) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+            return Resolution::Local(*local);
         }
-        match self.capture(name) {
-            Some(index) => Resolution::Upvalue(index),
-            None => Resolution::Unresolved,
+        // The capture is tried before the global, because an enclosing function's binding
+        // shadows a module binding of the same name. Asking `resolve` first would jump from
+        // here to module scope and skip every function in between -- reading the wrong binding
+        // whenever a name is reused, and reusing a name like `value` is not unusual. That was
+        // invisible for as long as a module binding was only created at the line that declared
+        // it, because the name did not exist yet when the inner function was compiled.
+        if let Some(index) = self.capture(name) {
+            return Resolution::Upvalue(index);
         }
+        self.resolve(name)
     }
 
     /// Thread a binding from the function that owns it down to the one being compiled.
@@ -3409,6 +3590,34 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
 }
 
 /// Every name a pattern binds.
+/// The names a pattern binds, in source order.
+///
+/// Ordered, unlike [`collect_pattern_names`], because these decide slot numbering and the
+/// bytecode is a cache key: the same source has to produce the same instructions, and a hash set
+/// does not promise that.
+fn pattern_names_in_order(pattern: &Pattern, names: &mut Vec<String>) {
+    match pattern {
+        Pattern::Identifier(name) => names.push(name.clone()),
+        Pattern::WithDefault { inner, .. } => pattern_names_in_order(inner, names),
+        Pattern::Object { properties, rest } => {
+            for property in properties {
+                pattern_names_in_order(&property.value, names);
+            }
+            if let Some(rest) = rest {
+                names.push(rest.clone());
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for element in elements.iter().flatten() {
+                pattern_names_in_order(element, names);
+            }
+            if let Some(rest) = rest {
+                pattern_names_in_order(rest, names);
+            }
+        }
+    }
+}
+
 fn collect_pattern_names(pattern: &Pattern, names: &mut HashSet<String>) {
     match pattern {
         Pattern::Identifier(name) => {
@@ -4719,6 +4928,120 @@ mod tests {
                 .code
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::Call { .. }))
+        );
+    }
+
+    #[test]
+    fn a_function_declaration_is_emitted_before_the_statements_around_it() {
+        // `f(); function f() {}` is ordinary JavaScript, so the value has to exist before the
+        // line that writes it.
+        let program = compile(&module(vec![
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::Call {
+                    callee: Box::new(identifier("f")),
+                    arguments: Vec::new(),
+                },
+                span: Span::default(),
+            })),
+            function("f", &[], vec![]),
+        ]))
+        .expect("compiles");
+        let make = program
+            .code
+            .iter()
+            .position(|instruction| matches!(instruction, Instruction::MakeFunction(_)))
+            .expect("the function is built");
+        let call = program
+            .code
+            .iter()
+            .position(|instruction| matches!(instruction, Instruction::Call { .. }))
+            .expect("the call is emitted");
+        assert!(make < call, "the binding is filled before it is read");
+    }
+
+    #[test]
+    fn a_direct_read_before_a_declaration_is_refused() {
+        // Pre-declaring every name in a block would otherwise turn this from a diagnostic into a
+        // silent `undefined`, which is the trade the dead-zone flag exists to avoid.
+        let messages = errors(vec![
+            statement(StatementKind::Expression(identifier("x"))),
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("x".into()),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+        ]);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("before its declaration")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_var_read_before_its_declaration_is_undefined_rather_than_refused() {
+        // The one kind that is initialised on entry, which is the whole difference.
+        let program = compile(&module(vec![
+            statement(StatementKind::Expression(identifier("x"))),
+            statement(StatementKind::Variable {
+                kind: VariableKind::Var,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("x".into()),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+        ]));
+        assert!(program.is_ok(), "{program:?}");
+    }
+
+    #[test]
+    fn an_enclosing_functions_binding_shadows_a_module_binding() {
+        // Resolution used to go from the inner function straight to module scope, skipping every
+        // function in between -- so an inner parameter sharing a name with a module binding read
+        // the wrong one. Invisible until a module binding existed before the line declaring it.
+        let program = compile(&module(vec![
+            statement(StatementKind::Function(Box::new(kiln_hir::Function {
+                name: Some("outer".into()),
+                arrow: false,
+                generator: false,
+                parameters: vec![kiln_hir::Parameter {
+                    pattern: kiln_hir::Pattern::Identifier("shared".into()),
+                    span: Span::default(),
+                }],
+                rest: None,
+                body: vec![statement(StatementKind::Return(Some(arrow(
+                    &[],
+                    vec![statement(StatementKind::Return(Some(identifier("shared"))))],
+                ))))],
+                span: Span::default(),
+            }))),
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("shared".into()),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+        ]))
+        .expect("compiles");
+        // The arrow reads the parameter it captured, not the module slot.
+        let arrow_body = &program.functions[0].code;
+        assert!(
+            arrow_body
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadUpvalue(_))),
+            "expected a capture, got {arrow_body:?}"
+        );
+        assert!(
+            !arrow_body
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_)))
         );
     }
 }

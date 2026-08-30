@@ -7,8 +7,8 @@
 
 use std::{collections::HashSet, fmt::Write as _};
 
-use kiln_host_abi::{HostOp, HOST_ABI_VERSION};
-use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, BYTECODE_VERSION};
+use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
+use kiln_ir::{BYTECODE_VERSION, BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
@@ -745,6 +745,7 @@ fn stack_effect(
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
+        | Instruction::MarkUninitialized(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
@@ -981,6 +982,7 @@ fn emit_instruction(
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::EnumerateKeys
+        | Instruction::MarkUninitialized(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
@@ -1204,6 +1206,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::DeleteComputed => byte(&mut hash, 47),
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
+            Instruction::MarkUninitialized(value) => {
+                byte(&mut hash, 51);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::ConstructSpread => byte(&mut hash, 49),
             Instruction::DeleteProperty(value) => {
                 byte(&mut hash, 46);
@@ -1436,9 +1442,11 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.symbol.starts_with("kiln_module_"));
         assert_eq!(first.symbol.len(), "kiln_module_".len() + 32);
-        assert!(first.symbol["kiln_module_".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            first.symbol["kiln_module_".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
         assert!(!first.source.contains("/Users/"));
         assert!(first.source.contains(&format!(
             "int {}(kiln_host *host, kiln_value *result)",
@@ -1511,10 +1519,11 @@ mod tests {
         assert_ne!(one.source, two.source);
         assert_ne!(one.symbol, other.symbol);
         assert!(!one.symbol.contains("/"));
-        assert!(one
-            .symbol
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+        assert!(
+            one.symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
     }
 
     #[test]
