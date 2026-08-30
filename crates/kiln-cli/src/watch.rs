@@ -390,8 +390,8 @@ struct RefreshResult {
 
 struct NativeExecution {
     exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
     timed_out: bool,
 }
 
@@ -653,8 +653,8 @@ fn execute_native(path: &Path) -> Result<NativeExecution> {
     let stderr = join_native_pipe(stderr_reader, "stderr")?;
     Ok(NativeExecution {
         exit_code: status.code(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout,
+        stderr,
         timed_out,
     })
 }
@@ -681,7 +681,13 @@ fn report_native_execution(
     expected_stdout: &str,
     execution: &NativeExecution,
 ) -> Result<()> {
-    if !execution.timed_out && execution.exit_code == Some(0) && execution.stdout == expected_stdout
+    // This is an observable-output smoke check, not the canonical state/value oracle required
+    // for full semantic equivalence. The standalone launcher currently discards its kiln_value,
+    // so claiming more here would hide pure-result mismatches.
+    if !execution.timed_out
+        && execution.exit_code == Some(0)
+        && execution.stdout == expected_stdout.as_bytes()
+        && execution.stderr.is_empty()
     {
         return note(
             notes,
@@ -689,8 +695,8 @@ fn report_native_execution(
         );
     }
     let expected_stdout = debug_excerpt(expected_stdout);
-    let native_stdout = debug_excerpt(&execution.stdout);
-    let native_stderr = debug_excerpt(&execution.stderr);
+    let native_stdout = debug_bytes_excerpt(&execution.stdout);
+    let native_stderr = debug_bytes_excerpt(&execution.stderr);
     note(
         notes,
         format_args!(
@@ -698,6 +704,21 @@ fn report_native_execution(
             execution.exit_code, execution.timed_out
         ),
     )
+}
+
+fn debug_bytes_excerpt(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => debug_excerpt(text),
+        Err(_) => {
+            const LIMIT: usize = 128;
+            let end = bytes.len().min(LIMIT);
+            if end == bytes.len() {
+                format!("{:?}", &bytes[..end])
+            } else {
+                format!("{:?}… ({} bytes)", &bytes[..end], bytes.len())
+            }
+        }
+    }
 }
 
 fn debug_excerpt(text: &str) -> String {
@@ -1194,8 +1215,8 @@ mod tests {
                 execution_count.fetch_add(1, Ordering::SeqCst);
                 Ok(NativeExecution {
                     exit_code: Some(0),
-                    stdout: "revision 3\n".to_owned(),
-                    stderr: String::new(),
+                    stdout: b"revision 3\n".to_vec(),
+                    stderr: Vec::new(),
                     timed_out: false,
                 })
             }),
@@ -1300,8 +1321,8 @@ mod tests {
                 execution_count.fetch_add(1, Ordering::SeqCst);
                 Ok(NativeExecution {
                     exit_code: Some(0),
-                    stdout: "obsolete\n".to_owned(),
-                    stderr: String::new(),
+                    stdout: b"obsolete\n".to_vec(),
+                    stderr: Vec::new(),
                     timed_out: false,
                 })
             }),
@@ -1337,8 +1358,8 @@ mod tests {
     fn native_refresh_reports_output_or_exit_mismatches_on_the_notes_stream() {
         let execution = NativeExecution {
             exit_code: Some(7),
-            stdout: "native output\n".to_owned(),
-            stderr: "native error\n".to_owned(),
+            stdout: b"native output\n".to_vec(),
+            stderr: b"native error\n".to_vec(),
             timed_out: false,
         };
         let mut notes = Vec::new();
@@ -1358,6 +1379,45 @@ mod tests {
         assert!(notes.contains("native exit Some(7)"), "{notes}");
         assert!(notes.contains("native timeout false"), "{notes}");
         assert!(notes.contains("native error\\n"), "{notes}");
+    }
+
+    #[test]
+    fn native_refresh_is_byte_exact_and_rejects_unexpected_stderr() {
+        let mut notes = Vec::new();
+        report_native_execution(
+            &mut notes,
+            "/project/.kiln/bin/main",
+            "�",
+            &NativeExecution {
+                exit_code: Some(0),
+                stdout: vec![0xff],
+                stderr: Vec::new(),
+                timed_out: false,
+            },
+        )
+        .expect("invalid utf-8 mismatch is reported");
+        let invalid_utf8 = String::from_utf8(notes).expect("notes are utf-8");
+        assert!(invalid_utf8.contains("native refresh mismatch"));
+        assert!(invalid_utf8.contains("[255]"), "{invalid_utf8}");
+
+        let mut notes = Vec::new();
+        report_native_execution(
+            &mut notes,
+            "/project/.kiln/bin/main",
+            "same\n",
+            &NativeExecution {
+                exit_code: Some(0),
+                stdout: b"same\n".to_vec(),
+                stderr: b"unexpected\n".to_vec(),
+                timed_out: false,
+            },
+        )
+        .expect("stderr mismatch is reported");
+        assert!(
+            String::from_utf8(notes)
+                .expect("notes are utf-8")
+                .contains("native refresh mismatch")
+        );
     }
 
     #[cfg(unix)]
@@ -1380,8 +1440,8 @@ mod tests {
 
         let execution = execute_native(&executable).expect("execute fixture");
         assert_eq!(execution.exit_code, Some(4));
-        assert_eq!(execution.stdout, "native stdout\n");
-        assert_eq!(execution.stderr, "native stderr\n");
+        assert_eq!(execution.stdout, b"native stdout\n");
+        assert_eq!(execution.stderr, b"native stderr\n");
         assert!(!execution.timed_out);
 
         let _ = std::fs::remove_dir_all(&dir);
