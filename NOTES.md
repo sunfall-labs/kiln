@@ -1371,3 +1371,18 @@ That closes the audit. What remains refused, in the order I would take it: `supe
 them fired on the Effect bundles.
 
 differential 72/0/0, conformance 39/39, 46 test binaries, clippy clean.
+
+**2026-08-29, Codex — interpreter number conversion now has one allocation-free semantic core.**
+I added `kiln-number-core`, a `no_std`/no-`alloc` byte-span parser and caller-buffer formatter with
+panic-prone operations lint-denied, and made `kiln-host-abi` delegate both language operations to
+it. That removes the interpreter's duplicated decimal/radix implementation while leaving the
+public HostOps contract unchanged. The old native C formatter/parser remain temporarily as an
+independent oracle: 4,096 binary64 formatter cases plus a 4,000-case decimal/radix parser corpus
+must agree with the Rust core before the eventual private C-symbol adapter replaces them.
+
+The extraction found a real correctness bug in the old interpreter formatter:
+`157651540651918.12` was rendered as `157651540651918.13`; Node and `dragonbox_ecma` both require
+the former shortest round-trip spelling. The exact case is now a regression in the core, HostValue,
+and C oracle. `cargo test --workspace --locked` and warnings-denied all-target workspace Clippy are
+green on the shared tree. ADR 0018 remains Proposed: this lands its semantic-core prerequisite, not
+the still-undecided archive manifest, target matrix, or native provider packaging.

@@ -242,6 +242,9 @@ version = "0.0.0"
 [[package]]
 name = "kiln-host-abi"
 version = "0.0.0"
+dependencies = [
+ "kiln-number-core",
+]
 
 [[package]]
 name = "kiln-interpreter"
@@ -298,7 +301,7 @@ dependencies = [
 name = "kiln-native-number"
 version = "0.0.0"
 dependencies = [
- "dragonbox_ecma",
+ "kiln-number-core",
 ]
 
 [[package]]
@@ -311,6 +314,13 @@ dependencies = [
 [[package]]
 name = "kiln-native-toolchain"
 version = "0.0.0"
+
+[[package]]
+name = "kiln-number-core"
+version = "0.0.0"
+dependencies = [
+ "dragonbox_ecma",
+]
 
 [[package]]
 name = "kiln-proto"

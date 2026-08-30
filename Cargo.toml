@@ -21,6 +21,7 @@ kiln-module-resolver = { path = "crates/kiln-module-resolver" }
 kiln-native = { path = "crates/kiln-native" }
 kiln-native-number = { path = "crates/kiln-native-number" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
+kiln-number-core = { path = "crates/kiln-number-core" }
 kiln-runtime = { path = "crates/kiln-runtime" }
 kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
 kiln-conformance = { path = "crates/kiln-conformance" }

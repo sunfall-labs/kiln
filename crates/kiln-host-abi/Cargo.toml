@@ -5,5 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# This crate is the stable, dependency-free boundary between compiled programs and their host.
+# This crate is the stable, compiler-independent boundary between programs and their host. Its
+# number semantics come from the allocation-free runtime core shared with native artifacts.
 [dependencies]
+kiln-number-core = { workspace = true }
