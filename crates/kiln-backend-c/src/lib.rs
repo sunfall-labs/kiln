@@ -310,6 +310,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_HAS_OWN 65
 #define KILN_C99_METHOD_IS_ARRAY 66
 #define KILN_C99_METHOD_ARRAY_OF 67
+#define KILN_C99_METHOD_OBJECT_CREATE 68
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -344,6 +345,11 @@ typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upv
                             kiln_value *thrown);
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* The object `new f()` links instances to, and the store `f.x = 1` writes into. Both are
+     * created on first use: an ordinary function that is never used as a constructor and never
+     * carries a property allocates neither. */
+    kiln_value prototype;
+    kiln_value properties;
     /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
      * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
     const char *name;
@@ -372,7 +378,16 @@ typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
     size_t capacity;
+    /* The next object a property read falls through to, or undefined for none.  Undefined and
+     * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
+     * nothing was recorded and the other means nothing was wanted. */
+    kiln_value prototype;
 } kiln_object;
+
+/* A prototype chain is built by the program, so its length is the program's business -- but the
+ * walk is on the C stack, where running out aborts rather than reports. Bounded, like the
+ * interpreter's. */
+#define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
  * grows it and the gap reads as undefined.  Holes are not represented -- a program that can
@@ -384,10 +399,68 @@ typedef struct kiln_array {
     size_t capacity;
 } kiln_array;
 
+/* A growable byte buffer, for the operations that build a string rather than slice one. */
+typedef struct kiln_text {
+    char *bytes;
+    size_t len;
+    size_t capacity;
+} kiln_text;
+
 /* Internal link-time runtime contract. The final executable/shared library supplies this symbol
  * from kiln-native-number; it is not part of the public embedding ABI. */
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
+
+
+/* Forward declarations.
+ *
+ * The runtime below is one long sequence of static functions, and the order they happen to be
+ * written in is not the order they call each other in: a property read reaches string conversion,
+ * string conversion reaches the array join, the join reaches the read again. Declaring them all
+ * here once removes the ordering constraint entirely, rather than reshuffling the file every time
+ * a new call crosses an old boundary. */
+static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len);
+static kiln_value kiln_c99_undefined(void);
+static kiln_value kiln_c99_null(void);
+static kiln_value kiln_c99_boolean(int value);
+static kiln_value kiln_c99_number(double value);
+static kiln_value kiln_c99_uninitialized(void);
+static kiln_value kiln_c99_builtin(uint64_t code);
+static kiln_value kiln_c99_method(uint64_t code);
+static kiln_value kiln_c99_function(kiln_closure *closure);
+static kiln_closure *kiln_c99_closure_of(kiln_value value);
+static kiln_value *kiln_c99_cell_of(kiln_value value);
+static kiln_object *kiln_c99_object_of(kiln_value value);
+static kiln_array *kiln_c99_array_of(kiln_value value);
+static double kiln_c99_as_number(kiln_value value);
+static int kiln_c99_truthy(kiln_value value);
+static int kiln_c99_signbit(double value);
+static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
+static int kiln_c99_is_callable(kiln_value value);
+static int kiln_c99_is_reference(kiln_value value);
+static kiln_value kiln_c99_text(kiln_value value);
+static kiln_value kiln_c99_copy_text(const char *text, size_t len);
+static kiln_value kiln_c99_inspect(kiln_value value);
+static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
+static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
+static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
+static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
+static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
+static int kiln_c99_new_object(kiln_value *out);
+static int kiln_c99_new_array(kiln_value *out);
+static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln_value value);
+static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln_value *out);
+static int kiln_c99_array_push(kiln_value target, kiln_value value);
+static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
+static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
+static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
+static const char *kiln_c99_method_name(uint64_t code);
+static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                         kiln_value *thrown);
+static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth, kiln_value *thrown);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -419,6 +492,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;
+    object->prototype = kiln_c99_undefined();
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -494,6 +568,23 @@ static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln
     kiln_object *object;
     size_t index;
     int status;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        kiln_closure *closure = kiln_c99_closure_of(target);
+        /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
+         * slot on the closure rather than an ordinary property -- a write that landed in the
+         * store would be read back by `f.prototype` and ignored by `new`. */
+        if (kiln_c99_same_name(key, key_len, "prototype")) {
+            closure->prototype = value;
+            return KILN_C99_OK;
+        }
+        if (closure->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&closure->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return kiln_c99_put(closure->properties, key, key_len, value);
+    }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
     }
@@ -612,6 +703,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_HAS_OWN: return "hasOwn";
     case KILN_C99_METHOD_IS_ARRAY: return "isArray";
     case KILN_C99_METHOD_ARRAY_OF: return "of";
+    case KILN_C99_METHOD_OBJECT_CREATE: return "create";
     default: return NULL;
     }
 }
@@ -656,6 +748,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_INTEGER,
                                       KILN_C99_METHOD_IS_FINITE);
     case KILN_C99_BUILTIN_OBJECT:
+        if (kiln_c99_same_name(key, key_len, "create")) {
+            return KILN_C99_METHOD_OBJECT_CREATE;
+        }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_OBJECT_KEYS,
                                       KILN_C99_METHOD_HAS_OWN);
     case KILN_C99_BUILTIN_ARRAY:
@@ -760,6 +855,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
         }
     }
     closure->body = body;
+    closure->prototype = kiln_c99_undefined();
+    closure->properties = kiln_c99_undefined();
     closure->name = name;
     closure->name_len = name_len;
     closure->proto = proto;
@@ -768,11 +865,6 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
-
-static kiln_value kiln_c99_text(kiln_value value);
-static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
-                                  kiln_value receiver, const kiln_value *args, size_t argc,
-                                  int depth, kiln_value *thrown);
 
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
@@ -872,11 +964,6 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
 }
 
-typedef struct kiln_text {
-    char *bytes;
-    size_t len;
-    size_t capacity;
-} kiln_text;
 
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
     int status;
@@ -1198,6 +1285,41 @@ static double kiln_c99_array_index(kiln_value key) {
     return number;
 }
 
+/* The object `new f()` gives instances, created on first use.
+ *
+ * It carries `constructor` back to the function, which is what makes `x.constructor === C` true
+ * and what a console reads to print `C {}` rather than `{}`. The two point at each other, so a
+ * constructor that is never collected keeps its prototype alive -- and nothing here collects. */
+static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
+    kiln_closure *closure = kiln_c99_closure_of(function);
+    if (closure->prototype.tag == KILN_VALUE_UNDEFINED) {
+        int status = kiln_c99_new_object(&closure->prototype);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        status = kiln_c99_put(closure->prototype, "constructor", 11, function);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    *out = closure->prototype;
+    return KILN_C99_OK;
+}
+
+/* The store `f.x = 1` writes into. Separate from the prototype object: a static belongs to the
+ * function and an instance method belongs to what it constructs. */
+static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
+    kiln_closure *closure = kiln_c99_closure_of(function);
+    if (closure->properties.tag == KILN_VALUE_UNDEFINED) {
+        int status = kiln_c99_new_object(&closure->properties);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    *out = closure->properties;
+    return KILN_C99_OK;
+}
+
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
 static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln_value *out) {
@@ -1207,15 +1329,43 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
                     memcmp(key, length_key, sizeof(length_key) - 1) == 0;
     switch (target.tag) {
     case KILN_VALUE_OBJECT: {
-        kiln_object *object = kiln_c99_object_of(target);
-        for (index = 0; index < object->count; ++index) {
-            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-                *out = object->properties[index].value;
-                return KILN_C99_OK;
+        kiln_value current = target;
+        size_t steps;
+        /* Own properties first, then the chain. Iterative and bounded rather than recursive:
+         * the walk is on the C stack, and a program can build a chain long enough to exhaust
+         * it. */
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_object *object;
+            if (current.tag != KILN_VALUE_OBJECT) {
+                break;
             }
+            object = kiln_c99_object_of(current);
+            for (index = 0; index < object->count; ++index) {
+                if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                    *out = object->properties[index].value;
+                    return KILN_C99_OK;
+                }
+            }
+            current = object->prototype;
         }
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
+    }
+    case KILN_VALUE_FUNCTION: {
+        kiln_closure *closure = kiln_c99_closure_of(target);
+        if (kiln_c99_same_name(key, key_len, "prototype")) {
+            return kiln_c99_prototype_object(target, out);
+        }
+        if (kiln_c99_same_name(key, key_len, "name")) {
+            *out = closure->name == NULL ? kiln_c99_from_units(NULL, 0)
+                                         : kiln_c99_copy_text(closure->name, closure->name_len);
+            return KILN_C99_OK;
+        }
+        if (closure->properties.tag != KILN_VALUE_OBJECT) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        return kiln_c99_get(closure->properties, key, key_len, out);
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
@@ -2222,6 +2372,28 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = target;
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_OBJECT_CREATE: {
+            kiln_value built;
+            /* The descriptor argument can carry accessors, which are functions, so it is
+             * refused rather than half-honoured -- silently ignoring it would give an object
+             * missing every property the program asked for. */
+            if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* `Object.create(null)` records the absence, which is not the same as recording
+             * nothing: an object with no link at all inherits `Object.prototype`. */
+            if (argc > 0 && (args[0].tag == KILN_VALUE_OBJECT || args[0].tag == KILN_VALUE_NULL)) {
+                kiln_c99_object_of(built)->prototype = args[0];
+            } else if (argc > 0) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *result = built;
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_HAS_OWN: {
             kiln_value key = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
             kiln_object *object;
@@ -2453,6 +2625,66 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     default:
         return KILN_C99_CONTROL_ERROR;
     }
+}
+
+/* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
+ * unless the body returned an object, which wins. That override is what makes a factory
+ * constructor work. */
+static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+                              const kiln_value *args, size_t argc, int depth,
+                              kiln_value *thrown) {
+    kiln_value prototype;
+    kiln_value instance;
+    kiln_value produced;
+    int status;
+    if (callee.tag != KILN_VALUE_FUNCTION) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_prototype_object(callee, &prototype);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_new_object(&instance);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    kiln_c99_object_of(instance)->prototype = prototype;
+    status = kiln_c99_call(host, &produced, callee, instance, args, argc, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *result = produced.tag == KILN_VALUE_OBJECT || produced.tag == KILN_VALUE_ARRAY ? produced
+                                                                                   : instance;
+    return KILN_C99_OK;
+}
+
+/* `x instanceof C` walks the same chain a property read walks, looking for `C.prototype` rather
+ * than for a name -- which is why the two must agree about the shape of the chain. */
+static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
+    kiln_value prototype;
+    kiln_value current;
+    size_t steps;
+    int status;
+    if (constructor.tag != KILN_VALUE_FUNCTION) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_prototype_object(constructor, &prototype);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *answer = 0;
+    current = value;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        if (current.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        current = kiln_c99_object_of(current)->prototype;
+        if (current.tag == prototype.tag && current.bits == prototype.bits) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_OK;
 }
 
 static kiln_value kiln_c99_typeof(kiln_value value) {
@@ -2735,6 +2967,14 @@ fn validate_code(
             {
                 return Err(invalid(index, format!("local {local} is out of bounds")));
             }
+            Instruction::LoadGlobal(slot) | Instruction::StoreGlobal(slot)
+                if u64::from(*slot) >= u64::from(program.local_count) =>
+            {
+                return Err(invalid(
+                    index,
+                    format!("module slot {slot} is out of bounds"),
+                ));
+            }
             Instruction::LoadUpvalue(upvalue) | Instruction::StoreUpvalue(upvalue)
                 if (*upvalue as usize) >= upvalue_count =>
             {
@@ -2868,8 +3108,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
-        Instruction::Binary(BinaryOp::In | BinaryOp::InstanceOf) => Err(EmitError::Unsupported {
-            feature: "reference operators in the native backend".to_string(),
+        Instruction::Binary(BinaryOp::In) => Err(EmitError::Unsupported {
+            feature: "the `in` operator in the native backend".to_string(),
         }),
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
@@ -2893,6 +3133,10 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
         | Instruction::Throw
+        | Instruction::New { .. }
+        | Instruction::SetPrototype
+        | Instruction::LoadGlobal(_)
+        | Instruction::StoreGlobal(_)
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -2966,10 +3210,7 @@ fn stack_effect(
         // module with a flat local array and no call stack, so these have no lowering yet --
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
-        Instruction::LoadGlobal(_)
-        | Instruction::StoreGlobal(_)
-        | Instruction::New { .. }
-        | Instruction::Dup2
+        Instruction::Dup2
         | Instruction::SpreadInto
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
@@ -2990,7 +3231,6 @@ fn stack_effect(
         | Instruction::RestArguments(_)
         | Instruction::Yield
         | Instruction::Await
-        | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
             feature: instruction_feature(instruction),
@@ -3000,6 +3240,7 @@ fn stack_effect(
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)
         | Instruction::LoadBuiltin(_)
+        | Instruction::LoadGlobal(_)
         | Instruction::MakeFunction(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
@@ -3051,6 +3292,24 @@ fn stack_effect(
             }
         }
         Instruction::LoadThis => Ok((height + 1, false)),
+        // `new` consumes the callee and its arguments and leaves the instance, exactly as a
+        // call does.
+        Instruction::New { argc } => {
+            let needed = usize::from(*argc) + 1;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
+        // The prototype is written into the target, which stays.
+        Instruction::SetPrototype => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // The receiver sits under the arguments, exactly where a callee would, and the result
         // replaces both -- so a method call and a plain call have the same shape here.
         Instruction::CallMethod { argc, .. } => {
@@ -3086,6 +3345,7 @@ fn stack_effect(
         Instruction::StoreLocal(_)
         | Instruction::StoreCell(_)
         | Instruction::StoreUpvalue(_)
+        | Instruction::StoreGlobal(_)
         | Instruction::Pop => {
             if height < 1 {
                 Err(underflow(1))
@@ -3103,8 +3363,8 @@ fn stack_effect(
                 ))
             }
         }
-        Instruction::Binary(BinaryOp::In | BinaryOp::InstanceOf) => Err(EmitError::Unsupported {
-            feature: "reference operators in the native backend".to_string(),
+        Instruction::Binary(BinaryOp::In) => Err(EmitError::Unsupported {
+            feature: "the `in` operator in the native backend".to_string(),
         }),
         Instruction::Binary(_) => {
             if height < 2 {
@@ -3160,6 +3420,24 @@ fn produces_callables(program: &Program) -> bool {
         })
     };
     makes_one(&program.code) || program.functions.iter().any(|proto| makes_one(&proto.code))
+}
+
+/// Whether anything in this program reaches module scope from inside a call.
+///
+/// A module binding outlives every call and is shared by all of them, so when one is read from a
+/// function body it cannot live in the entry point's automatic frame -- that frame is gone by
+/// the time an exported closure runs. It becomes a file-scope array instead, which is what a
+/// per-module singleton is.
+fn uses_module_scope(program: &Program) -> bool {
+    let reaches = |code: &[Instruction]| {
+        code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::LoadGlobal(_) | Instruction::StoreGlobal(_)
+            )
+        })
+    };
+    reaches(&program.code) || program.functions.iter().any(|proto| reaches(&proto.code))
 }
 
 /// Whether a body reads `this`.
@@ -3414,6 +3692,14 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
             .unwrap();
         }
     }
+    if uses_module_scope(program) {
+        writeln!(
+            output,
+            "static kiln_value {symbol}_globals[{}];",
+            usize::try_from(program.local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
     render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
@@ -3435,12 +3721,18 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
-    writeln!(
-        output,
-        "    kiln_value locals[{}];",
-        usize::try_from(program.local_count).unwrap().max(1)
-    )
-    .unwrap();
+    if uses_module_scope(program) {
+        // Named rather than automatic: an exported closure reads module scope after the entry
+        // point has returned, and a frame that has returned is not somewhere to read from.
+        writeln!(output, "    kiln_value *locals = {symbol}_globals;").unwrap();
+    } else {
+        writeln!(
+            output,
+            "    kiln_value locals[{}];",
+            usize::try_from(program.local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
     render_handler_prologue(
         &mut output,
         &handler_targets(&program.code),
@@ -3491,6 +3783,14 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
             .unwrap();
         }
     }
+    if uses_module_scope(program) {
+        writeln!(
+            output,
+            "static kiln_value {symbol}_globals[{}];",
+            usize::try_from(program.local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
     render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
@@ -3512,12 +3812,18 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
-    writeln!(
-        output,
-        "    kiln_value locals[{}];",
-        usize::try_from(program.local_count).unwrap().max(1)
-    )
-    .unwrap();
+    if uses_module_scope(program) {
+        // Named rather than automatic: an exported closure reads module scope after the entry
+        // point has returned, and a frame that has returned is not somewhere to read from.
+        writeln!(output, "    kiln_value *locals = {symbol}_globals;").unwrap();
+    } else {
+        writeln!(
+            output,
+            "    kiln_value locals[{}];",
+            usize::try_from(program.local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
     render_handler_prologue(
         &mut output,
         &handler_targets(&program.code),
@@ -3622,10 +3928,7 @@ fn emit_instruction(
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
-        Instruction::LoadGlobal(_)
-        | Instruction::StoreGlobal(_)
-        | Instruction::New { .. }
-        | Instruction::Dup2
+        Instruction::Dup2
         | Instruction::SpreadInto
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
@@ -3646,7 +3949,6 @@ fn emit_instruction(
         | Instruction::RestArguments(_)
         | Instruction::Yield
         | Instruction::Await
-        | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
             unreachable!("verification rejects these instructions before emission")
@@ -3838,6 +4140,43 @@ fn emit_instruction(
             );
         }
         Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
+        // Module scope is one array for the whole module, so a read from a function body names
+        // it directly rather than reaching for a frame that may no longer exist.
+        Instruction::LoadGlobal(slot) => {
+            if guarded.contains(slot) {
+                writeln!(
+                    output,
+                    "    if ({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                )
+                .unwrap();
+            }
+            writeln!(output, "    stack[sp++] = {symbol}_globals[{slot}];").unwrap();
+        }
+        Instruction::StoreGlobal(slot) => {
+            writeln!(output, "    {symbol}_globals[{slot}] = stack[--sp];").unwrap();
+        }
+        Instruction::Binary(BinaryOp::InstanceOf) => {
+            output.push_str(
+                "    { kiln_value constructor = stack[--sp]; int answer; int status = kiln_c99_instance_of(stack[sp - 1], constructor, &answer); if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+            );
+        }
+        Instruction::New { argc } => {
+            let argc = usize::from(*argc);
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value built; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                argc + 1
+            )
+            .unwrap();
+        }
+        // `class D extends C` links the two prototype objects, which is what makes an instance
+        // of `D` find a method of `C`.
+        Instruction::SetPrototype => {
+            output.push_str(
+                "    { kiln_value prototype = stack[--sp]; if (stack[sp - 1].tag != KILN_VALUE_OBJECT) return KILN_C99_CONTROL_ERROR; kiln_c99_object_of(stack[sp - 1])->prototype = prototype; }\n",
+            );
+        }
         // The stack height is recorded with the handler, because a `catch` starts from the
         // height the `try` began at however deep the expression that threw had got.
         Instruction::PushHandler(target) => {
@@ -5311,24 +5650,26 @@ int main(void) {{
         assert!(run.status.success(), "empty host string concat failed");
     }
 
+    /// `instanceof` emits now that a value can carry a prototype chain; `in` does not, because it
+    /// asks whether a *name* is present and nothing here enumerates one yet. The point of the
+    /// test is unchanged: an operator this backend cannot do must say so rather than emit a
+    /// silent undefined.
     #[test]
-    fn reference_operators_are_refused_until_native_values_can_carry_references() {
-        for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
-            let result = emit(&program(
-                vec![Constant::Null],
-                vec![
-                    Instruction::Const(0),
-                    Instruction::Const(0),
-                    Instruction::Binary(operator),
-                    Instruction::Return,
-                ],
-                0,
-            ));
-            assert!(
-                matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("reference operators")),
-                "{operator:?} must not emit a silent undefined result"
-            );
-        }
+    fn the_in_operator_is_refused_rather_than_emitting_undefined() {
+        let result = emit(&program(
+            vec![Constant::Null],
+            vec![
+                Instruction::Const(0),
+                Instruction::Const(0),
+                Instruction::Binary(BinaryOp::In),
+                Instruction::Return,
+            ],
+            0,
+        ));
+        assert!(
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`in` operator")),
+            "`in` must not emit a silent undefined result"
+        );
     }
 
     #[test]
@@ -5337,14 +5678,14 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::LoadGlobal(0),
+                Instruction::EnumerateKeys,
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadGlobal`")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`EnumerateKeys`")),
             "dead code must not bypass the native instruction allowlist"
         );
     }
