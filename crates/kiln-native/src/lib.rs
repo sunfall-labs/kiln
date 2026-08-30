@@ -1578,13 +1578,7 @@ impl NativeBuilder {
         key: &ArtifactKey,
         expected: &[u8],
     ) -> Result<(Vec<u8>, Digest, bool), NativeError> {
-        match self.cache.lookup(key)? {
-            Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true)),
-            Lookup::Miss => {
-                let stored = self.cache.put(key, expected)?;
-                Ok((expected.to_vec(), stored.digest, false))
-            }
-        }
+        cached_payload(&self.cache, key, expected)
     }
 
     fn object(
@@ -1606,6 +1600,29 @@ impl NativeBuilder {
                 let stored = self.cache.put(key, &bytes)?;
                 Ok((bytes, stored.digest, false, report.elapsed))
             }
+        }
+    }
+}
+
+fn cached_payload(
+    cache: &ArtifactCache,
+    key: &ArtifactKey,
+    expected: &[u8],
+) -> Result<(Vec<u8>, Digest, bool), NativeError> {
+    match cache.lookup(key)? {
+        Lookup::Hit(artifact) if artifact.bytes != expected => Err(CacheError::Corrupt {
+            path: artifact.path,
+            reason: format!(
+                "cached payload digest {} does not match deterministic expected digest {}",
+                artifact.digest.to_hex(),
+                Digest::hash(expected).to_hex()
+            ),
+        }
+        .into()),
+        Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true)),
+        Lookup::Miss => {
+            let stored = cache.put(key, expected)?;
+            Ok((expected.to_vec(), stored.digest, false))
         }
     }
 }
@@ -2934,6 +2951,37 @@ mod tests {
             })
         );
         assert_eq!(cache.lookup(&second).expect("second lookup"), Lookup::Miss);
+    }
+
+    #[test]
+    fn deterministic_payload_hits_reject_self_consistent_wrong_bytes() {
+        let root = TestDirectory::new("kiln-native-expected-payload");
+        let cache = ArtifactCache::new(root.path.join("cache"));
+        let expected = b"deterministic generated C";
+        let payload_key = key(
+            ArtifactKind::GeneratedC,
+            "kiln-test-generator",
+            Backend::C,
+            "test ABI",
+            "test target",
+            CacheProfile::Debug,
+            Digest::hash(b"test options"),
+            [Digest::hash(expected)],
+        );
+        cache
+            .put(&payload_key, b"different but internally valid bytes")
+            .expect("seed a self-consistent wrong record");
+
+        let error = cached_payload(&cache, &payload_key, expected)
+            .expect_err("a deterministic payload must match its expected bytes");
+        assert!(
+            matches!(
+                error,
+                NativeError::Cache(CacheError::Corrupt { ref reason, .. })
+                    if reason.contains("does not match deterministic expected digest")
+            ),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

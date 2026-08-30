@@ -253,7 +253,8 @@ impl Project {
     /// Input order is deliberately irrelevant. Logical paths must already use the caller's
     /// chosen normalization policy; their exact bytes are module identity. [`Interface`] values
     /// are canonical because external implementations construct them with
-    /// [`Interface::from_exports`].
+    /// [`Interface::from_exports`], [`Interface::from_exports_and_linkage`], or
+    /// [`Interface::from_module`].
     pub fn from_interfaces<'a>(
         interfaces: impl IntoIterator<Item = (&'a str, &'a Interface)>,
     ) -> Self {
