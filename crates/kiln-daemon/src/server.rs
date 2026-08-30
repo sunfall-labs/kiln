@@ -21,11 +21,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    dispatch, execute_prepared_run, native_build_graph, native_build_output, native_build_program,
-    native_build_shared_graph, native_build_shared_program, native_graph, native_program,
-    native_run_graph, native_run_program, prepare_run, Next,
+    Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
+    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
+    native_program, native_run_graph, native_run_program, prepare_run,
 };
-use crate::framing::{read_frame, write_frame, MAX_MESSAGE_BYTES};
+use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -515,17 +515,29 @@ fn commit_sync<E: QueryEngine>(
                 current: guard.source_view,
             };
         }
-        let active = guard.engine.source_files();
-        for (file, path) in active {
-            if !transaction.manifest.contains_key(&path) {
-                guard.engine.remove_source(file);
+        let next_view = match next_source_view(guard.source_view) {
+            Ok(view) => view,
+            Err(message) => return Response::Error { message },
+        };
+        let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
+            let active = guard.engine.source_files();
+            for (file, path) in active {
+                if !transaction.manifest.contains_key(&path) {
+                    guard.engine.remove_source(file);
+                }
             }
+            for (path, text) in transaction.staged {
+                let file = guard.engine.intern(&path);
+                guard.engine.set_source(file, text);
+            }
+        }));
+        if let Err(payload) = mutation {
+            if let Ok(view) = next_source_view(guard.source_view) {
+                guard.source_view = view;
+            }
+            return internal_error(&*payload);
         }
-        for (path, text) in transaction.staged {
-            let file = guard.engine.intern(&path);
-            guard.engine.set_source(file, text);
-        }
-        guard.source_view = SourceView(guard.source_view.0.wrapping_add(1));
+        guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
         };
@@ -547,11 +559,21 @@ fn set_source<E: QueryEngine>(
             current: guard.source_view,
         };
     }
-    let file = guard.engine.intern(&path);
-    guard.engine.set_source(file, text);
+    let next_view = match next_source_view(guard.source_view) {
+        Ok(view) => view,
+        Err(message) => return Response::Error { message },
+    };
+    let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
+        let file = guard.engine.intern(&path);
+        guard.engine.set_source(file, text);
+    }));
+    if let Err(payload) = mutation {
+        guard.source_view = next_view;
+        return internal_error(&*payload);
+    }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
     // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
-    guard.source_view = SourceView(guard.source_view.0.wrapping_add(1));
+    guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
     }
@@ -571,10 +593,36 @@ fn handle_source_request<E: QueryEngine>(
             Next::Continue,
         );
     }
+    let revision = guard.engine.revision().0;
     match panic::catch_unwind(AssertUnwindSafe(|| operation(&mut guard.engine))) {
+        Ok(_response) if guard.engine.revision().0 != revision => {
+            match next_source_view(guard.source_view) {
+                Ok(view) => {
+                    guard.source_view = view;
+                    (Response::StaleSourceView { current: view }, Next::Continue)
+                }
+                Err(message) => (Response::Error { message }, Next::Continue),
+            }
+        }
         Ok(response) => (response, Next::Continue),
-        Err(payload) => (internal_error(&*payload), Next::Continue),
+        Err(payload) => {
+            if guard.engine.revision().0 != revision {
+                match next_source_view(guard.source_view) {
+                    Ok(view) => guard.source_view = view,
+                    Err(message) => return (Response::Error { message }, Next::Continue),
+                }
+            }
+            (internal_error(&*payload), Next::Continue)
+        }
     }
+}
+
+fn next_source_view(current: SourceView) -> Result<SourceView, String> {
+    current
+        .0
+        .checked_add(1)
+        .map(SourceView)
+        .ok_or_else(|| "source view exhausted".to_owned())
 }
 
 /// Run one request, holding the engine lock only while a query actually needs it.
@@ -615,9 +663,7 @@ fn handle<E: QueryEngine>(
             stage_source(pending.as_mut(), sync_id, path, text),
             Next::Continue,
         ),
-        Request::CommitSync { sync_id } => {
-            (commit_sync(state, pending, sync_id), Next::Continue)
-        }
+        Request::CommitSync { sync_id } => (commit_sync(state, pending, sync_id), Next::Continue),
         Request::SetSource {
             path,
             text,
@@ -628,7 +674,7 @@ fn handle<E: QueryEngine>(
             project_root,
             source_view,
         } => handle_source_request(state, source_view, |engine| {
-            dispatch(
+            dispatch_source(
                 engine,
                 Request::Check {
                     path,
@@ -639,7 +685,7 @@ fn handle<E: QueryEngine>(
             .0
         }),
         Request::Project { source_view } => handle_source_request(state, source_view, |engine| {
-            dispatch(engine, Request::Project { source_view }).0
+            dispatch_source(engine, Request::Project { source_view }).0
         }),
         Request::Run {
             path,
@@ -757,12 +803,30 @@ fn handle_run<E: QueryEngine>(
                 Next::Continue,
             );
         }
+        let revision = guard.engine.revision().0;
         match panic::catch_unwind(AssertUnwindSafe(|| {
             prepare_run(&mut guard.engine, path, project_root)
         })) {
+            Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
+                match next_source_view(guard.source_view) {
+                    Ok(view) => {
+                        guard.source_view = view;
+                        return (Response::StaleSourceView { current: view }, Next::Continue);
+                    }
+                    Err(message) => return (Response::Error { message }, Next::Continue),
+                }
+            }
             Ok(Ok(prepared)) => prepared,
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
-            Err(payload) => return (internal_error(&*payload), Next::Continue),
+            Err(payload) => {
+                if guard.engine.revision().0 != revision {
+                    match next_source_view(guard.source_view) {
+                        Ok(view) => guard.source_view = view,
+                        Err(message) => return (Response::Error { message }, Next::Continue),
+                    }
+                }
+                return (internal_error(&*payload), Next::Continue);
+            }
         }
     };
     run_without_engine_lock(|| execute_prepared_run(prepared))
@@ -803,9 +867,27 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             Ok(Ok(prepared)) => prepared,
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
+                if guard.engine.revision().0 != current_revision {
+                    match next_source_view(guard.source_view) {
+                        Ok(view) => guard.source_view = view,
+                        Err(message) => return (Response::Error { message }, Next::Continue),
+                    }
+                }
                 return (internal_error(&*payload), Next::Continue);
             }
         };
+        if guard.engine.revision().0 != current_revision {
+            match next_source_view(guard.source_view) {
+                Ok(view) => guard.source_view = view,
+                Err(message) => return (Response::Error { message }, Next::Continue),
+            }
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
         // Canonicalizing a legacy relative overlay is itself an input reconciliation and may
         // advance the revision while the lock is held. Pin publication to the reconciled
         // snapshot, while the check above still rejects a genuinely stale caller revision.
@@ -899,6 +981,7 @@ fn snapshot_temp_output(final_output: &Path) -> PathBuf {
     final_output.with_file_name(format!(".kiln-{name}-{}-{id}.tmp", std::process::id()))
 }
 
+#[allow(clippy::result_large_err)]
 fn prepare_native_snapshot<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     path: &str,
@@ -912,6 +995,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
             current: guard.source_view,
         });
     }
+    let revision = guard.engine.revision().0;
     match panic::catch_unwind(AssertUnwindSafe(|| {
         let graph = native_graph(&mut guard.engine, path, project_root)?;
         match graph {
@@ -921,9 +1005,26 @@ fn prepare_native_snapshot<E: QueryEngine>(
             Some(_) | None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
         }
     })) {
+        Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
+            match next_source_view(guard.source_view) {
+                Ok(view) => guard.source_view = view,
+                Err(message) => return Err(Response::Error { message }),
+            }
+            Err(Response::StaleSourceView {
+                current: guard.source_view,
+            })
+        }
         Ok(Ok(prepared)) => Ok(prepared),
         Ok(Err(message)) => Err(Response::Error { message }),
-        Err(payload) => Err(internal_error(&*payload)),
+        Err(payload) => {
+            if guard.engine.revision().0 != revision {
+                match next_source_view(guard.source_view) {
+                    Ok(view) => guard.source_view = view,
+                    Err(message) => return Err(Response::Error { message }),
+                }
+            }
+            Err(internal_error(&*payload))
+        }
     }
 }
 

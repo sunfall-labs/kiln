@@ -7,8 +7,8 @@ use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, ProjectSummary, Request, Response, RunSummary, ScalarValueSummary,
-    Stats, PROTOCOL_VERSION,
+    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
+    ScalarValueSummary, Stats,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -52,6 +52,34 @@ impl PreparedRun {
 }
 
 pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, Next) {
+    if matches!(
+        request,
+        Request::SetSource { .. }
+            | Request::Check { .. }
+            | Request::Run { .. }
+            | Request::NativeBuild { .. }
+            | Request::NativeBuildAtRevision { .. }
+            | Request::NativeSharedBuild { .. }
+            | Request::NativeRun { .. }
+            | Request::Project { .. }
+    ) {
+        return (
+            Response::Error {
+                message: "source-consuming requests require daemon state handling".into(),
+            },
+            Next::Continue,
+        );
+    }
+    dispatch_source(engine, request)
+}
+
+/// Dispatch a source-consuming request after the server has checked its SourceView while holding
+/// the DaemonState mutex. This is crate-visible rather than public so no authority-free path is
+/// exposed to callers.
+pub(crate) fn dispatch_source<E: QueryEngine>(
+    engine: &mut E,
+    request: Request,
+) -> (Response, Next) {
     match request {
         Request::Ping { protocol } if protocol != PROTOCOL_VERSION => (
             Response::Error {
