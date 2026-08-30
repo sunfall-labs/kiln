@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -115,6 +115,8 @@ pub enum Request {
     /// Run the query pipeline for a file and return its summary.
     Check {
         path: String,
+        /// Project root used to reconcile relative editor-buffer spellings with this file.
+        project_root: String,
     },
     /// Compile the cached HIR and execute one module through the interpreter.
     Run {

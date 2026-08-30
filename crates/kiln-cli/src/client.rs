@@ -291,10 +291,10 @@ mod tests {
             "the in-process daemon should report this process"
         );
 
-        let first = commands::check(&mut client, &source)
+        let first = commands::check(&mut client, &source, &dir)
             .expect("first check")
             .text;
-        let second = commands::check(&mut client, &source)
+        let second = commands::check(&mut client, &source, &dir)
             .expect("second check")
             .text;
 
@@ -320,7 +320,7 @@ mod tests {
             "an unchanged file must reuse something:\n{second}"
         );
 
-        let missing = commands::check(&mut client, Path::new("/definitely/not/here.js"));
+        let missing = commands::check(&mut client, Path::new("/definitely/not/here.js"), &dir);
         assert!(matches!(missing, Err(Error::MissingFile(_))), "{missing:?}");
 
         stop.shutdown();

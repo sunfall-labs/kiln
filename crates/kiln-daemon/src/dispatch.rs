@@ -79,7 +79,9 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             (Response::Ok, Next::Continue)
         }
 
-        Request::Check { path } => (check(engine, path), Next::Continue),
+        Request::Check { path, project_root } => {
+            (check(engine, path, project_root), Next::Continue)
+        }
         Request::Run { path, project_root } => (run(engine, path, project_root), Next::Continue),
         Request::NativeBuild {
             path,
@@ -236,8 +238,12 @@ fn sync<E: QueryEngine>(engine: &mut E, files: Vec<kiln_proto::SourceHash>) -> R
 /// Reading from disk only when the file has no source yet is what makes an editor-driven
 /// `SetSource` authoritative: once a client has pushed unsaved buffer contents, later `Check`s
 /// must see the buffer, not the stale bytes on disk.
-fn check<E: QueryEngine>(engine: &mut E, path: String) -> Response {
-    let file = match ensure_source(engine, &path) {
+fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
+    let source = match resolve_source_path(&path, &project_root) {
+        Some(entry) => ensure_canonical_source(engine, &path, &entry, &project_root),
+        None => ensure_source(engine, &path),
+    };
+    let file = match source {
         Ok(file) => file,
         Err(message) => return Response::Error { message },
     };

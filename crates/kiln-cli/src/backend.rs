@@ -62,8 +62,8 @@ pub trait Backend: Send {
         }
     }
 
-    fn check(&mut self, path: String) -> Result<ModuleSummary> {
-        match self.request(Request::Check { path })? {
+    fn check(&mut self, path: String, project_root: String) -> Result<ModuleSummary> {
+        match self.request(Request::Check { path, project_root })? {
             Response::Checked(summary) => Ok(summary),
             other => Err(mismatch("Check", &other)),
         }

@@ -107,7 +107,9 @@ mod tests {
 
         let dir = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            let out = commands::check(&mut session, &source).expect("check").text;
+            let out = commands::check(&mut session, &source, &fixture)
+                .expect("check")
+                .text;
             assert!(out.contains("a.js  r"), "{out}");
             // A fresh database has computed nothing before, so this check is all new work.
             assert!(out.contains("recomputed      parse 1"), "{out}");

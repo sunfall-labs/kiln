@@ -259,6 +259,7 @@ fn request_and_response_round_trip_over_a_socket() {
     let Response::Checked(summary) = client
         .request(&Request::Check {
             path: "a.js".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("check")
     else {
@@ -308,7 +309,10 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         })
         .expect("set initial source");
     let Response::Checked(initial) = setup
-        .request(&Request::Check { path: path.clone() })
+        .request(&Request::Check {
+            path: path.clone(),
+            project_root: project_root.clone(),
+        })
         .expect("check initial source")
     else {
         panic!("expected initial checked response");
@@ -348,7 +352,10 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     };
     assert_eq!(stats.revision, 2);
     let Response::Checked(summary) = editor
-        .request(&Request::Check { path: path.clone() })
+        .request(&Request::Check {
+            path: path.clone(),
+            project_root: project_root.clone(),
+        })
         .expect("check")
     else {
         panic!("expected checked response");
@@ -1079,6 +1086,7 @@ fn a_panicking_query_costs_one_request_not_the_daemon() {
     let response = client
         .request(&Request::Check {
             path: "boom.js".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("the daemon answers rather than dying");
     let Response::Error { message } = response else {
@@ -1186,6 +1194,7 @@ fn check_reads_from_disk_when_nothing_was_pushed() {
     let Response::Checked(summary) = client
         .request(&Request::Check {
             path: module.to_string_lossy().into_owned(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("check")
     else {
@@ -1195,27 +1204,40 @@ fn check_reads_from_disk_when_nothing_was_pushed() {
 }
 
 #[test]
-fn a_pushed_buffer_wins_over_the_file_on_disk() {
+fn a_relative_pushed_buffer_wins_over_disk_during_a_canonical_check() {
     // The editor case: the buffer is unsaved, so re-reading the file would silently check the
     // wrong text.
     let fixture = Fixture::started();
     let module = fixture.dir.join("buffered.js");
     std::fs::write(&module, "export saved\n").expect("write fixture module");
-    let path = module.to_string_lossy().into_owned();
+    let path = std::fs::canonicalize(&module)
+        .expect("canonical module")
+        .to_string_lossy()
+        .into_owned();
+    let project_root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical project root")
+        .to_string_lossy()
+        .into_owned();
 
     let mut client = fixture.client();
     client
         .request(&Request::SetSource {
-            path: path.clone(),
+            path: "buffered.js".into(),
             text: "export unsaved\n".into(),
         })
         .expect("set source");
 
-    let Response::Checked(summary) = client.request(&Request::Check { path }).expect("check")
+    let Response::Checked(summary) = client
+        .request(&Request::Check { path, project_root })
+        .expect("check")
     else {
         panic!("expected a module summary");
     };
     assert_eq!(summary.exports, vec!["unsaved".to_string()]);
+    let Response::Project(project) = client.request(&Request::Project).expect("project") else {
+        panic!("expected a project summary");
+    };
+    assert_eq!(project.modules, 1, "one file must have one active spelling");
 }
 
 #[test]
@@ -1227,6 +1249,7 @@ fn checking_a_missing_file_is_an_error_not_a_panic() {
     let response = client
         .request(&Request::Check {
             path: missing.clone(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("check");
     assert!(
@@ -1285,6 +1308,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
     let response = client
         .request(&Request::Check {
             path: "real.ts".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("check");
     let Response::Checked(summary) = response else {
@@ -1333,6 +1357,7 @@ fn the_default_daemon_serves_the_real_query_engine() {
     let Response::Checked(summary) = client
         .request(&Request::Check {
             path: "real.ts".into(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("check malformed source")
     else {
@@ -1361,6 +1386,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     let Response::Checked(disk_summary) = client
         .request(&Request::Check {
             path: disk_module.to_string_lossy().into_owned(),
+            project_root: fixture.dir.to_string_lossy().into_owned(),
         })
         .expect("production check reads disk")
     else {
