@@ -1697,3 +1697,42 @@ a view (they would need write-back, like the proxy path), and `map`/`filter` ret
 array rather than a plain one. The last is a real difference `console.log` shows.
 
 differential 85/0/0, conformance 39/39, Effect 12/12, thirdparty 8/8.
+
+**2026-08-29, Claude — where the language stands, as one list.**
+
+Writing this because the notes above are a diary and the state is now spread across a dozen of
+them. Everything here is verified by `scripts/differential.sh` (85 probes), the 39-case
+conformance corpus, the twelve Effect bundles, and `scripts/thirdparty.sh` (8 real libraries),
+all green.
+
+**Implemented in this stretch:** modules end to end (a closure carries its program, so
+`export function` works; namespace imports; named, namespace and star re-exports; `export default
+<expression>`), `for await` and async generators, destructuring assignment, `new.target`,
+tagged templates and `String.raw`, BigInt values *and* literals, `Proxy` with nine traps and
+`revocable`, typed arrays and `ArrayBuffer`, `#x in o`, `super.x = v`, the four URI functions,
+`escape`/`unescape`, `Object.prototype`'s methods, prototype tables for five built-ins, generic
+array methods over array-likes, and `process`/`globalThis` as realm objects.
+
+**Wrong answers found and fixed** -- the part worth remembering, because none of these was a
+refusal and all of them came from running real code: `s[0]` on a string; `charAt` on a surrogate
+pair; every `Date` setter; `constructor` on every intrinsic; `globalThis` rebuilt per read;
+`f.prototype = x` ignored; a class constructor with no name; `array.length = n` ignored;
+`Map.values()` yielding pairs; `Map`/`Set` without `forEach`; a regexp stringifying as "Error";
+`String.replace` ignoring `$&` with a string pattern; `defineProperty` running an inherited
+setter; a named function expression unable to call itself; `Array(3)` and `Object(x)` not
+callable; two classes sharing a private name; an arrow's rest parameter always empty; and `===`
+answering false for a date, a regexp, a promise, a proxy, a bound function and a BigInt compared
+with themselves.
+
+**Still not implemented, in the order I would take them:** live export bindings (an export is a
+value read once, so a later reassignment does not show); `DataView` and the `BigInt64Array` pair;
+`sort`/`reverse` on a typed array; `map`/`filter` on one returning a typed array rather than a
+plain one; the template object not being cached per call site or frozen;
+`Object.getOwnPropertySymbols` reporting none because symbol keys are stored as strings;
+`import.meta`; dynamic `import()`; `using` declarations. An exhausted call depth is also a hard
+error where node throws a catchable `RangeError`.
+
+**The method that produced most of this:** bundle a real library with esbuild, run it under both
+engines, and when they differ, instrument the bundle and diff the traces. Twice the traces were
+*identical* right up to the failure, which each time ruled out a whole subsystem in one step and
+pointed at a single comparison. `conformance/thirdparty/build.sh` adds a library in two lines.
