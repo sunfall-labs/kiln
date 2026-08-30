@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_run_synchronizes_and_executes_a_package_dependency() {
+    fn one_shot_run_and_native_run_execute_a_package_dependency() {
         let fixture =
             std::env::temp_dir().join(format!("kiln-cli-package-fixture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&fixture);
@@ -156,18 +156,56 @@ mod tests {
         std::fs::write(package.join("index.js"), "export const answer = 42;\n")
             .expect("write package entry");
 
-        let (output, updated) = {
+        let (output, native, updated_native, updated) = {
             let mut session = OneShot::start().expect("start an in-process engine");
             let output = commands::run(&mut session, &source, &fixture).expect("run package graph");
+            let native = match commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                kiln_proto::NativeProfile::Dev,
+            ) {
+                Ok(output) => Some(output),
+                Err(error) if error.to_string().contains("no supported C compiler") => {
+                    eprintln!("skipping native package graph: no supported C compiler found");
+                    None
+                }
+                Err(error) => panic!("run native package graph: {error}"),
+            };
             std::fs::write(package.join("index.js"), "export const answer = 43;\n")
                 .expect("update package entry");
+            let updated_native = native.as_ref().map(|_| {
+                commands::native_run(
+                    &mut session,
+                    &source,
+                    &fixture,
+                    kiln_proto::NativeProfile::Dev,
+                )
+                .expect("rerun updated native package graph")
+            });
             let updated = commands::run(&mut session, &source, &fixture)
                 .expect("rerun updated package graph");
-            (output, updated)
+            (output, native, updated_native, updated)
         };
 
         assert_eq!(output.text, "42\n");
         assert_eq!(output.exit_code, 0);
+        if let Some(native) = native {
+            assert_eq!(native.text, "42\n");
+            assert_eq!(native.exit_code, 0);
+            assert_eq!(
+                native.value,
+                Some(kiln_proto::ScalarValueSummary::Undefined)
+            );
+        }
+        if let Some(updated_native) = updated_native {
+            assert_eq!(updated_native.text, "43\n");
+            assert_eq!(updated_native.exit_code, 0);
+            assert_eq!(
+                updated_native.value,
+                Some(kiln_proto::ScalarValueSummary::Undefined)
+            );
+        }
         assert_eq!(updated.text, "43\n");
         assert_eq!(updated.exit_code, 0);
         let _ = std::fs::remove_dir_all(&fixture);
