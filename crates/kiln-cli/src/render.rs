@@ -453,6 +453,7 @@ mod tests {
             project_computed: project,
             validated,
             early_cutoff: cutoff,
+            ..Stats::default()
         }
     }
 
