@@ -10,7 +10,7 @@ use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
     Export, ExportName, ExportOrigin, Expression as HirExpression,
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
-    ItemKind, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
+    ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, Parameter as HirParameter, RequestedModule,
     SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, UnaryOperator as HirUnaryOperator,
@@ -18,13 +18,13 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
-};
-use oxc_ast::ast::{
-    ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
+    Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
     ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters,
     Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
     VariableDeclaration, VariableDeclarationKind,
+};
+use oxc_ast::ast::{
+    ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -291,7 +291,24 @@ impl Lowerer {
                     body: Box::new(self.statement_or_unsupported(&statement.body)),
                 }
             }
-            Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
+            Statement::ForInStatement(statement) => {
+                let (kind, name) = match self.for_binding(&statement.left) {
+                    Some(binding) => binding,
+                    None => {
+                        return Some(HirStatement {
+                            kind: self.unsupported_statement("for-in binding", statement_span),
+                            span: statement_span,
+                        });
+                    }
+                };
+                HirStatementKind::ForIn {
+                    kind,
+                    name,
+                    object: self.expression(&statement.right),
+                    body: Box::new(self.statement_or_unsupported(&statement.body)),
+                }
+            }
+            Statement::ForOfStatement(_) => {
                 self.unsupported_statement("for-in or for-await-of statement", statement_span)
             }
             Statement::BreakStatement(statement) => HirStatementKind::Break {
@@ -601,17 +618,9 @@ impl Lowerer {
                 HirExpressionKind::SuperCall { arguments }
             }
             Expression::CallExpression(expression) if !expression.optional => {
-                let mut arguments = Vec::with_capacity(expression.arguments.len());
-                for argument in &expression.arguments {
-                    let Some(argument) = argument.as_expression() else {
-                        return self
-                            .unsupported_expression("spread call argument", expression_span);
-                    };
-                    arguments.push(self.expression(argument));
-                }
                 HirExpressionKind::Call {
                     callee: Box::new(self.expression(&expression.callee)),
-                    arguments,
+                    arguments: self.arguments(&expression.arguments),
                 }
             }
             Expression::StaticMemberExpression(member)
@@ -647,7 +656,7 @@ impl Lowerer {
                 for element in &expression.elements {
                     match element {
                         ArrayExpressionElement::SpreadElement(spread) => {
-                            elements.push(kiln_hir::ArrayElement::Spread(
+                            elements.push(kiln_hir::ListElement::Spread(
                                 self.expression(&spread.argument),
                             ));
                         }
@@ -661,7 +670,7 @@ impl Lowerer {
                                 return self
                                     .unsupported_expression("array element", expression_span);
                             };
-                            elements.push(kiln_hir::ArrayElement::Item(self.expression(value)));
+                            elements.push(kiln_hir::ListElement::Item(self.expression(value)));
                         }
                     }
                 }
@@ -685,22 +694,10 @@ impl Lowerer {
                     return self.unsupported_expression("class expression", expression_span);
                 }
             },
-            Expression::NewExpression(expression) => {
-                let mut arguments = Vec::with_capacity(expression.arguments.len());
-                for argument in &expression.arguments {
-                    let Some(argument) = argument.as_expression() else {
-                        return self.unsupported_expression(
-                            "spread constructor argument",
-                            expression_span,
-                        );
-                    };
-                    arguments.push(self.expression(argument));
-                }
-                HirExpressionKind::New {
-                    callee: Box::new(self.expression(&expression.callee)),
-                    arguments,
-                }
-            }
+            Expression::NewExpression(expression) => HirExpressionKind::New {
+                callee: Box::new(self.expression(&expression.callee)),
+                arguments: self.arguments(&expression.arguments),
+            },
             Expression::TemplateLiteral(literal) => HirExpressionKind::Template {
                 quasis: literal
                     .quasis
@@ -1081,6 +1078,46 @@ impl Lowerer {
             body: statements,
             span: statement_span,
         })
+    }
+
+    /// The `kind` and single bound name of a `for-in` or `for-of` head, when it is a simple
+    /// declaration of one identifier. `None` for every other shape, each of which needs its own
+    /// lowering and gets its own diagnostic at the call site.
+    fn for_binding(&mut self, left: &ForStatementLeft<'_>) -> Option<(HirVariableKind, String)> {
+        let ForStatementLeft::VariableDeclaration(declaration) = left else {
+            return None;
+        };
+        let declarator = declaration.declarations.first()?;
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return None;
+        };
+        let kind = match declaration.kind {
+            VariableDeclarationKind::Var => HirVariableKind::Var,
+            VariableDeclarationKind::Const => HirVariableKind::Const,
+            _ => HirVariableKind::Let,
+        };
+        Some((kind, identifier.name.to_string()))
+    }
+
+    /// Lower an argument list, where a spread contributes however many an iterable holds.
+    fn arguments(&mut self, arguments: &oxc_allocator::Vec<'_, Argument<'_>>) -> Vec<ListElement> {
+        let mut lowered = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            lowered.push(match argument {
+                Argument::SpreadElement(spread) => {
+                    ListElement::Spread(self.expression(&spread.argument))
+                }
+                other => match other.as_expression() {
+                    Some(expression) => ListElement::Item(self.expression(expression)),
+                    // Every non-spread argument is an expression; this arm exists because the
+                    // oxc enum cannot say so in its type.
+                    None => ListElement::Item(
+                        self.unsupported_expression("argument", HirSpan::default()),
+                    ),
+                },
+            });
+        }
+        lowered
     }
 
     /// Lower an object literal, or refuse the whole literal.

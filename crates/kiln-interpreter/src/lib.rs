@@ -1424,73 +1424,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                     let arguments = self.stack.split_off(self.stack.len() - argc);
                     let callee = self.pop(current)?;
-                    match callee {
-                        Value::Native(Native::Error) => {
-                            let error = self.construct_error(&arguments);
-                            self.stack.push(error);
-                        }
-                        Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
-                            let is_map = matches!(kind, Native::MapConstructor);
-                            let mut data = ObjectData::default();
-                            data.set("@@entries", Value::Array(Rc::new(RefCell::new(Vec::new()))));
-                            if is_map {
-                                data.set("@@map", Value::Boolean(true));
-                            }
-                            data.set("size", Value::Number(0.0));
-                            let collection = Value::Object(Rc::new(RefCell::new(data)));
-                            // `new Set(iterable)` and `new Map(entries)` seed themselves through
-                            // `add`/`set`, so deduplication and size accounting are the same code
-                            // the explicit calls use rather than a second copy of it.
-                            if let Some(source) = arguments.first().cloned()
-                                && !matches!(source, Value::Undefined | Value::Null)
-                            {
-                                for item in self.drain_iterable(&source, current)? {
-                                    let (key, value) = if is_map {
-                                        (
-                                            self.computed(&item, &Value::Number(0.0)),
-                                            self.computed(&item, &Value::Number(1.0)),
-                                        )
-                                    } else {
-                                        (item, Value::Undefined)
-                                    };
-                                    call_native(
-                                        if is_map {
-                                            Native::MapSet
-                                        } else {
-                                            Native::SetAdd
-                                        },
-                                        &collection,
-                                        &[key, value],
-                                    )?;
-                                }
-                            }
-                            self.stack.push(collection);
-                        }
-                        Value::Function(closure) => {
-                            // `new` creates the instance, runs the body with it as `this`, and
-                            // yields the instance -- unless the body returned an object, which
-                            // wins. That override is what makes factory constructors work.
-                            let instance = self.instantiate(&closure);
-                            self.stack.push(Value::Undefined);
-                            let argc = arguments.len();
-                            for argument in arguments {
-                                self.stack.push(argument);
-                            }
-                            self.call_with_this(
-                                Rc::clone(&closure),
-                                argc as u16,
-                                current,
-                                instance.clone(),
-                                Some(instance),
-                            )?;
-                        }
-                        other => {
-                            return Err(ExecutionError::NotConstructable {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
-                        }
-                    }
+                    self.construct(callee, arguments, current)?;
                 }
                 Instruction::NewObject { count } => {
                     let count = *count as usize;
@@ -1526,6 +1460,50 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         object.borrow_mut().set(&key, value);
                     }
                     self.stack.push(target);
+                }
+                Instruction::EnumerateKeys => {
+                    let target = self.pop(current)?;
+                    // Own enumerable *string* keys only. The VM's reserved keys are symbols and
+                    // internal slots, and neither is enumerable; inherited properties are absent
+                    // because nothing here can yet make one enumerable -- a class puts its
+                    // methods on the prototype, and those are not.
+                    let keys = own_properties(&target)
+                        .into_iter()
+                        .map(|(key, _)| key)
+                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                        .map(Value::String)
+                        .collect();
+                    self.stack.push(Value::Array(Rc::new(RefCell::new(keys))));
+                }
+                Instruction::Apply => {
+                    let arguments = self.pop(current)?;
+                    let callee = self.pop(current)?;
+                    let this_value = self.pop(current)?;
+                    let Value::Array(arguments) = arguments else {
+                        // The compiler only ever builds this operand with `array_literal`.
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: arguments.type_name(),
+                        });
+                    };
+                    let arguments = arguments.borrow().clone();
+                    let result = self.call_value(&callee, this_value, arguments, current)?;
+                    self.stack.push(result);
+                }
+                Instruction::ConstructSpread => {
+                    let arguments = self.pop(current)?;
+                    let callee = self.pop(current)?;
+                    let Value::Array(arguments) = arguments else {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: arguments.type_name(),
+                        });
+                    };
+                    let arguments = arguments.borrow().clone();
+                    // `new` with a computed argument list is the same construction the
+                    // fixed-arity `New` performs, so it goes through the same path rather than
+                    // repeating the allocate-run-override sequence.
+                    self.construct(callee, arguments, current)?;
                 }
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
@@ -2269,6 +2247,87 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         let prototype = Value::Object(Rc::new(RefCell::new(data)));
         self.error_prototype = Some(prototype.clone());
         prototype
+    }
+
+    /// `new callee(...arguments)`.
+    ///
+    /// Leaves the instance on the stack for a native constructor. For a user function it pushes a
+    /// frame instead, and the instance arrives when that frame returns -- which is why this
+    /// cannot simply hand one back.
+    fn construct(
+        &mut self,
+        callee: Value,
+        arguments: Vec<Value>,
+        current: usize,
+    ) -> Result<(), ExecutionError> {
+        match callee {
+            Value::Native(Native::Error) => {
+                let error = self.construct_error(&arguments);
+                self.stack.push(error);
+            }
+            Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
+                let is_map = matches!(kind, Native::MapConstructor);
+                let mut data = ObjectData::default();
+                data.set("@@entries", Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                if is_map {
+                    data.set("@@map", Value::Boolean(true));
+                }
+                data.set("size", Value::Number(0.0));
+                let collection = Value::Object(Rc::new(RefCell::new(data)));
+                // `new Set(iterable)` and `new Map(entries)` seed themselves through
+                // `add`/`set`, so deduplication and size accounting are the same code
+                // the explicit calls use rather than a second copy of it.
+                if let Some(source) = arguments.first().cloned()
+                    && !matches!(source, Value::Undefined | Value::Null)
+                {
+                    for item in self.drain_iterable(&source, current)? {
+                        let (key, value) = if is_map {
+                            (
+                                self.computed(&item, &Value::Number(0.0)),
+                                self.computed(&item, &Value::Number(1.0)),
+                            )
+                        } else {
+                            (item, Value::Undefined)
+                        };
+                        call_native(
+                            if is_map {
+                                Native::MapSet
+                            } else {
+                                Native::SetAdd
+                            },
+                            &collection,
+                            &[key, value],
+                        )?;
+                    }
+                }
+                self.stack.push(collection);
+            }
+            Value::Function(closure) => {
+                // `new` creates the instance, runs the body with it as `this`, and
+                // yields the instance -- unless the body returned an object, which
+                // wins. That override is what makes factory constructors work.
+                let instance = self.instantiate(&closure);
+                self.stack.push(Value::Undefined);
+                let argc = arguments.len();
+                for argument in arguments {
+                    self.stack.push(argument);
+                }
+                self.call_with_this(
+                    Rc::clone(&closure),
+                    argc as u16,
+                    current,
+                    instance.clone(),
+                    Some(instance),
+                )?;
+            }
+            other => {
+                return Err(ExecutionError::NotConstructable {
+                    instruction: current,
+                    value: other.type_name(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Build an `Error` instance whose prototype is this run's `Error.prototype`.

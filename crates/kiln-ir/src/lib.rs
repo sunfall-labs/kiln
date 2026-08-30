@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 use kiln_hir::{
-    ArrayElement, AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName,
-    ExportOrigin, Expression, ExpressionKind, Function, ImportName, Literal, LogicalOperator,
+    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
+    Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
     Module, ObjectKey, ObjectMember, Pattern, Span, Statement, StatementKind, SwitchCase,
     UnaryOperator, VariableKind,
 };
@@ -202,6 +202,20 @@ pub enum Instruction {
     DeleteProperty(u32),
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Replace a value with an array of its own enumerable string keys, in enumeration order.
+    ///
+    /// A snapshot, which is what the language specifies: a key *added* during the loop may or may
+    /// not be visited and this chooses not to. A key *deleted* during the loop must not be, which
+    /// the loop rechecks rather than this instruction predicting.
+    EnumerateKeys,
+    /// Call with an argument list built at runtime, for a call containing a spread.
+    ///
+    /// Stack: `[this, callee, arguments] -> [result]`. A separate instruction rather than a flag
+    /// on `Call` because the arity is no longer in the bytecode: it is the length of an array the
+    /// program computed, which is exactly what a spread means.
+    Apply,
+    /// `new callee(...arguments)`. Stack: `[callee, arguments] -> [instance]`.
+    ConstructSpread,
     /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
     /// than a copy of its value.
     ///
@@ -792,6 +806,12 @@ impl Compiler {
                 body,
                 statement.span,
             ),
+            StatementKind::ForIn {
+                kind,
+                name,
+                object,
+                body,
+            } => self.for_in(*kind, name, object, body, statement.span),
             StatementKind::ForOf {
                 kind,
                 name,
@@ -1159,6 +1179,91 @@ impl Compiler {
         while let Some(finalizer) = self.pending_finalizers.pop() {
             self.finalizers.push(finalizer);
         }
+    }
+
+    /// `for (const name in object) body`.
+    ///
+    /// Walks a snapshot of the keys by index rather than through the iterator protocol, because
+    /// there is no iterator involved: the keys are produced once and the loop steps through them.
+    /// Each key is rechecked against the object before the body runs, so one the body deleted is
+    /// skipped -- the reason this is not simply a `for-of` over `Object.keys(object)`.
+    fn for_in(
+        &mut self,
+        kind: VariableKind,
+        name: &str,
+        object: &Expression,
+        body: &Statement,
+        span: Span,
+    ) {
+        let subject = format!("%in{}", self.hidden_bindings);
+        let keys = format!("%keys{}", self.hidden_bindings);
+        let cursor = format!("%at{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+
+        self.scopes.push(HashMap::new());
+        self.expression(object);
+        self.declare_hidden(&subject, span);
+        self.load_hidden(&subject);
+        self.code.push(Instruction::EnumerateKeys);
+        self.declare_hidden(&keys, span);
+        self.push_constant(Constant::Number(0f64.to_bits()));
+        self.declare_hidden(&cursor, span);
+
+        let start = self.code.len();
+        self.load_hidden(&cursor);
+        self.load_hidden(&keys);
+        let length = self.constant_index(Constant::String("length".to_owned()));
+        self.code.push(Instruction::GetProperty(length));
+        self.code.push(Instruction::Binary(BinaryOp::LessThan));
+        let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        // Read this step's key, then advance the cursor, so a `continue` in the body cannot
+        // re-read it.
+        let key = format!("%key{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.load_hidden(&keys);
+        self.load_hidden(&cursor);
+        self.code.push(Instruction::GetComputed);
+        self.declare_hidden(&key, span);
+        self.load_hidden(&cursor);
+        self.push_constant(Constant::Number(1f64.to_bits()));
+        self.code.push(Instruction::Binary(BinaryOp::Add));
+        self.store_hidden(&cursor);
+
+        // A key the body has already deleted is not visited.
+        self.load_hidden(&key);
+        self.load_hidden(&subject);
+        self.code.push(Instruction::Binary(BinaryOp::In));
+        let skip = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        // A fresh binding each iteration, so a closure made in the body captures that step's key.
+        self.scopes.push(HashMap::new());
+        self.load_hidden(&key);
+        self.declare_bound(kind, name, span);
+
+        self.loops.push(LoopContext {
+            finalizer_depth: self.finalizers.len(),
+            handler_depth: self.handler_depth,
+            ..LoopContext::default()
+        });
+        self.statement(body);
+        let context = self.loops.pop().expect("this loop pushed its own context");
+        self.scopes.pop().expect("iteration scope was just pushed");
+
+        let continue_target = self.code.len() as u32;
+        for jump in context.continues {
+            self.patch_jump_to(jump, continue_target);
+        }
+        // A skipped key rejoins here, having already advanced the cursor.
+        self.patch_jump(skip);
+        self.code.push(Instruction::Jump(start as u32));
+
+        self.patch_jump(exit_jump);
+        let exit = self.code.len() as u32;
+        for jump in context.breaks {
+            self.patch_jump_to(jump, exit);
+        }
+        self.scopes.pop().expect("loop scope was just pushed");
     }
 
     /// `for (const name of iterable) body`.
@@ -1831,9 +1936,18 @@ impl Compiler {
                     self.error(Some(expression.span), "too many constructor arguments");
                     return;
                 }
+                if Self::has_spread(arguments) {
+                    self.expression(callee);
+                    self.array_literal(arguments, expression.span);
+                    self.code.push(Instruction::ConstructSpread);
+                    return;
+                }
                 self.expression(callee);
                 for argument in arguments {
-                    self.expression(argument);
+                    let ListElement::Item(value) = argument else {
+                        unreachable!("just checked that there are no spreads");
+                    };
+                    self.expression(value);
                 }
                 self.code.push(Instruction::New {
                     argc: arguments.len() as u16,
@@ -2540,7 +2654,7 @@ impl Compiler {
     /// Without a spread this is one `NewArray` over the elements. With one, the array is built
     /// incrementally: the run of literal elements before each spread becomes its own `NewArray`
     /// and the spread appends to it, because a spread's length is not known until it runs.
-    fn array_literal(&mut self, elements: &[ArrayElement], span: Span) {
+    fn array_literal(&mut self, elements: &[ListElement], span: Span) {
         if elements.len() > u32::MAX as usize {
             self.error(Some(span), "array literal has too many elements");
             return;
@@ -2548,10 +2662,10 @@ impl Compiler {
 
         if !elements
             .iter()
-            .any(|element| matches!(element, ArrayElement::Spread(_)))
+            .any(|element| matches!(element, ListElement::Spread(_)))
         {
             for element in elements {
-                let ArrayElement::Item(value) = element else {
+                let ListElement::Item(value) = element else {
                     unreachable!("just checked that there are no spreads");
                 };
                 self.expression(value);
@@ -2566,11 +2680,11 @@ impl Compiler {
         let mut started = false;
         for element in elements {
             match element {
-                ArrayElement::Item(value) => {
+                ListElement::Item(value) => {
                     self.expression(value);
                     pending += 1;
                 }
-                ArrayElement::Spread(value) => {
+                ListElement::Spread(value) => {
                     self.flush_array_run(&mut pending, &mut started);
                     self.expression(value);
                     self.code.push(Instruction::SpreadInto);
@@ -2663,7 +2777,25 @@ impl Compiler {
         self.code.push(Instruction::SetProperty(name));
     }
 
-    fn call(&mut self, callee: &Expression, arguments: &[Expression], span: Span) {
+    /// Whether an argument list contains a spread, and so needs its length computed at runtime.
+    fn has_spread(arguments: &[ListElement]) -> bool {
+        arguments
+            .iter()
+            .any(|argument| matches!(argument, ListElement::Spread(_)))
+    }
+
+    /// Emit the arguments of a call with no spread, in order, returning the count.
+    fn emit_arguments(&mut self, arguments: &[ListElement]) -> u16 {
+        for argument in arguments {
+            let ListElement::Item(value) = argument else {
+                unreachable!("callers check for spreads first");
+            };
+            self.expression(value);
+        }
+        arguments.len() as u16
+    }
+
+    fn call(&mut self, callee: &Expression, arguments: &[ListElement], span: Span) {
         let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
                 &callee.kind,
@@ -2675,16 +2807,21 @@ impl Compiler {
             self.error(Some(span), "too many call arguments");
             return;
         }
-        let argc = arguments.len() as u16;
 
         if is_console_log {
             // Still a compile-time shape rather than a value. `console` becomes an ordinary
             // object once there are objects to hold it; until then this is the only way to
             // reach stdout, and turning it into a real call would mean inventing a callable
             // with no object model underneath it.
-            for argument in arguments {
-                self.expression(argument);
+            if Self::has_spread(arguments) {
+                // `HostCall` carries its arity in the bytecode, and a spread does not have one
+                // until it runs. Refused rather than flattened into a single array argument,
+                // which would print `[1, 2]` where the program asked for `1 2`.
+                self.error(Some(span), "spread into `console.log` is not supported yet");
+                self.push_constant(Constant::Undefined);
+                return;
             }
+            let argc = self.emit_arguments(arguments);
             self.code.push(Instruction::HostCall {
                 op: HostOp::WriteStdout,
                 argc,
@@ -2692,35 +2829,56 @@ impl Compiler {
             return;
         }
 
-        // A method call keeps its receiver rather than reading the function out first.
+        // A method call keeps its receiver rather than reading the function out first. With a
+        // spread the receiver has to be kept explicitly instead, because `Apply` takes it as an
+        // operand -- so each shape below has a fixed-arity form and a spread form.
+        let spreading = Self::has_spread(arguments);
         match &callee.kind {
             // `super.m(...)` resolves the function on the parent's prototype but runs it against
             // the current `this` -- that is the whole point of it, and an ordinary call would
             // lose the receiver.
-            ExpressionKind::SuperMember { .. } => {
+            ExpressionKind::SuperMember { .. } if !spreading => {
                 self.expression(callee);
-                for argument in arguments {
-                    self.expression(argument);
-                }
+                let argc = self.emit_arguments(arguments);
                 self.code.push(Instruction::SuperCall { argc });
+                return;
+            }
+            ExpressionKind::SuperMember { .. } => {
+                self.error(
+                    Some(span),
+                    "spread into a `super` call is not supported yet",
+                );
+                self.push_constant(Constant::Undefined);
                 return;
             }
             ExpressionKind::StaticMember { object, property } => {
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.expression(object);
-                for argument in arguments {
-                    self.expression(argument);
+                if spreading {
+                    // The receiver stays beneath the method, which is what `Apply` expects.
+                    self.code.push(Instruction::Dup);
+                    self.code.push(Instruction::GetProperty(name));
+                    self.array_literal(arguments, span);
+                    self.code.push(Instruction::Apply);
+                } else {
+                    let argc = self.emit_arguments(arguments);
+                    self.code.push(Instruction::CallMethod { name, argc });
                 }
-                self.code.push(Instruction::CallMethod { name, argc });
                 return;
             }
             ExpressionKind::ComputedMember { object, property } => {
                 self.expression(object);
-                self.expression(property);
-                for argument in arguments {
-                    self.expression(argument);
+                if spreading {
+                    self.code.push(Instruction::Dup);
+                    self.expression(property);
+                    self.code.push(Instruction::GetComputed);
+                    self.array_literal(arguments, span);
+                    self.code.push(Instruction::Apply);
+                } else {
+                    self.expression(property);
+                    let argc = self.emit_arguments(arguments);
+                    self.code.push(Instruction::CallComputed { argc });
                 }
-                self.code.push(Instruction::CallComputed { argc });
                 return;
             }
             _ => {}
@@ -2729,10 +2887,16 @@ impl Compiler {
         // Everything else is a real call. The callee is evaluated first so it sits below its
         // arguments, which is both the evaluation order the language requires and the layout
         // the VM needs to find it at a fixed depth.
-        self.expression(callee);
-        for argument in arguments {
-            self.expression(argument);
+        if spreading {
+            // A plain call has no receiver, and `Apply` takes one, so `undefined` stands in.
+            self.push_constant(Constant::Undefined);
+            self.expression(callee);
+            self.array_literal(arguments, span);
+            self.code.push(Instruction::Apply);
+            return;
         }
+        self.expression(callee);
+        let argc = self.emit_arguments(arguments);
         self.code.push(Instruction::Call { argc });
     }
 
@@ -2992,6 +3156,10 @@ fn collect_nested_function_names(
             collect_identifiers(test, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
         }
+        StatementKind::ForIn { object, body, .. } => {
+            collect_identifiers(object, names, inside_function);
+            collect_nested_function_names(body, names, inside_function);
+        }
         StatementKind::DoWhile { body, test } => {
             collect_nested_function_names(body, names, inside_function);
             collect_identifiers(test, names, inside_function);
@@ -3162,21 +3330,16 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(consequent, names, collecting);
             collect_identifiers(alternate, names, collecting);
         }
-        ExpressionKind::Call { callee, arguments } => {
+        ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
             collect_identifiers(callee, names, collecting);
             for argument in arguments {
-                collect_identifiers(argument, names, collecting);
-            }
-        }
-        ExpressionKind::New { callee, arguments } => {
-            collect_identifiers(callee, names, collecting);
-            for argument in arguments {
-                collect_identifiers(argument, names, collecting);
+                let (ListElement::Item(value) | ListElement::Spread(value)) = argument;
+                collect_identifiers(value, names, collecting);
             }
         }
         ExpressionKind::Array { elements } => {
             for element in elements {
-                let (ArrayElement::Item(value) | ArrayElement::Spread(value)) = element;
+                let (ListElement::Item(value) | ListElement::Spread(value)) = element;
                 collect_identifiers(value, names, collecting);
             }
         }
@@ -3260,14 +3423,15 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || expression_references(consequent, name)
                 || expression_references(alternate, name)
         }
-        ExpressionKind::Call { callee, arguments } => {
+        ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
             expression_references(callee, name)
-                || arguments
-                    .iter()
-                    .any(|argument| expression_references(argument, name))
+                || arguments.iter().any(|argument| {
+                    let (ListElement::Item(value) | ListElement::Spread(value)) = argument;
+                    expression_references(value, name)
+                })
         }
         ExpressionKind::Array { elements } => elements.iter().any(|element| match element {
-            ArrayElement::Item(value) | ArrayElement::Spread(value) => {
+            ListElement::Item(value) | ListElement::Spread(value) => {
                 expression_references(value, name)
             }
         }),
@@ -3286,12 +3450,6 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
             expression_references(object, name)
                 || expression_references(property, name)
                 || expression_references(value, name)
-        }
-        ExpressionKind::New { callee, arguments } => {
-            expression_references(callee, name)
-                || arguments
-                    .iter()
-                    .any(|argument| expression_references(argument, name))
         }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
@@ -3914,7 +4072,7 @@ mod tests {
                     },
                     span: Span::default(),
                 }),
-                arguments: vec![number(1.0)],
+                arguments: vec![kiln_hir::ListElement::Item(number(1.0))],
             },
             span: Span::default(),
         };
@@ -4347,6 +4505,55 @@ mod tests {
                 .count(),
             2,
             "one append per hole, and none for the empty text between them"
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_spread_keeps_its_arity_in_the_bytecode() {
+        // The fixed-arity path is the common one and must not pay for the general one: no array
+        // is built and no `Apply` is emitted.
+        let program = compile(&module(vec![
+            function("f", &["x"], vec![]),
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::Call {
+                    callee: Box::new(Expression {
+                        kind: ExpressionKind::Identifier("f".into()),
+                        span: Span::default(),
+                    }),
+                    arguments: vec![kiln_hir::ListElement::Item(number(1.0))],
+                },
+                span: Span::default(),
+            })),
+        ]))
+        .expect("compiles");
+        assert!(program.code.contains(&Instruction::Call { argc: 1 }));
+        assert!(!program.code.contains(&Instruction::Apply));
+    }
+
+    #[test]
+    fn a_call_with_a_spread_builds_its_arguments_at_runtime() {
+        // A spread's length is not known until it runs, so the arity leaves the bytecode and
+        // becomes the length of an array the program computes.
+        let program = compile(&module(vec![
+            function("f", &["x"], vec![]),
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::Call {
+                    callee: Box::new(Expression {
+                        kind: ExpressionKind::Identifier("f".into()),
+                        span: Span::default(),
+                    }),
+                    arguments: vec![kiln_hir::ListElement::Spread(number(1.0))],
+                },
+                span: Span::default(),
+            })),
+        ]))
+        .expect("compiles");
+        assert!(program.code.contains(&Instruction::Apply));
+        assert!(
+            !program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::Call { .. }))
         );
     }
 }
