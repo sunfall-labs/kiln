@@ -14,6 +14,7 @@ frontend-oxc = { workspace = true }
 kiln-interpreter = { workspace = true }
 kiln-ir = { workspace = true }
 kiln-module-graph = { workspace = true }
+kiln-module-resolver = { workspace = true }
 kiln-native = { workspace = true }
 kiln-runtime = { workspace = true }
 kiln-conformance = { workspace = true }

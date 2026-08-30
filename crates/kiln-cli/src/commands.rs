@@ -647,6 +647,9 @@ fn sync_project_sources_with_override(
         };
         texts.push((path, text));
     }
+    if let Some((entry, _)) = source_override {
+        sources::include_reachable_dependencies(root, entry, &mut texts)?;
+    }
     let manifest = texts
         .iter()
         .map(|(path, text)| (path.clone(), source_digest(text)))

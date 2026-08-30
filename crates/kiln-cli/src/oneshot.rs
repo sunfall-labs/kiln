@@ -14,6 +14,7 @@
 //! around it and nothing else in the CLI changes.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use kiln_daemon::{Daemon, ShutdownHandle};
@@ -31,11 +32,15 @@ pub struct OneShot {
     dir: PathBuf,
 }
 
+static NEXT_ONE_SHOT: AtomicU64 = AtomicU64::new(0);
+
 impl OneShot {
     pub fn start() -> Result<OneShot> {
-        // Named by pid so two concurrent `kiln --one-shot` runs cannot share a database, and
-        // cleared first in case a killed run of the same pid left the directory behind.
-        let dir = std::env::temp_dir().join(format!("kiln-1s-{}", std::process::id()));
+        // PID separates processes; the serial separates concurrent sessions in this process.
+        // The latter matters to embedders and to parallel tests, where PID alone made one session
+        // delete another's live socket directory.
+        let serial = NEXT_ONE_SHOT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kiln-1s-{}-{serial}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("daemon.sock");
 
@@ -97,6 +102,15 @@ mod tests {
     use crate::commands;
 
     #[test]
+    fn concurrent_one_shot_sessions_have_private_socket_directories() {
+        let first = OneShot::start().expect("start first engine");
+        let second = OneShot::start().expect("start second engine");
+        assert_ne!(first.dir, second.dir);
+        assert!(first.socket.exists());
+        assert!(second.socket.exists());
+    }
+
+    #[test]
     fn a_one_shot_run_answers_and_then_leaves_nothing_behind() {
         let fixture =
             std::env::temp_dir().join(format!("kiln-cli-1s-fixture-{}", std::process::id()));
@@ -121,6 +135,41 @@ mod tests {
             "{} should have been cleaned up",
             dir.display()
         );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn one_shot_run_synchronizes_and_executes_a_package_dependency() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-cli-package-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let package = fixture.join("node_modules/pkg");
+        std::fs::create_dir_all(&package).expect("create package fixture");
+        let source = fixture.join("main.js");
+        std::fs::write(
+            &source,
+            "import { answer } from 'pkg'; console.log(answer);\n",
+        )
+        .expect("write entry");
+        std::fs::write(package.join("package.json"), r#"{"exports":"./index.js"}"#)
+            .expect("write package manifest");
+        std::fs::write(package.join("index.js"), "export const answer = 42;\n")
+            .expect("write package entry");
+
+        let (output, updated) = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            let output = commands::run(&mut session, &source, &fixture).expect("run package graph");
+            std::fs::write(package.join("index.js"), "export const answer = 43;\n")
+                .expect("update package entry");
+            let updated = commands::run(&mut session, &source, &fixture)
+                .expect("rerun updated package graph");
+            (output, updated)
+        };
+
+        assert_eq!(output.text, "42\n");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(updated.text, "43\n");
+        assert_eq!(updated.exit_code, 0);
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }
