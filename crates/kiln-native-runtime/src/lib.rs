@@ -280,9 +280,11 @@ static int kiln_cli_write_value(kiln_value value) {
                 ? kiln_cli_write_bytes("-Infinity", 9)
                 : kiln_cli_write_bytes("Infinity", 8);
         }
-        /* JavaScript renders both signed zeros as 0. */
+        /* Console display preserves negative zero; String(-0) is the separate `0` conversion. */
         if (number == 0.0) {
-            return kiln_cli_write_bytes("0", 1);
+            return signbit(number)
+                ? kiln_cli_write_bytes("-0", 2)
+                : kiln_cli_write_bytes("0", 1);
         }
         /* %.17g is intentionally the temporary native scalar formatting contract. */
         length = snprintf(buffer, sizeof(buffer), "%.17g", number);
@@ -609,7 +611,7 @@ int main(void) {
         assert!(run.status.success());
         assert_eq!(
             String::from_utf8(run.stdout).expect("UTF-8 stdout"),
-            "undefined null true false 0 NaN Infinity -Infinity hello\n"
+            "undefined null true false -0 NaN Infinity -Infinity hello\n"
         );
         let _ = std::fs::remove_dir_all(root);
     }
