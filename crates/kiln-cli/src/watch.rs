@@ -423,8 +423,10 @@ enum NativeRunResult {
     Cancelled,
 }
 
+type NativeFinisher = Box<dyn FnOnce(Arc<AtomicBool>) -> Result<NativeRunResult> + Send + 'static>;
+
 struct NativeRun {
-    finish: Box<dyn FnOnce(Arc<AtomicBool>) -> Result<NativeRunResult> + Send + 'static>,
+    finish: Option<NativeFinisher>,
 }
 
 impl NativeRun {
@@ -432,12 +434,26 @@ impl NativeRun {
         finish: impl FnOnce(Arc<AtomicBool>) -> Result<NativeRunResult> + Send + 'static,
     ) -> Self {
         Self {
-            finish: Box::new(finish),
+            finish: Some(Box::new(finish)),
         }
     }
 
-    fn finish(self, cancelled: Arc<AtomicBool>) -> Result<NativeRunResult> {
-        (self.finish)(cancelled)
+    fn finish(mut self, cancelled: Arc<AtomicBool>) -> Result<NativeRunResult> {
+        let finish = self
+            .finish
+            .take()
+            .expect("a native run can only be finished once");
+        finish(cancelled)
+    }
+}
+
+impl Drop for NativeRun {
+    fn drop(&mut self) {
+        let Some(finish) = self.finish.take() else {
+            return;
+        };
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let _ = finish(cancelled);
     }
 }
 
@@ -2005,17 +2021,21 @@ mod tests {
 
         let result_path = dir.join("result.bin");
         let run = launch_native(&executable, &result_path).expect("launch fixture");
-        for _ in 0..100 {
-            if descendant_pid.is_file() {
-                break;
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        let descendant = loop {
+            match std::fs::read_to_string(&descendant_pid) {
+                Ok(pid) => {
+                    break pid
+                        .trim()
+                        .parse::<i32>()
+                        .expect("descendant pid is numeric");
+                }
+                Err(_) if Instant::now() < ready_deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("descendant pid is published: {error}"),
             }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let descendant = std::fs::read_to_string(&descendant_pid)
-            .expect("descendant pid is published")
-            .trim()
-            .parse::<i32>()
-            .expect("descendant pid is numeric");
+        };
         let cancelled = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
         assert!(matches!(
@@ -2043,6 +2063,77 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(descendant_is_gone, "the descendant survived cancellation");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_an_unfinished_native_refresh_stops_its_process_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("native-drop-process-group");
+        let executable = dir.join("program");
+        let descendant_pid = dir.join("descendant.pid");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'partial' > \"${}\"\nsleep 10 &\nprintf '%s\\n' \"$!\" > \"{}\"\nwait\n",
+                NATIVE_RESULT_PATH_ENV,
+                descendant_pid.display(),
+            ),
+        )
+        .expect("write executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make executable");
+
+        let result_path = dir.join("result.bin");
+        let run = launch_native(&executable, &result_path).expect("launch fixture");
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        let descendant = loop {
+            match std::fs::read_to_string(&descendant_pid) {
+                Ok(pid) => {
+                    break pid
+                        .trim()
+                        .parse::<i32>()
+                        .expect("descendant pid is numeric");
+                }
+                Err(_) if Instant::now() < ready_deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("descendant pid is published: {error}"),
+            }
+        };
+
+        let started = Instant::now();
+        drop(run);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "dropping a native run must stop descendants retaining its pipes"
+        );
+        assert!(
+            !result_path.exists(),
+            "dropping a native run must remove its sidecar"
+        );
+
+        let mut descendant_is_gone = false;
+        for _ in 0..100 {
+            // SAFETY: signal zero performs existence/permission checking without sending a signal.
+            if unsafe { libc::kill(descendant, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                descendant_is_gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            descendant_is_gone,
+            "the descendant survived NativeRun::drop"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
