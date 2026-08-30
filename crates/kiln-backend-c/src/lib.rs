@@ -253,7 +253,10 @@ enum kiln_value_tag {
     /* A compiled pattern and its cursor. bits holds a kiln_regexp*. */
     KILN_VALUE_REGEXP = 20,
     /* An arbitrary-precision integer. bits holds the provider's opaque handle. */
-    KILN_VALUE_BIGINT = 21
+    KILN_VALUE_BIGINT = 21,
+    /* Typed views are private heap values.  Their pointers never cross the scalar embedding ABI. */
+    KILN_VALUE_ARRAY_BUFFER = 22,
+    KILN_VALUE_TYPED_ARRAY = 23
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -281,6 +284,16 @@ enum kiln_value_tag {
 /* `BigInt`, which converts and never constructs: `new BigInt(1)` is a TypeError in the
  * specification, and the reason is that a BigInt is a primitive. */
 #define KILN_C99_BUILTIN_BIGINT 28
+#define KILN_C99_BUILTIN_ARRAY_BUFFER 29
+#define KILN_C99_BUILTIN_INT8_ARRAY 30
+#define KILN_C99_BUILTIN_UINT8_ARRAY 31
+#define KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY 32
+#define KILN_C99_BUILTIN_INT16_ARRAY 33
+#define KILN_C99_BUILTIN_UINT16_ARRAY 34
+#define KILN_C99_BUILTIN_INT32_ARRAY 35
+#define KILN_C99_BUILTIN_UINT32_ARRAY 36
+#define KILN_C99_BUILTIN_FLOAT32_ARRAY 37
+#define KILN_C99_BUILTIN_FLOAT64_ARRAY 38
 
 /* Array methods, part two.
  *
@@ -603,6 +616,9 @@ enum kiln_value_tag {
 /* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
  * Library code reaches for it constantly on values it has already coerced. */
 #define KILN_C99_METHOD_PRIMITIVE_TO_STRING 176
+#define KILN_C99_METHOD_TYPED_SUBARRAY 230
+#define KILN_C99_METHOD_TYPED_SET 231
+#define KILN_C99_METHOD_TYPED_FILL 232
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -625,6 +641,30 @@ typedef struct kiln_value {
     const char *ptr;
     size_t len;
 } kiln_value;
+
+typedef enum kiln_typed_kind {
+    KILN_TYPED_INT8,
+    KILN_TYPED_UINT8,
+    KILN_TYPED_UINT8_CLAMPED,
+    KILN_TYPED_INT16,
+    KILN_TYPED_UINT16,
+    KILN_TYPED_INT32,
+    KILN_TYPED_UINT32,
+    KILN_TYPED_FLOAT32,
+    KILN_TYPED_FLOAT64
+} kiln_typed_kind;
+
+typedef struct kiln_typed_buffer {
+    uint8_t *bytes;
+    size_t byte_length;
+} kiln_typed_buffer;
+
+typedef struct kiln_typed_array {
+    kiln_typed_buffer *buffer;
+    size_t byte_offset;
+    size_t length;
+    kiln_typed_kind kind;
+} kiln_typed_array;
 
 
 /* A nonzero callback return is propagated as KILN_C99_HOST_ERROR.  The callback owns any
@@ -998,6 +1038,8 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value);
 static kiln_value *kiln_c99_cell_of(kiln_value value);
 static kiln_object *kiln_c99_object_of(kiln_value value);
 static kiln_array *kiln_c99_array_of(kiln_value value);
+static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value);
+static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value);
 static double kiln_c99_as_number(kiln_value value);
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
                                       kiln_value *thrown);
@@ -1017,6 +1059,15 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_array(kiln_value *out);
+static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length);
+static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+                                    kiln_value source, size_t byte_offset, size_t length,
+                                    int has_length, kiln_value *thrown);
+static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
+static size_t kiln_c99_typed_width(kiln_typed_kind kind);
+static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
+static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
+static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -1174,6 +1225,14 @@ static kiln_array *kiln_c99_array_of(kiln_value value) {
     return (kiln_array *)(uintptr_t)value.bits;
 }
 
+static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
+    return (kiln_typed_buffer *)(uintptr_t)value.bits;
+}
+
+static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
+    return (kiln_typed_array *)(uintptr_t)value.bits;
+}
+
 static int kiln_c99_new_object(kiln_value *out) {
     kiln_object *object = (kiln_object *)malloc(sizeof *object);
     if (object == NULL) {
@@ -1199,6 +1258,297 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->properties = kiln_c99_undefined();
     array->frozen = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
+    switch (kind) {
+    case KILN_TYPED_INT8:
+    case KILN_TYPED_UINT8:
+    case KILN_TYPED_UINT8_CLAMPED: return 1;
+    case KILN_TYPED_INT16:
+    case KILN_TYPED_UINT16: return 2;
+    case KILN_TYPED_INT32:
+    case KILN_TYPED_UINT32:
+    case KILN_TYPED_FLOAT32: return 4;
+    case KILN_TYPED_FLOAT64: return 8;
+    }
+    return 1;
+}
+
+static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
+    switch (kind) {
+    case KILN_TYPED_INT8: return "Int8Array";
+    case KILN_TYPED_UINT8: return "Uint8Array";
+    case KILN_TYPED_UINT8_CLAMPED: return "Uint8ClampedArray";
+    case KILN_TYPED_INT16: return "Int16Array";
+    case KILN_TYPED_UINT16: return "Uint16Array";
+    case KILN_TYPED_INT32: return "Int32Array";
+    case KILN_TYPED_UINT32: return "Uint32Array";
+    case KILN_TYPED_FLOAT32: return "Float32Array";
+    case KILN_TYPED_FLOAT64: return "Float64Array";
+    }
+    return "TypedArray";
+}
+
+static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_INT8_ARRAY: *kind = KILN_TYPED_INT8; return 1;
+    case KILN_C99_BUILTIN_UINT8_ARRAY: *kind = KILN_TYPED_UINT8; return 1;
+    case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY: *kind = KILN_TYPED_UINT8_CLAMPED; return 1;
+    case KILN_C99_BUILTIN_INT16_ARRAY: *kind = KILN_TYPED_INT16; return 1;
+    case KILN_C99_BUILTIN_UINT16_ARRAY: *kind = KILN_TYPED_UINT16; return 1;
+    case KILN_C99_BUILTIN_INT32_ARRAY: *kind = KILN_TYPED_INT32; return 1;
+    case KILN_C99_BUILTIN_UINT32_ARRAY: *kind = KILN_TYPED_UINT32; return 1;
+    case KILN_C99_BUILTIN_FLOAT32_ARRAY: *kind = KILN_TYPED_FLOAT32; return 1;
+    case KILN_C99_BUILTIN_FLOAT64_ARRAY: *kind = KILN_TYPED_FLOAT64; return 1;
+    default: return 0;
+    }
+}
+
+static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
+    kiln_typed_buffer *buffer = (kiln_typed_buffer *)malloc(sizeof *buffer);
+    if (buffer == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    buffer->bytes = (uint8_t *)calloc(byte_length == 0 ? 1 : byte_length, 1);
+    if (buffer->bytes == NULL) {
+        free(buffer);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    buffer->byte_length = byte_length;
+    *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* ECMAScript's ToIndex: missing/undefined/NaN become zero, but negative, infinite and unsafe
+ * integer values are RangeErrors.  The size_t bound is separate because a 32-bit C target is
+ * narrower than JavaScript's maximum safe integer.  Checking both before the cast keeps the
+ * generated C out of the implementation-defined/undefined floating-to-integer range. */
+static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown) {
+    double numeric = kiln_c99_as_number(value);
+    double integral;
+    if (isnan(numeric) || numeric == 0.0) {
+        *out = 0;
+        return KILN_C99_OK;
+    }
+    integral = trunc(numeric);
+    if (!isfinite(integral) || integral < 0.0 || integral > 9007199254740991.0 ||
+        integral > (double)((size_t)-1)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "invalid array buffer or typed array length");
+    }
+    *out = (size_t)integral;
+    return KILN_C99_OK;
+}
+
+static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
+    size_t width = kiln_c99_typed_width(view->kind);
+    size_t at;
+    const uint8_t *bytes;
+    uint32_t bits32;
+    uint64_t bits64;
+    int32_t signed32;
+    int16_t signed16;
+    uint16_t unsigned16;
+    float float32;
+    double float64;
+    if (index >= view->length || view->byte_offset > view->buffer->byte_length ||
+        index > (((size_t)-1) - view->byte_offset) / width) {
+        return NAN;
+    }
+    at = view->byte_offset + index * width;
+    if (at > view->buffer->byte_length || width > view->buffer->byte_length - at) {
+        return NAN;
+    }
+    bytes = view->buffer->bytes + at;
+    switch (view->kind) {
+    case KILN_TYPED_INT8: return (double)(int8_t)bytes[0];
+    case KILN_TYPED_UINT8:
+    case KILN_TYPED_UINT8_CLAMPED: return (double)bytes[0];
+    case KILN_TYPED_INT16:
+        signed16 = (int16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
+        return (double)signed16;
+    case KILN_TYPED_UINT16:
+        unsigned16 = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+        return (double)unsigned16;
+    case KILN_TYPED_INT32:
+        bits32 = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                 ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+        memcpy(&signed32, &bits32, sizeof signed32);
+        return (double)signed32;
+    case KILN_TYPED_UINT32:
+        bits32 = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                 ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+        return (double)bits32;
+    case KILN_TYPED_FLOAT32:
+        bits32 = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                 ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+        memcpy(&float32, &bits32, sizeof float32);
+        return (double)float32;
+    case KILN_TYPED_FLOAT64:
+        bits64 = (uint64_t)bytes[0] | ((uint64_t)bytes[1] << 8) |
+                 ((uint64_t)bytes[2] << 16) | ((uint64_t)bytes[3] << 24) |
+                 ((uint64_t)bytes[4] << 32) | ((uint64_t)bytes[5] << 40) |
+                 ((uint64_t)bytes[6] << 48) | ((uint64_t)bytes[7] << 56);
+        memcpy(&float64, &bits64, sizeof float64);
+        return float64;
+    }
+    return NAN;
+}
+
+static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value) {
+    size_t width = kiln_c99_typed_width(view->kind);
+    size_t at;
+    uint8_t *bytes;
+    uint32_t bits32;
+    uint64_t bits64;
+    int32_t signed32;
+    int16_t signed16;
+    uint16_t unsigned16;
+    float float32;
+    double float64;
+    double rounded;
+    if (index >= view->length || view->byte_offset > view->buffer->byte_length ||
+        index > (((size_t)-1) - view->byte_offset) / width) {
+        return;
+    }
+    at = view->byte_offset + index * width;
+    if (at > view->buffer->byte_length || width > view->buffer->byte_length - at) {
+        return;
+    }
+    bytes = view->buffer->bytes + at;
+    switch (view->kind) {
+    case KILN_TYPED_INT8: bytes[0] = (uint8_t)kiln_c99_to_uint32(value); return;
+    case KILN_TYPED_UINT8:
+        bytes[0] = (uint8_t)kiln_c99_to_uint32(value);
+        return;
+    case KILN_TYPED_UINT8_CLAMPED:
+        if (isnan(value) || value <= 0.0) {
+            bytes[0] = 0;
+        } else if (value >= 255.0) {
+            bytes[0] = 255;
+        } else {
+            rounded = floor(value);
+            if (value - rounded > 0.5 ||
+                (value - rounded == 0.5 && fmod(rounded, 2.0) != 0.0)) {
+                rounded += 1.0;
+            }
+            bytes[0] = (uint8_t)rounded;
+        }
+        return;
+    case KILN_TYPED_INT16:
+        signed16 = (int16_t)kiln_c99_to_uint32(value);
+        unsigned16 = (uint16_t)signed16;
+        bytes[0] = (uint8_t)unsigned16;
+        bytes[1] = (uint8_t)(unsigned16 >> 8);
+        return;
+    case KILN_TYPED_UINT16:
+        unsigned16 = (uint16_t)kiln_c99_to_uint32(value);
+        bytes[0] = (uint8_t)unsigned16;
+        bytes[1] = (uint8_t)(unsigned16 >> 8);
+        return;
+    case KILN_TYPED_INT32:
+        signed32 = (int32_t)kiln_c99_to_uint32(value);
+        memcpy(&bits32, &signed32, sizeof bits32);
+        bytes[0] = (uint8_t)bits32;
+        bytes[1] = (uint8_t)(bits32 >> 8);
+        bytes[2] = (uint8_t)(bits32 >> 16);
+        bytes[3] = (uint8_t)(bits32 >> 24);
+        return;
+    case KILN_TYPED_UINT32:
+        bits32 = kiln_c99_to_uint32(value);
+        bytes[0] = (uint8_t)bits32;
+        bytes[1] = (uint8_t)(bits32 >> 8);
+        bytes[2] = (uint8_t)(bits32 >> 16);
+        bytes[3] = (uint8_t)(bits32 >> 24);
+        return;
+    case KILN_TYPED_FLOAT32:
+        float32 = (float)value;
+        memcpy(&bits32, &float32, sizeof bits32);
+        bytes[0] = (uint8_t)bits32;
+        bytes[1] = (uint8_t)(bits32 >> 8);
+        bytes[2] = (uint8_t)(bits32 >> 16);
+        bytes[3] = (uint8_t)(bits32 >> 24);
+        return;
+    case KILN_TYPED_FLOAT64:
+        float64 = value;
+        memcpy(&bits64, &float64, sizeof bits64);
+        bytes[0] = (uint8_t)bits64;
+        bytes[1] = (uint8_t)(bits64 >> 8);
+        bytes[2] = (uint8_t)(bits64 >> 16);
+        bytes[3] = (uint8_t)(bits64 >> 24);
+        bytes[4] = (uint8_t)(bits64 >> 32);
+        bytes[5] = (uint8_t)(bits64 >> 40);
+        bytes[6] = (uint8_t)(bits64 >> 48);
+        bytes[7] = (uint8_t)(bits64 >> 56);
+        return;
+    }
+}
+
+static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+                                    kiln_value source, size_t byte_offset, size_t length,
+                                    int has_length, kiln_value *thrown) {
+    size_t width = kiln_c99_typed_width(kind);
+    kiln_value buffer_value;
+    kiln_typed_array *view;
+    size_t count;
+    size_t index;
+    int status;
+    if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
+        kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(source);
+        if (byte_offset % width != 0 || byte_offset > buffer->byte_length ||
+            (!has_length && (buffer->byte_length - byte_offset) % width != 0) ||
+            (has_length && (length > (buffer->byte_length - byte_offset) / width))) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "invalid typed array length or offset");
+        }
+        count = has_length ? length : (buffer->byte_length - byte_offset) / width;
+        view = (kiln_typed_array *)malloc(sizeof *view);
+        if (view == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        view->buffer = buffer;
+        view->byte_offset = byte_offset;
+        view->length = count;
+        view->kind = kind;
+        *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
+        return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_ARRAY) {
+        count = kiln_c99_array_of(source)->count;
+    } else if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+        count = kiln_c99_typed_array_of(source)->length;
+    } else {
+        status = kiln_c99_to_index(source, &count, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    if (count > ((size_t)-1) / width) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_typed_buffer(&buffer_value, count * width);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    view = (kiln_typed_array *)malloc(sizeof *view);
+    if (view == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    view->buffer = kiln_c99_typed_buffer_of(buffer_value);
+    view->byte_offset = 0;
+    view->length = count;
+    view->kind = kind;
+    for (index = 0; index < count; ++index) {
+        double item = source.tag == KILN_VALUE_ARRAY
+                          ? kiln_c99_as_number(kiln_c99_array_of(source)->elements[index])
+                      : source.tag == KILN_VALUE_TYPED_ARRAY
+                          ? kiln_c99_typed_get(kiln_c99_typed_array_of(source), index)
+                          : 0.0;
+        kiln_c99_typed_set(view, index, item);
+    }
+    *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
     return KILN_C99_OK;
 }
 
@@ -1732,6 +2082,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REGEXP_TEST: return "test";
     case KILN_C99_METHOD_REGEXP_EXEC: return "exec";
     case KILN_C99_METHOD_REGEXP_TO_STRING: return "toString";
+    case KILN_C99_METHOD_TYPED_SUBARRAY: return "subarray";
+    case KILN_C99_METHOD_TYPED_SET: return "set";
+    case KILN_C99_METHOD_TYPED_FILL: return "fill";
     case KILN_C99_METHOD_MATH_RANDOM: return "random";
     case KILN_C99_METHOD_MATH_SINH: return "sinh";
     case KILN_C99_METHOD_MATH_COSH: return "cosh";
@@ -2096,6 +2449,16 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_NUMBER_PROTOTYPE: return "Number";
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE: return "Function";
     case KILN_C99_BUILTIN_FUNCTION: return "Function";
+    case KILN_C99_BUILTIN_ARRAY_BUFFER: return "ArrayBuffer";
+    case KILN_C99_BUILTIN_INT8_ARRAY: return "Int8Array";
+    case KILN_C99_BUILTIN_UINT8_ARRAY: return "Uint8Array";
+    case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY: return "Uint8ClampedArray";
+    case KILN_C99_BUILTIN_INT16_ARRAY: return "Int16Array";
+    case KILN_C99_BUILTIN_UINT16_ARRAY: return "Uint16Array";
+    case KILN_C99_BUILTIN_INT32_ARRAY: return "Int32Array";
+    case KILN_C99_BUILTIN_UINT32_ARRAY: return "Uint32Array";
+    case KILN_C99_BUILTIN_FLOAT32_ARRAY: return "Float32Array";
+    case KILN_C99_BUILTIN_FLOAT64_ARRAY: return "Float64Array";
     default: {
         /* Every other tag is an error constructor; a tag with no name at all is a tag added
          * without one, which shows as anonymous rather than dereferencing a null. */
@@ -2777,7 +3140,8 @@ static int kiln_c99_is_reference(kiln_value value) {
      * would produce, so reducing it to text first would turn every date subtraction into NaN. */
     return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
            value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR ||
-           value.tag == KILN_VALUE_COLLECTION;
+           value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_ARRAY_BUFFER ||
+           value.tag == KILN_VALUE_TYPED_ARRAY;
 }
 
 /* Whether a value has to be converted before it crosses the embedding boundary.
@@ -3045,6 +3409,61 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             *result = kiln_c99_bigint_value(handle);
             return KILN_C99_OK;
         }
+        case KILN_C99_BUILTIN_ARRAY_BUFFER: {
+            size_t length;
+            int status;
+            if (new_target.tag == KILN_VALUE_UNDEFINED) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "ArrayBuffer constructor requires 'new'");
+            }
+            status = kiln_c99_to_index(argc > 0 ? args[0] : kiln_c99_undefined(), &length,
+                                       thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_new_typed_buffer(result, length);
+        }
+        case KILN_C99_BUILTIN_INT8_ARRAY:
+        case KILN_C99_BUILTIN_UINT8_ARRAY:
+        case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:
+        case KILN_C99_BUILTIN_INT16_ARRAY:
+        case KILN_C99_BUILTIN_UINT16_ARRAY:
+        case KILN_C99_BUILTIN_INT32_ARRAY:
+        case KILN_C99_BUILTIN_UINT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
+            kiln_typed_kind kind;
+            kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+            size_t byte_offset = 0;
+            size_t length = 0;
+            int has_length = 0;
+            int status;
+            if (new_target.tag == KILN_VALUE_UNDEFINED) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "typed array constructor requires 'new'");
+            }
+            if (!kiln_c99_builtin_typed_kind(callee.bits, &kind)) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            /* Offset and length are meaningful only for a backing buffer. Extra arguments to
+             * array-like and numeric-length constructors are ignored without coercion. */
+            if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
+                status = kiln_c99_to_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                           &byte_offset, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                has_length = argc > 2 && args[2].tag != KILN_VALUE_UNDEFINED;
+                if (has_length) {
+                    status = kiln_c99_to_index(args[2], &length, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+            }
+            return kiln_c99_new_typed_array(result, kind, source, byte_offset, length,
+                                            has_length, thrown);
+        }
         case KILN_C99_BUILTIN_SYMBOL:
             return kiln_c99_new_symbol(result, argc > 0 ? args[0] : kiln_c99_undefined());
         case KILN_C99_BUILTIN_REGEXP: {
@@ -3212,6 +3631,8 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
         return 1;
     case KILN_VALUE_BIGINT:
         /* Truthiness follows zero, not sign: `-1n` is truthy and `0n` is not. */
@@ -3332,6 +3753,27 @@ static kiln_value kiln_c99_text(kiln_value value) {
          * `"1"`. A console adds it back, which is a different question and answered there. */
         return kiln_c99_bigint_text(value, 10);
     }
+    case KILN_VALUE_TYPED_ARRAY: {
+        kiln_typed_array *view = kiln_c99_typed_array_of(value);
+        kiln_text joined = {NULL, 0, 0};
+        size_t index;
+        for (index = 0; index < view->length; ++index) {
+            kiln_value shown;
+            if (index != 0 && kiln_c99_text_append(&joined, ",", 1) != KILN_C99_OK) {
+                free(joined.bytes);
+                return kiln_c99_undefined();
+            }
+            shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
+            if (shown.tag != KILN_VALUE_STRING ||
+                kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                free(joined.bytes);
+                return kiln_c99_undefined();
+            }
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+    }
+    case KILN_VALUE_ARRAY_BUFFER:
+        return kiln_c99_copy_text("[object ArrayBuffer]", 21);
     case KILN_VALUE_REGEXP: {
         /* `String(/a/g)` is the literal as written, which is what `toString` returns. */
         kiln_regexp *regexp = kiln_c99_regexp_of(value);
@@ -3834,6 +4276,87 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_ARRAY_BUFFER:
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "byteLength")) {
+            *out = kiln_c99_number((double)kiln_c99_typed_buffer_of(target)->byte_length);
+            return KILN_C99_OK;
+        }
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
+            return KILN_C99_OK;
+        }
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    case KILN_VALUE_TYPED_ARRAY: {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            *out = kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)
+                       ? kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES)
+                       : kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "length")) {
+            *out = kiln_c99_number((double)view->length);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "byteLength")) {
+            *out = kiln_c99_number((double)(view->length * kiln_c99_typed_width(view->kind)));
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "byteOffset")) {
+            *out = kiln_c99_number((double)view->byte_offset);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+            *out = kiln_c99_number((double)kiln_c99_typed_width(view->kind));
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "buffer")) {
+            *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER,
+                                  (uint64_t)(uintptr_t)view->buffer, NULL, 0);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            uint64_t builtin = KILN_C99_BUILTIN_UINT8_ARRAY;
+            switch (view->kind) {
+            case KILN_TYPED_INT8: builtin = KILN_C99_BUILTIN_INT8_ARRAY; break;
+            case KILN_TYPED_UINT8: builtin = KILN_C99_BUILTIN_UINT8_ARRAY; break;
+            case KILN_TYPED_UINT8_CLAMPED: builtin = KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY; break;
+            case KILN_TYPED_INT16: builtin = KILN_C99_BUILTIN_INT16_ARRAY; break;
+            case KILN_TYPED_UINT16: builtin = KILN_C99_BUILTIN_UINT16_ARRAY; break;
+            case KILN_TYPED_INT32: builtin = KILN_C99_BUILTIN_INT32_ARRAY; break;
+            case KILN_TYPED_UINT32: builtin = KILN_C99_BUILTIN_UINT32_ARRAY; break;
+            case KILN_TYPED_FLOAT32: builtin = KILN_C99_BUILTIN_FLOAT32_ARRAY; break;
+            case KILN_TYPED_FLOAT64: builtin = KILN_C99_BUILTIN_FLOAT64_ARRAY; break;
+            }
+            *out = kiln_c99_builtin(builtin);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "join")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_JOIN);
+        } else if (kiln_c99_same_name(key, key_len, "values")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+        } else if (kiln_c99_same_name(key, key_len, "entries")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_ENTRIES);
+        } else if (kiln_c99_same_name(key, key_len, "keys")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_KEYS);
+        } else if (kiln_c99_same_name(key, key_len, "subarray")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_SUBARRAY);
+        } else if (kiln_c99_same_name(key, key_len, "slice")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
+        } else if (kiln_c99_same_name(key, key_len, "set")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_SET);
+        } else if (kiln_c99_same_name(key, key_len, "fill")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_FILL);
+        } else {
+            *out = kiln_c99_undefined();
+        }
+        return KILN_C99_OK;
+    }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
@@ -4130,6 +4653,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
+        {
+            kiln_typed_kind typed_kind;
+            if (kind == KILN_PROPERTY_STRING &&
+                kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
+                kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+                *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
+                return KILN_C99_OK;
+            }
+        }
         /* A namespace's constants are values rather than methods, so they are answered here
          * instead of through a call. */
         if (target.bits == KILN_C99_BUILTIN_SYMBOL) {
@@ -4322,6 +4854,15 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if ((size_t)index < view->length) {
+            *out = kiln_c99_number(kiln_c99_typed_get(view, (size_t)index));
+        } else {
+            *out = kiln_c99_undefined();
+        }
+        return KILN_C99_OK;
+    }
     {
         /* An object key is a string, whatever it was written as -- and a symbol's is the
          * reserved slot it names rather than the way it prints. */
@@ -4359,6 +4900,11 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         if (slot + 1 > array->count) {
             array->count = slot + 1;
         }
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
         return KILN_C99_OK;
     }
     {
@@ -6975,8 +7521,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value at;
             kiln_value step;
             kiln_array *array;
+            kiln_typed_array *typed;
+            kiln_value part_value;
             size_t position;
             int finished;
+            int part = 0;
             if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -6988,12 +7537,22 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            if (items.tag != KILN_VALUE_ARRAY) {
+            if (items.tag != KILN_VALUE_ARRAY && items.tag != KILN_VALUE_TYPED_ARRAY) {
                 return KILN_C99_CONTROL_ERROR;
             }
-            array = kiln_c99_array_of(items);
             position = (size_t)kiln_c99_as_number(at);
-            finished = position >= array->count;
+            if (items.tag == KILN_VALUE_TYPED_ARRAY) {
+                typed = kiln_c99_typed_array_of(items);
+                finished = position >= typed->length;
+            } else {
+                array = kiln_c99_array_of(items);
+                finished = position >= array->count;
+            }
+            if (items.tag == KILN_VALUE_TYPED_ARRAY &&
+                kiln_c99_get_internal(host, receiver, "@@iterpart", 10, &part_value, depth,
+                                      thrown) == KILN_C99_OK) {
+                part = (int)kiln_c99_as_number(part_value);
+            }
             if (!finished) {
                 status = kiln_c99_put(host, receiver, "@@index", 7,
                                       kiln_c99_number((double)(position + 1)), depth, thrown);
@@ -7005,9 +7564,30 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_put(host, step, "value", 5,
-                                  finished ? kiln_c99_undefined() : array->elements[position],
-                                  depth, thrown);
+            {
+                kiln_value produced = kiln_c99_undefined();
+                if (!finished) {
+                    if (items.tag == KILN_VALUE_TYPED_ARRAY) {
+                        produced = part == 2 ? kiln_c99_number((double)position)
+                                             : kiln_c99_number(kiln_c99_typed_get(typed, position));
+                        if (part == 1) {
+                            status = kiln_c99_new_array(&produced);
+                            if (status == KILN_C99_OK) {
+                                status = kiln_c99_array_push(produced, kiln_c99_number((double)position));
+                            }
+                            if (status == KILN_C99_OK) {
+                                status = kiln_c99_array_push(
+                                    produced, kiln_c99_number(kiln_c99_typed_get(typed, position)));
+                            }
+                        }
+                    } else {
+                        produced = array->elements[position];
+                    }
+                }
+                status = status == KILN_C99_OK
+                             ? kiln_c99_put(host, step, "value", 5, produced, depth, thrown)
+                             : status;
+            }
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -7051,6 +7631,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             case KILN_VALUE_PROMISE: tag = "Promise"; break;
             case KILN_VALUE_SYMBOL: tag = "Symbol"; break;
             case KILN_VALUE_BIGINT: tag = "BigInt"; break;
+            case KILN_VALUE_ARRAY_BUFFER: tag = "ArrayBuffer"; break;
+            case KILN_VALUE_TYPED_ARRAY:
+                tag = kiln_c99_typed_name(kiln_c99_typed_array_of(receiver)->kind);
+                break;
             case KILN_VALUE_FUNCTION:
             case KILN_VALUE_BUILTIN:
             case KILN_VALUE_METHOD:
@@ -7236,6 +7820,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * terminates -- which is what the length being read once means. */
             kiln_value snapshot;
             kiln_array *array;
+            if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
+                return kiln_c99_new_typed_iterator(result, receiver, 0);
+            }
             if (receiver.tag != KILN_VALUE_ARRAY) {
                 return KILN_C99_CONTROL_ERROR;
             }
@@ -7731,6 +8318,150 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_CONTROL_ERROR;
         }
         return kiln_c99_invoke_string_method(result, code, receiver, args, argc);
+    }
+    if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
+        switch (code) {
+        case KILN_C99_METHOD_JOIN: {
+            kiln_text joined = {NULL, 0, 0};
+            kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value shown_separator;
+            const char *separator_bytes = ",";
+            size_t separator_len = 1;
+            if (separator.tag != KILN_VALUE_UNDEFINED) {
+                shown_separator = kiln_c99_text(separator);
+                if (shown_separator.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                separator_bytes = shown_separator.ptr;
+                separator_len = shown_separator.len;
+            }
+            for (index = 0; index < view->length; ++index) {
+                kiln_value shown;
+                if (index != 0 && kiln_c99_text_append(&joined, separator_bytes, separator_len) !=
+                                      KILN_C99_OK) {
+                    free(joined.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
+                if (shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ARRAY_VALUES:
+            return kiln_c99_new_typed_iterator(result, receiver, 0);
+        case KILN_C99_METHOD_ARRAY_ENTRIES:
+            return kiln_c99_new_typed_iterator(result, receiver, 1);
+        case KILN_C99_METHOD_ARRAY_KEYS:
+            return kiln_c99_new_typed_iterator(result, receiver, 2);
+        case KILN_C99_METHOD_TYPED_SUBARRAY: {
+            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                   view->length, 0);
+            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                                 view->length, view->length);
+            kiln_typed_array *sub = (kiln_typed_array *)malloc(sizeof *sub);
+            if (sub == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            sub->buffer = view->buffer;
+            sub->byte_offset = view->byte_offset + start * kiln_c99_typed_width(view->kind);
+            sub->length = end >= start ? end - start : 0;
+            sub->kind = view->kind;
+            *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)sub, NULL, 0);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_SLICE: {
+            size_t width = kiln_c99_typed_width(view->kind);
+            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                   view->length, 0);
+            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                                 view->length, view->length);
+            size_t count = end >= start ? end - start : 0;
+            kiln_value buffer;
+            kiln_typed_array *copy;
+            if (count > ((size_t)-1) / width) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            status = kiln_c99_new_typed_buffer(&buffer, count * width);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            copy = (kiln_typed_array *)malloc(sizeof *copy);
+            if (copy == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            copy->buffer = kiln_c99_typed_buffer_of(buffer);
+            copy->byte_offset = 0;
+            copy->length = count;
+            copy->kind = view->kind;
+            if (count != 0) {
+                memcpy(copy->buffer->bytes,
+                       view->buffer->bytes + view->byte_offset + start * width,
+                       count * width);
+            }
+            *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)copy, NULL, 0);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_TYPED_SET: {
+            size_t offset = 0;
+            size_t count;
+            double *items;
+            if (argc == 0 || (args[0].tag != KILN_VALUE_ARRAY &&
+                              args[0].tag != KILN_VALUE_TYPED_ARRAY)) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (argc > 1) {
+                status = kiln_c99_to_index(args[1], &offset, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            count = args[0].tag == KILN_VALUE_ARRAY
+                        ? kiln_c99_array_of(args[0])->count
+                        : kiln_c99_typed_array_of(args[0])->length;
+            if (offset > view->length || count > view->length - offset) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "offset is out of bounds");
+            }
+            if (count > ((size_t)-1) / sizeof *items) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            items = (double *)malloc((count == 0 ? 1 : count) * sizeof *items);
+            if (items == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < count; ++index) {
+                items[index] = args[0].tag == KILN_VALUE_ARRAY
+                                   ? kiln_c99_as_number(kiln_c99_array_of(args[0])->elements[index])
+                                   : kiln_c99_typed_get(kiln_c99_typed_array_of(args[0]), index);
+            }
+            for (index = 0; index < count; ++index) {
+                kiln_c99_typed_set(view, offset + index, items[index]);
+            }
+            free(items);
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_TYPED_FILL: {
+            double filler = argc > 0 ? kiln_c99_as_number(args[0]) : NAN;
+            size_t start = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                                   view->length, 0);
+            size_t end = kiln_c99_relative_index(argc > 2 ? args[2] : kiln_c99_undefined(),
+                                                 view->length, view->length);
+            for (index = start; index < end; ++index) {
+                kiln_c99_typed_set(view, index, filler);
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+        default:
+            return KILN_C99_CONTROL_ERROR;
+        }
     }
     if (receiver.tag != KILN_VALUE_ARRAY) {
         /* Redirected onto something that is not an array. The array methods are generic: they
@@ -8444,6 +9175,17 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
+    if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(source);
+        /* Read each element at the moment it is visited: a view is live over its shared buffer. */
+        for (index = 0; index < view->length; ++index) {
+            status = kiln_c99_array_push(target, kiln_c99_number(kiln_c99_typed_get(view, index)));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
     if (source.tag == KILN_VALUE_COLLECTION) {
         /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
          * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
@@ -8564,6 +9306,34 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
     kiln_value current = target;
     size_t steps;
     *answer = 0;
+    if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
+        *answer = kiln_c99_same_name(key, key_len, "byteLength") ||
+                  kiln_c99_same_name(key, key_len, "constructor");
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        double index = kiln_c99_key_index(key, key_len);
+        if (index >= 0.0) {
+            *answer = (size_t)index < view->length;
+        } else {
+            *answer = kiln_c99_same_name(key, key_len, "length") ||
+                      kiln_c99_same_name(key, key_len, "byteLength") ||
+                      kiln_c99_same_name(key, key_len, "byteOffset") ||
+                      kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT") ||
+                      kiln_c99_same_name(key, key_len, "buffer") ||
+                      kiln_c99_same_name(key, key_len, "constructor") ||
+                      kiln_c99_same_name(key, key_len, "join") ||
+                      kiln_c99_same_name(key, key_len, "values") ||
+                      kiln_c99_same_name(key, key_len, "entries") ||
+                      kiln_c99_same_name(key, key_len, "keys") ||
+                      kiln_c99_same_name(key, key_len, "subarray") ||
+                      kiln_c99_same_name(key, key_len, "set") ||
+                      kiln_c99_same_name(key, key_len, "fill") ||
+                      kiln_c99_same_name(key, key_len, "@@iterator");
+        }
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An index is present when it is in range, and `length` always is. */
         double index = kiln_c99_key_index(key, key_len);
@@ -9693,6 +10463,13 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part) {
+    int status = kiln_c99_new_iterator(out, source);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_put(NULL, *out, "@@iterpart", 10, kiln_c99_number((double)part), 0, NULL);
+}
 static const char *kiln_c99_error_name(uint64_t builtin) {
     switch (builtin) {
     case KILN_C99_BUILTIN_TYPE_ERROR: return "TypeError";
@@ -10514,6 +11291,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_new_error(result, callee.bits,
                                   argc > 0 ? args[0] : kiln_c99_undefined());
     }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        (callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+         kiln_c99_builtin_typed_kind(callee.bits, &(kiln_typed_kind){0}))) {
+        return kiln_c99_call_with_target(host, result, callee, kiln_c99_undefined(), callee,
+                                         args, argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_MAP ||
                                              callee.bits == KILN_C99_BUILTIN_SET)) {
         int is_map = callee.bits == KILN_C99_BUILTIN_MAP;
@@ -10645,6 +11428,24 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_DATE: *answer = value.tag == KILN_VALUE_DATE; return KILN_C99_OK;
         case KILN_C99_BUILTIN_REGEXP: *answer = value.tag == KILN_VALUE_REGEXP; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_ARRAY_BUFFER:
+            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_INT8_ARRAY:
+        case KILN_C99_BUILTIN_UINT8_ARRAY:
+        case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:
+        case KILN_C99_BUILTIN_INT16_ARRAY:
+        case KILN_C99_BUILTIN_UINT16_ARRAY:
+        case KILN_C99_BUILTIN_INT32_ARRAY:
+        case KILN_C99_BUILTIN_UINT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
+            kiln_typed_kind kind;
+            *answer = kiln_c99_builtin_typed_kind(constructor.bits, &kind) &&
+                      value.tag == KILN_VALUE_TYPED_ARRAY &&
+                      kiln_c99_typed_array_of(value)->kind == kind;
+            return KILN_C99_OK;
+        }
         case KILN_C99_BUILTIN_ERROR:
         case KILN_C99_BUILTIN_TYPE_ERROR:
         case KILN_C99_BUILTIN_RANGE_ERROR:
@@ -10676,7 +11477,8 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_OBJECT:
             *answer = value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_ARRAY ||
-                      value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_COLLECTION;
+                      value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_COLLECTION ||
+                      value.tag == KILN_VALUE_ARRAY_BUFFER || value.tag == KILN_VALUE_TYPED_ARRAY;
             return KILN_C99_OK;
         default: return KILN_C99_CONTROL_ERROR;
         }
@@ -10746,6 +11548,8 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -11380,7 +12184,17 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::RegExp
             | kiln_ir::Builtin::GlobalThis
             | kiln_ir::Builtin::BigInt
-            | kiln_ir::Builtin::Function,
+            | kiln_ir::Builtin::Function
+            | kiln_ir::Builtin::ArrayBuffer
+            | kiln_ir::Builtin::Int8Array
+            | kiln_ir::Builtin::Uint8Array
+            | kiln_ir::Builtin::Uint8ClampedArray
+            | kiln_ir::Builtin::Int16Array
+            | kiln_ir::Builtin::Uint16Array
+            | kiln_ir::Builtin::Int32Array
+            | kiln_ir::Builtin::Uint32Array
+            | kiln_ir::Builtin::Float32Array
+            | kiln_ir::Builtin::Float64Array,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -13192,6 +14006,18 @@ fn emit_instruction(
                 kiln_ir::Builtin::DecodeUriComponent => {
                     "kiln_c99_method(KILN_C99_METHOD_DECODE_URI_COMPONENT)"
                 }
+                kiln_ir::Builtin::ArrayBuffer => "kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER)",
+                kiln_ir::Builtin::Int8Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT8_ARRAY)",
+                kiln_ir::Builtin::Uint8Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY)",
+                kiln_ir::Builtin::Uint8ClampedArray => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY)"
+                }
+                kiln_ir::Builtin::Int16Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT16_ARRAY)",
+                kiln_ir::Builtin::Uint16Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT16_ARRAY)",
+                kiln_ir::Builtin::Int32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_INT32_ARRAY)",
+                kiln_ir::Builtin::Uint32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT32_ARRAY)",
+                kiln_ir::Builtin::Float32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT32_ARRAY)",
+                kiln_ir::Builtin::Float64Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -15079,6 +15905,428 @@ int main(void) {{
         assert!(
             run.status.success(),
             "UTF-16 relational comparison returned the wrong result"
+        );
+    }
+    #[cfg(any())]
+    mod pre_typed_array_tests {
+
+        #[test]
+        fn executable_array_string_iterator_and_named_enumeration_are_distinct() {
+            let generated = emit(&program(
+                vec![Constant::String("@@iterator".into())],
+                vec![
+                    Instruction::NewArray { count: 0 },
+                    Instruction::Const(0),
+                    Instruction::GetComputed,
+                    Instruction::Return,
+                ],
+                0,
+            ))
+            .expect("array string iterator probe emits");
+            let wrapper = format!(
+                r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_UNDEFINED ? 0 : 1;
+}}
+"#,
+                symbol = generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, "array-string-iterator");
+            assert!(
+                run.status.success(),
+                "an absent ordinary @@iterator key must not expose Symbol.iterator"
+            );
+
+            let constants = vec![
+                Constant::Number(0.0f64.to_bits()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::Number(2.0f64.to_bits()),
+                Constant::Number(3.0f64.to_bits()),
+                Constant::String("a".into()),
+                Constant::String("b".into()),
+                Constant::String("keys".into()),
+                Constant::String("values".into()),
+                Constant::String("entries".into()),
+            ];
+            let array = |code: &mut Vec<Instruction>| {
+                code.extend([
+                    Instruction::Const(1),
+                    Instruction::NewArray { count: 1 },
+                    Instruction::Dup,
+                    Instruction::Const(5),
+                    Instruction::Const(2),
+                    Instruction::SetComputed,
+                    Instruction::Pop,
+                    Instruction::Dup,
+                    Instruction::Const(4),
+                    Instruction::Const(3),
+                    Instruction::SetComputed,
+                    Instruction::Pop,
+                ]);
+            };
+            let probes = [
+                (6, 2, 4, "keys"),    // Object.keys(array)[2] == "a".
+                (7, 2, 3, "values"),  // Object.values(array)[2] == 3.
+                (8, 1, 5, "entries"), // Object.entries(array)[1][0] == "b".
+            ];
+            for (method, index, expected, label) in probes {
+                let mut code = vec![Instruction::LoadBuiltin(kiln_ir::Builtin::Object)];
+                array(&mut code);
+                code.push(Instruction::CallMethod {
+                    name: method,
+                    argc: 1,
+                });
+                code.push(Instruction::Const(index));
+                code.push(Instruction::GetComputed);
+                if method == 8 {
+                    code.push(Instruction::Const(0));
+                    code.push(Instruction::GetComputed);
+                    code.push(Instruction::Const(5));
+                } else {
+                    code.push(Instruction::Const(expected));
+                }
+                code.extend([
+                    Instruction::Binary(BinaryOp::StrictEqual),
+                    Instruction::Return,
+                ]);
+                let generated = emit(&program(constants.clone(), code, 0))
+                    .expect("array enumeration probe emits");
+                let wrapper = format!(
+                    "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+                    generated.symbol
+                );
+                let run = run_with_main(&generated, &wrapper, label);
+                assert!(
+                    run.status.success(),
+                    "array {label} omitted named string properties"
+                );
+            }
+
+            let mut code = Vec::new();
+            array(&mut code);
+            code.push(Instruction::EnumerateKeys);
+            code.push(Instruction::Const(2));
+            code.push(Instruction::GetComputed);
+            code.push(Instruction::Const(4));
+            code.extend([
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ]);
+            let generated = emit(&program(constants, code, 0)).expect("for-in probe emits");
+            let wrapper = format!(
+                "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+                generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, "array-for-in");
+            assert!(
+                run.status.success(),
+                "for-in omitted named string properties"
+            );
+        }
+
+        #[test]
+        fn executable_inspection_skips_symbol_properties_without_separators() {
+            let generated = emit(&program(
+                vec![
+                    Constant::String("iterator".into()),
+                    Constant::Number(1.0f64.to_bits()),
+                    Constant::String("a".into()),
+                    Constant::Number(2.0f64.to_bits()),
+                ],
+                vec![
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                    Instruction::GetProperty(0),
+                    Instruction::Const(1),
+                    Instruction::Const(2),
+                    Instruction::Const(3),
+                    Instruction::NewObject { count: 2 },
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Return,
+                ],
+                0,
+            ))
+            .expect("symbol inspection probe emits");
+            let wrapper = format!(
+                r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
+        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}}
+"#,
+                symbol = generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, "symbol-inspection");
+            assert!(
+                run.status.success(),
+                "symbol-only properties must not leave malformed inspection separators"
+            );
+        }
+    }
+
+    #[test]
+    fn executable_array_string_iterator_and_named_enumeration_are_distinct() {
+        let generated = emit(&program(
+            vec![Constant::String("@@iterator".into())],
+            vec![
+                Instruction::NewArray { count: 0 },
+                Instruction::Const(0),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("array string iterator probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_UNDEFINED ? 0 : 1;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-string-iterator");
+        assert!(
+            run.status.success(),
+            "an absent ordinary @@iterator key must not expose Symbol.iterator"
+        );
+
+        let constants = vec![
+            Constant::Number(0.0f64.to_bits()),
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+            Constant::Number(3.0f64.to_bits()),
+            Constant::String("a".into()),
+            Constant::String("b".into()),
+            Constant::String("keys".into()),
+            Constant::String("values".into()),
+            Constant::String("entries".into()),
+        ];
+        let array = |code: &mut Vec<Instruction>| {
+            code.extend([
+                Instruction::Const(1),
+                Instruction::NewArray { count: 1 },
+                Instruction::Dup,
+                Instruction::Const(5),
+                Instruction::Const(2),
+                Instruction::SetComputed,
+                Instruction::Pop,
+                Instruction::Dup,
+                Instruction::Const(4),
+                Instruction::Const(3),
+                Instruction::SetComputed,
+                Instruction::Pop,
+            ]);
+        };
+        let probes = [
+            (6, 2, 4, "keys"),    // Object.keys(array)[2] == "a".
+            (7, 2, 3, "values"),  // Object.values(array)[2] == 3.
+            (8, 1, 5, "entries"), // Object.entries(array)[1][0] == "b".
+        ];
+        for (method, index, expected, label) in probes {
+            let mut code = vec![Instruction::LoadBuiltin(kiln_ir::Builtin::Object)];
+            array(&mut code);
+            code.push(Instruction::CallMethod {
+                name: method,
+                argc: 1,
+            });
+            code.push(Instruction::Const(index));
+            code.push(Instruction::GetComputed);
+            if method == 8 {
+                code.push(Instruction::Const(0));
+                code.push(Instruction::GetComputed);
+                code.push(Instruction::Const(5));
+            } else {
+                code.push(Instruction::Const(expected));
+            }
+            code.extend([
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ]);
+            let generated =
+                emit(&program(constants.clone(), code, 0)).expect("array enumeration probe emits");
+            let wrapper = format!(
+                "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+                generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, label);
+            assert!(
+                run.status.success(),
+                "array {label} omitted named string properties"
+            );
+        }
+
+        let mut code = Vec::new();
+        array(&mut code);
+        code.push(Instruction::EnumerateKeys);
+        code.push(Instruction::Const(2));
+        code.push(Instruction::GetComputed);
+        code.push(Instruction::Const(4));
+        code.extend([
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::Return,
+        ]);
+        let generated = emit(&program(constants, code, 0)).expect("for-in probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-for-in");
+        assert!(
+            run.status.success(),
+            "for-in omitted named string properties"
+        );
+    }
+
+    #[test]
+    fn executable_typed_array_views_cover_all_element_kinds_and_aliasing() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value buffer;
+    kiln_value bytes;
+    kiln_value words;
+    kiln_value source;
+    kiln_value sub;
+    kiln_value iterator;
+    kiln_value step;
+    kiln_value value;
+    kiln_value args[3];
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_typed_kind kinds[] = {{KILN_TYPED_INT8, KILN_TYPED_UINT8, KILN_TYPED_UINT8_CLAMPED,
+        KILN_TYPED_INT16, KILN_TYPED_UINT16, KILN_TYPED_INT32, KILN_TYPED_UINT32,
+        KILN_TYPED_FLOAT32, KILN_TYPED_FLOAT64}};
+    double inputs[] = {{200.0, 256.0, 300.0, 70000.0, 70000.0, 4294967297.0,
+        -1.0, 1.1, 1.1}};
+    double expected[] = {{-56.0, 0.0, 255.0, 4464.0, 4464.0, 1.0,
+        4294967295.0, 1.1, 1.1}};
+    size_t index;
+    if (kiln_c99_new_typed_buffer(&buffer, 8) != KILN_C99_OK) return 2;
+    if (kiln_c99_new_typed_array(&bytes, KILN_TYPED_UINT8, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_new_typed_array(&words, KILN_TYPED_UINT32, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_typed_array_of(bytes)->length != 8 || kiln_c99_typed_array_of(words)->length != 2) return 5;
+    kiln_c99_typed_set(kiln_c99_typed_array_of(bytes), 0, 1.0);
+    kiln_c99_typed_set(kiln_c99_typed_array_of(bytes), 1, 2.0);
+    kiln_c99_typed_set(kiln_c99_typed_array_of(bytes), 2, 3.0);
+    kiln_c99_typed_set(kiln_c99_typed_array_of(bytes), 3, 4.0);
+    if (kiln_c99_typed_get(kiln_c99_typed_array_of(words), 0) != 67305985.0) return 6;
+    if (kiln_c99_new_typed_array(&source, KILN_TYPED_UINT8, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 7;
+    if (kiln_c99_invoke_method(NULL, &sub, KILN_C99_METHOD_TYPED_SUBARRAY, source,
+                               (kiln_value[]){{kiln_c99_number(1.0), kiln_c99_number(3.0)}}, 2, 0,
+                               &thrown) != KILN_C99_OK) return 8;
+    kiln_c99_typed_set(kiln_c99_typed_array_of(sub), 0, 9.0);
+    if (kiln_c99_typed_get(kiln_c99_typed_array_of(bytes), 1) != 9.0) return 9;
+    for (index = 0; index < sizeof kinds / sizeof *kinds; ++index) {{
+        if (kiln_c99_new_array(&source) != KILN_C99_OK ||
+            kiln_c99_array_push(source, kiln_c99_number(inputs[index])) != KILN_C99_OK ||
+            kiln_c99_new_typed_array(&value, kinds[index], source, 0, 0, 0, &thrown) != KILN_C99_OK) return 10;
+        if (kinds[index] == KILN_TYPED_FLOAT32) {{
+            if (fabs(kiln_c99_typed_get(kiln_c99_typed_array_of(value), 0) - expected[index]) > 0.000001) return 11;
+        }} else if (kiln_c99_typed_get(kiln_c99_typed_array_of(value), 0) != expected[index]) return 12;
+    }}
+    if (kiln_c99_new_typed_iterator(&iterator, source, 0) != KILN_C99_OK ||
+        kiln_c99_call(NULL, &step, kiln_c99_method(KILN_C99_METHOD_ITERATOR_NEXT), iterator,
+                      NULL, 0, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_get(NULL, step, "value", 5, &value, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_as_number(value) != inputs[sizeof inputs / sizeof *inputs - 1]) return 13;
+    /* ToIndex must reject before an out-of-range floating-to-size_t cast, while NaN is zero. */
+    if (kiln_c99_to_index(kiln_c99_number(NAN), &index, &thrown) != KILN_C99_OK || index != 0)
+        return 14;
+    if (kiln_c99_to_index(kiln_c99_number(-1.0), &index, &thrown) != KILN_C99_THROWN ||
+        kiln_c99_to_index(kiln_c99_number(1e300), &index, &thrown) != KILN_C99_THROWN)
+        return 15;
+    /* Extra offset/length arguments are ignored for an array source without being coerced. */
+    if (kiln_c99_new_array(&source) != KILN_C99_OK ||
+        kiln_c99_array_push(source, kiln_c99_number(7.0)) != KILN_C99_OK) return 16;
+    args[0] = source;
+    args[1] = kiln_c99_number(1e300);
+    if (kiln_c99_construct(NULL, &value, kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY),
+                           args, 2, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_typed_array_of(value)->length != 1 ||
+        kiln_c99_typed_get(kiln_c99_typed_array_of(value), 0) != 7.0) return 17;
+    args[0] = kiln_c99_number(-1.0);
+    if (kiln_c99_construct(NULL, &value, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
+                           args, 1, 0, &thrown) != KILN_C99_THROWN) return 18;
+    return 0;
+}}
+/* {} */
+"#,
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "typed-array-core");
+        assert!(
+            run.status.success(),
+            "typed-array C core failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_inspection_skips_symbol_properties_without_separators() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("iterator".into()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("a".into()),
+                Constant::Number(2.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::Const(3),
+                Instruction::NewObject { count: 2 },
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("symbol inspection probe emits");
+        let wrapper = format!(
+            r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
+        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "symbol-inspection");
+        assert!(
+            run.status.success(),
+            "symbol-only properties must not leave malformed inspection separators"
         );
     }
 }
