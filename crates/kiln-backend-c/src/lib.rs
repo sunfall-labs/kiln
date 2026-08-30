@@ -622,6 +622,9 @@ typedef struct kiln_closure {
     /* ...and, when this is set, drives it to completion against a promise rather than handing
      * the object to the program. */
     int asynchronous;
+    /* ...unless it is *both*, in which case the object is handed over after all and each `next`
+     * gets a promise of its own. */
+    int async_generator;
     /* What a generator's frame has to be big enough for, known when the body is emitted. */
     uint32_t local_count;
     uint32_t stack_size;
@@ -729,6 +732,14 @@ typedef struct kiln_generator {
     size_t handler_top;
     /* What `next(v)` passed in, which becomes the result of the `yield` that suspended. */
     kiln_value sent;
+    /* Whether the suspension that stopped this frame was an `await` rather than a `yield`.
+     *
+     * They emit identically -- both save the frame and return `YIELDED` -- and for an ordinary
+     * generator or an async function nothing has to tell them apart. An async generator does:
+     * an `await` between two `yield`s is invisible to the consumer, because the step is not
+     * finished. */
+    int awaiting;
+    int async_generator;
     /* Whether `sent` is a value to resume with or a rejection to raise at the suspension point.
      * A rejected `await` throws *into* the body, so a `try` around it catches -- which is the
      * whole reason the handler stack above has to survive a suspension. */
@@ -951,6 +962,8 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
@@ -1012,6 +1025,10 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                                         int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
+                                           int finished, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
                                   const kiln_value *args, size_t argc);
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
@@ -1328,6 +1345,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->sp = 0;
     frame->resume = 0;
     frame->sent = kiln_c99_undefined();
+    frame->awaiting = 0;
+    frame->async_generator = 0;
     frame->raising = 0;
     frame->promise = kiln_c99_undefined();
     frame->is_async = 0;
@@ -2532,7 +2551,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
                                  size_t name_len, uint32_t proto, int generator, int asynchronous,
-                                 int arrow, uint32_t local_count, uint32_t stack_size,
+                                 int async_generator, int arrow, uint32_t local_count,
+                                 uint32_t stack_size,
                                  uint32_t handler_depth, const kiln_value *captured,
                                  uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
@@ -2558,6 +2578,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->stack_size = stack_size;
     closure->handler_depth = handler_depth;
     closure->arrow = arrow;
+    closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
     closure->captured_new_target = kiln_c99_new_target;
@@ -2684,7 +2705,12 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         if (status != KILN_C99_OK) {
             return status;
         }
-        if (!closure->asynchronous) {
+        if (!closure->asynchronous || closure->async_generator) {
+            /* An async generator is handed over too: it awaits *and* yields, so nothing can drive
+             * it to completion -- each `next` drives one step and gets a promise of its own. */
+            if (closure->async_generator) {
+                kiln_c99_generator_of(built)->async_generator = 1;
+            }
             *result = built;
             return KILN_C99_OK;
         }
@@ -3210,8 +3236,8 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
-static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                        kiln_value *out, int depth, kiln_value *thrown) {
+static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, kiln_value *out, int depth, kiln_value *thrown) {
     static const char length_key[] = "length";
     size_t index;
     int is_length = key_len == sizeof(length_key) - 1 &&
@@ -3511,8 +3537,18 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_GENERATOR: {
-        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
-                                               KILN_C99_METHOD_GENERATOR_SELF);
+        uint64_t code;
+        if (kiln_c99_same_name(key, key_len, "@@asyncIterator")) {
+            /* Only an async generator has one, and answering for a sync one would make
+             * `for await` take the wrong loop. */
+            if (!kiln_c99_generator_of(target)->async_generator) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_SELF);
+            return KILN_C99_OK;
+        }
+        code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
+                                      KILN_C99_METHOD_GENERATOR_SELF);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
@@ -3715,6 +3751,23 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         /* A boolean or callable has no own properties here. */
         return KILN_C99_CONTROL_ERROR;
     }
+}
+
+/* A read, with one rule about the machine's own keys layered over it.
+ *
+ * A `@@` key is a *protocol probe*: `for await` asks every subject for `@@asyncIterator` before
+ * deciding which loop to run, and "this value does not have one" is a real answer. An unknown name
+ * a *program* wrote is a different thing -- a method this backend does not have -- and stays the
+ * error it was, because answering undefined would turn `a.sort(f)` into "undefined is not a
+ * function" three frames from the cause. */
+static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown) {
+    int status = kiln_c99_get_own_kind(host, target, key, key_len, out, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR && key_len >= 2 && key[0] == '@' && key[1] == '@') {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    return status;
 }
 
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
@@ -6214,8 +6267,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_CONTROL_ERROR;
             }
             *result = kiln_c99_undefined();
-            return kiln_c99_async_step(host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(),
-                                       code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown);
+            /* The same two handlers serve both drivers: what an arrival means depends on the
+             * frame it is arriving at, not on who attached them. */
+            return kiln_c99_generator_of(receiver)->async_generator
+                       ? kiln_c99_async_generator_step(
+                             host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(),
+                             code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown)
+                       : kiln_c99_async_step(host, receiver,
+                                             argc > 0 ? args[0] : kiln_c99_undefined(),
+                                             code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown);
         case KILN_C99_METHOD_ITERATOR_NEXT: {
             kiln_value items;
             kiln_value at;
@@ -6456,6 +6516,17 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_CONTROL_ERROR;
             }
             frame = kiln_c99_generator_of(receiver);
+            if (frame->async_generator && code == KILN_C99_METHOD_GENERATOR_NEXT) {
+                /* Each step gets a promise of its own, because the body can `await` any number of
+                 * times before it reaches the `yield` that finishes the step. */
+                status = kiln_c99_new_promise(&frame->promise);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                *result = frame->promise;
+                return kiln_c99_async_generator_step(
+                    host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(), 0, depth, thrown);
+            }
             /* `.return(v)` finishes the generator without resuming it, so the body never runs
              * again and the value is the caller's rather than the body's. */
             if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
@@ -9084,6 +9155,92 @@ static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
  * has to happen after arrival is attached to that as two handlers -- resume with the value, or
  * throw into the body -- and the machine goes back to the queue. That is the whole of `await`:
  * the suspension is the generator's, and the scheduling is the promise's. */
+/* Settle one step's promise with `{ value, done }`, which is the shape the iteration protocol is
+ * written against -- an async generator's `next` promises that object rather than the value. */
+static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
+                                           int finished, int depth, kiln_value *thrown) {
+    kiln_value shaped;
+    int status = kiln_c99_new_object(&shaped);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, shaped, "value", 5, value, depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, shaped, "done", 4, kiln_c99_boolean(finished), depth, thrown);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_settle(step, shaped, 0);
+}
+
+/* One step of an async generator: resume the body until it either awaits or finishes a step.
+ *
+ * The difference from an async *function* is the whole reason this exists. A function has one
+ * promise and runs to completion; a generator has one promise per `next`, and an `await` between
+ * two `yield`s must leave that promise pending -- the step is not finished, and the consumer has
+ * not been told anything yet. `frame->awaiting` is what says which suspension happened. */
+static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                                         int rejected, int depth, kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_value step = frame->promise;
+    kiln_closure *closure;
+    kiln_value produced;
+    int status;
+    if (frame->done) {
+        return kiln_c99_async_generator_settle(host, step, kiln_c99_undefined(), 1, depth, thrown);
+    }
+    if (rejected && !frame->started) {
+        frame->done = 1;
+        return kiln_c99_settle(step, sent, 1);
+    }
+    frame->sent = sent;
+    frame->raising = rejected;
+    closure = kiln_c99_closure_of(frame->function);
+    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
+                           thrown, frame);
+    if (status == KILN_C99_YIELDED) {
+        frame->started = 1;
+        if (frame->awaiting) {
+            /* Still inside the step: wait for what was awaited and come back here. */
+            kiln_value awaited = produced;
+            kiln_value resume;
+            kiln_value raise;
+            kiln_value ignored;
+            if (awaited.tag != KILN_VALUE_PROMISE) {
+                kiln_value wrapped;
+                status = kiln_c99_new_promise(&wrapped);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_settle(wrapped, awaited, 0);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                awaited = wrapped;
+            }
+            status = kiln_c99_bind(&resume, kiln_c99_method(KILN_C99_METHOD_ASYNC_RESUME),
+                                   generator);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_bind(&raise, kiln_c99_method(KILN_C99_METHOD_ASYNC_THROW),
+                                       generator);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_then(awaited, resume, raise, &ignored);
+        }
+        return kiln_c99_async_generator_settle(host, step, produced, 0, depth, thrown);
+    }
+    if (status == KILN_C99_THROWN) {
+        frame->done = 1;
+        return kiln_c99_settle(step, *thrown, 1);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    frame->done = 1;
+    return kiln_c99_async_generator_settle(host, step, produced, 1, depth, thrown);
+}
+
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown) {
     kiln_generator *frame = kiln_c99_generator_of(generator);
@@ -9651,15 +9808,9 @@ fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
         // an automatic C frame cannot be. An `async` function is compiled as one for the same
         // reason -- `await` suspends exactly as `yield` does.
         // An async *generator* suspends for two different reasons -- a value for its consumer
-        // and a promise it is waiting on -- and the driver has to tell them apart to know
-        // whether the consumer's step is finished. Nothing here does, so it is refused rather
-        // than driven as if it were one or the other.
-        if proto.async_generator {
-            return Err(EmitError::Unsupported {
-                feature: "async generators in the native backend".to_string(),
-            });
-        }
-
+        // and a promise it is waiting on -- and the driver has to tell them apart to know whether
+        // the consumer's step is finished. `frame->awaiting`, written at each suspension, is what
+        // says which; without it the two emit identically and nothing downstream could tell.
         if proto.parameter_count > proto.local_count {
             return Err(EmitError::InvalidProgram {
                 message: format!(
@@ -11104,6 +11255,7 @@ fn emit_instruction(
             let generator = i32::from(target.generator || target.asynchronous);
             let asynchronous = i32::from(target.asynchronous);
             let arrow = i32::from(target.arrow);
+            let async_generator = i32::from(target.async_generator);
             let frame_locals = target.local_count.max(1);
             let frame_stack = frame_stacks[*proto as usize].max(1);
             // One handler slot per instruction: a body cannot register more handlers than it has
@@ -11113,7 +11265,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -11133,7 +11285,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, {async_generator}, {arrow}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -11406,7 +11558,8 @@ fn emit_instruction(
         Instruction::Yield | Instruction::Await => {
             writeln!(
                 output,
-                "    frame->sp = sp - 1; frame->resume = {index}; *result = stack[sp - 1]; return KILN_C99_YIELDED;"
+                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = stack[sp - 1]; return KILN_C99_YIELDED;",
+                i32::from(matches!(instruction, Instruction::Await))
             )
             .unwrap();
             // Where `next` comes back to. What the caller sent becomes the value of the `yield`
