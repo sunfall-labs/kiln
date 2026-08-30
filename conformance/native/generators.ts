@@ -99,3 +99,15 @@ function* outerGuard(): Generator<string> {
   } catch (e: any) { yield `outer ${e}`; }
 }
 console.log([...outerGuard()]);
+
+// The frame also retains the receiver across every suspension. Building a generator from a
+// method must not replace its `this` with the receiver of a later `.next()` call.
+const generatorOwner = {
+  tag: "generator owner",
+  *read(): Generator<string> {
+    yield this.tag;
+    return this.tag;
+  },
+};
+const receiverGenerator = generatorOwner.read();
+console.log(receiverGenerator.next().value, receiverGenerator.next().value);

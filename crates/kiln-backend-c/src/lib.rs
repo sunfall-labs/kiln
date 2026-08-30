@@ -645,6 +645,7 @@ typedef struct kiln_closure {
     kiln_scheduler_switch_fn scheduler_switch;
     /* Arrows have no call-time `this` or `new.target`; both are captured where made. */
     int arrow;
+    kiln_value captured_this;
     kiln_value captured_new_target;
     /* Calling this builds a generator object instead of running the body. */
     int generator;
@@ -2708,8 +2709,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
                                  size_t name_len, uint32_t proto, int arrow, int generator,
-                                 int asynchronous, kiln_value new_target, uint32_t local_count,
-                                 uint32_t stack_size, uint32_t handler_depth,
+                                 int asynchronous, kiln_value receiver, kiln_value new_target,
+                                 uint32_t local_count, uint32_t stack_size, uint32_t handler_depth,
                                  const kiln_value *captured, uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
@@ -2734,6 +2735,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->scheduler_switch = NULL;
 #endif
     closure->arrow = arrow;
+    closure->captured_this = arrow ? receiver : kiln_c99_undefined();
     closure->captured_new_target = new_target;
     closure->generator = generator;
     closure->asynchronous = asynchronous;
@@ -2876,13 +2878,16 @@ static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_v
         }
     }
     closure = kiln_c99_closure_of(callee);
+    if (closure->arrow) {
+        receiver = closure->captured_this;
+        new_target = closure->captured_new_target;
+    }
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
-         * differs only in who drives it, which is this rather than the program. */
+        * differs only in who drives it, which is this rather than the program. */
         kiln_value built;
-        kiln_value target = closure->arrow ? closure->captured_new_target : new_target;
-        int status = kiln_c99_new_generator(&built, callee, receiver, target, args, argc);
+        int status = kiln_c99_new_generator(&built, callee, receiver, new_target, args, argc);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -2902,9 +2907,6 @@ static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_v
              * what makes the code before the first one behave like an ordinary call. */
             return kiln_c99_async_step(host, built, kiln_c99_undefined(), 0, depth, thrown);
         }
-    }
-    if (closure->arrow) {
-        new_target = closure->captured_new_target;
     }
     return kiln_c99_invoke_body(closure, host, result, receiver, new_target, args, argc,
                                 depth + 1, thrown, NULL);
@@ -12210,11 +12212,19 @@ fn emit_instruction(
             // One handler slot per instruction: a body cannot register more handlers than it has
             // instructions, which is the same bound an automatic frame uses.
             let frame_handlers = target.code.len().max(1);
+            // Every function body receives its effective receiver. An arrow snapshots that
+            // value now; an ordinary closure carries the same field but never consults it.
+            // Module entry has no receiver and therefore captures `undefined` explicitly.
+            let defining_receiver = if target.arrow && matches!(site, ReturnSite::Body) {
+                "receiver"
+            } else {
+                "kiln_c99_undefined()"
+            };
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, {defining_receiver}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -12234,7 +12244,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, {defining_receiver}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -14478,6 +14488,56 @@ int main(void) {
         assert!(
             run.status.success(),
             "a closure and its module body did not share one cell (exit {:?})",
+            run.status.code()
+        );
+    }
+
+    /// An arrow has no call-time receiver. It snapshots the receiver of the frame that creates
+    /// it, even when a later plain call supplies `undefined` as `this`.
+    #[test]
+    fn executable_arrow_captures_its_defining_receiver() {
+        let arrow = FunctionProto {
+            arrow: true,
+            code: vec![Instruction::LoadThis, Instruction::Return],
+            ..function(Vec::new())
+        };
+        let maker = FunctionProto {
+            code: vec![Instruction::MakeFunction(1), Instruction::Return],
+            ..function(Vec::new())
+        };
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("make".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::NewObject { count: 0 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::SetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::StoreLocal(2),
+                Instruction::LoadLocal(2),
+                Instruction::Call { argc: 0 },
+                Instruction::LoadLocal(1),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: vec![maker, arrow],
+        })
+        .expect("arrow receiver program emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits == 1 ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "arrow-receiver");
+        assert!(
+            run.status.success(),
+            "an arrow observed its call-time receiver instead of its defining receiver (exit {:?})",
             run.status.code()
         );
     }
