@@ -3133,13 +3133,21 @@ join `Object`/`Array`/`String` as objects a method can be borrowed from, and
 tables (`[profile.release] debug = 1`). Nobody debugs through a private ABI adapter, so the
 provider build now passes `-C debuginfo=0` as well: 8.4 MiB, multiplied by every cached build.
 
-**`.kiln/cache` has no bound and it filled the disk twice today** -- once mid-session and once
-during a test run, where it surfaced as
-`could not write temporary artifact ...: No space left on device` from six `kiln-native` tests at
-once. `mbx gc --max-size` handles the *build* cache; the artifact cache has no equivalent I could
-find. That is worth an eviction policy before it bites someone who does not know to look, and it
-is Codex's area rather than mine -- but the symptom is unmistakable and worth recognising: several
-unrelated native tests failing at once, all of them on a write.
+**`.kiln/cache` has no bound, and it stopped this session dead.** Three times today the volume
+filled; the third time there was not enough room left for the shell to create a file, so no command
+could run at all -- including the one that would have freed space. `.kiln/cache` was **6.7 GiB**.
+
+The arithmetic is not exotic. A native build stores generated C, an object, a runtime object, a
+launcher object and a linked executable; the executable alone is ~2.6 MiB, and the corpora are 140
+programs. Every edit to the backend changes the generated C, which changes every downstream key,
+which stores a fresh copy of all of it. Forty iterations of an ordinary afternoon is several
+gigabytes, and nothing evicts any of it.
+
+`mbx gc --max-size` handles the *build* cache and the artifact cache needs the same thing -- a
+size bound and an eviction order. Codex, this is your area, but it is now a hard blocker rather
+than a nuisance, and the symptom is recognisable: several unrelated native tests failing at once,
+all of them on a write, or `zig cc` failing to parse an archive that "does not exist" because it
+was half-written. `rm -rf .kiln/cache ~/.cache/zig` is the recovery.
 
 ### `globalThis`, `new.target`, and a broken tree
 
@@ -3197,3 +3205,82 @@ the list of the ones that exist is real. What is left there: `Proxy`, `BigInt`, 
 `structuredClone`. Async generators are the other gap, and they are not a builtin: `await` and
 `yield` emit identically today, so an async generator's driver cannot tell the suspension that
 finishes a step from the one that does not.
+
+### Async generators, and the flag that makes them possible
+
+**2026-08-30, Claude — `kiln-backend-c`, `conformance/native/async-generators.ts`.**
+
+The refusal said exactly what was missing:
+
+> An async *generator* suspends for two different reasons -- a value for its consumer and a promise
+> it is waiting on -- and the driver has to tell them apart to know whether the consumer's step is
+> finished. Nothing here does.
+
+Now something does. `yield` and `await` still emit identically -- both save the frame and return
+`YIELDED` -- but each now writes `frame->awaiting` first, and that one bit is the whole feature. An
+async *function* has one promise and runs to completion; an async *generator* has one promise per
+`next`, and an `await` between two `yield`s has to leave that promise pending because the step is
+not finished and the consumer has not been told anything yet.
+
+The two resume handlers are shared between the drivers: what an arrival means depends on the frame
+it arrives at, not on who attached them.
+
+**`@@` keys are protocol probes now.** `for await` asks *every* subject for `@@asyncIterator`
+before deciding which loop to run, and an array answering `KILN_C99_CONTROL_ERROR` stopped the
+program. A `@@` miss is undefined; a name a *program* wrote still errors, because answering
+undefined there turns `a.sort(f)` into "undefined is not a function" three frames from the cause.
+One rule, in one place, layered over the read.
+
+**One interpreter bug fell out of writing the probe.** A body that throws leaves the generator
+*finished*, and the interpreter did not mark it so -- a later `next` resumed it and threw the same
+thing again, with nothing waiting for that second rejection. The visible symptom was a caught
+rejection turning into an uncaught one two lines later:
+
+```js
+try { await each.next(); } catch (e) { console.log("caught", e.message); }  // caught stopped
+console.log("after", (await each.next()).done);                             // uncaught (in promise)
+```
+
+The native side had it right, which is how it was found. That is the fourth time today.
+
+**One gap left, shared by the engines rather than between them.** How many turns a step costs:
+`collect(counted(3))` and `stepByHand()` started in parallel interleave differently in kiln than in
+node. Both engines agree with each other, so `conformance/native` is satisfied; the probe sequences
+its work rather than asserting an order neither engine can yet keep.
+
+### Where the native backend stands
+
+**2026-08-30, Claude.** A summary, because the entries above are a day's worth of them.
+
+**Every bytecode instruction emits.** `validate_supported_instruction` has no catch-all arm left,
+and the match is exhaustive so a new instruction stops the backend compiling until somebody
+decides. What can still be refused is a *builtin*, and the list is short: `Proxy`, `BigInt`, the
+typed arrays and `ArrayBuffer`, `WeakMap`/`WeakSet`, `process`, `performance`, and `structuredClone`.
+
+**The corpora, all three green.** `conformance/native` is 30 probes, every one matching between
+the engines and 0 refused. `conformance/differential` is 97 against node with 0 refused and 0
+diverged. `conformance/thirdparty` is 13 real libraries. The native corpus grew from 20 probes to
+30 today, and every one of the ten new ones covers something the backend could not do this
+morning.
+
+**What today actually was.** Not one feature: a measurement. Running every differential probe
+through `--native` and tallying the *first* refusal each hits turned a vague backlog into an
+ordered list, and the list kept being wrong in useful ways -- `LoadGlobal` never appeared,
+`Dup2` and `CallComputed` had been refused for months without a probe naming them, and the biggest
+single find came from grepping the thirdparty bundles for method names rather than from the tally
+at all.
+
+**And the corpus is not the language.** Three of the things fixed today were *wrong answers*
+rather than refusals -- `replace` with a regexp silently returning its subject, `replace` not
+expanding `$&` with a plain-string pattern, and every builtin printing as `[Function: String]`.
+None of them was reachable by a probe, because the probes that would have reached them were
+refused earlier for unrelated reasons. Each refusal removed is a set of answers nobody has checked
+yet, which is the argument for removing them in order rather than by appetite.
+
+**The interpreter moved too, ten times**, always because the native side and node agreed against
+it: `codePointAt` on a lone surrogate, `split` on a pattern that matches nothing, `toFixed` on a
+tie, `parseInt` with a negative radix, `parseFloat("inf")`, an uncatchable `new RegExp("(")`,
+`Promise.any([])` with no `errors`, four regexp flag accessors, nine globals missing from
+`globalThis`, and an async generator that was not finished after it threw. The corpus is not
+checking the backend against the interpreter; it is checking them against each other, and either
+can be the one that moves.

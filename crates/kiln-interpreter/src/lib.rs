@@ -5490,7 +5490,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         let instruction = self.instruction;
         match self.resume_catching(generator, resume, instruction)? {
-            Err(thrown) => self.settle(step, &Settled::Rejected(thrown)),
+            Err(thrown) => {
+                // A body that threw is finished, and a later `next` has to answer `{ done: true }`
+                // rather than resuming it and throwing the same thing again -- which is what it
+                // did, and what turned a caught rejection into an uncaught one two lines later.
+                generator.borrow_mut().done = true;
+                self.settle(step, &Settled::Rejected(thrown));
+            }
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
                 self.resolve_promise(step, result);
