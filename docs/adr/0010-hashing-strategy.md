@@ -126,7 +126,7 @@ separate places: `kiln-db::hash`, the Fx map type, and `kiln-digest`. Reaching f
 nearby is how the unsafe version of this design returns.
 
 Changing the strong algorithm later is a format change, not a refactor: artifact cache records pin
-their format and `SourceDigest` pins protocol 13's JSON representation. Likewise,
+their format and `SourceDigest` pins the wire representation introduced by protocol 13. Likewise,
 `ModuleSummary` still carries `u64` FNV values on the wire. Widening those summaries would need its
 own protocol revision only if they ever stop being backed by whole-value equality.
 

@@ -94,12 +94,13 @@ Embedding uses the same module entry ABI without linking the command-line runtim
 layout, status codes, and HostOps callback. For each scalar build it composes those declarations
 with the content-derived entry symbol under a module-specific include guard. The native coordinator
 publishes that program header at `output.with_extension("h")` before atomically publishing the
-shared library, then reports both paths over the versioned protocol. Library outputs ending in
-`.h` are rejected, and coordination layers reject a derived header that would overwrite the source.
+requested shared-library copy, then reports those paths and the canonical loader path over the
+versioned protocol. Library outputs ending in `.h` are rejected, and coordination layers reject a
+derived header that would overwrite the source.
 Each file publication is atomic, and a process mutex plus an advisory lock on the output directory
-prevents concurrent builders from interleaving different header/library pairs. The pair is still not
-reader-transactional; the library is the final ready signal until a future versioned
-package-directory design can swap a manifest for the pair. Directory scope is required because
+prevents concurrent builders from interleaving different shared packages. The package is still not
+reader-transactional; the requested library path is the final ready signal until a future versioned
+package-directory design can swap a manifest for the package. Directory scope is required because
 different library suffixes can derive the same header pathname.
 
 Default executable and shared-library paths preserve the entry's complete project-relative source
@@ -113,6 +114,20 @@ shared links have cache identities distinct from executable objects and links; a
 hit is never accepted as an embedding artifact. Shared-library linking is initially supported on
 macOS and Linux, where the toolchain flags, emitted header, and dynamic-loader behavior are
 exercised by real C-host integration tests.
+
+The dynamic-loader identity is a canonical, slash-free file under the output directory's reserved
+`.kiln-loaders` namespace. Its name contains the full SHA-256 digest of the pre-link compiler,
+backend kind, embedding ABI, target, profile, link policy, public symbol, and ordered object/runtime
+inputs. Mach-O records `@rpath/<canonical leaf>` and ELF records the canonical leaf as `DT_SONAME`;
+the namespace is not part of either embedded identity because a slash-bearing ELF SONAME bypasses
+RPATH search. The builder publishes that canonical file first, the header second, and a byte-for-byte
+copy at the exact requested output path last. It reports all three paths. The loader namespace is
+reserved against explicit outputs, and an existing content name is never overwritten with different
+bytes. Embedders must package the canonical loader file and add its directory to RPATH; the requested
+path remains a stable human alias and publication-ready signal. Distinct content therefore cannot
+collapse merely because two requested paths share a basename, while identical linked content can
+safely share one loader identity. Old canonical generations remain until an explicit future
+cache/package cleanup policy; an in-use loader is never eagerly deleted during rebuild.
 
 An acyclic module graph is embedded behind one topology-derived wrapper symbol with the same
 two-argument entry ABI as a scalar shared library. The graph's generated module entries keep their

@@ -946,6 +946,7 @@ fn native_shared_summary(
     NativeSharedLibrarySummary {
         module_symbol: report.module_symbol,
         output_path: report.output.to_string_lossy().into_owned(),
+        loader_path: report.loader.to_string_lossy().into_owned(),
         header_path: report.header.to_string_lossy().into_owned(),
         compiler_identity: format!(
             "{} {} targeting {} ({})",

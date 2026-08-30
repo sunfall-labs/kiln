@@ -764,6 +764,27 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         .join(".kiln/lib/src")
         .join(format!("native-shared.js.{extension}"));
     assert_eq!(first.output_path, expected_output.to_string_lossy());
+    let loader = Path::new(&first.loader_path);
+    assert_eq!(
+        loader.parent(),
+        Some(
+            expected_output
+                .parent()
+                .unwrap()
+                .join(".kiln-loaders")
+                .as_path()
+        )
+    );
+    assert!(
+        loader
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("kiln-"))
+    );
+    assert!(loader.is_file());
+    assert_eq!(
+        std::fs::read(loader).expect("read canonical loader"),
+        std::fs::read(&expected_output).expect("read requested shared library")
+    );
     let expected_header = expected_output.with_extension("h");
     assert_eq!(first.header_path, expected_header.to_string_lossy());
     let header = std::fs::read_to_string(&first.header_path).expect("read shared build header");
@@ -779,6 +800,7 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
         panic!("expected cached shared build");
     };
     assert_eq!(second.output_path, first.output_path);
+    assert_eq!(second.loader_path, first.loader_path);
     assert_eq!(second.header_path, first.header_path);
     assert!(second.generated_c_cache_hit);
     assert!(second.object_cache_hit);
@@ -894,6 +916,22 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
         .join(".kiln/lib")
         .join(format!("shared-entry.js.{extension}"));
     assert_eq!(first.output_path, expected_output.to_string_lossy());
+    let loader = Path::new(&first.loader_path);
+    assert_eq!(
+        loader.parent(),
+        Some(
+            expected_output
+                .parent()
+                .unwrap()
+                .join(".kiln-loaders")
+                .as_path()
+        )
+    );
+    assert!(loader.is_file());
+    assert_eq!(
+        std::fs::read(loader).expect("read graph canonical loader"),
+        std::fs::read(&expected_output).expect("read requested graph library")
+    );
     let expected_header = expected_output.with_extension("h");
     assert_eq!(first.header_path, expected_header.to_string_lossy());
     assert!(
@@ -914,6 +952,7 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
         panic!("expected cached shared graph build");
     };
     assert_eq!(second.output_path, first.output_path);
+    assert_eq!(second.loader_path, first.loader_path);
     assert_eq!(second.header_path, first.header_path);
     assert_eq!(second.module_symbol, first.module_symbol);
     assert!(second.generated_c_cache_hit);

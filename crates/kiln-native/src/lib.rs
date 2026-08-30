@@ -170,6 +170,11 @@ pub struct NativeSharedLibrarySizes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeSharedLibraryReport {
     pub output: PathBuf,
+    /// Canonically named library whose leaf name is the dynamic-loader identity.
+    ///
+    /// Package this file with the requested output alias and add its parent directory to the
+    /// embedding host's dynamic-loader search path.
+    pub loader: PathBuf,
     /// Program-specific C header declaring `module_symbol` against the stable embedding ABI.
     pub header: PathBuf,
     pub module_symbol: String,
@@ -223,6 +228,9 @@ pub enum NativeError {
         first: PathBuf,
         second: PathBuf,
     },
+    ImmutableArtifactCollision {
+        path: PathBuf,
+    },
     NumberProvider {
         message: String,
     },
@@ -266,6 +274,11 @@ impl fmt::Display for NativeError {
                 first.display(),
                 second.display()
             ),
+            Self::ImmutableArtifactCollision { path } => write!(
+                formatter,
+                "canonical native artifact at {} has different contents",
+                path.display()
+            ),
             Self::NumberProvider { message } => {
                 write!(formatter, "native number provider failed: {message}")
             }
@@ -290,6 +303,7 @@ impl std::error::Error for NativeError {
             Self::WorkerPanic { .. }
             | Self::SymbolCollision { .. }
             | Self::ArtifactPathCollision { .. }
+            | Self::ImmutableArtifactCollision { .. }
             | Self::NumberProvider { .. }
             | Self::RunResult { .. } => None,
         }
@@ -715,12 +729,25 @@ impl NativeBuilder {
             object_elapsed.max(compile_started.elapsed())
         };
 
+        let link_inputs = [object_digest, number_provider_digest];
+        let loader = shared_library_loader_path(
+            &options.output,
+            shared_library_content_identity(
+                &compiler,
+                Backend::Custom("native-shared-library-loader".to_owned()),
+                &embedding_abi,
+                &target,
+                profile,
+                &module.symbol,
+                link_inputs,
+            ),
+        )?;
         let link_options_digest = Digest::hash(
             format!(
                 "shared-library\0{}\0system-math\0{}\0{}\0{}",
                 profile.as_str(),
                 shared_library_name(),
-                shared_library_link_identity(&options.output),
+                shared_library_link_identity(&loader),
                 shared_library_link_policy(),
             )
             .as_bytes(),
@@ -733,7 +760,7 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [object_digest, number_provider_digest],
+            link_inputs,
         );
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
@@ -752,7 +779,7 @@ impl NativeBuilder {
                     .push(paths.number_provider_a.clone());
                 configure_shared_library_link(
                     &mut link_options,
-                    &options.output,
+                    &loader,
                     &module.symbol,
                     workspace.path(),
                 )?;
@@ -765,10 +792,11 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        publish_shared_artifacts(&options.output, header_source.as_bytes(), &library)?;
+        publish_shared_artifacts(&options.output, &loader, header_source.as_bytes(), &library)?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
+            loader,
             header,
             module_symbol: module.symbol,
             tool: identity,
@@ -1019,22 +1047,34 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = Digest::hash(
-            format!(
-                "shared-graph\0{}\0system-math\0{}\0{}\0{}",
-                profile.as_str(),
-                shared_library_name(),
-                shared_library_link_identity(&options.output),
-                shared_library_link_policy(),
-            )
-            .as_bytes(),
-        );
         let mut link_inputs = module_objects
             .iter()
             .map(|(_, digest, _)| *digest)
             .collect::<Vec<_>>();
         link_inputs.push(number_provider_digest);
         link_inputs.push(wrapper_object.1);
+        let loader = shared_library_loader_path(
+            &options.output,
+            shared_library_content_identity(
+                &compiler,
+                Backend::Custom("native-shared-graph-loader".to_owned()),
+                &embedding_abi,
+                &target,
+                profile,
+                &wrapper_symbol,
+                link_inputs.iter().copied(),
+            ),
+        )?;
+        let link_options_digest = Digest::hash(
+            format!(
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}",
+                profile.as_str(),
+                shared_library_name(),
+                shared_library_link_identity(&loader),
+                shared_library_link_policy(),
+            )
+            .as_bytes(),
+        );
         let library_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -1043,7 +1083,7 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            link_inputs,
+            link_inputs.iter().copied(),
         );
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
@@ -1068,7 +1108,7 @@ impl NativeBuilder {
                     .push(paths.number_provider_a.clone());
                 configure_shared_library_link(
                     &mut link_options,
-                    &options.output,
+                    &loader,
                     &wrapper_symbol,
                     workspace.path(),
                 )?;
@@ -1080,10 +1120,11 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        publish_shared_artifacts(&options.output, header_source.as_bytes(), &library)?;
+        publish_shared_artifacts(&options.output, &loader, header_source.as_bytes(), &library)?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
+            loader,
             header,
             module_symbol: wrapper_symbol,
             tool: identity,
@@ -2174,20 +2215,43 @@ fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), Native
 
 fn publish_shared_artifacts(
     output: &Path,
+    loader: &Path,
     header_source: &[u8],
     library: &[u8],
 ) -> Result<(), NativeError> {
+    if output == loader {
+        return Err(NativeError::ArtifactPathCollision {
+            first: output.to_path_buf(),
+            second: loader.to_path_buf(),
+        });
+    }
     // `File` locking semantics differ for separately opened handles in one process, so keep an
     // explicit process lock as well as the cross-process directory lock.
     let _process_lock = SHARED_PUBLICATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _directory_lock = acquire_shared_publication_lock(output)?;
+    materialize_immutable(loader, library)?;
     // Publish the declaration first so replacing the library remains the final ready signal for
     // consumers. The directory lock keeps concurrent builders from interleaving two pairs;
     // readers still use the library replacement as the readiness boundary.
     materialize(&shared_library_header_path(output), header_source, false)?;
     materialize(output, library, false)
+}
+
+fn materialize_immutable(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
+    match fs::read(path) {
+        Ok(existing) if existing == bytes => Ok(()),
+        Ok(_) => Err(NativeError::ImmutableArtifactCollision {
+            path: path.to_path_buf(),
+        }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => materialize(path, bytes, false),
+        Err(source) => Err(NativeError::Io {
+            operation: "read canonical shared library",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 fn acquire_shared_publication_lock(output: &Path) -> Result<fs::File, NativeError> {
@@ -2445,13 +2509,84 @@ fn shared_library_link_identity(output: &Path) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn shared_library_content_identity(
+    compiler: &str,
+    backend: Backend,
+    embedding_abi: &str,
+    target: &str,
+    profile: NativeProfile,
+    public_symbol: &str,
+    inputs: impl IntoIterator<Item = Digest>,
+) -> Digest {
+    let identity_options = Digest::hash(
+        format!(
+            "shared-loader-content-v1\0{}\0system-math\0{}\0{}",
+            profile.as_str(),
+            shared_library_link_policy(),
+            public_symbol,
+        )
+        .as_bytes(),
+    );
+    key(
+        ArtifactKind::LinkedArtifact,
+        compiler,
+        backend,
+        embedding_abi,
+        target,
+        profile.cache(),
+        identity_options,
+        inputs,
+    )
+    .digest()
+}
+
+fn shared_library_loader_path(output: &Path, identity: Digest) -> Result<PathBuf, NativeError> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| NativeError::Io {
+        operation: "create shared output directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let parent = fs::canonicalize(parent).map_err(|source| NativeError::Io {
+        operation: "canonicalize shared output directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    const LOADER_DIRECTORY: &str = ".kiln-loaders";
+    if output
+        .file_name()
+        .is_some_and(|name| name == LOADER_DIRECTORY)
+        || parent
+            .components()
+            .any(|component| component.as_os_str() == LOADER_DIRECTORY)
+    {
+        return Err(NativeError::ArtifactPathCollision {
+            first: output.to_path_buf(),
+            second: parent,
+        });
+    }
+    let extension = Path::new(shared_library_name())
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("so");
+    Ok(parent.join(LOADER_DIRECTORY).join(format!(
+        "kiln-{}.{}",
+        identity.to_base64_url(),
+        extension
+    )))
+}
+
 const fn shared_library_link_policy() -> &'static str {
     if cfg!(target_os = "macos") {
-        "macos-dynamiclib-install-name-rpath-export-list-v2"
+        "macos-content-loader-install-name-rpath-export-list-v3"
     } else if cfg!(target_os = "linux") {
-        "linux-shared-soname-version-script-v2"
+        "linux-content-loader-soname-version-script-v3"
     } else {
-        "unsupported-shared-link-v1"
+        "unsupported-content-loader-shared-link-v2"
     }
 }
 
@@ -2555,6 +2690,7 @@ mod tests {
     fn shared_publication_serializes_each_header_library_pair() {
         let root = TestDirectory::new("kiln-native-shared-publication");
         let output = root.path.join("program.so");
+        let loader = root.path.join("kiln-content.so");
         let header = shared_library_header_path(&output);
         materialize(&header, b"old header", false).expect("publish old header");
         materialize(&output, b"old library", false).expect("publish old library");
@@ -2565,9 +2701,15 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let writer_output = output.clone();
+        let writer_loader = loader.clone();
         let writer = std::thread::spawn(move || {
             entered_tx.send(()).expect("announce waiting writer");
-            let result = publish_shared_artifacts(&writer_output, b"new header", b"new library");
+            let result = publish_shared_artifacts(
+                &writer_output,
+                &writer_loader,
+                b"new header",
+                b"new library",
+            );
             finished_tx.send(result).expect("report publication");
         });
         entered_rx.recv().expect("writer starts");
@@ -2586,8 +2728,60 @@ mod tests {
             .expect("writer completes after unlock")
             .expect("publication succeeds");
         writer.join().expect("writer exits");
-        assert_eq!(fs::read(header).expect("read new header"), b"new header");
-        assert_eq!(fs::read(output).expect("read new library"), b"new library");
+        assert_eq!(fs::read(&header).expect("read new header"), b"new header");
+        assert_eq!(fs::read(&output).expect("read new library"), b"new library");
+        assert_eq!(
+            fs::read(&loader).expect("read loader library"),
+            b"new library"
+        );
+
+        let collision =
+            publish_shared_artifacts(&output, &loader, b"other header", b"other library")
+                .expect_err("a canonical content name is immutable");
+        assert!(matches!(
+            collision,
+            NativeError::ImmutableArtifactCollision { .. }
+        ));
+        assert_eq!(fs::read(header).unwrap(), b"new header");
+        assert_eq!(fs::read(output).unwrap(), b"new library");
+    }
+
+    #[test]
+    fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
+        let root = TestDirectory::new("kiln-native-loader-path");
+        let real = root.path.join("real");
+        fs::create_dir(&real).expect("create real output directory");
+        let identity = Digest::hash(b"loader-path-test");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, root.path.join("alias"))
+                .expect("create output-directory symlink");
+            let loader = shared_library_loader_path(&root.path.join("alias/program.so"), identity)
+                .expect("derive loader through symlink");
+            let canonical_real = fs::canonicalize(&real).expect("canonical real directory");
+            assert_eq!(
+                loader.parent(),
+                Some(canonical_real.join(".kiln-loaders").as_path())
+            );
+        }
+
+        let reserved = real.join(".kiln-loaders");
+        fs::create_dir(&reserved).expect("create reserved loader directory");
+        assert!(matches!(
+            shared_library_loader_path(&reserved.join("program.so"), identity),
+            Err(NativeError::ArtifactPathCollision { .. })
+        ));
+        let nested = reserved.join("nested");
+        fs::create_dir(&nested).expect("create nested reserved directory");
+        assert!(matches!(
+            shared_library_loader_path(&nested.join("program.so"), identity),
+            Err(NativeError::ArtifactPathCollision { .. })
+        ));
+        assert!(matches!(
+            shared_library_loader_path(&real.join(".kiln-loaders"), identity),
+            Err(NativeError::ArtifactPathCollision { .. })
+        ));
     }
 
     fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
@@ -2776,6 +2970,12 @@ mod tests {
         assert!(second.cache_hits.library);
         assert_eq!(first.module_symbol, second.module_symbol);
         assert_eq!(second.output, library_path);
+        assert!(second.loader.is_file());
+        assert_eq!(
+            fs::read(&second.output).unwrap(),
+            fs::read(&second.loader).unwrap()
+        );
+        assert_eq!(second.loader, first.loader);
         assert_eq!(first.header, library_path.with_extension("h"));
         assert_eq!(second.header, first.header);
         let published_header = fs::read_to_string(&second.header).expect("read embedding header");
@@ -2801,9 +3001,10 @@ mod tests {
         assert!(renamed.cache_hits.generated_c);
         assert!(renamed.cache_hits.object);
         assert!(
-            !renamed.cache_hits.library,
-            "the embedded install name or SONAME changes with the output basename"
+            renamed.cache_hits.library,
+            "a content-named loader is reusable across requested output aliases"
         );
+        assert_eq!(renamed.loader, first.loader);
         assert_eq!(renamed.header, renamed.output.with_extension("h"));
 
         let host_source = root.path.join("host.c");
@@ -2874,9 +3075,10 @@ int main(void) {
             .expect("compile embedding host");
         let mut link_options = LinkOptions::default();
         link_options.runtime_libraries.push(library_path.clone());
+        let loader_directory = second.loader.parent().expect("loader has directory");
         link_options
             .extra_args
-            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
         toolchain
             .link_executable(
                 std::slice::from_ref(&host_object),
@@ -2886,9 +3088,9 @@ int main(void) {
             .expect("link embedding host");
         let mut command = Command::new(&host_executable);
         #[cfg(target_os = "linux")]
-        command.env("LD_LIBRARY_PATH", &root.path);
+        command.env("LD_LIBRARY_PATH", loader_directory);
         #[cfg(target_os = "macos")]
-        command.env("DYLD_LIBRARY_PATH", &root.path);
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
         let output = command.output().expect("run embedding host");
         assert!(
             output.status.success(),
@@ -3334,6 +3536,8 @@ int main(void) {
         assert!(cached.cache_hits.generated_c);
         assert!(cached.cache_hits.object);
         assert!(cached.cache_hits.library);
+        assert_eq!(cached.loader, report.loader);
+        assert!(cached.loader.is_file());
         let renamed = builder
             .build_shared_graph(
                 &graph,
@@ -3351,7 +3555,8 @@ int main(void) {
             .expect("renamed shared graph succeeds");
         assert!(renamed.cache_hits.generated_c);
         assert!(renamed.cache_hits.object);
-        assert!(!renamed.cache_hits.library);
+        assert!(renamed.cache_hits.library);
+        assert_eq!(renamed.loader, report.loader);
         let wrapper_source = root.path.join("wrapper.c");
         fs::write(&wrapper_source, wrapper).expect("write wrapper source");
         let compile_options = CompileOptions {
@@ -3585,21 +3790,139 @@ int main(void) {{
             .expect("compile shared graph host");
         let mut link_options = LinkOptions::default();
         link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
         link_options
             .extra_args
-            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
         toolchain
             .link_executable(&[host_object], &host_executable, &link_options)
             .expect("link shared graph host");
         let mut command = Command::new(&host_executable);
         #[cfg(target_os = "linux")]
-        command.env("LD_LIBRARY_PATH", &root.path);
+        command.env("LD_LIBRARY_PATH", loader_directory);
         #[cfg(target_os = "macos")]
-        command.env("DYLD_LIBRARY_PATH", &root.path);
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
         let output = command.output().expect("run shared graph host");
         assert!(
             output.status.success(),
             "shared graph host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping shared loader integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping shared loader integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-content-loader-test");
+        let first_dir = root.path.join("first");
+        let second_dir = root.path.join("second");
+        let leaf = if cfg!(target_os = "macos") {
+            "same.dylib"
+        } else {
+            "same.so"
+        };
+        let program = |value: f64| Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Number(value.to_bits())],
+            code: vec![Instruction::Const(0), Instruction::Return],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let first = builder
+            .build_shared_library(
+                &program(11.0),
+                &NativeBuildOptions {
+                    output: first_dir.join(leaf),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build first same-basename library");
+        let second = builder
+            .build_shared_library(
+                &program(22.0),
+                &NativeBuildOptions {
+                    output: second_dir.join(leaf),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build second same-basename library");
+        assert_ne!(first.loader.file_name(), second.loader.file_name());
+        assert_eq!(
+            fs::read(&first.output).unwrap(),
+            fs::read(&first.loader).unwrap()
+        );
+        assert_eq!(
+            fs::read(&second.output).unwrap(),
+            fs::read(&second.loader).unwrap()
+        );
+
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "first/same.h"
+#include "second/same.h"
+#include <stdint.h>
+
+int main(void) {{
+    kiln_value result;
+    if ({first_symbol}(NULL, &result) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits}))
+        return 1;
+    if ({second_symbol}(NULL, &result) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits}))
+        return 2;
+    return 0;
+}}
+"#,
+                first_symbol = first.module_symbol,
+                second_symbol = second.module_symbol,
+                first_bits = 11.0_f64.to_bits(),
+                second_bits = 22.0_f64.to_bits(),
+            ),
+        )
+        .expect("write same-basename host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile same-basename host");
+        let host_executable = root.path.join("host");
+        let mut link_options = LinkOptions {
+            runtime_libraries: vec![first.output.clone(), second.output.clone()],
+            ..LinkOptions::default()
+        };
+        for directory in [
+            first.loader.parent().expect("first loader directory"),
+            second.loader.parent().expect("second loader directory"),
+        ] {
+            link_options
+                .extra_args
+                .push(format!("-Wl,-rpath,{}", directory.display()).into());
+        }
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link same-basename host");
+        let output = Command::new(&host_executable)
+            .output()
+            .expect("run same-basename host");
+        assert!(
+            output.status.success(),
+            "same-basename host failed with {:?}: {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
