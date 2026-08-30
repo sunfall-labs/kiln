@@ -2137,16 +2137,23 @@ builtins spanning every family before writing it, and
 `conformance/differential/builtin-names.js` keeps checking. A table of two hundred names would
 have been two hundred chances to disagree with the property table that resolves the name.
 
-**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, string
-methods, `sort` and the array methods with awkward callbacks (`find`, `some`, `every`),
-accessors, `delete`, `EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
+**Twenty-two string methods followed**, built on one conversion pair rather than a dozen ad-hoc
+walks: `kiln_c99_to_units` / `kiln_c99_from_units`, with every method working on UTF-16 code
+units in between. That is not tidiness -- it is the same decision ADR 0022 forced in the
+interpreter, and a dozen separate walks would be a dozen chances to disagree about where a
+position is. `toUpperCase`/`toLowerCase` refuse outside ASCII, because case mapping needs Unicode
+tables the unit does not carry and guessing would disagree with the interpreter silently.
+
+**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, `sort` and
+the array methods with awkward callbacks (`find`, `some`, `every`), accessors, `delete`,
+`EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 6/6, differential 90/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 7/7, differential 91/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
