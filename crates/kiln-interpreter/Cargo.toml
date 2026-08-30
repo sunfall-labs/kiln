@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-runtime = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 regress = { workspace = true }

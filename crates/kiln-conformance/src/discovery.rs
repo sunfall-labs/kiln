@@ -16,6 +16,7 @@ use kiln_test262::TestCase;
 use crate::case::{
     CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, Variant, VariantResult,
 };
+use crate::harness::Harness;
 use crate::manifest::{MANIFEST_FILE_NAME, Manifest, ManifestError, ManifestTest};
 use crate::{program, test262};
 
@@ -33,6 +34,8 @@ pub enum Provenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceTest {
     id: String,
+    /// Shared across every test in one tree: the harness is the same file set for all of them.
+    harness: Option<std::sync::Arc<Harness>>,
     source_path: PathBuf,
     path: PathBuf,
     bundle_input_paths: Vec<PathBuf>,
@@ -100,7 +103,9 @@ impl ConformanceTest {
     /// different program against that observation.
     pub fn run(&self, mode: RunMode) -> Vec<VariantResult> {
         match &self.declaration {
-            Declaration::Frontmatter(case) => test262::run_case_variants(case, mode),
+            Declaration::Frontmatter(case) => {
+                test262::run_case_variants_with_harness(case, mode, self.harness.as_deref())
+            }
             Declaration::ExpectedStdout {
                 expected: _,
                 unavailable_reason: Some(reason),
@@ -121,6 +126,7 @@ impl ConformanceTest {
         resolution: crate::manifest::ProgramResolution,
     ) -> Self {
         Self {
+            harness: None,
             id: test.id.clone(),
             source_path,
             path: resolution.path,
@@ -141,6 +147,7 @@ impl ConformanceTest {
             .to_string_lossy()
             .replace('\\', "/");
         Self {
+            harness: None,
             id,
             source_path: case.path.clone(),
             path: case.path.clone(),
@@ -188,6 +195,14 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
         .into_iter()
         .map(|case| ConformanceTest::from_frontmatter(root, case))
         .collect();
+    // Loaded once for the whole tree and shared: every case needs at least `assert.js`, and a
+    // hundred thousand variants re-reading it would cost more than the run.
+    let harness = Harness::discover(root).map(std::sync::Arc::new);
+    if harness.is_some() {
+        for test in &mut tests {
+            test.harness = harness.clone();
+        }
+    }
     tests.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(tests)
 }

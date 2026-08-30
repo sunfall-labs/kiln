@@ -589,6 +589,9 @@ enum kiln_value_tag {
  * a receiver kind is a range, and this has to land inside the one that answers a method reached
  * through an object. */
 #define KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT 175
+/* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
+ * Library code reaches for it constantly on values it has already coerced. */
+#define KILN_C99_METHOD_PRIMITIVE_TO_STRING 176
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -628,6 +631,8 @@ typedef struct kiln_closure {
      * `this`: it has none of its own. */
     int arrow;
     kiln_value captured_new_target;
+    /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
+    kiln_value captured_arguments;
     /* Calling this builds a generator object instead of running the body. */
     int generator;
     /* ...and, when this is set, drives it to completion against a promise rather than handing
@@ -884,29 +889,10 @@ typedef struct kiln_microtask {
  * run in the order they were made rather than in whatever order the array happens to hold them --
  * which is a difference a program can see and therefore one the two engines have to share. */
 typedef struct kiln_timer {
-    double id;
-    double due;
-    uint64_t sequence;
     kiln_value callback;
     kiln_value *args;
     size_t argc;
-    /* An interval re-arms itself with this delay; a timeout does not re-arm. */
-    double repeat;
-    int repeats;
 } kiln_timer;
-/* The timers, and the clock they are due against.
- *
- * The clock is *virtual*: it advances to whatever the next timer is due at rather than waiting
- * for it. `setTimeout(f, 1000)` therefore costs nothing, and a program's observable ordering is
- * the same as it would be on a real clock -- which is the only part of a timer a compiler test
- * can check anyway. The interpreter does exactly this, and the two agreeing about ordering is
- * what `conformance/native/timers.ts` is for. */
-static kiln_timer *kiln_c99_timers;
-static size_t kiln_c99_timer_count;
-static size_t kiln_c99_timer_capacity;
-static double kiln_c99_now;
-static double kiln_c99_next_timer_id = 1.0;
-static uint64_t kiln_c99_next_sequence;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
@@ -930,6 +916,15 @@ typedef struct kiln_text {
  * language counts in (ADR 0022) and matching over UTF-16 makes them so without a conversion. */
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
+typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
+typedef void (*kiln_realm_drop_fn)(void *work);
+int kiln_realm_is_active(void);
+int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
+int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
+                           void *work, uint64_t *out_id);
+int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
+                            void *work, uint64_t *out_id);
+int kiln_realm_clear_timer(uint64_t id);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
@@ -973,6 +968,8 @@ static kiln_value *kiln_c99_cell_of(kiln_value value);
 static kiln_object *kiln_c99_object_of(kiln_value value);
 static kiln_array *kiln_c99_array_of(kiln_value value);
 static double kiln_c99_as_number(kiln_value value);
+static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
+                                      kiln_value *thrown);
 static int kiln_c99_truthy(kiln_value value);
 static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
@@ -1055,10 +1052,12 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
                          kiln_value *out);
-static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
-static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
+static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
+static void kiln_c99_drop_microtask(void *work);
+static int kiln_c99_run_timer(void *work, void *host, void *thrown);
+static void kiln_c99_drop_timer(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown);
@@ -1071,8 +1070,13 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
-static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
-                                   kiln_value *out, kiln_value *thrown);
+static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+                                   kiln_value right, kiln_value *out, int depth,
+                                   kiln_value *thrown);
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+                                 kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
+                                  kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
@@ -1235,6 +1239,34 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         /* An array is not an object here, but it can still carry a property that is not an
          * element -- which is how `exec` reports `index` and `input`. */
         kiln_array *array = kiln_c99_array_of(target);
+        if (kiln_c99_same_name(key, key_len, "length")) {
+            /* `length` is derived, not stored, so writing it is a resize: truncating drops the
+             * tail and growing fills with holes, which are not undefined elements. */
+            double wanted = kiln_c99_as_number(value);
+            size_t at;
+            if (!(wanted >= 0.0) || floor(wanted) != wanted || wanted > 4294967295.0) {
+                /* A RangeError rather than a write that quietly does nothing. */
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "Invalid array length");
+            }
+            if (array->frozen) {
+                return KILN_C99_OK;
+            }
+            if ((size_t)wanted <= array->count) {
+                array->count = (size_t)wanted;
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)wanted,
+                                      sizeof *array->elements);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            for (at = array->count; at < (size_t)wanted; ++at) {
+                array->elements[at] = kiln_c99_hole();
+            }
+            array->count = (size_t)wanted;
+            return KILN_C99_OK;
+        }
         if (array->properties.tag != KILN_VALUE_OBJECT) {
             status = kiln_c99_new_object(&array->properties);
             if (status != KILN_C99_OK) {
@@ -1600,6 +1632,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_COLLECTION_SELF: return "@@iterator";
     case KILN_C99_METHOD_ITERATOR_NEXT: return "next";
     case KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT: return "next";
+    case KILN_C99_METHOD_PRIMITIVE_TO_STRING: return "toString";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
     case KILN_C99_METHOD_ARRAY_VALUES: return "values";
     case KILN_C99_METHOD_THEN: return "then";
@@ -2083,6 +2116,41 @@ static kiln_value kiln_c99_new_target;
  * constructor can name the subclass it is being built for -- so exactly one call has to *not*
  * compute a fresh one. */
 static int kiln_c99_inheriting_new_target;
+
+/* The running call's own arguments, and the list an arrow sees instead.
+ *
+ * An arrow has no `arguments` of its own -- `arguments` inside one is the enclosing function's,
+ * which is a *different list* from the arrow's own rest parameter. So an arrow captures the
+ * visible list where it was written, exactly as it captures `this` and `new.target`, and the
+ * three are saved and restored together around every call for the same reason.
+ *
+ * The raw pointer and count rather than an array, because a call must not pay to materialise an
+ * `arguments` nothing asked for; the array is built where one is actually read. */
+static const kiln_value *kiln_c99_frame_args;
+static size_t kiln_c99_frame_argc;
+static kiln_value kiln_c99_captured_arguments;
+static int kiln_c99_frame_is_arrow;
+
+/* The `arguments` this frame can see: an arrow's captured list, or this call's own. */
+static int kiln_c99_visible_arguments(kiln_value *out) {
+    size_t at;
+    int status;
+    if (kiln_c99_frame_is_arrow) {
+        *out = kiln_c99_captured_arguments;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_array(out);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    for (at = 0; at < kiln_c99_frame_argc; ++at) {
+        status = kiln_c99_array_push(*out, kiln_c99_frame_args[at]);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    return KILN_C99_OK;
+}
 
 /* The realm's global object, created on first use.
  *
@@ -2699,6 +2767,16 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
     closure->captured_new_target = kiln_c99_new_target;
+    closure->captured_arguments = kiln_c99_undefined();
+    if (arrow) {
+        /* Only an arrow, and only at creation: the list belongs to a frame that will be gone
+         * before the arrow is called, so it has to be copied out now rather than pointed at. */
+        int captured = kiln_c99_visible_arguments(&closure->captured_arguments);
+        if (captured != KILN_C99_OK) {
+            free(closure);
+            return captured;
+        }
+    }
     closure->prototype = kiln_c99_undefined();
     closure->properties = kiln_c99_undefined();
     closure->name = name;
@@ -2766,15 +2844,41 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     if (callee.tag == KILN_VALUE_BUILTIN) {
         static const char empty[] = "";
         switch (callee.bits) {
-        case KILN_C99_BUILTIN_STRING:
+        case KILN_C99_BUILTIN_STRING: {
             /* `String()` with no argument is the empty string, not `"undefined"`. */
-            *result = argc == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0)
-                                : kiln_c99_text(args[0]);
+            kiln_value subject;
+            int status;
+            if (argc == 0) {
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0);
+                return KILN_C99_OK;
+            }
+            /* The *string* hint: `toString` before `valueOf`, which is the other way round from
+             * every operator. `${x}` compiles to this call for exactly that reason -- a template
+             * is not `"" + x`, and for an object with both methods the two disagree. */
+            status = kiln_c99_to_primitive(host, args[0], 1, &subject, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = kiln_c99_text(subject);
             return KILN_C99_OK;
-        case KILN_C99_BUILTIN_NUMBER:
+        }
+        case KILN_C99_BUILTIN_NUMBER: {
+            double converted;
+            int status;
             /* `Number()` with no argument is zero, not NaN: there is nothing to fail to convert. */
-            *result = kiln_c99_number(argc == 0 ? 0.0 : kiln_c99_as_number(args[0]));
+            if (argc == 0) {
+                *result = kiln_c99_number(0.0);
+                return KILN_C99_OK;
+            }
+            /* The *number* hint, the reverse of the `String` builtin above: `Number([6])` is 6
+             * because an array declines `valueOf` and its `toString` answers "6". */
+            status = kiln_c99_to_number_checked(host, args[0], &converted, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = kiln_c99_number(converted);
             return KILN_C99_OK;
+        }
         case KILN_C99_BUILTIN_BIGINT: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_number(0.0);
             void *handle = NULL;
@@ -2876,6 +2980,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
          * arrow's captured one, because an arrow has none of its own. `super(...)` is the one call
          * that keeps what it found: the base constructor is being run *for* the subclass. */
         kiln_value saved = kiln_c99_new_target;
+        const kiln_value *saved_args = kiln_c99_frame_args;
+        size_t saved_argc = kiln_c99_frame_argc;
+        kiln_value saved_captured = kiln_c99_captured_arguments;
+        int saved_is_arrow = kiln_c99_frame_is_arrow;
         int status;
         if (kiln_c99_inheriting_new_target) {
             kiln_c99_inheriting_new_target = 0;
@@ -2883,9 +2991,20 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             kiln_c99_new_target =
                 closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
         }
+        kiln_c99_frame_is_arrow = closure->arrow;
+        if (closure->arrow) {
+            kiln_c99_captured_arguments = closure->captured_arguments;
+        } else {
+            kiln_c99_frame_args = args;
+            kiln_c99_frame_argc = argc;
+        }
         status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
                                thrown, NULL);
         kiln_c99_new_target = saved;
+        kiln_c99_frame_args = saved_args;
+        kiln_c99_frame_argc = saved_argc;
+        kiln_c99_captured_arguments = saved_captured;
+        kiln_c99_frame_is_arrow = saved_is_arrow;
         return status;
     }
 }
@@ -3615,11 +3734,28 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "toString") ||
+            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
+            return KILN_C99_OK;
+        }
         return KILN_C99_CONTROL_ERROR;
     case KILN_VALUE_STRING: {
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
         if (is_length) {
@@ -4037,10 +4173,13 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         }
         return KILN_C99_OK;
     }
-    if (target.tag != KILN_VALUE_OBJECT) {
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY &&
+        target.tag != KILN_VALUE_FUNCTION) {
         return KILN_C99_CONTROL_ERROR;
     }
     {
+        /* Not an index, so it is an ordinary key -- `a["length"] = 0` and `a["tag"] = "x"` are
+         * the same write `a.length` and `a.tag` are, reached by a different spelling. */
         kiln_value text = kiln_c99_property_key(key);
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
@@ -5253,8 +5392,37 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     if (code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
-        double first = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
-        double second = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
+        double first = 0.0 / 0.0;
+        double second = 0.0 / 0.0;
+        /* Only the methods that actually want a number reduce their arguments. `Object.assign`,
+         * `JSON.stringify` and `Function.prototype.call` are reached through this same range, and
+         * `call` in particular takes a *receiver* in `args[0]` -- running `valueOf` on it would be
+         * a user-visible call the language never asks for. Coercing every argument here was safe
+         * only while `kiln_c99_as_number` was pure; now that it can reach a program's `valueOf`,
+         * the set has to be named. The global `isNaN`/`isFinite` are in it and the `Number` pair
+         * beside them is not, for the reason given at their cases below. */
+        /* `min`, `max` and `hypot` are variadic and reduce each argument themselves, so they must
+         * not be reduced here as well: a `valueOf` that counts its own calls sees the difference,
+         * and ToNumber is specified to happen once per argument. */
+        if ((code <= KILN_C99_METHOD_MATH_ATAN && code != KILN_C99_METHOD_MATH_MIN &&
+             code != KILN_C99_METHOD_MATH_MAX && code != KILN_C99_METHOD_MATH_HYPOT) ||
+            code == KILN_C99_METHOD_GLOBAL_IS_NAN || code == KILN_C99_METHOD_GLOBAL_IS_FINITE) {
+            if (argc > 0) {
+                int reduced = kiln_c99_to_number_checked(host, args[0], &first, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+            }
+            if (argc > 1) {
+                int reduced = kiln_c99_to_number_checked(host, args[1], &second, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+            }
+        } else {
+            first = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
+            second = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
+        }
         switch (code) {
         case KILN_C99_METHOD_FUNCTION_CALL:
             /* The receiver is the function; the first argument becomes *its* receiver. */
@@ -5587,10 +5755,22 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         case KILN_C99_METHOD_PARSE_INT:
         case KILN_C99_METHOD_PARSE_FLOAT: {
-            kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value text;
             const char *bytes;
             size_t len;
             size_t at = 0;
+            /* These two read a *string*, so the string hint: `toString` before `valueOf`, and
+             * `parseInt({toString: () => "99"})` is 99. The same split `kiln_c99_to_number_checked`
+             * makes for the number hint -- `kiln_c99_text` is pure, so it cannot run a `toString`
+             * the program wrote and answered NaN for every object that has one. */
+            if (kiln_c99_is_reference(subject)) {
+                int reduced = kiln_c99_to_primitive(host, subject, 1, &subject, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+            }
+            text = kiln_c99_text(subject);
             if (text.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -5870,7 +6050,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * whose result is perfectly representable, which is the whole reason it exists. */
             double total = 0.0;
             for (index = 0; index < argc; ++index) {
-                total = hypot(total, kiln_c99_as_number(args[index]));
+                double leg;
+                int reduced = kiln_c99_to_number_checked(host, args[index], &leg, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+                total = hypot(total, leg);
             }
             *result = kiln_c99_number(total);
             return KILN_C99_OK;
@@ -5881,7 +6066,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * every one of them. */
             double best = code == KILN_C99_METHOD_MATH_MIN ? 1.0 / 0.0 : -1.0 / 0.0;
             for (index = 0; index < argc; ++index) {
-                double value = kiln_c99_as_number(args[index]);
+                double value;
+                int reduced = kiln_c99_to_number_checked(host, args[index], &value, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
                 if (isnan(value)) {
                     best = value;
                     break;
@@ -6677,8 +6866,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         case KILN_C99_METHOD_OBJECT_VALUE_OF:
             /* Returns the receiver unchanged, which is the identity that makes ToPrimitive fall
-             * through to `toString` for a plain object. */
+             * through to `toString` for a plain object -- and the right answer for a primitive,
+             * which is already what it converts to. */
             *result = receiver;
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_PRIMITIVE_TO_STRING:
+            *result = kiln_c99_text(receiver);
             return KILN_C99_OK;
         case KILN_C99_METHOD_DATE_PARSE: {
             /* Parsing accepts the ISO forms and rejects the rest, rather than guessing: a date
@@ -8191,9 +8384,12 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
 /* Define an accessor half, merging with a half already defined under the same key.
  *
  * Merging matters because `get x()` and `set x()` are written separately and describe one
- * property; defining the second must not discard the first. */
+ * property; defining the second must not discard the first.
+ *
+ * `enumerable` separates the two syntaxes that reach here: an object literal's accessor is an
+ * ordinary property and is enumerated, a class body's is not. */
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
-                                    kiln_value getter, kiln_value setter) {
+                                    kiln_value getter, kiln_value setter, int enumerable) {
     kiln_object *object;
     size_t index;
     int status;
@@ -8203,7 +8399,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         if (status != KILN_C99_OK) {
             return status;
         }
-        return kiln_c99_define_accessor(store, key, key_len, getter, setter);
+        return kiln_c99_define_accessor(store, key, key_len, getter, setter, enumerable);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
@@ -8224,6 +8420,9 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         if (setter.tag != KILN_VALUE_UNDEFINED) {
             object->properties[index].setter = setter;
         }
+        if (!enumerable) {
+            object->properties[index].enumerable = 0;
+        }
         return KILN_C99_OK;
     }
     status = kiln_c99_put(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL);
@@ -8235,6 +8434,44 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
             object->properties[index].accessor = 1;
             object->properties[index].getter = getter;
             object->properties[index].setter = setter;
+            if (!enumerable) {
+                object->properties[index].enumerable = 0;
+            }
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+/* Define a method: a data property that is reachable by name and never enumerated.
+ *
+ * `kiln_c99_put` is an assignment and creates an enumerated property, which is right for an
+ * object literal and wrong for a class body -- `for (const k in new C())` visits the fields the
+ * constructor assigned and nothing the class declared. */
+static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+                                  kiln_value method) {
+    kiln_object *object;
+    size_t index;
+    int status;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        kiln_value store;
+        status = kiln_c99_function_store(target, &store);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        return kiln_c99_define_method(store, key, key_len, method);
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_put(NULL, target, key, key_len, method, 0, NULL);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            object->properties[index].enumerable = 0;
             return KILN_C99_OK;
         }
     }
@@ -10068,28 +10305,10 @@ static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
 }
 
 static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right) {
-    /* A function reduces to a primitive before every coercing operator, exactly as it does in
-     * the interpreter: its `valueOf` hands back the object itself, so `toString` decides.
-     * Strict equality is identity and never coerces, and a nullish `==` is answered without any
-     * conversion at all. */
-    if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
-        int coerces = 1;
-        if (operation == 7 || operation == 8) {
-            coerces = 0;
-        } else if ((operation == 15 || operation == 16) &&
-                   (left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
-                    right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL)) {
-            coerces = 0;
-        }
-        if (coerces) {
-            if (kiln_c99_is_reference(left)) {
-                left = kiln_c99_text(left);
-            }
-            if (kiln_c99_is_reference(right)) {
-                right = kiln_c99_text(right);
-            }
-        }
-    }
+    /* Reference operands have already been reduced by `kiln_c99_binary_checked`, which is where
+     * the reduction has to live: it is a *call* into the program, and this function has neither
+     * a host to make one with nor anywhere to put what it throws. A reference reaching here is a
+     * scalar program's, and a scalar program has no reference in it. */
     switch (operation) {
     case 1:
         if (left.tag == KILN_VALUE_STRING || right.tag == KILN_VALUE_STRING) {
@@ -10147,6 +10366,120 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
     }
 }
 
+
+/* Reduce a value to a primitive, which is a *call* rather than a formatting rule.
+ *
+ * Which method is tried first depends on what the operator wanted: arithmetic wants a number and
+ * asks `valueOf` first, string conversion asks `toString` first. Every date and decimal library
+ * is used through the first of those, and `${x}` differs from `"" + x` only in this.
+ *
+ * A method that hands back another object is skipped rather than accepted: the point is to reach
+ * a primitive, and a `valueOf` returning `this` -- which is what `Object.prototype.valueOf` does
+ * -- would otherwise stop the search at its own receiver.
+ *
+ * A value with no method to call falls back to `kiln_c99_text`, which is where an array's join
+ * and a function's source text already live. */
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+                                 kiln_value *out, int depth, kiln_value *thrown) {
+    static const char *const string_first[2] = {"toString", "valueOf"};
+    static const char *const value_first[2] = {"valueOf", "toString"};
+    const char *const *order = string_hint ? string_first : value_first;
+    int step;
+    if (!kiln_c99_is_reference(value)) {
+        *out = value;
+        return KILN_C99_OK;
+    }
+    {
+        /* `@@toPrimitive` overrides both, and is told which hint it is answering. */
+        kiln_value exotic;
+        int status = kiln_c99_get(host, value, "@@toPrimitive", 13, &exotic, depth, thrown);
+        if (status == KILN_C99_THROWN) {
+            return status;
+        }
+        if (status == KILN_C99_OK && kiln_c99_is_callable(exotic)) {
+            kiln_value hint = kiln_c99_copy_text(string_hint ? "string" : "default",
+                                                 string_hint ? 6 : 7);
+            kiln_value produced;
+            status = kiln_c99_call(host, &produced, exotic, value, &hint, 1, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (kiln_c99_is_reference(produced)) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert object to primitive value");
+            }
+            *out = produced;
+            return KILN_C99_OK;
+        }
+    }
+    for (step = 0; step < 2; ++step) {
+        kiln_value method;
+        kiln_value produced;
+        int status = kiln_c99_get(host, value, order[step], strlen(order[step]), &method, depth,
+                                  thrown);
+        if (status == KILN_C99_THROWN) {
+            return status;
+        }
+        if (status != KILN_C99_OK || !kiln_c99_is_callable(method)) {
+            continue;
+        }
+        status = kiln_c99_call(host, &produced, method, value, NULL, 0, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!kiln_c99_is_reference(produced)) {
+            *out = produced;
+            return KILN_C99_OK;
+        }
+    }
+    /* Neither was reachable, or neither answered with a primitive. The specification stops the
+     * program here, and this used to answer `kiln_c99_text(value)` instead -- which is not merely
+     * a wrong value but a wrong *program*: everything after the fault ran, and the process exited
+     * 0 where the language says 1. `Object.create(null) + 1` and an object whose `valueOf` and
+     * `toString` both return objects are the two ways in. */
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                "Cannot convert object to primitive value");
+}
+
+/* ToNumber, for a caller that has a host and somewhere to throw.
+ *
+ * `kiln_c99_as_number` is pure, so on a reference it can only answer NaN -- it cannot run the
+ * `valueOf` that ToNumber is specified to call. Every builtin that wants a number from a value the
+ * program supplied goes through here instead, which is the same split `kiln_c99_unary_checked`
+ * makes below for the operators. */
+static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
+                                      kiln_value *thrown) {
+    kiln_value reduced;
+    int status;
+    if (!kiln_c99_is_reference(value)) {
+        *out = kiln_c99_as_number(value);
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_to_primitive(host, value, 0, &reduced, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *out = kiln_c99_as_number(reduced);
+    return KILN_C99_OK;
+}
+
+/* `+x`, `-x` and `~x` on something that is not a primitive yet.
+ *
+ * The same reduction the binary operators do, for the same reason: all three want a number, and
+ * a number is what `valueOf` is for. `!`, `typeof` and `void` do not coerce -- they answer about
+ * the value they were given. */
+static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
+                                  kiln_value *out, int depth, kiln_value *thrown) {
+    if ((operation == 1 || operation == 2 || operation == 5) && kiln_c99_is_reference(value)) {
+        int status = kiln_c99_to_primitive(host, value, 0, &value, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    *out = kiln_c99_unary(operation, value);
+    return KILN_C99_OK;
+}
+
 /* The operators that can throw.
  *
  * Only BigInt makes an operator throw before anything is called, so this wraps
@@ -10156,10 +10489,45 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
  * The provider owns the arithmetic (ADR 0025) -- writing arbitrary-precision division twice is
  * exactly the duplication that pattern exists to prevent -- so this is the type dispatch and the
  * error surface around it, nothing more. */
-static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
-                                   kiln_value *out, kiln_value *thrown) {
-    int left_big = left.tag == KILN_VALUE_BIGINT;
-    int right_big = right.tag == KILN_VALUE_BIGINT;
+static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+                                   kiln_value right, kiln_value *out, int depth,
+                                   kiln_value *thrown) {
+    int left_big;
+    int right_big;
+    if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
+        /* Strict equality is identity and never coerces, `in` and `instanceof` take their
+         * operands as they are, and a nullish `==` is answered without any conversion at all --
+         * `value != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
+         * there is both wrong and, for a wrapper that assumes it is being used properly, fatal. */
+        int coerces = !(operation == 7 || operation == 8 || operation == 13 || operation == 14);
+        if (operation == 15 || operation == 16) {
+            /* `==` reduces only across a type boundary. Two objects compare as themselves --
+             * `{} == {}` is false -- and reducing both to text would make every pair of empty
+             * objects equal. A nullish side is answered without any conversion at all: `value
+             * != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
+             * there is both wrong and, for a wrapper that assumes it is being used properly,
+             * fatal. */
+            if ((kiln_c99_is_reference(left) && kiln_c99_is_reference(right)) ||
+                left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
+                right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL) {
+                coerces = 0;
+            }
+        }
+        if (coerces) {
+            /* Every operator here wants a number or has no preference, and both of those ask
+             * `valueOf` first. Only `${}` and `String(x)` use the other order. */
+            int status = kiln_c99_to_primitive(host, left, 0, &left, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_to_primitive(host, right, 0, &right, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
+    left_big = left.tag == KILN_VALUE_BIGINT;
+    right_big = right.tag == KILN_VALUE_BIGINT;
     const void *a;
     const void *b;
     uint32_t provider_op = 0;
@@ -10529,6 +10897,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
+        | Instruction::DefineMethod
         | Instruction::SpreadObject
         | Instruction::SpreadInto
         | Instruction::ConstructSpread
@@ -10541,6 +10910,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PushHole
         | Instruction::Yield
         | Instruction::SuperCall { .. }
+        | Instruction::SuperApply
         | Instruction::SuperForward
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
@@ -10707,7 +11077,7 @@ fn stack_effect(
         }
         // The half and the key are consumed; the target stays, so a class body can define
         // several accessors on one object without reloading it.
-        Instruction::DefineAccessor { .. } => {
+        Instruction::DefineAccessor { .. } | Instruction::DefineMethod => {
             if height < 3 {
                 Err(underflow(3))
             } else {
@@ -10736,6 +11106,14 @@ fn stack_effect(
                 Err(underflow(3))
             } else {
                 Ok((height - 2, false))
+            }
+        }
+        // `super(...xs)`: the parent and the computed argument list come off, its result goes on.
+        Instruction::SuperApply => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // Replaces the value with an array of what it yields.
@@ -11907,14 +12285,25 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::DefineAccessor { setter } => {
+        Instruction::DefineAccessor {
+            setter,
+            enumerable,
+        } => {
             let half = if *setter { "setter" } else { "getter" };
             let other = if *setter { "getter" } else { "setter" };
+            let enumerable = i32::from(*enumerable);
             writeln!(
                 output,
-                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_text(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter); if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_text(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
+        }
+        // A class's methods are not enumerated, which is the whole difference from the
+        // `SetProperty` an object literal's methods lower to.
+        Instruction::DefineMethod => {
+            output.push_str(
+                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_text(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
+            );
         }
         // `in` asks whether the property exists, not what it produces, so unlike a read it does
         // not call an accessor.
@@ -11942,9 +12331,11 @@ fn emit_instruction(
         // `arguments` is every argument this frame was given, as an array. A real one is an
         // exotic object that aliases the parameters; a copy is what almost every use of it wants,
         // and the aliasing was removed from the language in strict mode anyway.
+        // Not `args` and `argc`: inside an arrow those are the arrow's own, and `arguments`
+        // there is the enclosing function's -- a different list entirely.
         Instruction::LoadArguments => {
             output.push_str(
-                "    { kiln_value given; size_t at; int status = kiln_c99_new_array(&given); if (status != KILN_C99_OK) return status; for (at = 0; at < argc; ++at) { status = kiln_c99_array_push(given, args[at]); if (status != KILN_C99_OK) return status; } stack[sp++] = given; }\n",
+                "    { kiln_value given; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; stack[sp++] = given; }\n",
             );
         }
         // `...rest` is every argument past the named parameters, as an array. A generator's
@@ -11971,6 +12362,16 @@ fn emit_instruction(
             writeln!(
                 output,
                 "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
+            )
+            .unwrap();
+        }
+        // `Apply`'s runtime argument list, but against the instance being built and keeping the
+        // `new.target` of the call that is building it -- the two things `super()` adds.
+        Instruction::SuperApply => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); kiln_c99_inheriting_new_target = 1; status = kiln_c99_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); kiln_c99_inheriting_new_target = 0; if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }
@@ -12127,8 +12528,14 @@ fn emit_instruction(
         }
         Instruction::Pop => output.push_str("    --sp;\n"),
         Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
-        Instruction::Unary(operator) => {
+        // A scalar program holds no reference to reduce, and has nowhere to put a thrown
+        // value either, so its emitted bytes stay what they were.
+        Instruction::Unary(operator) if !*callables => {
             writeln!(output, "    stack[sp - 1] = kiln_c99_unary({}, stack[sp - 1]);", unary_code(*operator)).unwrap()
+        }
+        Instruction::Unary(operator) => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap()
         }
         Instruction::Binary(operator) if !*callables => {
             // A scalar program has no BigInt in it and so no operator in it can throw. It also
@@ -12140,7 +12547,7 @@ fn emit_instruction(
             // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
-            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, left, right, &answer, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap()
+            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap()
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
@@ -12369,6 +12776,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::SpreadObject => byte(&mut hash, 45),
             Instruction::DeleteComputed => byte(&mut hash, 47),
             Instruction::Apply => byte(&mut hash, 48),
+            Instruction::SuperApply => byte(&mut hash, 61),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
@@ -12388,10 +12796,15 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 54);
                 word(&mut hash, u64::from(*value));
             }
-            Instruction::DefineAccessor { setter } => {
+            Instruction::DefineAccessor {
+                setter,
+                enumerable,
+            } => {
                 byte(&mut hash, 52);
                 byte(&mut hash, u8::from(*setter));
+                byte(&mut hash, u8::from(*enumerable));
             }
+            Instruction::DefineMethod => byte(&mut hash, 43),
             Instruction::MarkUninitialized(value) => {
                 byte(&mut hash, 51);
                 word(&mut hash, u64::from(*value));

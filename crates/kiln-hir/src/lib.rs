@@ -382,13 +382,39 @@ pub struct VariableDeclarator {
 /// A pattern is a tree because destructuring nests, and defaults are a wrapper rather than a
 /// field on each shape: `[a = 1]`, `{ b = 2 }` and `[[c = 3]]` are the same construct at
 /// different depths, and giving every shape its own optional default would say otherwise.
+///
+/// Three of the shapes store through a reference rather than binding a name. They belong here
+/// even though a declaration can never use them -- `let [o.p] = xs` is a syntax error -- because
+/// `[o.p, q] = xs` mixes them with names freely, and the alternative is a second pattern tree
+/// that differs from this one only in which leaves it admits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Identifier(String),
+    /// `[object.property] = xs`. The same target shape as
+    /// [`ExpressionKind::MemberAssignment`], and split from the computed and private forms for
+    /// the same reason it is: the three evaluate different things before the store.
+    Member {
+        object: Box<Expression>,
+        property: String,
+    },
+    /// `[object[property]] = xs`, mirroring [`ExpressionKind::ComputedAssignment`].
+    Computed {
+        object: Box<Expression>,
+        property: Box<Expression>,
+    },
+    /// `[object.#name] = xs`, mirroring [`ExpressionKind::PrivateAssignment`]: the field has to
+    /// already exist on the object, and it not existing is a TypeError rather than a property
+    /// being created.
+    PrivateMember {
+        object: Box<Expression>,
+        name: String,
+    },
     /// `{ a, b: renamed, ...rest }`
     Object {
         properties: Vec<PatternProperty>,
-        rest: Option<String>,
+        /// A pattern rather than a name, because `({ ...o.rest } = src)` stores the leftovers
+        /// through a reference. A declaration's rest is always an [`Pattern::Identifier`].
+        rest: Option<Box<Pattern>>,
     },
     /// `[a, , b, ...rest]`. `None` is a hole, which binds nothing.
     Array {
@@ -404,8 +430,22 @@ pub enum Pattern {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternProperty {
-    pub key: String,
+    pub key: PatternKey,
     pub value: Pattern,
+}
+
+/// Which property of the source a pattern property reads.
+///
+/// Not an [`ObjectKey`]: a pattern cannot name a private field as the *source* of a property --
+/// `({ #x: a } = o)` is not syntax -- and a key that could be private would put a case here that
+/// no lowering can produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternKey {
+    /// `{ a: x }`, `{ "a": x }` and `{ 0: x }`, all normalised to the string they name.
+    Static(String),
+    /// `{ [expression]: x }`, evaluated where the source wrote it -- before the value is read
+    /// out of the source, and once even when a rest has to exclude the key it produced.
+    Computed(Expression),
 }
 
 impl Pattern {
@@ -463,7 +503,7 @@ pub enum ExpressionKind {
     /// `super(...)` in a derived constructor: run the parent constructor against this instance
     /// rather than allocating a new one.
     SuperCall {
-        arguments: Vec<Expression>,
+        arguments: Vec<ListElement>,
     },
     /// `super.property`, which resolves on the parent's prototype rather than on `this`.
     SuperMember {

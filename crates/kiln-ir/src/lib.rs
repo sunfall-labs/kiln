@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
     Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, Span, Statement, StatementKind, SwitchCase,
-    UnaryOperator, VariableKind,
+    Module, ObjectKey, ObjectMember, Pattern, PatternKey, Span, Statement, StatementKind,
+    SwitchCase, UnaryOperator, VariableKind,
 };
 
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
@@ -254,9 +254,22 @@ pub enum Instruction {
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
     /// is already there rather than replacing it.
+    ///
+    /// `enumerable` is what separates the two syntaxes that reach here: `{ get x() {} }` is an
+    /// ordinary property of an object literal and is enumerated, and `class C { get x() {} }` is
+    /// part of the class rather than of any instance and is not.
     DefineAccessor {
         setter: bool,
+        enumerable: bool,
     },
+    /// Define a method on an object. Stack: `[target, key, function] -> [target]`.
+    ///
+    /// `SetProperty` with the key on the stack would be the same thing but for the attributes:
+    /// an assignment creates an enumerated property, and a class's methods are not enumerated --
+    /// `for (const k in new C())` visits fields and nothing else. An assignment cannot express
+    /// that, which is why lowering a class body needs an instruction of its own where an object
+    /// literal does not.
+    DefineMethod,
     /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
     ///
     /// Reading it is a `ReferenceError`. Emitted only where a read could actually reach it --
@@ -277,6 +290,12 @@ pub enum Instruction {
     Apply,
     /// `new callee(...arguments)`. Stack: `[callee, arguments] -> [instance]`.
     ConstructSpread,
+    /// `super(...arguments)`. Stack: `[parent, arguments] -> [result]`.
+    ///
+    /// Separate from `Apply` because `super()` initialises the *existing* instance and keeps the
+    /// `new.target` of the call building it, and separate from `SuperCall` because the arity is
+    /// the length of an array the program computed rather than a number in the bytecode.
+    SuperApply,
     /// Put a fresh cell in a local slot, so a nested function can capture the *binding* rather
     /// than a copy of its value.
     ///
@@ -601,6 +620,27 @@ pub struct ModuleProgram {
 enum PatternLeaf {
     Declare(VariableKind),
     Assign,
+}
+
+/// Where a pattern walk reads the value it is taking apart.
+///
+/// Straight off the stack whenever nothing else has to push there, which keeps `{ a, b } = o`
+/// free of a temporary. A target that stores through a property reference, and a computed key,
+/// both evaluate expressions *between* the source arriving and the value being read out of it;
+/// those pushes would bury the source, so it spills into a hidden binding instead.
+enum PatternSource {
+    Stack,
+    Hidden(String),
+}
+
+/// A pattern property's key, once it has been evaluated.
+///
+/// A computed key is held in a hidden binding rather than kept as an expression, because a rest
+/// has to exclude the key that was actually produced -- re-running the expression would evaluate
+/// it twice and could produce a different key the second time.
+enum SourceKey {
+    Static(u32),
+    Computed(String),
 }
 
 /// A source-located compiler failure.
@@ -1204,6 +1244,12 @@ impl Compiler {
         self.destructure(PatternLeaf::Assign, pattern, span);
     }
 
+    /// Take the value on top of the stack apart, consuming it.
+    ///
+    /// A leaf that stores through a property reference expects the receiver -- and the key, for a
+    /// computed one -- to be sitting under that value already: [`Compiler::destructure_element`]
+    /// puts them there before the value exists, because that is the order the language evaluates
+    /// them in. Only that method reaches such a leaf, which is why nothing here re-derives them.
     fn destructure(&mut self, leaf: PatternLeaf, pattern: &Pattern, span: Span) {
         match pattern {
             Pattern::Identifier(name) => {
@@ -1217,6 +1263,17 @@ impl Compiler {
                     PatternLeaf::Declare(kind) => self.declare_bound(kind, name, span),
                     PatternLeaf::Assign => self.store_existing(name, span),
                 }
+            }
+            Pattern::Member { property, .. } => {
+                let name = self.constant_index(Constant::String(property.clone()));
+                self.store_through_reference(leaf, Instruction::SetProperty(name), span);
+            }
+            Pattern::Computed { .. } => {
+                self.store_through_reference(leaf, Instruction::SetComputed, span);
+            }
+            Pattern::PrivateMember { name, .. } => {
+                let name = self.constant_index(Constant::String(self.private_key(name)));
+                self.store_through_reference(leaf, Instruction::SetPrivate(name), span);
             }
             Pattern::WithDefault { inner, default } => {
                 // A default applies only to `undefined`, not to every falsy value and not to
@@ -1232,63 +1289,192 @@ impl Compiler {
                 self.destructure(leaf, inner, span);
             }
             Pattern::Object { properties, rest } => {
-                for property in properties {
-                    self.code.push(Instruction::Dup);
-                    let key = self.constant_index(Constant::String(property.key.clone()));
-                    self.code.push(Instruction::GetProperty(key));
-                    self.destructure(leaf, &property.value, span);
-                }
-                match rest {
-                    // Copy everything, then remove what the named properties already took. The
-                    // other direction -- copy all but a set of names -- would need the exclusion
-                    // list at runtime; this needs only instructions that already earn their keep.
-                    Some(name) => {
-                        let source = format!("%rest{}", self.hidden_bindings);
-                        self.hidden_bindings += 1;
-                        self.scopes.push(HashMap::new());
-                        self.declare_hidden(&source, span);
+                let spilled = rest.is_some()
+                    || properties.iter().any(|property| {
+                        stores_through_reference(&property.value)
+                            || matches!(property.key, PatternKey::Computed(_))
+                    });
+                let source = self.pattern_source(spilled, span);
 
-                        self.code.push(Instruction::NewObject { count: 0 });
-                        self.load_hidden(&source);
-                        self.code.push(Instruction::SpreadObject);
-                        for property in properties {
-                            let key = self.constant_index(Constant::String(property.key.clone()));
-                            self.code.push(Instruction::Dup);
-                            self.code.push(Instruction::DeleteProperty(key));
-                            self.code.push(Instruction::Pop);
+                let mut taken = Vec::with_capacity(properties.len());
+                for property in properties {
+                    // A computed key is evaluated where the source wrote it: before the target's
+                    // reference and before the read, and exactly once even when a rest below
+                    // needs the key again.
+                    let key = match &property.key {
+                        PatternKey::Static(name) => {
+                            SourceKey::Static(self.constant_index(Constant::String(name.clone())))
                         }
-                        self.scopes.pop().expect("rest scope was just pushed");
-                        match leaf {
-                            PatternLeaf::Declare(kind) => self.declare_bound(kind, name, span),
-                            PatternLeaf::Assign => self.store_existing(name, span),
+                        PatternKey::Computed(expression) => {
+                            self.expression(expression);
+                            let held = format!("%key{}", self.hidden_bindings);
+                            self.hidden_bindings += 1;
+                            self.declare_hidden(&held, span);
+                            SourceKey::Computed(held)
                         }
-                    }
-                    None => self.code.push(Instruction::Pop),
+                    };
+                    self.destructure_element(leaf, &property.value, span, |compiler| {
+                        compiler.load_pattern_source(&source);
+                        compiler.read_key(&key);
+                    });
+                    taken.push(key);
                 }
+
+                // Copy everything, then remove what the named properties already took. The other
+                // direction -- copy all but a set of names -- would need the exclusion list at
+                // runtime; this needs only instructions that already earn their keep.
+                if let Some(rest) = rest {
+                    self.destructure_element(leaf, rest, span, |compiler| {
+                        compiler.code.push(Instruction::NewObject { count: 0 });
+                        compiler.load_pattern_source(&source);
+                        compiler.code.push(Instruction::SpreadObject);
+                        for key in &taken {
+                            compiler.code.push(Instruction::Dup);
+                            match key {
+                                SourceKey::Static(index) => {
+                                    compiler.code.push(Instruction::DeleteProperty(*index));
+                                }
+                                SourceKey::Computed(held) => {
+                                    compiler.load_hidden(held);
+                                    compiler.code.push(Instruction::DeleteComputed);
+                                }
+                            }
+                            compiler.code.push(Instruction::Pop);
+                        }
+                    });
+                }
+                self.finish_pattern_source(&source);
             }
             Pattern::Array { elements, rest } => {
                 self.code.push(Instruction::IterableToArray);
+                let spilled = elements.iter().flatten().any(stores_through_reference)
+                    || rest.as_deref().is_some_and(stores_through_reference);
+                let source = self.pattern_source(spilled, span);
                 for (index, element) in elements.iter().enumerate() {
                     let Some(element) = element else {
                         continue; // a hole binds nothing
                     };
-                    self.code.push(Instruction::Dup);
-                    self.push_constant(Constant::Number((index as f64).to_bits()));
-                    self.code.push(Instruction::GetComputed);
-                    self.destructure(leaf, element, span);
+                    self.destructure_element(leaf, element, span, |compiler| {
+                        compiler.load_pattern_source(&source);
+                        compiler.push_constant(Constant::Number((index as f64).to_bits()));
+                        compiler.code.push(Instruction::GetComputed);
+                    });
                 }
                 if let Some(rest) = rest {
-                    self.code.push(Instruction::Dup);
-                    self.push_constant(Constant::Number((elements.len() as f64).to_bits()));
-                    let slice = self.constant_index(Constant::String("slice".to_owned()));
-                    self.code.push(Instruction::CallMethod {
-                        name: slice,
-                        argc: 1,
+                    self.destructure_element(leaf, rest, span, |compiler| {
+                        compiler.load_pattern_source(&source);
+                        compiler.push_constant(Constant::Number((elements.len() as f64).to_bits()));
+                        let slice = compiler.constant_index(Constant::String("slice".to_owned()));
+                        compiler.code.push(Instruction::CallMethod {
+                            name: slice,
+                            argc: 1,
+                        });
                     });
-                    self.destructure(leaf, rest, span);
                 }
+                self.finish_pattern_source(&source);
+            }
+        }
+    }
+
+    /// Take one element or property apart, given how to push the value it receives.
+    ///
+    /// The value is emitted by a callback rather than passed in already on the stack, because a
+    /// target that stores through a reference has to be evaluated *before* it: `({ a: o.p } = s)`
+    /// evaluates `o` and only then runs the getter for `a`, and which of the two throws first is
+    /// observable. A nested pattern is not a reference, so `[{ a: o.p }] = xs` evaluates `o`
+    /// while taking the inner object apart rather than before reading the element.
+    fn destructure_element(
+        &mut self,
+        leaf: PatternLeaf,
+        target: &Pattern,
+        span: Span,
+        value: impl FnOnce(&mut Self),
+    ) {
+        // In declaration position a reference target is refused rather than evaluated, so
+        // nothing is pushed here that the leaf below would not know to pop.
+        if matches!(leaf, PatternLeaf::Assign) {
+            self.reference_prologue(target);
+        }
+        value(self);
+        self.destructure(leaf, target, span);
+    }
+
+    /// Evaluate what a target stores through, looking past any default it carries.
+    fn reference_prologue(&mut self, target: &Pattern) {
+        match target {
+            Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+                self.expression(object);
+            }
+            Pattern::Computed { object, property } => {
+                self.expression(object);
+                self.expression(property);
+            }
+            // `[o.p = 1] = xs` evaluates `o` before the element, not after the default decides
+            // whether one is needed: the default is part of the value, not part of the target.
+            Pattern::WithDefault { inner, .. } => self.reference_prologue(inner),
+            _ => {}
+        }
+    }
+
+    /// Finish a leaf that stores through a reference, with the value on top of the stack and the
+    /// reference under it.
+    fn store_through_reference(&mut self, leaf: PatternLeaf, store: Instruction, span: Span) {
+        match leaf {
+            PatternLeaf::Assign => {
+                self.code.push(store);
+                // The store leaves the value, which is what an assignment expression evaluates
+                // to and what a pattern walk has no further use for.
                 self.code.push(Instruction::Pop);
             }
+            // `let [o.p] = xs` is a syntax error: a declaration introduces names, and a property
+            // reference is not one. Nothing was pushed for the reference, so only the value goes.
+            PatternLeaf::Declare(_) => {
+                self.error(
+                    Some(span),
+                    "a declaration cannot bind through a property reference",
+                );
+                self.code.push(Instruction::Pop);
+            }
+        }
+    }
+
+    /// Move the value being taken apart off the stack when the walk needs the room.
+    ///
+    /// The temporary deliberately goes in the scope that is current, rather than in one pushed
+    /// around the walk: the names the pattern binds are declared as it runs, and a scope of the
+    /// walk's own would swallow them when it was popped.
+    fn pattern_source(&mut self, spilled: bool, span: Span) -> PatternSource {
+        if !spilled {
+            return PatternSource::Stack;
+        }
+        let name = format!("%source{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.declare_hidden(&name, span);
+        PatternSource::Hidden(name)
+    }
+
+    fn load_pattern_source(&mut self, source: &PatternSource) {
+        match source {
+            PatternSource::Stack => self.code.push(Instruction::Dup),
+            PatternSource::Hidden(name) => self.load_hidden(name),
+        }
+    }
+
+    /// Read one property of the source, which is already on top of the stack.
+    fn read_key(&mut self, key: &SourceKey) {
+        match key {
+            SourceKey::Static(index) => self.code.push(Instruction::GetProperty(*index)),
+            SourceKey::Computed(held) => {
+                self.load_hidden(held);
+                self.code.push(Instruction::GetComputed);
+            }
+        }
+    }
+
+    /// Drop the source now the walk is done with it. A spilled one is already off the stack.
+    fn finish_pattern_source(&mut self, source: &PatternSource) {
+        if matches!(source, PatternSource::Stack) {
+            self.code.push(Instruction::Pop);
         }
     }
 
@@ -2540,13 +2726,26 @@ impl Compiler {
                 property,
             } => self.update_member(*increment, *prefix, object, property, expression.span),
             ExpressionKind::SuperCall { arguments } => {
+                if Self::has_spread(arguments) {
+                    // The count is the length of an array the program computes, which is exactly
+                    // what `argc` cannot say. The parent is reached through the same runtime-list
+                    // shape `Apply` uses, but through `SuperApply`, because running the parent
+                    // against the instance being built is not an ordinary call.
+                    self.load_super();
+                    self.array_literal(arguments, expression.span);
+                    self.code.push(Instruction::SuperApply);
+                    return;
+                }
                 if arguments.len() > u16::MAX as usize {
                     self.error(Some(expression.span), "too many arguments to `super`");
                     return;
                 }
                 self.load_super();
                 for argument in arguments {
-                    self.expression(argument);
+                    let (ListElement::Item(value) | ListElement::Spread(value)) = argument else {
+                        continue;
+                    };
+                    self.expression(value);
                 }
                 // The parent's return value is this expression's value, so `SuperCall` leaves
                 // exactly one thing on the stack and needs no epilogue here.
@@ -2912,6 +3111,7 @@ impl Compiler {
                     self.code.push(Instruction::MakeFunction(index));
                     self.code.push(Instruction::DefineAccessor {
                         setter: matches!(kind, kiln_hir::MethodKind::Set),
+                        enumerable: true,
                     });
                 }
             }
@@ -3127,11 +3327,20 @@ impl Compiler {
         // Bound before the body is compiled, so a method can refer to the class by name.
         self.variable(VariableKind::Let, &name, None, class.span);
 
+        // A class expression with no written name still needs a binding to hold itself, and
+        // `class_expression` invents one carrying a `%` that no identifier can contain. That
+        // binding is scaffolding: `(class {}).name` is the empty string, and reporting the
+        // scaffolding instead put `"%class0"` where the program could read it.
+        let written_name = if name.starts_with('%') {
+            String::new()
+        } else {
+            name.clone()
+        };
         let constructor = match &class.constructor {
             // The constructor *is* the class as a value, so it carries the class's name: that is
             // what `new.target.name` and a console's `C {}` both read.
             Some(constructor) => Function {
-                name: Some(name.clone()),
+                name: Some(written_name.clone()),
                 ..constructor.clone()
             },
             // A class with no constructor gets an empty one, so `new` needs no special case for
@@ -3139,7 +3348,7 @@ impl Compiler {
             None => Function {
                 rest: None,
                 asynchronous: false,
-                name: Some(name.clone()),
+                name: Some(written_name),
                 // A class binds its own name through `class_expression`, not through this.
                 binds_own_name: false,
                 arrow: false,
@@ -3260,20 +3469,21 @@ impl Compiler {
                     continue;
                 }
                 ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name)));
+                    self.push_constant(Constant::String(self.private_key(name)));
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(Instruction::DefineMethod);
                 }
                 ObjectKey::Static(key) if !accessor => {
-                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.push_constant(Constant::String(key.clone()));
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(Instruction::DefineMethod);
                 }
                 ObjectKey::Static(key) => {
                     self.push_constant(Constant::String(key.clone()));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::DefineAccessor {
                         setter: matches!(method.kind, kiln_hir::MethodKind::Set),
+                        enumerable: false,
                     });
                 }
                 ObjectKey::Computed(key) => {
@@ -3282,9 +3492,10 @@ impl Compiler {
                     if accessor {
                         self.code.push(Instruction::DefineAccessor {
                             setter: matches!(method.kind, kiln_hir::MethodKind::Set),
+                            enumerable: false,
                         });
                     } else {
-                        self.code.push(Instruction::SetComputed);
+                        self.code.push(Instruction::DefineMethod);
                     }
                 }
             }
@@ -3890,6 +4101,10 @@ impl Compiler {
         value: &Expression,
     ) {
         let name = self.constant_index(Constant::String(self.private_key(name)));
+        if operator.is_short_circuiting() {
+            self.short_circuiting_private(operator, object, name, value);
+            return;
+        }
         self.expression(object);
         if operator != AssignmentOperator::Assign {
             self.code.push(Instruction::Dup);
@@ -3901,6 +4116,48 @@ impl Compiler {
             self.expression(value);
         }
         self.code.push(Instruction::SetPrivate(name));
+    }
+
+    /// `object.#name ??= value`, and the `&&=`/`||=` forms.
+    ///
+    /// The same shape as [`Compiler::short_circuiting_member`] and for the same reason: the
+    /// receiver has to survive a decision that may skip both the right-hand side and the store,
+    /// so `o().#x ||= v` calls `o` once. Without this the operator fell through to the compound
+    /// path, which asks `compound_operator` for the arithmetic a short-circuiting assignment
+    /// does not have -- and that is unreachable, so the compiler panicked on valid code.
+    fn short_circuiting_private(
+        &mut self,
+        operator: AssignmentOperator,
+        object: &Expression,
+        name: u32,
+        value: &Expression,
+    ) {
+        let span = object.span;
+        let receiver = format!("%scp{}", self.hidden_bindings);
+        let current = format!("%scpcur{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+
+        self.expression(object);
+        self.declare_hidden(&receiver, span);
+
+        self.load_hidden(&receiver);
+        self.code.push(Instruction::GetPrivate(name));
+        self.declare_hidden(&current, span);
+
+        self.load_hidden(&current);
+        let skip = self.emit_jump(short_circuit_jump(operator));
+
+        self.load_hidden(&receiver);
+        self.expression(value);
+        self.code.push(Instruction::SetPrivate(name));
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        // Skipped: the expression evaluates to the value that was already there.
+        self.patch_jump(skip);
+        self.load_hidden(&current);
+        self.patch_jump(done);
+        self.scopes.pop().expect("assignment scope was just pushed");
     }
 
     fn member_assignment(
@@ -4078,11 +4335,13 @@ impl Compiler {
                 return;
             }
             ExpressionKind::SuperMember { .. } => {
-                self.error(
-                    Some(span),
-                    "spread into a `super` call is not supported yet",
-                );
-                self.push_constant(Constant::Undefined);
+                // `super.m(...xs)` resolves the method on the parent but runs it against the
+                // current receiver, which is precisely the `[this, callee, arguments]` shape
+                // `Apply` takes -- no dedicated instruction is needed for this half.
+                self.code.push(Instruction::LoadThis);
+                self.expression(callee);
+                self.array_literal(arguments, span);
+                self.code.push(Instruction::Apply);
                 return;
             }
             // `this.#m()` is a method call: the private name is read off the receiver and the
@@ -4469,35 +4728,61 @@ fn names_captured_by_nested_functions(body: &[Statement]) -> HashSet<String> {
 fn names_captured_by_this_function(function: &Function) -> HashSet<String> {
     let mut captured = names_captured_by_nested_functions(&function.body);
     for parameter in &function.parameters {
-        collect_pattern_default_captures(&parameter.pattern, &mut captured);
+        collect_pattern_captures(&parameter.pattern, &mut captured);
     }
     if let Some(rest) = &function.rest {
-        collect_pattern_default_captures(rest, &mut captured);
+        collect_pattern_captures(rest, &mut captured);
     }
     captured
 }
 
-/// Names that nested functions inside a pattern's defaults refer to.
-fn collect_pattern_default_captures(pattern: &Pattern, names: &mut HashSet<String>) {
+/// Names that nested functions inside a pattern's expressions refer to.
+///
+/// A pattern reads names as well as binding them: a default, a computed key, and the object a
+/// reference target stores through are all ordinary expressions, and a closure in any of them
+/// decides whether the name it reaches has to be boxed.
+fn collect_pattern_captures(pattern: &Pattern, names: &mut HashSet<String>) {
     match pattern {
         Pattern::Identifier(_) => {}
+        Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+            collect_identifiers(object, names, false);
+        }
+        Pattern::Computed { object, property } => {
+            collect_identifiers(object, names, false);
+            collect_identifiers(property, names, false);
+        }
         Pattern::WithDefault { inner, default } => {
             collect_identifiers(default, names, false);
-            collect_pattern_default_captures(inner, names);
+            collect_pattern_captures(inner, names);
         }
-        Pattern::Object { properties, .. } => {
+        Pattern::Object { properties, rest } => {
             for property in properties {
-                collect_pattern_default_captures(&property.value, names);
+                if let PatternKey::Computed(key) = &property.key {
+                    collect_identifiers(key, names, false);
+                }
+                collect_pattern_captures(&property.value, names);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_captures(rest, names);
             }
         }
         Pattern::Array { elements, rest } => {
             for element in elements.iter().flatten() {
-                collect_pattern_default_captures(element, names);
+                collect_pattern_captures(element, names);
             }
             if let Some(rest) = rest {
-                collect_pattern_default_captures(rest, names);
+                collect_pattern_captures(rest, names);
             }
         }
+    }
+}
+
+/// Whether a target stores through a property reference rather than binding a name.
+fn stores_through_reference(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Member { .. } | Pattern::Computed { .. } | Pattern::PrivateMember { .. } => true,
+        Pattern::WithDefault { inner, .. } => stores_through_reference(inner),
+        _ => false,
     }
 }
 
@@ -4709,13 +4994,16 @@ fn private_key(scope: u32, name: &str) -> String {
 fn pattern_names_in_order(pattern: &Pattern, names: &mut Vec<String>) {
     match pattern {
         Pattern::Identifier(name) => names.push(name.clone()),
+        // A reference target binds nothing: `[o.p] = xs` stores into an object that already
+        // exists, and `o` was declared somewhere else.
+        Pattern::Member { .. } | Pattern::Computed { .. } | Pattern::PrivateMember { .. } => {}
         Pattern::WithDefault { inner, .. } => pattern_names_in_order(inner, names),
         Pattern::Object { properties, rest } => {
             for property in properties {
                 pattern_names_in_order(&property.value, names);
             }
             if let Some(rest) = rest {
-                names.push(rest.clone());
+                pattern_names_in_order(rest, names);
             }
         }
         Pattern::Array { elements, rest } => {
@@ -4734,13 +5022,14 @@ fn collect_pattern_names(pattern: &Pattern, names: &mut HashSet<String>) {
         Pattern::Identifier(name) => {
             names.insert(name.clone());
         }
+        Pattern::Member { .. } | Pattern::Computed { .. } | Pattern::PrivateMember { .. } => {}
         Pattern::WithDefault { inner, .. } => collect_pattern_names(inner, names),
         Pattern::Object { properties, rest } => {
             for property in properties {
                 collect_pattern_names(&property.value, names);
             }
             if let Some(rest) = rest {
-                names.insert(rest.clone());
+                collect_pattern_names(rest, names);
             }
         }
         Pattern::Array { elements, rest } => {
@@ -4787,7 +5076,10 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         | ExpressionKind::Unsupported { .. } => {}
         ExpressionKind::SuperCall { arguments } => {
             for argument in arguments {
-                collect_identifiers(argument, names, collecting);
+                let (ListElement::Item(value) | ListElement::Spread(value)) = argument else {
+                    continue;
+                };
+                collect_identifiers(value, names, collecting);
             }
         }
         ExpressionKind::Unary { argument, .. } => collect_identifiers(argument, names, collecting),
@@ -4808,7 +5100,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             if collecting {
                 collect_pattern_names(pattern, names);
             }
-            collect_pattern_default_captures(pattern, names);
+            collect_pattern_captures(pattern, names);
             collect_identifiers(value, names, collecting);
         }
         ExpressionKind::Conditional {
@@ -5002,9 +5294,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         | ExpressionKind::Function(_)
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::Unsupported { .. } => false,
-        ExpressionKind::SuperCall { arguments } => arguments
-            .iter()
-            .any(|argument| expression_references(argument, name)),
+        ExpressionKind::SuperCall { arguments } => arguments.iter().any(|argument| match argument {
+            ListElement::Item(value) | ListElement::Spread(value) => {
+                expression_references(value, name)
+            }
+            ListElement::Hole => false,
+        }),
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             expression_references(expression, name)
         }
@@ -5588,6 +5883,41 @@ mod tests {
             .count();
         assert_eq!(returns, 2, "explicit return plus the fall-through epilogue");
         assert!(matches!(code.first(), Some(Instruction::Const(_))));
+    }
+
+    #[test]
+    fn an_anonymous_class_expression_does_not_report_its_hidden_binding_as_a_name() {
+        // The binding a nameless class expression is held in carries a `%` so it can never
+        // collide with an identifier the program wrote. That is scaffolding, and it used to
+        // reach the constructor's `name`, so `(class {}).name` read back `"%class0"` -- a value
+        // no engine produces and no program could have written.
+        let program = compile(&module(vec![statement(StatementKind::Expression(
+            Expression {
+                kind: ExpressionKind::Class(Box::new(kiln_hir::Class {
+                    name: None,
+                    superclass: None,
+                    constructor: None,
+                    methods: Vec::new(),
+                    fields: Vec::new(),
+                    span: Span::default(),
+                })),
+                span: Span::default(),
+            },
+        ))]))
+        .expect("an empty class compiles");
+
+        assert!(
+            program
+                .functions
+                .iter()
+                .all(|proto| proto.name.as_deref() == Some("")),
+            "{:?}",
+            program
+                .functions
+                .iter()
+                .map(|proto| proto.name.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -6327,6 +6657,91 @@ mod tests {
             !arrow_body
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_)))
+        );
+    }
+
+    /// `[o.p] = xs` evaluates `o` before it reads the element, not after.
+    ///
+    /// The order is observable whenever either side throws or runs a getter, and it is the one
+    /// thing a pattern walk cannot get right by emitting the value first and the target second --
+    /// which is what every other leaf does.
+    #[test]
+    fn a_reference_target_is_evaluated_before_the_value_it_receives() {
+        let body = vec![
+            statement(StatementKind::Variable {
+                kind: VariableKind::Var,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("o".into()),
+                    initializer: None,
+                    span: Span::default(),
+                }],
+            }),
+            statement(StatementKind::Variable {
+                kind: VariableKind::Var,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier("xs".into()),
+                    initializer: None,
+                    span: Span::default(),
+                }],
+            }),
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::PatternAssignment {
+                    pattern: kiln_hir::Pattern::Array {
+                        elements: vec![Some(kiln_hir::Pattern::Member {
+                            object: Box::new(identifier("o")),
+                            property: "p".into(),
+                        })],
+                        rest: None,
+                    },
+                    value: Box::new(identifier("xs")),
+                },
+                span: Span::default(),
+            })),
+        ];
+        let program = compile(&module(body)).expect("valid HIR compiles");
+        let at = |wanted: &Instruction| {
+            program
+                .code
+                .iter()
+                .position(|instruction| instruction == wanted)
+                .expect("instruction is emitted")
+        };
+        let receiver = at(&Instruction::LoadLocal(0));
+        let read = at(&Instruction::GetComputed);
+        let store = program
+            .code
+            .iter()
+            .position(|instruction| matches!(instruction, Instruction::SetProperty(_)))
+            .expect("the element is stored through the reference");
+        assert!(receiver < read, "the receiver is evaluated before the read");
+        assert!(read < store, "the value exists before it is stored");
+    }
+
+    /// `let [o.p] = xs` is a syntax error, and the parser says so first -- but nothing in the
+    /// HIR shape prevents a frontend from building it, so the walk refuses it rather than
+    /// storing through a reference in a position that only ever declares names.
+    #[test]
+    fn a_declaration_cannot_bind_through_a_reference() {
+        let body = vec![statement(StatementKind::Variable {
+            kind: VariableKind::Let,
+            declarations: vec![kiln_hir::VariableDeclarator {
+                pattern: kiln_hir::Pattern::Array {
+                    elements: vec![Some(kiln_hir::Pattern::Member {
+                        object: Box::new(identifier("o")),
+                        property: "p".into(),
+                    })],
+                    rest: None,
+                },
+                initializer: Some(identifier("xs")),
+                span: Span::default(),
+            }],
+        })];
+        let diagnostics = compile(&module(body)).expect_err("a declaration is refused");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("property reference")),
+            "the diagnostic names what it refused: {diagnostics:?}"
         );
     }
 }
