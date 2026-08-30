@@ -62,6 +62,12 @@ The native `expected_revision` on `NativeBuildAtRevision` remains a separate pub
 Source-view validation protects the source authority boundary; expected-revision validation still
 protects publication of a prepared native artifact when the database changes during the build.
 
+`SourceView` is not derived-content identity. After a request proves that its view is current, the
+module-graph cache is keyed by canonical root and entry, database revision, pinned resolution-map
+identity, and graph format. A byte-identical sync therefore advances the authority fence without
+discarding a content-identical graph snapshot. A source mutation or resolution-map change still
+invalidates that snapshot eagerly; an uncertain panic path does too.
+
 ### Watch updates remain compare-and-swap
 
 `Request::SetSource { path, text, source_view }` is the low-latency watch/editor path, not a
@@ -87,6 +93,8 @@ indefinitely or attempt to infer which paths changed concurrently.
   or `SourceUpdated` and recover with a complete resync after a stale response.
 - A no-op complete sync still invalidates the authority token. This costs a view increment but
   prevents two clients from treating the same observed view as an unexpired write lease.
+- Authority-token churn alone does not invalidate derived graph snapshots whose revision and
+  resolution identity are unchanged.
 - Disconnect cleanup is automatic because pending state is not shared with the engine or another
   connection.
 - Native builds retain two independent correctness checks: source-view freshness before prepare
@@ -103,6 +111,8 @@ indefinitely or attempt to infer which paths changed concurrently.
   request can observe or consume the partially changed internal state.
 - A successful commit applies removals and updates atomically and returns a strictly newer view,
   including when the resulting source bytes are unchanged.
+- A byte-identical sync retains a graph snapshot under its unchanged content identity, while a
+  source or pinned-resolution change cannot hit that snapshot.
 - A source-consuming request with an old view returns `StaleSourceView` before preparing a query.
 - A current `SetSource` returns `SourceUpdated` with the next view; a stale one leaves the source
   unchanged.

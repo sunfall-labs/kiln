@@ -587,6 +587,7 @@ fn set_source<E: QueryEngine>(
         Ok(view) => view,
         Err(message) => return Response::Error { message },
     };
+    let revision = guard.engine.revision().0;
     let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
         let file = guard.engine.intern(&path);
         guard.engine.set_source(file, text);
@@ -597,8 +598,10 @@ fn set_source<E: QueryEngine>(
         return internal_error(&*payload);
     }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
-    // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
-    guard.graph_cache.invalidate();
+    // warm no-op behavior. The view still advances, but a content-identical graph remains valid.
+    if guard.engine.revision().0 != revision {
+        guard.graph_cache.invalidate();
+    }
     guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
