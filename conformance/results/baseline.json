@@ -4,51 +4,51 @@
   "tests": [
     {
       "id": "effect/01-core",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/02-gen",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/03-ref",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/04-all-foreach",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/05-concurrency",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/06-sleep",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/07-interruption",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/08-scope",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/09-fiber",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/10-tagged-error",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/11-stream",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "effect/12-service-layer",
-      "outcome": "skipped"
+      "outcome": "pass"
     },
     {
       "id": "guard/g01-spread-symbols",
@@ -80,7 +80,7 @@
     },
     {
       "id": "guard/g07-timers-order",
-      "outcome": "fail"
+      "outcome": "pass"
     },
     {
       "id": "guard/g08-finally-paths",
@@ -100,7 +100,7 @@
     },
     {
       "id": "guard/g12-private-not-inherited",
-      "outcome": "fail"
+      "outcome": "pass"
     },
     {
       "id": "guard/g13-set-mutation",
@@ -128,7 +128,7 @@
     },
     {
       "id": "guard/g19-subclass-array-map",
-      "outcome": "fail"
+      "outcome": "pass"
     },
     {
       "id": "regress/r01-handler-outlives-frame",
@@ -160,10 +160,10 @@
     }
   ],
   "totals": {
-    "failed": 3,
+    "failed": 0,
     "not_yet_runnable": 0,
-    "passed": 24,
-    "skipped": 12,
+    "passed": 39,
+    "skipped": 0,
     "total": 39,
     "unsupported": 0
   }
