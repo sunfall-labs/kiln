@@ -6714,10 +6714,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectGet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let key = arguments
-                    .get(1)
-                    .map_or_else(String::new, Value::property_key);
-                self.read_property(&target, &key, instruction)
+                if !is_reflect_target(&target) {
+                    return Err(ExecutionError::NotAnObject {
+                        instruction,
+                        value: target.type_name(),
+                    });
+                }
+                let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let receiver = arguments.get(2).cloned().unwrap_or_else(|| target.clone());
+                self.read_computed_with_receiver(&target, &key, &receiver, instruction)
             }
             Native::ReflectSet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -10975,25 +10980,43 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        self.read_computed_with_receiver(target, key, target, instruction)
+    }
+
+    /// The `[[Get]]` operation with an explicit receiver. Ordinary bracket access uses the target
+    /// itself; `Reflect.get` can provide a different value for accessors and proxy traps.
+    fn read_computed_with_receiver(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get(target, key, instruction);
+            return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
-        // An element, a typed-array slot and a string's code unit are storage rather than
-        // properties: no accessor can stand in front of one, and `computed` is the only thing
-        // that can read them.
-        if array_index(key).is_some()
-            && matches!(
-                target,
-                Value::Array(_) | Value::TypedArray(_) | Value::String(_)
-            )
-        {
-            return Ok(self.computed(target, key));
+        let property_key = key.property_key();
+        let accessor = match target {
+            Value::Object(object) => object.borrow().lookup(&property_key),
+            Value::Function(closure) if property_key != "prototype" => {
+                closure.properties.borrow().lookup(&property_key)
+            }
+            Value::Array(items) => items.properties.borrow().lookup(&property_key),
+            Value::Native(_) | Value::Callback(_) => {
+                match self.intrinsics.overridden(target, &property_key) {
+                    Overridden::Held(property, _) => Some(property),
+                    Overridden::Removed | Overridden::Untouched => None,
+                }
+            }
+            _ => None,
+        };
+        match accessor {
+            Some(Property::Accessor { get, .. }) => match get {
+                Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
+                None => Ok(Value::Undefined),
+            },
+            _ => Ok(self.computed(target, key)),
         }
-        // Everything else is the same named read `.a` performs, getters included. `o["a"]` and
-        // `o.a` name one property, so they cannot disagree about how it is reached -- and the
-        // computed form is what every generic helper is written with, so answering `undefined`
-        // there hid the accessor from exactly the code most likely to meet one.
-        self.read_property(target, &key.property_key(), instruction)
     }
 
     /// Read `key` from a proxy, through its `get` trap or through its target.
@@ -11003,18 +11026,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        self.proxy_get_with_receiver(target, key, target, instruction)
+    }
+
+    fn proxy_get_with_receiver(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return self.read_computed(target, key, instruction);
+            return self.read_computed_with_receiver(target, key, receiver, instruction);
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
         match self.proxy_trap(&proxy, "get", instruction)? {
             Some(trap) => {
                 let handler = proxy.handler.clone();
-                let arguments = vec![inner, Self::trap_key(key), target.clone()];
+                let arguments = vec![inner, Self::trap_key(key), receiver.clone()];
                 self.call_value(&trap, handler, arguments, instruction)
             }
-            None => self.read_computed(&inner, key, instruction),
+            None => self.read_computed_with_receiver(&inner, key, receiver, instruction),
         }
     }
 
@@ -16427,6 +16460,22 @@ fn is_object_like(value: &Value) -> bool {
     matches!(
         value,
         Value::Object(_) | Value::Function(_) | Value::Array(_)
+    )
+}
+
+/// `Reflect.get` does not box primitive targets. Every other public `Value` variant represents an
+/// object or callable object; `Cell` is internal and must never escape as a target.
+fn is_reflect_target(value: &Value) -> bool {
+    !matches!(
+        value,
+        Value::Undefined
+            | Value::Null
+            | Value::Boolean(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::BigInt(_)
+            | Value::Symbol(_)
+            | Value::Cell(_)
     )
 }
 
