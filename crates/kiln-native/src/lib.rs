@@ -4,6 +4,8 @@
 //! This crate is the narrow coordinator that gives those pieces an ordered build graph:
 //! generated module C, application object, reusable runtime object, launcher object, executable.
 
+mod number_provider;
+
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -22,9 +24,6 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
-use kiln_native_number::{
-    NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION, runtime_source as native_number_source,
-};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
     RuntimeSourceError, launcher_source, runtime_source,
@@ -34,6 +33,7 @@ use kiln_native_toolchain::{
     BuildProfile as ToolchainProfile, CompileOptions, LinkOptions, ToolIdentity, Toolchain,
     ToolchainError,
 };
+use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -42,8 +42,8 @@ static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceL
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(NUMBER_FORMAT_VERSION == 1);
-    assert!(NUMBER_PARSE_VERSION == 1);
+    assert!(PROVIDER_SCHEMA_VERSION == 1);
+    assert!(PROVIDER_ABI_VERSION == 1);
 };
 
 /// Native optimization and checking policy.
@@ -218,6 +218,9 @@ pub enum NativeError {
         first: PathBuf,
         second: PathBuf,
     },
+    NumberProvider {
+        message: String,
+    },
 }
 
 impl fmt::Display for NativeError {
@@ -254,6 +257,9 @@ impl fmt::Display for NativeError {
                 first.display(),
                 second.display()
             ),
+            Self::NumberProvider { message } => {
+                write!(formatter, "native number provider failed: {message}")
+            }
         }
     }
 }
@@ -269,7 +275,8 @@ impl std::error::Error for NativeError {
             Self::Io { source, .. } | Self::Launch { source, .. } => Some(source),
             Self::WorkerPanic { .. }
             | Self::SymbolCollision { .. }
-            | Self::ArtifactPathCollision { .. } => None,
+            | Self::ArtifactPathCollision { .. }
+            | Self::NumberProvider { .. } => None,
         }
     }
 }
@@ -309,6 +316,7 @@ impl From<ToolchainError> for NativeError {
 pub struct NativeBuilder {
     cache: ArtifactCache,
     toolchain: Toolchain,
+    number_provider: OnceLock<Result<NumberProvider, String>>,
 }
 
 impl NativeBuilder {
@@ -328,7 +336,11 @@ impl NativeBuilder {
     }
 
     pub const fn new(cache: ArtifactCache, toolchain: Toolchain) -> Self {
-        Self { cache, toolchain }
+        Self {
+            cache,
+            toolchain,
+            number_provider: OnceLock::new(),
+        }
     }
 
     pub fn toolchain(&self) -> &Toolchain {
@@ -337,6 +349,37 @@ impl NativeBuilder {
 
     pub fn cache(&self) -> &ArtifactCache {
         &self.cache
+    }
+
+    fn number_provider(&self) -> Result<NumberProvider, NativeError> {
+        self.number_provider
+            .get_or_init(|| {
+                number_provider::discover(self.toolchain.identity())
+                    .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(|message| NativeError::NumberProvider { message })
+    }
+
+    fn cached_number_provider(&self, target: &str) -> Result<(Vec<u8>, Digest, bool), NativeError> {
+        let provider = self.number_provider()?;
+        let provider_key = key(
+            ArtifactKind::RuntimeLibrary,
+            &provider.identity,
+            Backend::Custom("rust-native-number-provider".to_owned()),
+            &native_number_abi_identity(),
+            target,
+            CacheProfile::Release,
+            Digest::hash(
+                format!(
+                    "schema={PROVIDER_SCHEMA_VERSION};abi={PROVIDER_ABI_VERSION};target={};pic=true;linkage=static",
+                    provider.rust_target
+                )
+                .as_bytes(),
+            ),
+            [provider.archive_digest],
+        );
+        self.cached_payload(&provider_key, &provider.archive)
     }
 
     /// Build one bytecode module and its separate host runtime into an executable.
@@ -360,6 +403,7 @@ impl NativeBuilder {
         let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
 
         let module_source_key = key(
             ArtifactKind::GeneratedC,
@@ -492,7 +536,12 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [application_digest, runtime_digest, launcher_digest],
+            [
+                application_digest,
+                runtime_digest,
+                launcher_digest,
+                number_provider_digest,
+            ],
         );
         let (executable, executable_digest, executable_hit, link_elapsed) =
             match self.cache.lookup(&executable_key)? {
@@ -501,6 +550,7 @@ impl NativeBuilder {
                     materialize(&paths.module_o, &application, false)?;
                     materialize(&paths.runtime_o, &runtime_object, false)?;
                     materialize(&paths.launcher_o, &launcher_object, false)?;
+                    materialize(&paths.number_provider_a, &number_provider, false)?;
                     let mut link_options = LinkOptions {
                         profile: profile.toolchain(),
                         ..LinkOptions::default()
@@ -508,6 +558,9 @@ impl NativeBuilder {
                     if cfg!(not(target_os = "windows")) {
                         link_options.libraries.push("m".to_owned());
                     }
+                    link_options
+                        .runtime_libraries
+                        .push(paths.number_provider_a.clone());
                     let report = self.toolchain.link_executable(
                         &[
                             paths.module_o.clone(),
@@ -597,6 +650,7 @@ impl NativeBuilder {
         let embedding_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
         let module_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-c-abi-{C_ABI_VERSION}"),
@@ -609,10 +663,6 @@ impl NativeBuilder {
         );
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
-        let number_source = native_number_source();
-        let number_source_key = native_number_source_key(&target);
-        let (number_source, number_source_digest, number_generated_c_hit) =
-            self.cached_payload(&number_source_key, number_source.as_bytes())?;
         let object_options = Digest::hash(
             format!(
                 "shared-library\0pic\0c11\0{}\0{}",
@@ -631,52 +681,23 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
-        let number_object_key = native_number_object_key(
-            &compiler,
-            &target,
-            profile,
-            identity.kind,
-            number_source_digest,
-        );
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
-        let number_compile_options = native_number_compile_options(profile);
         let compile_started = Instant::now();
-        let (object_result, number_result) = std::thread::scope(|scope| {
-            let object = scope.spawn(|| {
-                self.object(
-                    &object_key,
-                    &module_source,
-                    &paths.module_c,
-                    &paths.module_o,
-                    &compile_options,
-                )
-            });
-            let number = scope.spawn(|| {
-                self.object(
-                    &number_object_key,
-                    &number_source,
-                    &paths.number_c,
-                    &paths.number_o,
-                    &number_compile_options,
-                )
-            });
-            (
-                join_worker(object.join(), "shared module compile"),
-                join_worker(number.join(), "number runtime compile"),
-            )
-        });
-        let (object, object_digest, object_hit, object_elapsed) = object_result??;
-        let (number_object, number_digest, number_hit, number_elapsed) = number_result??;
-        let compile_elapsed = if object_hit && number_hit {
+        let (object, object_digest, object_hit, object_elapsed) = self.object(
+            &object_key,
+            &module_source,
+            &paths.module_c,
+            &paths.module_o,
+            &compile_options,
+        )?;
+        let compile_elapsed = if object_hit {
             Duration::ZERO
         } else {
-            object_elapsed
-                .max(number_elapsed)
-                .max(compile_started.elapsed())
+            object_elapsed.max(compile_started.elapsed())
         };
 
         let link_options_digest = Digest::hash(
@@ -697,13 +718,13 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [object_digest, number_digest],
+            [object_digest, number_provider_digest],
         );
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
                 materialize(&paths.module_o, &object, false)?;
-                materialize(&paths.number_o, &number_object, false)?;
+                materialize(&paths.number_provider_a, &number_provider, false)?;
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
                     ..LinkOptions::default()
@@ -711,8 +732,16 @@ impl NativeBuilder {
                 if cfg!(not(target_os = "windows")) {
                     link_options.libraries.push("m".to_owned());
                 }
-                configure_shared_library_link(&mut link_options, &options.output);
-                let objects = [paths.module_o.clone(), paths.number_o.clone()];
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
+                configure_shared_library_link(
+                    &mut link_options,
+                    &options.output,
+                    &module.symbol,
+                    workspace.path(),
+                )?;
+                let objects = [paths.module_o.clone()];
                 let report =
                     self.toolchain
                         .link_shared_library(&objects, &paths.library, &link_options)?;
@@ -733,13 +762,13 @@ impl NativeBuilder {
             module_symbol: module.symbol,
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
-                generated_c: generated_c_hit && number_generated_c_hit,
-                object: object_hit && number_hit,
+                generated_c: generated_c_hit,
+                object: object_hit,
                 library: library_hit,
             },
             sizes: NativeSharedLibrarySizes {
-                generated_c: module_source.len() as u64 + number_source.len() as u64,
-                object: object.len() as u64 + number_object.len() as u64,
+                generated_c: module_source.len() as u64,
+                object: object.len() as u64,
                 library: library.len() as u64,
             },
             timings: BuildTimings {
@@ -813,6 +842,7 @@ impl NativeBuilder {
         let embedding_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
         let mut module_sources = Vec::with_capacity(modules.len());
         for (_, module) in &modules {
             let source_key = key(
@@ -828,10 +858,6 @@ impl NativeBuilder {
             );
             module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
         }
-        let number_source = native_number_source();
-        let number_source_key = native_number_source_key(&target);
-        let (number_source, number_source_digest, number_generated_c_hit) =
-            self.cached_payload(&number_source_key, number_source.as_bytes())?;
         let wrapper_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}"),
@@ -878,14 +904,6 @@ impl NativeBuilder {
             position_independent: true,
             ..CompileOptions::default()
         };
-        let number_compile_options = native_number_compile_options(profile);
-        let number_object_key = native_number_object_key(
-            &compiler,
-            &target,
-            profile,
-            identity.kind,
-            number_source_digest,
-        );
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, _) in modules.iter().enumerate() {
             let (_, source_digest, _) = &module_sources[index];
@@ -911,7 +929,7 @@ impl NativeBuilder {
             [wrapper_source_digest, topology],
         );
         let compile_started = Instant::now();
-        let (module_objects, wrapper_object, number_object) = std::thread::scope(|scope| {
+        let (module_objects, wrapper_object) = std::thread::scope(|scope| {
             let worker_count = std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
                 .min(modules.len().max(1));
@@ -930,10 +948,6 @@ impl NativeBuilder {
             let module_compile_options_ref = &module_compile_options;
             let wrapper_compile_options_ref = &wrapper_compile_options;
             let wrapper_bytes_ref = &wrapper_bytes;
-            let number_compile_options_ref = &number_compile_options;
-            let number_source_ref = &number_source;
-            let number_c_ref = &paths.number_c;
-            let number_o_ref = &paths.number_o;
             let module_handles = index_chunks
                 .into_iter()
                 .map(|chunk| {
@@ -968,15 +982,6 @@ impl NativeBuilder {
                     wrapper_compile_options_ref,
                 )
             });
-            let number = scope.spawn(move || {
-                self.object(
-                    &number_object_key,
-                    number_source_ref,
-                    number_c_ref,
-                    number_o_ref,
-                    number_compile_options_ref,
-                )
-            });
             let modules = (|| {
                 let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
                 for handle in module_handles {
@@ -995,16 +1000,13 @@ impl NativeBuilder {
             })();
             let module_objects = modules?;
             let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
-            let number_object = join_worker(number.join(), "number runtime compile")??;
-            Ok::<_, NativeError>((module_objects, wrapper_object, number_object))
+            Ok::<_, NativeError>((module_objects, wrapper_object))
         })?;
-        let compile_elapsed =
-            if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 && number_object.2
-            {
-                Duration::ZERO
-            } else {
-                compile_started.elapsed()
-            };
+        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 {
+            Duration::ZERO
+        } else {
+            compile_started.elapsed()
+        };
 
         let link_options_digest = Digest::hash(
             format!(
@@ -1020,7 +1022,7 @@ impl NativeBuilder {
             .iter()
             .map(|(_, digest, _)| *digest)
             .collect::<Vec<_>>();
-        link_inputs.push(number_object.1);
+        link_inputs.push(number_provider_digest);
         link_inputs.push(wrapper_object.1);
         let library_key = key(
             ArtifactKind::LinkedArtifact,
@@ -1035,14 +1037,13 @@ impl NativeBuilder {
         let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 2);
+                let mut objects = Vec::with_capacity(modules.len() + 1);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
                 }
-                materialize(&paths.number_o, &number_object.0, false)?;
+                materialize(&paths.number_provider_a, &number_provider, false)?;
                 materialize(&paths.wrapper_o, &wrapper_object.0, false)?;
-                objects.push(paths.number_o.clone());
                 objects.push(paths.wrapper_o.clone());
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
@@ -1051,7 +1052,15 @@ impl NativeBuilder {
                 if cfg!(not(target_os = "windows")) {
                     link_options.libraries.push("m".to_owned());
                 }
-                configure_shared_library_link(&mut link_options, &options.output);
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
+                configure_shared_library_link(
+                    &mut link_options,
+                    &options.output,
+                    &wrapper_symbol,
+                    workspace.path(),
+                )?;
                 let report =
                     self.toolchain
                         .link_shared_library(&objects, &paths.library, &link_options)?;
@@ -1070,11 +1079,8 @@ impl NativeBuilder {
             tool: identity,
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
-                    && number_generated_c_hit
                     && wrapper_generated_c_hit,
-                object: module_objects.iter().all(|(_, _, hit)| *hit)
-                    && number_object.2
-                    && wrapper_object.2,
+                object: module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2,
                 library: library_hit,
             },
             sizes: NativeSharedLibrarySizes {
@@ -1082,13 +1088,11 @@ impl NativeBuilder {
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum::<u64>()
-                    + number_source.len() as u64
                     + wrapper_bytes.len() as u64,
                 object: module_objects
                     .iter()
                     .map(|(bytes, _, _)| bytes.len() as u64)
                     .sum::<u64>()
-                    + number_object.0.len() as u64
                     + wrapper_object.0.len() as u64,
                 library: library.len() as u64,
             },
@@ -1140,6 +1144,7 @@ impl NativeBuilder {
         let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
 
         let mut module_sources = Vec::with_capacity(modules.len());
         for (_, module) in &modules {
@@ -1325,6 +1330,7 @@ impl NativeBuilder {
             .collect::<Vec<_>>();
         link_inputs.push(runtime_digest);
         link_inputs.push(launcher_digest);
+        link_inputs.push(number_provider_digest);
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -1348,6 +1354,7 @@ impl NativeBuilder {
                 }
                 materialize(&paths.runtime_o, &runtime_object, false)?;
                 materialize(&paths.launcher_o, &launcher_object, false)?;
+                materialize(&paths.number_provider_a, &number_provider, false)?;
                 objects.push(paths.runtime_o.clone());
                 objects.push(paths.launcher_o.clone());
                 let mut link_options = LinkOptions {
@@ -1357,6 +1364,9 @@ impl NativeBuilder {
                 if cfg!(not(target_os = "windows")) {
                     link_options.libraries.push("m".to_owned());
                 }
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
                 let report =
                     self.toolchain
                         .link_executable(&objects, &paths.executable, &link_options)?;
@@ -1559,58 +1569,7 @@ fn runtime_abi_identity() -> String {
 }
 
 fn native_number_abi_identity() -> String {
-    format!("kiln-native-number-{NUMBER_FORMAT_VERSION}-{NUMBER_PARSE_VERSION}")
-}
-
-fn native_number_source_key(target: &str) -> ArtifactKey {
-    let abi = native_number_abi_identity();
-    key(
-        ArtifactKind::GeneratedC,
-        format!("kiln-native-number-{NUMBER_FORMAT_VERSION}-{NUMBER_PARSE_VERSION}"),
-        Backend::Custom("native-number-source".to_owned()),
-        &abi,
-        target,
-        CacheProfile::Debug,
-        Digest::hash(b"deterministic-c11-native-number"),
-        [Digest::hash(native_number_source().as_bytes())],
-    )
-}
-
-fn native_number_object_key(
-    compiler: &str,
-    target: &str,
-    profile: NativeProfile,
-    compiler_kind: impl fmt::Display,
-    source_digest: Digest,
-) -> ArtifactKey {
-    let abi = native_number_abi_identity();
-    key(
-        ArtifactKind::NativeObject,
-        compiler,
-        Backend::Custom("native-number".to_owned()),
-        &abi,
-        target,
-        profile.cache(),
-        Digest::hash(
-            format!(
-                "shared-number\0pic\0c11\0visibility-hidden\0{}\0{}",
-                compiler_kind,
-                profile.as_str()
-            )
-            .as_bytes(),
-        ),
-        [source_digest],
-    )
-}
-
-fn native_number_compile_options(profile: NativeProfile) -> CompileOptions {
-    let mut options = CompileOptions {
-        profile: profile.toolchain(),
-        position_independent: true,
-        ..CompileOptions::default()
-    };
-    options.extra_args.push("-fvisibility=hidden".into());
-    options
+    format!("kiln-native-number-provider-{PROVIDER_ABI_VERSION}")
 }
 
 fn target_identity(identity: &ToolIdentity) -> String {
@@ -2264,22 +2223,21 @@ struct BuildPaths {
     runtime_o: PathBuf,
     launcher_c: PathBuf,
     launcher_o: PathBuf,
+    number_provider_a: PathBuf,
     executable: PathBuf,
 }
 
 struct SharedLibraryPaths {
     module_c: PathBuf,
     module_o: PathBuf,
-    number_c: PathBuf,
-    number_o: PathBuf,
+    number_provider_a: PathBuf,
     library: PathBuf,
 }
 
 struct SharedGraphLibraryPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
-    number_c: PathBuf,
-    number_o: PathBuf,
+    number_provider_a: PathBuf,
     wrapper_c: PathBuf,
     wrapper_o: PathBuf,
     library: PathBuf,
@@ -2292,6 +2250,7 @@ struct GraphBuildPaths {
     runtime_o: PathBuf,
     launcher_c: PathBuf,
     launcher_o: PathBuf,
+    number_provider_a: PathBuf,
     executable: PathBuf,
 }
 
@@ -2310,6 +2269,7 @@ impl GraphBuildPaths {
             runtime_o: root.join("runtime.o"),
             launcher_c: root.join("launcher.c"),
             launcher_o: root.join("launcher.o"),
+            number_provider_a: root.join("libkiln_native_number_provider.a"),
             executable: root.join(if cfg!(windows) {
                 "program.exe"
             } else {
@@ -2328,6 +2288,7 @@ impl BuildPaths {
             runtime_o: root.join("runtime.o"),
             launcher_c: root.join("launcher.c"),
             launcher_o: root.join("launcher.o"),
+            number_provider_a: root.join("libkiln_native_number_provider.a"),
             executable: root.join(if cfg!(windows) {
                 "program.exe"
             } else {
@@ -2342,8 +2303,7 @@ impl SharedLibraryPaths {
         Self {
             module_c: root.join("module.c"),
             module_o: root.join("module.o"),
-            number_c: root.join("number.c"),
-            number_o: root.join("number.o"),
+            number_provider_a: root.join("libkiln_native_number_provider.a"),
             library: root.join(shared_library_name()),
         }
     }
@@ -2360,8 +2320,7 @@ impl SharedGraphLibraryPaths {
         Self {
             module_c,
             module_o,
-            number_c: root.join("number.c"),
-            number_o: root.join("number.o"),
+            number_provider_a: root.join("libkiln_native_number_provider.a"),
             wrapper_c: root.join("wrapper.c"),
             wrapper_o: root.join("wrapper.o"),
             library: root.join(shared_library_name()),
@@ -2406,26 +2365,48 @@ fn shared_library_link_identity(output: &Path) -> String {
 
 const fn shared_library_link_policy() -> &'static str {
     if cfg!(target_os = "macos") {
-        "macos-dynamiclib-install-name-rpath-v1"
+        "macos-dynamiclib-install-name-rpath-export-list-v2"
     } else if cfg!(target_os = "linux") {
-        "linux-shared-soname-v1"
+        "linux-shared-soname-version-script-v2"
     } else {
         "unsupported-shared-link-v1"
     }
 }
 
-fn configure_shared_library_link(options: &mut LinkOptions, output: &Path) {
+fn configure_shared_library_link(
+    options: &mut LinkOptions,
+    output: &Path,
+    public_symbol: &str,
+    workspace: &Path,
+) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
-    options
-        .extra_args
-        .push(format!("-Wl,-install_name,{identity}").into());
+    {
+        let exports = workspace.join("exports.txt");
+        materialize(&exports, format!("_{public_symbol}\n").as_bytes(), false)?;
+        options
+            .extra_args
+            .push(format!("-Wl,-install_name,{identity}").into());
+        options
+            .extra_args
+            .push(format!("-Wl,-exported_symbols_list,{}", exports.to_string_lossy()).into());
+    }
     #[cfg(target_os = "linux")]
-    options
-        .extra_args
-        .push(format!("-Wl,-soname,{identity}").into());
+    {
+        let exports = workspace.join("exports.map");
+        let source = format!("KILN_1 {{\n  global:\n    {public_symbol};\n  local:\n    *;\n}};\n");
+        materialize(&exports, source.as_bytes(), false)?;
+        options
+            .extra_args
+            .push(format!("-Wl,-soname,{identity}").into());
+        options
+            .extra_args
+            .push(format!("-Wl,--version-script,{}", exports.to_string_lossy()).into());
+        options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+    }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (options, identity);
+    let _ = (options, identity, public_symbol, workspace);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3585,6 +3566,10 @@ int main(int argc, char **argv) {{
         dlsym(second, "kiln_number_to_js_string") != NULL ||
         dlsym(first, "kiln_string_to_number") != NULL ||
         dlsym(second, "kiln_string_to_number") != NULL ||
+        dlsym(first, "rust_eh_personality") != NULL ||
+        dlsym(second, "rust_eh_personality") != NULL ||
+        dlsym(first, "rust_begin_unwind") != NULL ||
+        dlsym(second, "rust_begin_unwind") != NULL ||
         dlsym(first, "ffc_parse_double") != NULL ||
         dlsym(second, "ffc_parse_double") != NULL)
         return 4;

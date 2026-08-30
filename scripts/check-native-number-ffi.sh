@@ -14,7 +14,7 @@ KILN_NUMBER_RUSTFLAGS="${RUSTFLAGS:-}"
 if [[ -n $KILN_NUMBER_RUSTFLAGS ]]; then
 	KILN_NUMBER_RUSTFLAGS+=" "
 fi
-KILN_NUMBER_RUSTFLAGS+="-C panic=abort"
+KILN_NUMBER_RUSTFLAGS+="-C panic=abort -C relocation-model=pic"
 
 env RUSTFLAGS="$KILN_NUMBER_RUSTFLAGS" cargo rustc --locked \
 	-p kiln-native-number-ffi --release --crate-type staticlib

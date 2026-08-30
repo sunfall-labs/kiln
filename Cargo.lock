@@ -295,6 +295,8 @@ dependencies = [
  "kiln-native-runtime",
  "kiln-native-toolchain",
  "kiln-runtime",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
