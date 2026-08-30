@@ -2722,3 +2722,51 @@ with the property table that resolves them -- but it needs the exceptions writte
 Native emission: 23/23 on the native corpus, and `--native` now runs 76 of the 97 differential
 probes. `promises.js` gets further than it did and now stops at `Promise.allSettled` and
 `Promise.any`, which the backend does not have; that is the next small thing.
+
+### The promise combinators, and two turns nobody was counting
+
+**2026-08-30, Claude — `kiln-backend-c`, `kiln-interpreter`,
+`conformance/native/promises.ts`.**
+
+`Promise.allSettled` and `Promise.any` natively. All four combinators were already one machine
+differing in what each arrival does, so the difference travels as a mode in the shared state
+rather than as four copies of the wiring. `all` and `race` settle on any rejection and a plain
+settler is exactly that; the other two have something to record, so they get a rejection step of
+their own.
+
+**Three interpreter bugs, all found by the native side agreeing with node against it:**
+
+- `Promise.any([])` rejected with an error carrying no `errors`, so a handler reading
+  `error.errors.length` got a TypeError. It now carries an empty one: a handler should not have
+  to know *how* the list it was given was empty.
+- `errors` was enumerable, so `Object.keys(error)` was `["errors"]` where node says `[]`. It is
+  the error saying what happened, not a property of an object -- the same reason `message` is
+  hidden.
+- Both spellings of the aggregate now come from one `aggregate_error`, which is what let the
+  empty case and the counted case disagree in the first place.
+
+### `finally`, and why it costs two turns
+
+The native `.finally(f)` passed `f` as both halves of `then`, and the comment said so: "gets the
+running-on-both-paths half right and is what the corpus exercises". The corpus exercises it now,
+and it was wrong twice over.
+
+`finally` passes the outcome through untouched, which is the whole difference from `then(f, f)` --
+`p.then(() => 'ignored').finally(...)` had been replacing the value with `'ignored'`. Each side is
+now the handler wrapped in a step bound to the outcome, restoring it after the handler runs, with
+the handler's own throw allowed to win.
+
+**And it has to be slow about it.** The specification spells `finally` as
+`then(v => Promise.resolve(f()).then(() => v))`, and that is not a flourish: a handler that
+returns a promise is *waited for*, and the extra turn is visible in what order things print.
+Settling on the spot put the two `finally` lines six positions early.
+
+**Which turned up the real one.** Resolving a promise *with* a promise was attaching to it
+immediately; the language makes that attach a job of its own. So a chain that returns a promise
+from a handler takes one more turn than one returning a plain value -- exactly what
+`.then(v => Promise.resolve(v * 10))` in `promises.js` measures, and it had been one turn early
+in the native backend the whole time. It never showed up because nothing had run `promises.js`
+natively before today: it was refused on `queueMicrotask` at instruction one.
+
+That is the argument for the tally, in one line. The corpus does not measure what it cannot
+reach, and every refusal removed is a set of answers nobody has checked yet.
