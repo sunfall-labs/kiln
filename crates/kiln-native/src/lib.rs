@@ -40,6 +40,7 @@ use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERS
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
+static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
@@ -764,11 +765,7 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        // Publish the declaration first so the library is the final ready signal for consumers.
-        // Each file is replaced atomically; a future versioned package directory can make the
-        // pair transactional as a unit.
-        materialize(&header, header_source.as_bytes(), false)?;
-        materialize(&options.output, &library, false)?;
+        publish_shared_artifacts(&options.output, header_source.as_bytes(), &library)?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
@@ -1083,8 +1080,7 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        materialize(&header, header_source.as_bytes(), false)?;
-        materialize(&options.output, &library, false)?;
+        publish_shared_artifacts(&options.output, header_source.as_bytes(), &library)?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
@@ -2176,6 +2172,49 @@ fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), Native
     result
 }
 
+fn publish_shared_artifacts(
+    output: &Path,
+    header_source: &[u8],
+    library: &[u8],
+) -> Result<(), NativeError> {
+    // `File` locking semantics differ for separately opened handles in one process, so keep an
+    // explicit process lock as well as the cross-process directory lock.
+    let _process_lock = SHARED_PUBLICATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _directory_lock = acquire_shared_publication_lock(output)?;
+    // Publish the declaration first so replacing the library remains the final ready signal for
+    // consumers. The directory lock keeps concurrent builders from interleaving two pairs;
+    // readers still use the library replacement as the readiness boundary.
+    materialize(&shared_library_header_path(output), header_source, false)?;
+    materialize(output, library, false)
+}
+
+fn acquire_shared_publication_lock(output: &Path) -> Result<fs::File, NativeError> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| NativeError::Io {
+        operation: "create shared publication directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    // Directory scope is intentional: `foo.so` and `foo.dylib` both derive `foo.h`, so locking
+    // only the library pathname would still permit two writers to interleave the shared header.
+    let lock = fs::File::open(parent).map_err(|source| NativeError::Io {
+        operation: "open shared publication lock",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    lock.lock().map_err(|source| NativeError::Io {
+        operation: "lock shared publication",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    Ok(lock)
+}
+
 fn install_materialized(temporary: &Path, destination: &Path) -> Result<(), NativeError> {
     match fs::rename(temporary, destination) {
         Ok(()) => Ok(()),
@@ -2510,6 +2549,45 @@ mod tests {
             decode_run_result(&result_path, true).expect("decode valid result"),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn shared_publication_serializes_each_header_library_pair() {
+        let root = TestDirectory::new("kiln-native-shared-publication");
+        let output = root.path.join("program.so");
+        let header = shared_library_header_path(&output);
+        materialize(&header, b"old header", false).expect("publish old header");
+        materialize(&output, b"old library", false).expect("publish old library");
+
+        let process_lock = SHARED_PUBLICATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let writer_output = output.clone();
+        let writer = std::thread::spawn(move || {
+            entered_tx.send(()).expect("announce waiting writer");
+            let result = publish_shared_artifacts(&writer_output, b"new header", b"new library");
+            finished_tx.send(result).expect("report publication");
+        });
+        entered_rx.recv().expect("writer starts");
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "a second publisher must wait for the pair lock"
+        );
+        assert_eq!(fs::read(&header).expect("read old header"), b"old header");
+        assert_eq!(fs::read(&output).expect("read old library"), b"old library");
+
+        drop(process_lock);
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer completes after unlock")
+            .expect("publication succeeds");
+        writer.join().expect("writer exits");
+        assert_eq!(fs::read(header).expect("read new header"), b"new header");
+        assert_eq!(fs::read(output).expect("read new library"), b"new library");
     }
 
     fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
