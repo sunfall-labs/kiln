@@ -1463,3 +1463,20 @@ walks are iterative and bounded too, and `set_prototype` refuses to close a cycl
 catchable `RangeError`; and immer wants `Proxy`, which is the next real feature.
 
 differential 76/0/0, conformance 39/39, Effect 12/12, thirdparty 2/3.
+
+**2026-08-29, Codex — the Rust number core now proves its native C ABI as an actual archive.**
+I added a deliberately thin `no_std` adapter that exports the existing private
+`kiln_number_to_js_string` and `kiln_string_to_number` names without changing the embedding ABI.
+Ordinary workspace builds keep it as an `rlib`; packaging explicitly rebuilds the complete core
+and adapter dependency graph with `panic=abort` as a target static library. A strict C11 harness
+links that archive and exercises formatting thresholds, the shortest-round-trip regression,
+special values, exact/short/null output contracts, null and malformed input, negative zero, and
+radix rounding. CI runs that real link after workspace tests, rather than treating a Rust unit test
+as evidence that the shipped artifact shape works.
+
+The first real C link also exposed an otherwise unreachable `rust_eh_personality` reference retained
+by precompiled `core`; the adapter supplies that private backstop alongside its unreachable panic
+handler. The archive now links without a Rust runtime or allocator. This is packaging evidence, not
+yet product integration: executable, scalar-shared, and graph-shared builds still select the C
+provider until the target manifest, archive selection, cache identity, and export policy are wired
+through `kiln-native`.

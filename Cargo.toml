@@ -20,6 +20,7 @@ kiln-module-graph = { path = "crates/kiln-module-graph" }
 kiln-module-resolver = { path = "crates/kiln-module-resolver" }
 kiln-native = { path = "crates/kiln-native" }
 kiln-native-number = { path = "crates/kiln-native-number" }
+kiln-native-number-ffi = { path = "crates/kiln-native-number-ffi" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-number-core = { path = "crates/kiln-number-core" }
 kiln-runtime = { path = "crates/kiln-runtime" }

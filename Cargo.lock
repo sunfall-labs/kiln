@@ -305,6 +305,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-native-number-ffi"
+version = "0.0.0"
+dependencies = [
+ "kiln-number-core",
+]
+
+[[package]]
 name = "kiln-native-runtime"
 version = "0.0.0"
 dependencies = [
