@@ -713,6 +713,299 @@ impl NativeBuilder {
         })
     }
 
+    /// Build an acyclic module graph as one embedding shared library.
+    ///
+    /// The public entry point is a graph-specific two-argument wrapper using the stable embedding
+    /// ABI. Individual generated modules retain their internal six-argument ABI; the wrapper
+    /// evaluates them in dependency-first order and wires imports from the provider export arrays.
+    /// Only the wrapper is declared in the emitted public header. No CLI runtime or launcher is
+    /// linked into the resulting library.
+    pub fn build_shared_graph(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeSharedLibraryReport, NativeError> {
+        let total_started = Instant::now();
+        let emit_started = Instant::now();
+        let mut modules = Vec::with_capacity(graph.module_count());
+        let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
+        for node in graph.modules() {
+            let logical_path = logical_module_path(graph.project_root(), &node.path)?;
+            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            if !symbols.insert(emitted.symbol.clone()) {
+                return Err(NativeError::SymbolCollision {
+                    symbol: emitted.symbol,
+                });
+            }
+            modules.push((node, emitted));
+        }
+        if modules.is_empty() {
+            return Err(NativeError::Graph(
+                ModuleGraphError::InternalMissingModule {
+                    path: graph.entry().to_path_buf(),
+                },
+            ));
+        }
+        let topology = graph_shared_topology_digest(graph, &modules);
+        let wrapper_symbol = format!("kiln_shared_graph_{}", topology.to_hex());
+        let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
+        let mut header_source = graph_shared_header(&wrapper_symbol)?;
+        let emit_elapsed = emit_started.elapsed();
+
+        let header = shared_library_header_path(&options.output);
+        if options
+            .output
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("h"))
+        {
+            return Err(NativeError::ArtifactPathCollision {
+                first: options.output.clone(),
+                second: header,
+            });
+        }
+        // Keep the generated header in one owned buffer so publication remains independent of
+        // the temporary work directory.
+        header_source.shrink_to_fit();
+
+        let workspace = WorkDirectory::create()?;
+        let paths = SharedGraphLibraryPaths::new(workspace.path(), modules.len());
+        let identity = self.toolchain.identity().clone();
+        let profile = options.profile;
+        let module_abi = module_abi_identity();
+        let embedding_abi = runtime_abi_identity();
+        let target = target_identity(&identity);
+        let compiler = compiler_identity(&identity);
+        let mut module_sources = Vec::with_capacity(modules.len());
+        for (_, module) in &modules {
+            let source_key = key(
+                ArtifactKind::GeneratedC,
+                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                Backend::C,
+                &module_abi,
+                &target,
+                CacheProfile::Debug,
+                // PIC affects the object identity below, not this byte-for-byte reusable C unit.
+                Digest::hash(b"deterministic-c11-module"),
+                [Digest::hash(module.source.as_bytes())],
+            );
+            module_sources.push(self.cached_payload(&source_key, module.source.as_bytes())?);
+        }
+        let wrapper_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
+            &embedding_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"deterministic-c11-shared-graph-wrapper"),
+            [Digest::hash(wrapper.as_bytes()), topology],
+        );
+        let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
+            self.cached_payload(&wrapper_source_key, wrapper.as_bytes())?;
+
+        let object_options = Digest::hash(
+            format!(
+                "shared-graph\0pic\0c11\0{}\0{}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
+        let compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            position_independent: true,
+            ..CompileOptions::default()
+        };
+        let mut module_keys = Vec::with_capacity(modules.len());
+        for (index, _) in modules.iter().enumerate() {
+            let (_, source_digest, _) = &module_sources[index];
+            module_keys.push(key(
+                ArtifactKind::NativeObject,
+                &compiler,
+                Backend::Custom("native-shared-graph-module".to_owned()),
+                &embedding_abi,
+                &target,
+                profile.cache(),
+                object_options,
+                [*source_digest],
+            ));
+        }
+        let wrapper_object_key = key(
+            ArtifactKind::NativeObject,
+            &compiler,
+            Backend::Custom("native-shared-graph-wrapper".to_owned()),
+            &embedding_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [wrapper_source_digest, topology],
+        );
+        let compile_started = Instant::now();
+        let (module_objects, wrapper_object) = std::thread::scope(|scope| {
+            let worker_count = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(modules.len().max(1));
+            let chunk_size = modules.len().div_ceil(worker_count).max(1);
+            let index_chunks = (0..modules.len())
+                .collect::<Vec<_>>()
+                .chunks(chunk_size)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            let module_keys_ref = &module_keys;
+            let module_sources_ref = &module_sources;
+            let module_c_ref = &paths.module_c;
+            let module_o_ref = &paths.module_o;
+            let wrapper_c_ref = &paths.wrapper_c;
+            let wrapper_o_ref = &paths.wrapper_o;
+            let compile_options_ref = &compile_options;
+            let wrapper_bytes_ref = &wrapper_bytes;
+            let module_handles = index_chunks
+                .into_iter()
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|&index| {
+                                let result = self.object(
+                                    &module_keys_ref[index],
+                                    &module_sources_ref[index].0,
+                                    &module_c_ref[index],
+                                    &module_o_ref[index],
+                                    compile_options_ref,
+                                );
+                                (
+                                    index,
+                                    result.map(|(object, digest, hit, _elapsed)| {
+                                        (object, digest, hit)
+                                    }),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let wrapper = scope.spawn(move || {
+                self.object(
+                    &wrapper_object_key,
+                    wrapper_bytes_ref,
+                    wrapper_c_ref,
+                    wrapper_o_ref,
+                    compile_options_ref,
+                )
+            });
+            let modules = (|| {
+                let mut modules = (0..module_keys_ref.len()).map(|_| None).collect::<Vec<_>>();
+                for handle in module_handles {
+                    for (index, result) in join_worker(handle.join(), "module compile")? {
+                        modules[index] = Some(result?);
+                    }
+                }
+                modules
+                    .into_iter()
+                    .map(|result| {
+                        result.ok_or(NativeError::WorkerPanic {
+                            stage: "module compile",
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })();
+            let module_objects = modules?;
+            let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
+            Ok::<_, NativeError>((module_objects, wrapper_object))
+        })?;
+        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 {
+            Duration::ZERO
+        } else {
+            compile_started.elapsed()
+        };
+
+        let link_options_digest = Digest::hash(
+            format!(
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}",
+                profile.as_str(),
+                shared_library_name(),
+                shared_library_link_identity(&options.output),
+                shared_library_link_policy(),
+            )
+            .as_bytes(),
+        );
+        let mut link_inputs = module_objects
+            .iter()
+            .map(|(_, digest, _)| *digest)
+            .collect::<Vec<_>>();
+        link_inputs.push(wrapper_object.1);
+        let library_key = key(
+            ArtifactKind::LinkedArtifact,
+            &compiler,
+            Backend::Custom("native-shared-graph".to_owned()),
+            &embedding_abi,
+            &target,
+            profile.cache(),
+            link_options_digest,
+            link_inputs,
+        );
+        let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
+            Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
+            Lookup::Miss => {
+                let mut objects = Vec::with_capacity(modules.len() + 1);
+                for (index, (object, _, _)) in module_objects.iter().enumerate() {
+                    materialize(&paths.module_o[index], object, false)?;
+                    objects.push(paths.module_o[index].clone());
+                }
+                materialize(&paths.wrapper_o, &wrapper_object.0, false)?;
+                objects.push(paths.wrapper_o.clone());
+                let mut link_options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    link_options.libraries.push("m".to_owned());
+                }
+                configure_shared_library_link(&mut link_options, &options.output);
+                let report =
+                    self.toolchain
+                        .link_shared_library(&objects, &paths.library, &link_options)?;
+                let bytes = read(&paths.library, "read linked shared library")?;
+                self.cache.put(&library_key, &bytes)?;
+                (bytes, false, report.elapsed)
+            }
+        };
+        materialize(&header, header_source.as_bytes(), false)?;
+        materialize(&options.output, &library, false)?;
+
+        Ok(NativeSharedLibraryReport {
+            output: options.output.clone(),
+            header,
+            module_symbol: wrapper_symbol,
+            tool: identity,
+            cache_hits: NativeSharedLibraryCacheHits {
+                generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
+                    && wrapper_generated_c_hit,
+                object: module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2,
+                library: library_hit,
+            },
+            sizes: NativeSharedLibrarySizes {
+                generated_c: module_sources
+                    .iter()
+                    .map(|(bytes, _, _)| bytes.len() as u64)
+                    .sum::<u64>()
+                    + wrapper_bytes.len() as u64,
+                object: module_objects
+                    .iter()
+                    .map(|(bytes, _, _)| bytes.len() as u64)
+                    .sum::<u64>()
+                    + wrapper_object.0.len() as u64,
+                library: library.len() as u64,
+            },
+            timings: BuildTimings {
+                emit: emit_elapsed,
+                compile: compile_elapsed,
+                link: link_elapsed,
+                total: total_started.elapsed(),
+            },
+        })
+    }
+
     /// Build every module in an acyclic graph into one executable.
     ///
     /// Modules are emitted and compiled independently in the graph's dependency-first order.
@@ -1282,6 +1575,51 @@ fn graph_topology_digest(
     Digest::hash(&bytes)
 }
 
+/// Identity of the graph wiring used by the shared wrapper. Local bytecode slot assignments are
+/// deliberately excluded: changing a module body may renumber those private slots without
+/// changing the provider/import topology or the wrapper source.
+fn graph_shared_topology_digest(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Digest {
+    let mut bytes = Vec::new();
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let entry_index = modules
+        .iter()
+        .position(|(node, _)| node.path == graph.entry())
+        .unwrap_or(usize::MAX);
+    bytes.extend_from_slice(entry_index.to_string().as_bytes());
+    bytes.push(0);
+    for (node, module) in modules {
+        bytes.extend_from_slice(module.symbol.as_bytes());
+        bytes.push(0);
+        for dependency in &node.dependencies {
+            bytes.extend_from_slice(dependency.specifier.as_bytes());
+            bytes.push(0);
+            let index = indices
+                .get(&dependency.target)
+                .copied()
+                .unwrap_or(usize::MAX);
+            bytes.extend_from_slice(index.to_string().as_bytes());
+            bytes.push(0);
+        }
+        for import in &node.program.imports {
+            bytes.extend_from_slice(import.source.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(import.imported.as_bytes());
+            bytes.push(0);
+        }
+        for export in &node.program.exports {
+            bytes.extend_from_slice(export.exported.as_bytes());
+            bytes.push(0);
+        }
+    }
+    Digest::hash(&bytes)
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -1434,6 +1772,192 @@ int main(void) {
             },
         ));
     }
+    Ok(output)
+}
+
+fn graph_shared_header(wrapper_symbol: &str) -> Result<String, NativeError> {
+    // The graph wrapper has the same public two-argument signature as a scalar embedded module,
+    // so reuse the runtime's canonical symbol validation and include-guarded header generator.
+    embedding_module_header(wrapper_symbol).map_err(NativeError::from)
+}
+
+fn graph_shared_wrapper_source(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    wrapper_symbol: &str,
+) -> Result<String, NativeError> {
+    let mut indices = std::collections::HashMap::with_capacity(modules.len());
+    for (index, (node, _)) in modules.iter().enumerate() {
+        indices.insert(node.path.clone(), index);
+    }
+    let entry_index = modules
+        .iter()
+        .position(|(node, _)| node.path == graph.entry())
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: graph.entry().to_path_buf(),
+            })
+        })?;
+    let mut output = String::with_capacity(embedding_header().len() + modules.len() * 768);
+    output.push_str("/* Kiln native shared graph wrapper. */\n");
+    output.push_str(
+        "#include <stddef.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n",
+    );
+    output.push_str(embedding_header());
+    output.push('\n');
+    for (_, module) in modules {
+        writeln!(
+            output,
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            module.symbol
+        )
+        .unwrap();
+    }
+    output.push_str(
+        r#"
+typedef struct kiln_proxy_arena {
+    void **allocations;
+    size_t count;
+    size_t capacity;
+} kiln_proxy_arena;
+
+typedef struct kiln_proxy_host {
+    kiln_host *upstream;
+    kiln_proxy_arena *arena;
+} kiln_proxy_host;
+
+static void kiln_proxy_arena_clear(kiln_proxy_arena *arena) {
+    size_t index;
+    if (arena == NULL) return;
+    for (index = 0; index < arena->count; ++index) free(arena->allocations[index]);
+    free(arena->allocations);
+    arena->allocations = NULL;
+    arena->count = 0;
+    arena->capacity = 0;
+}
+
+static int kiln_proxy_arena_track(kiln_proxy_arena *arena, void *allocation) {
+    size_t capacity;
+    void **grown;
+    if (arena == NULL || allocation == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (arena->count == arena->capacity) {
+        capacity = arena->capacity == 0 ? 8 : arena->capacity;
+        if (capacity > (size_t)-1 / 2) return KILN_C99_HOST_ERROR;
+        capacity *= 2;
+        if (capacity > (size_t)-1 / sizeof(*grown)) return KILN_C99_HOST_ERROR;
+        grown = (void **)realloc(arena->allocations, capacity * sizeof(*grown));
+        if (grown == NULL) return KILN_C99_HOST_ERROR;
+        arena->allocations = grown;
+        arena->capacity = capacity;
+    }
+    arena->allocations[arena->count++] = allocation;
+    return KILN_C99_OK;
+}
+
+static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
+                           const kiln_value *arguments, kiln_value *result) {
+    kiln_proxy_host *proxy = (kiln_proxy_host *)context;
+    kiln_host *upstream;
+    kiln_proxy_arena *arena;
+    char *copy;
+    int status;
+    if (proxy == NULL || proxy->upstream == NULL || proxy->upstream->call == NULL ||
+        result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    upstream = proxy->upstream;
+    arena = proxy->arena;
+    status = upstream->call(upstream->context, operation, argc, arguments, result);
+    if (status != KILN_C99_OK) return status;
+    if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
+    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL))
+        return KILN_C99_INVALID_ARGUMENT;
+    copy = (char *)malloc(result->len == 0 ? 1 : result->len);
+    if (copy == NULL) return KILN_C99_HOST_ERROR;
+    if (result->len != 0) memcpy(copy, result->ptr, result->len);
+    status = kiln_proxy_arena_track(arena, copy);
+    if (status != KILN_C99_OK) {
+        free(copy);
+        return status;
+    }
+    result->ptr = copy;
+    return KILN_C99_OK;
+}
+"#,
+    );
+    writeln!(
+        output,
+        "\nint {wrapper_symbol}(kiln_host *host, kiln_value *result) {{\n    kiln_proxy_arena arena = {{ NULL, 0, 0 }};\n    kiln_proxy_host proxy = {{ host, &arena }};\n    kiln_host proxy_host = {{ kiln_proxy_call, &proxy }};\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+        wrapper_symbol = wrapper_symbol,
+        count = modules.len(),
+    )
+    .unwrap();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if !node.program.imports.is_empty() {
+            writeln!(
+                output,
+                "    if ((size_t){} > (size_t)-1 / sizeof(**import_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    import_arrays[{index}] = (kiln_value *)malloc((size_t){} * sizeof(**import_arrays));\n    if (import_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+                node.program.imports.len(),
+                node.program.imports.len()
+            )
+            .unwrap();
+        }
+        if !node.program.exports.is_empty() {
+            writeln!(
+                output,
+                "    if ((size_t){} > (size_t)-1 / sizeof(**export_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    export_arrays[{index}] = (kiln_value *)malloc((size_t){} * sizeof(**export_arrays));\n    if (export_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+                node.program.exports.len(),
+                node.program.exports.len()
+            )
+            .unwrap();
+        }
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            let dependency = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .ok_or_else(|| {
+                    NativeError::Graph(ModuleGraphError::UnresolvedImport {
+                        importer: node.path.clone(),
+                        source: import.source.clone(),
+                    })
+                })?;
+            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: dependency.target.clone(),
+                })
+            })?;
+            let export_index = modules[provider_index]
+                .0
+                .program
+                .exports
+                .iter()
+                .position(|export| export.exported == import.imported)
+                .ok_or_else(|| {
+                    NativeError::Graph(ModuleGraphError::MissingExport {
+                        importer: node.path.clone(),
+                        provider: dependency.target.clone(),
+                        name: import.imported.clone(),
+                    })
+                })?;
+            writeln!(
+                output,
+                "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];"
+            )
+            .unwrap();
+        }
+        let import_count = node.program.imports.len();
+        let export_count = node.program.exports.len();
+        writeln!(
+            output,
+            "    status = {}(&proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) goto cleanup;",
+            modules[index].1.symbol
+        )
+        .unwrap();
+        if index == entry_index {
+            output.push_str("    *result = module_result;\n");
+        }
+    }
+    output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
+    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    kiln_proxy_arena_clear(&arena);\n    return status;\n}}\n", modules.len()).unwrap();
     Ok(output)
 }
 
@@ -1599,6 +2123,14 @@ struct SharedLibraryPaths {
     library: PathBuf,
 }
 
+struct SharedGraphLibraryPaths {
+    module_c: Vec<PathBuf>,
+    module_o: Vec<PathBuf>,
+    wrapper_c: PathBuf,
+    wrapper_o: PathBuf,
+    library: PathBuf,
+}
+
 struct GraphBuildPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
@@ -1656,6 +2188,24 @@ impl SharedLibraryPaths {
         Self {
             module_c: root.join("module.c"),
             module_o: root.join("module.o"),
+            library: root.join(shared_library_name()),
+        }
+    }
+}
+
+impl SharedGraphLibraryPaths {
+    fn new(root: &Path, module_count: usize) -> Self {
+        let mut module_c = Vec::with_capacity(module_count);
+        let mut module_o = Vec::with_capacity(module_count);
+        for index in 0..module_count {
+            module_c.push(root.join(format!("module-{index}.c")));
+            module_o.push(root.join(format!("module-{index}.o")));
+        }
+        Self {
+            module_c,
+            module_o,
+            wrapper_c: root.join("wrapper.c"),
+            wrapper_o: root.join("wrapper.o"),
             library: root.join(shared_library_name()),
         }
     }
@@ -2306,6 +2856,401 @@ int main(void) {
         assert!(!edited.cache_hits.executable);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph project");
+        fs::write(project.join("main.js"), "").expect("write shared graph entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph dependency");
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(7.0_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::LoadLocal(0), Instruction::Return],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared graph");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    emit_module_with_logical_path(
+                        &node.program,
+                        &logical_module_path(graph.project_root(), &node.path)
+                            .expect("logical module path"),
+                    )
+                    .expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let wrapper_symbol = format!(
+            "kiln_shared_graph_{}",
+            graph_shared_topology_digest(&graph, &modules).to_hex()
+        );
+        let wrapper =
+            graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");
+        assert!(wrapper.contains(embedding_header()));
+        assert!(wrapper.contains("extern int kiln_module_path_"));
+        assert!(wrapper.contains("malloc((size_t)"));
+        assert!(!wrapper.contains("static kiln_value kiln_import"));
+        assert!(!wrapper.contains("static kiln_value kiln_export"));
+        assert!(!wrapper.contains("kiln_cli_host_call"));
+        assert!(!wrapper.contains("setlocale"));
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root
+                        .path
+                        .join("built")
+                        .with_extension(if cfg!(target_os = "macos") {
+                            "dylib"
+                        } else {
+                            "so"
+                        }),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared graph succeeds");
+        assert_eq!(report.module_symbol, wrapper_symbol);
+        assert!(report.output.is_file());
+        let cached = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: report.output.clone(),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("cached shared graph succeeds");
+        assert!(cached.cache_hits.generated_c);
+        assert!(cached.cache_hits.object);
+        assert!(cached.cache_hits.library);
+        let renamed = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("renamed").with_extension(
+                        if cfg!(target_os = "macos") {
+                            "dylib"
+                        } else {
+                            "so"
+                        },
+                    ),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("renamed shared graph succeeds");
+        assert!(renamed.cache_hits.generated_c);
+        assert!(renamed.cache_hits.object);
+        assert!(!renamed.cache_hits.library);
+        let wrapper_source = root.path.join("wrapper.c");
+        fs::write(&wrapper_source, wrapper).expect("write wrapper source");
+        let compile_options = CompileOptions {
+            position_independent: true,
+            ..CompileOptions::default()
+        };
+        let mut objects = Vec::with_capacity(modules.len() + 1);
+        for (index, (_, module)) in modules.iter().enumerate() {
+            let source = root.path.join(format!("module-{index}.c"));
+            let object = root.path.join(format!("module-{index}.o"));
+            fs::write(&source, &module.source).expect("write module source");
+            toolchain
+                .compile_c(&source, &object, &compile_options)
+                .expect("compile module source");
+            objects.push(object);
+        }
+        let wrapper_object = root.path.join("wrapper.o");
+        toolchain
+            .compile_c(&wrapper_source, &wrapper_object, &compile_options)
+            .expect("compile wrapper source");
+        objects.push(wrapper_object);
+        let library = root.path.join(shared_library_name());
+        toolchain
+            .link_shared_library(&objects, &library, &LinkOptions::default())
+            .expect("link shared graph");
+        assert!(library.is_file());
+        let header = root.path.join("wrapper.h");
+        fs::write(
+            &header,
+            graph_shared_header(&wrapper_symbol).expect("wrapper header emits"),
+        )
+        .expect("write wrapper header");
+        let host_source = root.path.join("null-host.c");
+        fs::write(
+            &host_source,
+            format!(
+                "#include \"wrapper.h\"\nint main(void) {{ kiln_value result; return {}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER; }}\n",
+                wrapper_symbol
+            ),
+        )
+        .expect("write null-host source");
+        let host_object = root.path.join("null-host.o");
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile null-host source");
+        let host_executable = root.path.join("null-host");
+        let mut host_link = LinkOptions::default();
+        host_link.runtime_libraries.push(library.clone());
+        host_link
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &host_link)
+            .expect("link null-host executable");
+        let output = Command::new(&host_executable)
+            .output()
+            .expect("run null-host executable");
+        assert!(
+            output.status.success(),
+            "null-host graph failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph host integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph host integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-host-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph host project");
+        fs::write(project.join("main.js"), "").expect("write shared graph host entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph host dependency");
+
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 0,
+                    },
+                    Instruction::StoreLocal(0),
+                    Instruction::LoadLocal(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared host graph");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared host graph");
+
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph header file name");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+typedef struct host_context {{
+    int mode;
+    char storage[4];
+}} host_context;
+
+static int host_call(void *opaque, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    host_context *context = (host_context *)opaque;
+    if (context == NULL || operation != KILN_HOST_OP_WRITE_STDOUT || result == NULL)
+        return KILN_C99_HOST_ERROR;
+    if (argc == 0) {{
+        if (context->mode == 2) return 7;
+        if (context->mode == 3) {{
+            *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 3}};
+            return KILN_C99_OK;
+        }}
+        if (context->mode == 1) {{
+            *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 0}};
+            return KILN_C99_OK;
+        }}
+        memcpy(context->storage, "dep", 3);
+        *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, context->storage, 3}};
+        return KILN_C99_OK;
+    }}
+    if (argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING)
+        return KILN_C99_HOST_ERROR;
+    if (context->mode == 1) {{
+        if (arguments[0].len != 0 || arguments[0].ptr == NULL)
+            return KILN_C99_HOST_ERROR;
+    }} else if (arguments[0].len != 3 || arguments[0].ptr == NULL ||
+               arguments[0].ptr == context->storage ||
+               memcmp(arguments[0].ptr, "dep", 3) != 0) {{
+        return KILN_C99_HOST_ERROR;
+    }}
+    *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    host_context context = {{0, {{0}}}};
+    kiln_host host = {{host_call, &context}};
+    kiln_value result;
+    int index;
+    for (index = 0; index < 64; ++index) {{
+        if ({symbol}(&host, &result) != KILN_C99_OK) return 2;
+    }}
+    context.mode = 1;
+    if ({symbol}(&host, &result) != KILN_C99_OK) return 3;
+    context.mode = 2;
+    if ({symbol}(&host, &result) != KILN_C99_HOST_ERROR) return 4;
+    context.mode = 3;
+    if ({symbol}(&host, &result) != KILN_C99_HOST_ERROR) return 5;
+    if ({symbol}(NULL, &result) != KILN_C99_HOST_ERROR) return 6;
+    return 0;
+}}
+"#,
+                symbol = report.module_symbol,
+            ),
+        )
+        .expect("write shared graph host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared graph host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared graph host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", &root.path);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", &root.path);
+        let output = command.output().expect("run shared graph host");
+        assert!(
+            output.status.success(),
+            "shared graph host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn stdout_program(text: &str) -> Program {

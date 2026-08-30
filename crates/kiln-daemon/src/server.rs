@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, native_build_graph, native_build_program, native_build_shared_program,
-    native_graph, native_program, native_run_graph, native_run_program,
+    Next, dispatch, native_build_graph, native_build_program, native_build_shared_graph,
+    native_build_shared_program, native_graph, native_program, native_run_graph,
+    native_run_program,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
@@ -423,12 +424,9 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
                 Err(message) => return (Response::Error { message }, Next::Continue),
             };
             match graph {
-                Some(graph) if graph.module_count() > 1 => (
-                    Response::Error {
-                        message: "native shared-library graph builds are unsupported; build a scalar module without imports".to_owned(),
-                    },
-                    Next::Continue,
-                ),
+                Some(graph) if graph.module_count() > 1 => run_without_engine_lock(|| {
+                    native_build_shared_graph(graph, path, project_root, output, profile)
+                }),
                 Some(_) | None => {
                     let program = match prepare_native(engine, &path) {
                         Ok(program) => program,

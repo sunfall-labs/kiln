@@ -96,17 +96,13 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             profile,
         } => (
             match native_graph(engine, &path, &project_root) {
-                Ok(Some(graph)) if graph.module_count() > 1 => Response::Error {
-                    message: "native shared-library graph builds are unsupported; build a scalar module without imports".to_owned(),
-                },
+                Ok(Some(graph)) if graph.module_count() > 1 => {
+                    native_build_shared_graph(graph, path, project_root, output, profile)
+                }
                 Ok(Some(_)) | Ok(None) => match native_program(engine, &path) {
-                    Ok(program) => native_build_shared_program(
-                        program,
-                        path,
-                        project_root,
-                        output,
-                        profile,
-                    ),
+                    Ok(program) => {
+                        native_build_shared_program(program, path, project_root, output, profile)
+                    }
                     Err(message) => Response::Error { message },
                 },
                 Err(message) => Response::Error { message },
@@ -419,9 +415,48 @@ pub(crate) fn native_build_shared_program(
     output: Option<String>,
     profile: NativeProfile,
 ) -> Response {
+    let (builder, options) =
+        match prepare_native_shared_build(&path, &project_root, output, profile) {
+            Ok(build) => build,
+            Err(message) => return Response::Error { message },
+        };
+    match builder.build_shared_library(&program, &options) {
+        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+pub(crate) fn native_build_shared_graph(
+    graph: ModuleGraph,
+    path: String,
+    project_root: String,
+    output: Option<String>,
+    profile: NativeProfile,
+) -> Response {
+    let (builder, options) =
+        match prepare_native_shared_build(&path, &project_root, output, profile) {
+            Ok(build) => build,
+            Err(message) => return Response::Error { message },
+        };
+    match builder.build_shared_graph(&graph, &options) {
+        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn prepare_native_shared_build(
+    path: &str,
+    project_root: &str,
+    output: Option<String>,
+    profile: NativeProfile,
+) -> Result<(kiln_native::NativeBuilder, kiln_native::NativeBuildOptions), String> {
     let project_root = PathBuf::from(project_root);
     let output = output.map_or_else(
-        || default_native_shared_output(&project_root, &path),
+        || default_native_shared_output(&project_root, path),
         |output| {
             let output = PathBuf::from(output);
             if output.is_absolute() {
@@ -431,7 +466,7 @@ pub(crate) fn native_build_shared_program(
             }
         },
     );
-    let source = PathBuf::from(&path);
+    let source = PathBuf::from(path);
     let project_source = if source.is_absolute() {
         source.clone()
     } else {
@@ -447,44 +482,28 @@ pub(crate) fn native_build_shared_program(
     };
     let header = kiln_native::shared_library_header_path(&output);
     if same_source(&output) {
-        return Response::Error {
-            message: format!("native output would overwrite source file {path}"),
-        };
+        return Err(format!("native output would overwrite source file {path}"));
     }
     if same_source(&header) {
-        return Response::Error {
-            message: format!("native shared-library header would overwrite source file {path}"),
-        };
+        return Err(format!(
+            "native shared-library header would overwrite source file {path}"
+        ));
     }
     if output
         .extension()
         .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("h"))
     {
-        return Response::Error {
-            message: "native shared-library header path must differ from library output".to_owned(),
-        };
+        return Err("native shared-library header path must differ from library output".to_owned());
     }
-    let builder =
-        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return Response::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
-    match builder.build_shared_library(
-        &program,
-        &kiln_native::NativeBuildOptions {
+    let builder = kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache"))
+        .map_err(|error| error.to_string())?;
+    Ok((
+        builder,
+        kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
         },
-    ) {
-        Ok(report) => Response::NativeSharedBuilt(native_shared_summary(report)),
-        Err(error) => Response::Error {
-            message: error.to_string(),
-        },
-    }
+    ))
 }
 
 pub(crate) fn native_build_graph(

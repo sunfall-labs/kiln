@@ -424,8 +424,9 @@ fn native_shared_build_rejects_header_source_and_output_collisions() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn production_daemon_native_shared_graph_build_is_rejected_before_linking() {
+fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() {
     let fixture = Fixture::empty();
     let dependency = fixture.dir.join("shared-dependency.js");
     let entry = fixture.dir.join("shared-entry.js");
@@ -457,21 +458,59 @@ fn production_daemon_native_shared_graph_build_is_rejected_before_linking() {
     }
     let request = Request::NativeSharedBuild {
         path: entry.to_string_lossy().into_owned(),
-        project_root: root,
+        project_root: root.clone(),
         output: None,
         profile: NativeProfile::Dev,
     };
 
-    let response = client.request(&request).expect("shared graph response");
-    let Response::Error { message } = response else {
-        panic!("expected shared graph rejection, got {response:?}");
+    let first = client.request(&request).expect("shared graph response");
+    let Response::NativeSharedBuilt(first) = first else {
+        if let Response::Error { ref message } = first
+            && message.contains("no supported C compiler")
+        {
+            eprintln!("skipping native shared graph daemon integration: {message}");
+            stop.shutdown();
+            within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+            return;
+        }
+        panic!("expected shared graph build, got {first:?}");
     };
+    let extension = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    let expected_output = Path::new(&root)
+        .join(".kiln/lib")
+        .join("shared-entry")
+        .with_extension(extension);
+    assert_eq!(first.output_path, expected_output.to_string_lossy());
+    let expected_header = expected_output.with_extension("h");
+    assert_eq!(first.header_path, expected_header.to_string_lossy());
     assert!(
-        message.contains("shared-library graph builds are unsupported"),
-        "{message}"
+        !first.module_symbol.is_empty(),
+        "wrapper symbol is reported"
     );
-    assert!(!fixture.dir.join(".kiln/lib/shared-entry.so").exists());
-    assert!(!fixture.dir.join(".kiln/lib/shared-entry.dylib").exists());
+    let header = std::fs::read_to_string(&first.header_path).expect("read shared graph header");
+    assert!(header.contains(&format!("int {}(", first.module_symbol)));
+    assert!(!first.generated_c_cache_hit);
+    assert!(!first.object_cache_hit);
+    assert!(!first.library_cache_hit);
+    assert!(expected_output.is_file());
+
+    let Response::NativeSharedBuilt(second) = client
+        .request(&request)
+        .expect("cached shared graph response")
+    else {
+        panic!("expected cached shared graph build");
+    };
+    assert_eq!(second.output_path, first.output_path);
+    assert_eq!(second.header_path, first.header_path);
+    assert_eq!(second.module_symbol, first.module_symbol);
+    assert!(second.generated_c_cache_hit);
+    assert!(second.object_cache_hit);
+    assert!(second.library_cache_hit);
+    assert_eq!(second.library_bytes, first.library_bytes);
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
