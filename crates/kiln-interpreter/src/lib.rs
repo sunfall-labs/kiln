@@ -376,6 +376,7 @@ pub enum Native {
     SetAdd,
     SetHas,
     SetDelete,
+    CollectionClear,
     MapSet,
     MapGet,
     MapHas,
@@ -9503,6 +9504,20 @@ fn call_native(
                 None => Value::Undefined,
             }
         }
+        Native::CollectionClear => {
+            let Some((entries, _)) = collection_state(receiver) else {
+                return Ok(Value::Undefined);
+            };
+            // Every entry becomes a tombstone rather than the vector being emptied, for the same
+            // reason a delete does: a live iterator holds an index into this vector, and
+            // shortening it underneath one would walk past the end.
+            let count = entries.borrow().len();
+            for index in 0..count {
+                entries.borrow_mut()[index] = Value::Native(Native::Tombstone);
+            }
+            set_size(receiver, 0.0);
+            Value::Undefined
+        }
         Native::SetDelete | Native::MapDelete => {
             let Some((entries, is_map)) = collection_state(receiver) else {
                 return Ok(Value::Boolean(false));
@@ -9900,6 +9915,12 @@ fn find_entry(entries: &[Value], key: &Value, is_map: bool) -> Option<usize> {
 ///
 /// Stored rather than derived so a read is a plain property lookup; the two cannot drift because
 /// only `add` and `delete` change either.
+fn set_size(receiver: &Value, size: f64) {
+    if let Value::Object(object) = receiver {
+        object.borrow_mut().set("size", Value::Number(size));
+    }
+}
+
 fn bump_size(receiver: &Value, delta: f64) {
     if let Value::Object(object) = receiver {
         let current = object
@@ -9988,6 +10009,7 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
         // `entries` hands the pair over whole. A Set stores bare values, and its `entries` pairs
         // each one with itself -- which is the specification's way of giving the two collections
         // one iteration protocol.
+        (_, "clear") => Value::Native(Native::CollectionClear),
         (_, "forEach") => Value::Native(Native::CollectionForEach),
         (_, "values") => Value::Native(Native::CollectionValues),
         (_, "keys") => Value::Native(Native::CollectionKeys),
