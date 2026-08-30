@@ -3387,10 +3387,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     | Native::ObjectSeal
                     | Native::ObjectPreventExtensions
                     | Native::ObjectGetPrototypeOf
-                    | Native::ObjectGetOwnPropertyDescriptor
-                    | Native::ObjectGetOwnPropertyDescriptors
                     | Native::ObjectAssign
-                    | Native::ObjectHasOwn
                     // Serialising walks the value without the machine, so it cannot run a `get`
                     // trap. Unwrapping the outermost proxy makes the common case -- a wrapper
                     // whose traps only observe -- work; a proxy *nested* inside is still
@@ -3660,6 +3657,76 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Ok(Value::String(out))
+            }
+            // `Object.prototype.hasOwnProperty.call(proxy, k)` is how a library asks a value
+            // whether it really holds a key, and on a proxy the answer is a trap: the pure
+            // implementation reads a property store and would say no to everything.
+            Native::ObjectHasOwnProperty if matches!(receiver, Value::Proxy(_)) => {
+                let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let described = self.proxy_descriptor(receiver, &key, instruction)?;
+                Ok(Value::Boolean(!matches!(
+                    described,
+                    Value::Undefined | Value::Null
+                )))
+            }
+            Native::ObjectHasOwn if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let described = self.proxy_descriptor(&target, &key, instruction)?;
+                Ok(Value::Boolean(!matches!(
+                    described,
+                    Value::Undefined | Value::Null
+                )))
+            }
+            // Describing and defining a property are trapped operations of their own. A library
+            // that copies a proxy into a plain object -- which is what a copy-on-write layer
+            // does when it finalises -- goes through exactly this pair.
+            Native::ObjectGetOwnPropertyDescriptor
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                self.proxy_descriptor(&target, &key, instruction)
+            }
+            Native::ObjectGetOwnPropertyDescriptors
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let mut data = ObjectData::default();
+                for key in self.own_keys(&target, instruction)? {
+                    let descriptor =
+                        self.proxy_descriptor(&target, &Value::String(key.clone()), instruction)?;
+                    if !matches!(descriptor, Value::Undefined) {
+                        data.set(&key, descriptor);
+                    }
+                }
+                Ok(Value::Object(Rc::new(RefCell::new(data))))
+            }
+            Native::ObjectDefineProperty if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let Value::Proxy(proxy) = &target else {
+                    unreachable!("checked by the guard");
+                };
+                let proxy = Rc::clone(proxy);
+                let inner = proxy.target.clone();
+                let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                match self.proxy_trap(&proxy, "defineProperty", instruction)? {
+                    Some(trap) => {
+                        let handler = proxy.handler.clone();
+                        let list = vec![inner, Self::trap_key(&key), descriptor];
+                        self.call_value(&trap, handler, list, instruction)?;
+                    }
+                    None => {
+                        self.dispatch_native(
+                            native,
+                            receiver,
+                            &[inner, key, descriptor],
+                            instruction,
+                        )?;
+                    }
+                }
+                Ok(target)
             }
             // `Object.keys` on a proxy is the `ownKeys` trap; the pure implementation reads a
             // property store the proxy does not have.
@@ -5805,6 +5872,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Separate from [`Vm::property`], which answers with the slot's contents, because reading an
     /// accessor is a *call* and only the machine can make one. Every program-visible read goes
     /// through this; the VM's own reads of reserved slots do not need to.
+    /// One property of a proxy described, through its trap or through its target.
+    fn proxy_descriptor(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return self.dispatch_native(
+                Native::ObjectGetOwnPropertyDescriptor,
+                &Value::Undefined,
+                &[target.clone(), key.clone()],
+                instruction,
+            );
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        match self.proxy_trap(&proxy, "getOwnPropertyDescriptor", instruction)? {
+            Some(trap) => {
+                let handler = proxy.handler.clone();
+                let list = vec![inner, Self::trap_key(key)];
+                self.call_value(&trap, handler, list, instruction)
+            }
+            None => self.proxy_descriptor(&inner, key, instruction),
+        }
+    }
+
     /// Run a mutating array method against a proxy, writing the result back through its traps.
     ///
     /// The elements are read out, the method runs on that array, and every element plus `length`

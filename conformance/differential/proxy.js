@@ -52,3 +52,25 @@ try { proxy.q; } catch (error) { console.log("revoked", error instanceof TypeErr
 const enumerated = [];
 for (const key in new Proxy({ m: 1, n: 2 }, {})) enumerated.push(key);
 console.log(enumerated.join(","));
+
+// Describing and defining a property are traps of their own, and a copy-on-write layer goes
+// through exactly this pair.
+const described = [];
+const shaped = new Proxy({ k: 1 }, {
+  getOwnPropertyDescriptor(t, k) {
+    described.push(String(k));
+    return Object.getOwnPropertyDescriptor(t, k);
+  },
+  defineProperty(t, k, d) {
+    Object.defineProperty(t, k, d);
+    return true;
+  },
+});
+console.log(Object.getOwnPropertyDescriptor(shaped, "k").value);
+Object.defineProperty(shaped, "j", { value: 2, enumerable: true, configurable: true });
+console.log(shaped.j, described.join(","));
+
+// `hasOwnProperty` asks the same question and must not read a store the proxy does not have.
+console.log(Object.prototype.hasOwnProperty.call(shaped, "k"));
+console.log(Object.prototype.hasOwnProperty.call(shaped, "absent"));
+console.log(Object.hasOwn(shaped, "j"));

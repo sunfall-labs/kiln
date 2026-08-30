@@ -1511,11 +1511,16 @@ and `in` route their errors through `catchable`, so a trap that throws (a revoke
 obviously) raises a `TypeError` the program can catch, as node does. They previously propagated
 straight out of the module.
 
-**immer still does not pass**, and I stopped rather than keep chasing it. It gets much further --
-drafts are created, writes go through, `push` lands -- and then finalisation touches a revoked
-draft where node does not. What is missing is the trap set I did *not* implement:
-`getOwnPropertyDescriptor` and `defineProperty`, which immer's finalise path uses to copy a draft
-into a plain object. That is the next piece of Proxy work, and it is a clean one.
+**`getOwnPropertyDescriptor` and `defineProperty` are trapped too**, along with
+`Object.prototype.hasOwnProperty` and `Object.hasOwn` on a proxy -- the pure implementations read
+a property store a proxy does not have, so they said "no" to every key, which is the shape of
+wrong answer this whole exercise is about.
+
+**immer still does not pass**, and I stopped chasing it. It gets a long way -- drafts are made,
+writes go through, `push` lands, descriptors are read -- and then finalisation leaves a nested
+draft in the result where node replaces it with a plain object. I have not found which of
+immer's steps diverges, and the honest state is that Proxy is implemented and one library's
+particular use of it is not yet satisfied.
 
 Also: `JSON.stringify` of a proxy serialises its target when the proxy is the top-level value,
 and refuses when one is nested. The stringify walk is pure and cannot run a `get` trap; the split
