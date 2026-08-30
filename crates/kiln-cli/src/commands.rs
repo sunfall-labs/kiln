@@ -274,7 +274,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     Ok(Output {
         text: render::check(&display, &summary, &work, after.revision, elapsed),
         notes,
-        exit_code: 0,
+        exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
         value: None,
     })
@@ -311,7 +311,7 @@ pub fn check_source(
     Ok(Output {
         text: render::check(display, &summary, &work, after.revision, elapsed),
         notes,
-        exit_code: 0,
+        exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
         value: None,
     })
@@ -1530,6 +1530,32 @@ mod tests {
         assert_eq!(
             out.notes,
             ["broken.ts:7..8: expected an identifier".to_string()]
+        );
+        assert_eq!(out.exit_code, 1);
+    }
+
+    #[test]
+    fn graph_diagnostics_make_check_unsuccessful() {
+        let mut fake = Fake::new();
+        fake.diagnostics.push(Diagnostic {
+            message: "could not resolve ./missing.js".to_owned(),
+            start: None,
+            end: None,
+        });
+
+        let out = check_source(
+            &mut fake,
+            "main.js",
+            "/tmp/main.js".to_owned(),
+            "/tmp".to_owned(),
+            "import './missing.js';".to_owned(),
+        )
+        .expect("a graph failure remains a structured check result");
+
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(
+            out.notes,
+            ["main.js: could not resolve ./missing.js".to_owned()]
         );
     }
 
