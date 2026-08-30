@@ -377,6 +377,7 @@ pub enum Native {
     SetHas,
     SetDelete,
     CollectionClear,
+    ObjectOwnNames,
     MapSet,
     MapGet,
     MapHas,
@@ -504,8 +505,11 @@ impl Native {
             (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
             // `getOwnPropertyNames` differs from `keys` only for non-enumerable properties, and
             // nothing here can make one yet -- so they are the same function until that changes.
+            // Not `Object.keys`: this reports every own property and that one reports only
+            // the enumerated ones. They were the same function until an error object gave them
+            // different answers.
             (Self::ObjectConstructor, "getOwnPropertyNames") => {
-                Some(Value::Native(Self::ObjectKeys))
+                Some(Value::Native(Self::ObjectOwnNames))
             }
             (Self::ObjectConstructor, "assign") => Some(Value::Native(Self::ObjectAssign)),
             (Self::ObjectConstructor, "entries") => Some(Value::Native(Self::ObjectEntries)),
@@ -750,6 +754,14 @@ pub enum Property {
 #[derive(Clone, Debug)]
 pub struct ObjectData {
     properties: Vec<(String, Property)>,
+    /// Own properties that exist but are not *enumerated*: readable by name, invisible to
+    /// `Object.keys`, `for...in`, spread and JSON.
+    ///
+    /// A list rather than a flag on each slot because it is empty for almost every object --
+    /// only an error carries one today. `entries` is the enumeration accessor and filters here,
+    /// so every caller that walks an object inherits the rule; `keys` does not, because
+    /// `getOwnPropertyNames` is supposed to see them.
+    non_enumerable: Vec<String>,
     /// `Object.preventExtensions` and `Object.seal`. Weaker than frozen: the properties that
     /// are already there stay writable, only the shape is closed.
     extensible: bool,
@@ -766,6 +778,7 @@ impl Default for ObjectData {
     fn default() -> Self {
         Self {
             properties: Vec::new(),
+            non_enumerable: Vec::new(),
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
@@ -975,11 +988,22 @@ impl ObjectData {
         self.properties.iter().map(|(name, _)| name.as_str())
     }
 
-    /// Own property slots in insertion order, which is the order JavaScript enumerates them in.
+    /// Own *enumerable* property slots in insertion order, which is the order JavaScript
+    /// enumerates them in.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Property)> {
         self.properties
             .iter()
+            .filter(|(name, _)| !self.non_enumerable.iter().any(|hidden| hidden == name))
             .map(|(name, property)| (name.as_str(), property))
+    }
+
+    /// Define a property that reads by name but is never enumerated, which is what every own
+    /// property of an error is: `e.message` works and `Object.keys(e)` is empty.
+    pub fn set_non_enumerable(&mut self, key: &str, value: Value) {
+        self.set(key, value);
+        if !self.non_enumerable.iter().any(|hidden| hidden == key) {
+            self.non_enumerable.push(key.to_owned());
+        }
     }
 }
 
@@ -7748,9 +7772,12 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
 
     let name = kind.name();
     let mut data = ObjectData::default();
-    data.set("message", Value::String(message.clone()));
-    data.set("name", Value::String(name.to_owned()));
-    data.set(
+    // Every own property of an error is non-enumerable, which is why `JSON.stringify(err)` is
+    // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
+    // program that serialises one is asking for the fields it names rather than all of them.
+    data.set_non_enumerable("message", Value::String(message.clone()));
+    data.set_non_enumerable("name", Value::String(name.to_owned()));
+    data.set_non_enumerable(
         "stack",
         Value::String(if message.is_empty() {
             name.to_owned()
@@ -7761,7 +7788,7 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     if let Some(Value::Object(options)) = arguments.get(1)
         && let Some(cause) = options.borrow().get("cause")
     {
-        data.set("cause", cause.clone());
+        data.set_non_enumerable("cause", cause.clone());
     }
     Value::Object(Rc::new(RefCell::new(data)))
 }
@@ -8337,6 +8364,18 @@ fn call_native(
             Value::Object(Rc::new(RefCell::new(data)))
         }
         Native::Reflect => Value::Undefined,
+        Native::ObjectOwnNames => {
+            // Every own property, enumerated or not. A function's own properties are included
+            // for a reason that took a while to find: the CommonJS interop every bundler emits
+            // copies a module's exports with this, and a module whose exports *are* a function
+            // -- lodash, and most of the older ecosystem -- copied nothing without it.
+            Value::Array(ArrayData::new(
+                own_property_keys(arguments.first().unwrap_or(&Value::Undefined))
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ))
+        }
         Native::ObjectKeys => {
             let keys = match arguments.first() {
                 // A function's own properties are the ones assigned to it. This matters more
@@ -8350,9 +8389,13 @@ fn call_native(
                     .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
+                // `entries` rather than `keys`: this reports what is *enumerated*, where
+                // `getOwnPropertyNames` reports everything. An error's own properties are the
+                // case where the two differ.
                 Some(Value::Object(object)) => object
                     .borrow()
-                    .keys()
+                    .entries()
+                    .map(|(key, _)| key)
                     .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
