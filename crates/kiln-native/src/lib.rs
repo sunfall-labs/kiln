@@ -5228,6 +5228,150 @@ int main(void) {{
     }
 
     #[test]
+    fn shared_graph_keeps_same_spelling_private_brands_isolated_across_translation_units() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph private integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph private integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-private-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph private project");
+        fs::write(project.join("main.js"), "").expect("write shared graph private entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph private dependency");
+
+        // Both generated units deliberately use the same printable private spelling. Their
+        // static token objects must nevertheless remain distinct, so the consumer's brand check
+        // does not accept an object branded by the provider.
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("@@private:0:x".into()),
+                    Constant::Number(1.0_f64.to_bits()),
+                    Constant::Undefined,
+                ],
+                code: vec![
+                    Instruction::NewObject { count: 0 },
+                    Instruction::Dup,
+                    Instruction::Const(1),
+                    Instruction::InitPrivate(0),
+                    Instruction::Pop,
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(2),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::String("@@private:0:x".into())],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::PrivateIn(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared graph private graph");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared graph private library");
+
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph private header file name");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 1;
+    return result.tag == KILN_VALUE_BOOLEAN && result.bits == 0 ? 0 : 2;
+}}
+"#,
+                symbol = report.module_symbol,
+            ),
+        )
+        .expect("write shared graph private host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared graph private host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared graph private host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run shared graph private host");
+        assert!(
+            output.status.success(),
+            "shared graph private host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
