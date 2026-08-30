@@ -1431,3 +1431,35 @@ VM frame. Both are next, and both are in NOTES rather than in a commit message b
 started either.
 
 differential 75/0/0, conformance 39/39, Effect 12/12.
+
+**2026-08-29, Claude — zod passes; the thing stopping it was eating the Rust stack.**
+
+Three more from `conformance/thirdparty`, all found by bisecting a stack overflow down to
+`z.string().parse`:
+
+- **`Object.defineProperty` with a data descriptor ran an inherited setter.** It went through
+  `set_computed`, which by design consults an accessor anywhere on the chain. `defineProperty`
+  *defines*; an assignment *assigns*. The difference is exactly the idiom where a prototype
+  getter replaces itself with an own value on first read -- zod's `defineBound` -- and routing
+  that through the prototype's setter calls it again, and again, until the process aborts.
+  `ObjectData::define_value` is the own-property write that has no such path.
+- **A named function expression could not call itself.** `const f = function step(n) { … step(…)
+  … }` is how a recursive function expression is written. This needed a new HIR flag rather than
+  reusing `name`, because named *evaluation* also sets `name`: an inferred name is metadata and
+  binding it would invent a scope, so `var f = function () {}; f = 1` would stop seeing the
+  reassignment from inside. `binds_own_name` says the source wrote it.
+- **`Array(3)` and `Object(x)` were not callable without `new`.** For `Array` the specification
+  simply defines the call form as the construct form, and a library allocating a sized array
+  reaches for the shorter one.
+
+**Two robustness changes worth flagging.** `max_call_depth` was **512**, which refused programs
+node runs -- `down(2000)` is not exotic -- and is now 10,000. A JavaScript frame is an entry in a
+vector, so ordinary recursion costs heap; what costs *stack* is a built-in calling back into
+JavaScript, which recurses in Rust. That is now bounded separately by `max_native_depth` (192),
+because overflowing the real stack aborts the process rather than reporting anything. Prototype
+walks are iterative and bounded too, and `set_prototype` refuses to close a cycle.
+
+**Still open, and both known:** an exhausted call depth is a hard error where node throws a
+catchable `RangeError`; and immer wants `Proxy`, which is the next real feature.
+
+differential 76/0/0, conformance 39/39, Effect 12/12, thirdparty 2/3.

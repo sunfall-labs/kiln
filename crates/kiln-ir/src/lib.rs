@@ -2497,8 +2497,37 @@ impl Compiler {
                 self.code.push(Instruction::GetProperty(name));
             }
             ExpressionKind::Function(function) => {
+                // A function expression the source gave a name to can call itself by that name,
+                // and the name is visible nowhere else. The scope pushed here is what keeps it
+                // there -- the same shape a named class expression uses, and for the same reason.
+                let self_bound = function
+                    .binds_own_name
+                    .then(|| function.name.clone())
+                    .flatten();
+                if let Some(name) = &self_bound {
+                    self.scopes.push(HashMap::new());
+                    self.predeclare(VariableKind::Const, name, false);
+                }
                 if let Some(index) = self.compile_function(function, expression.span) {
                     self.code.push(Instruction::MakeFunction(index));
+                }
+                if let Some(name) = &self_bound {
+                    // The closure is both the expression's value and what the binding holds, so
+                    // it is duplicated rather than loaded back.
+                    self.code.push(Instruction::Dup);
+                    match self.resolve(name) {
+                        Resolution::Local(local) if local.celled => {
+                            self.code.push(Instruction::StoreCell(local.slot));
+                        }
+                        Resolution::Local(local) => {
+                            self.code.push(Instruction::StoreLocal(local.slot));
+                        }
+                        _ => {
+                            self.error(Some(expression.span), "could not bind function expression");
+                            self.code.push(Instruction::Pop);
+                        }
+                    }
+                    self.scopes.pop().expect("function scope was just pushed");
                 }
             }
             ExpressionKind::Array { elements } => self.array_literal(elements, expression.span),
@@ -3004,6 +3033,8 @@ impl Compiler {
                 rest: None,
                 asynchronous: false,
                 name: Some(name.clone()),
+                // A class binds its own name through `class_expression`, not through this.
+                binds_own_name: false,
                 arrow: false,
                 generator: false,
                 parameters: Vec::new(),
@@ -4805,6 +4836,7 @@ mod tests {
 
     fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
         statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            binds_own_name: false,
             asynchronous: false,
             name: Some(name.to_owned()),
             arrow: false,
@@ -4834,6 +4866,7 @@ mod tests {
     fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
         Expression {
             kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
+                binds_own_name: false,
                 asynchronous: false,
                 name: None,
                 arrow: true,
@@ -6001,6 +6034,7 @@ mod tests {
         // the wrong one. Invisible until a module binding existed before the line declaring it.
         let program = compile(&module(vec![
             statement(StatementKind::Function(Box::new(kiln_hir::Function {
+                binds_own_name: false,
                 asynchronous: false,
                 name: Some("outer".into()),
                 arrow: false,

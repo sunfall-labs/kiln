@@ -1331,6 +1331,8 @@ impl Lowerer {
 
         Some(HirFunction {
             name: None,
+            // An arrow can never be given a name, so it never binds one.
+            binds_own_name: false,
             arrow: true,
             generator: false,
             asynchronous: arrow.r#async,
@@ -1358,6 +1360,7 @@ impl Lowerer {
 
         Some(HirFunction {
             name: declaration.id.as_ref().map(|id| id.name.to_string()),
+            binds_own_name: declaration.id.is_some(),
             arrow: false,
             generator: declaration.generator,
             asynchronous: declaration.r#async,

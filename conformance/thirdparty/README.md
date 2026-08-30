@@ -11,8 +11,13 @@ than a missing feature:
 - **date-fns** found that `s[0]` on a string was `undefined`, that a `Date` had no setters, and
   that no intrinsic value answered `constructor`.
 - **immer** found that `globalThis` was a fresh object on every read, so anything stored on it
-  vanished and `globalThis === globalThis` was false.
-- **zod** is not yet passing; it is kept here because what it fails on next is the backlog.
+  vanished and `globalThis === globalThis` was false. It is the one that does not pass yet: its
+  whole implementation is `Proxy`.
+- **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
+  instead of defining an own property, that a named function expression could not call itself,
+  and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
+  infinite recursion that took the Rust stack with it, which is the one failure a compiler must
+  never have.
 
 Regenerate with `conformance/thirdparty/build.sh`, which needs `npm` and the esbuild in
 `conformance/effect/node_modules`. The small bundles are committed -- a fixed input that does not
