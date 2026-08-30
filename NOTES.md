@@ -2333,8 +2333,25 @@ for `@@iterator` and drives `next`. Both work now, and they disagree about a hol
 iteration *reads* each position, so a hole arrives as undefined, where `map` over the same input
 leaves it alone.
 
+**Class inheritance followed**, 62 to 66. `class D extends C` links *two* pairs of things and I
+had only been thinking about one: the prototype objects, so an instance of `D` finds a method of
+`C`, and the **constructors**, so `D` finds a static of `C`. The second is why `class B extends A
+{}` refused -- `SetPrototype` was arriving with a function as its target and being turned away.
+A constructor's statics live in its own store, so a chain that reaches a function continues
+*into* that store rather than stopping there.
+
+`super()` is an ordinary call with `this` threaded through -- the parent initialises the instance
+that already exists rather than building one, which is the whole difference from `new Parent()`.
+`SuperForward` takes its arguments from the frame because a synthesized
+`constructor(...args) { super(...args) }` has no arity where it is written.
+
+One thing the probe turned up that is *not* a bug: an annotated field declaration (`count:
+number;`) makes kiln initialise the field at construction, where node's type stripping erases the
+declaration entirely -- so the two disagree about property order. That is a TypeScript question
+rather than an engine one, and the probe says so where it avoids it.
+
 **Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Promise` (2),
-`BigInt` (2), `SuperForward` (2). `async` is the only one with a real design question
+`BigInt` (2), `LoadArguments` (2). `async` is the only one with a real design question
 left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
 live in a program that just returns from `main`.
 
@@ -2343,7 +2360,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 18/18, differential 97/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 19/19, differential 97/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked

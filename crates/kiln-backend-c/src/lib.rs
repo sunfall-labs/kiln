@@ -630,6 +630,8 @@ static kiln_collection *kiln_c99_collection_of(kiln_value value);
 static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
+static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
@@ -1755,6 +1757,11 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
          * it. */
         for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_object *object;
+            /* A constructor's statics live in its own store, so a chain that reaches one
+             * continues *into* that store rather than stopping at the function. */
+            if (current.tag == KILN_VALUE_FUNCTION) {
+                current = kiln_c99_closure_of(current)->properties;
+            }
             if (current.tag != KILN_VALUE_OBJECT) {
                 break;
             }
@@ -5165,6 +5172,26 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     return KILN_C99_OK;
 }
 
+/* `class D extends C` links two pairs of things: the prototype objects, so an instance of `D`
+ * finds a method of `C`, and the *constructors*, so `D` finds a static of `C`. The second is
+ * what makes this take a function as well as an object. */
+static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
+    if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_c99_object_of(target)->prototype = prototype;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        kiln_value store;
+        int status = kiln_c99_function_store(target, &store);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        kiln_c99_object_of(store)->prototype = prototype;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
 /* `x instanceof C` walks the same chain a property read walks, looking for `C.prototype` rather
  * than for a name -- which is why the two must agree about the shape of the chain. */
 static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
@@ -5717,6 +5744,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::RestArguments(_)
         | Instruction::PushHole
         | Instruction::Yield
+        | Instruction::SuperCall { .. }
+        | Instruction::SuperForward
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -5799,9 +5828,7 @@ fn stack_effect(
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
-        | Instruction::Await
-        | Instruction::SuperCall { .. }
-        | Instruction::SuperForward => Err(EmitError::Unsupported {
+        | Instruction::Await => Err(EmitError::Unsupported {
             feature: instruction_feature(instruction),
         }),
         Instruction::Const(_)
@@ -5863,6 +5890,26 @@ fn stack_effect(
             }
         }
         Instruction::LoadThis => Ok((height + 1, false)),
+        // The parent initialises the *existing* instance rather than allocating one, but it is
+        // still a call and still leaves what it returned -- which the lowering pops, because
+        // `super()` is a statement.
+        Instruction::SuperCall { argc } => {
+            let needed = usize::from(*argc) + 1;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
+        // The arguments come from the frame rather than the stack, so only the parent is here
+        // and the result replaces it.
+        Instruction::SuperForward => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
         // `new` consumes the callee and its arguments and leaves the instance, exactly as a
         // call does.
         Instruction::New { argc } => {
@@ -6171,6 +6218,8 @@ fn needs_call_context(program: &Program) -> bool {
                     | Instruction::SpreadInto
                     | Instruction::IterableToArray
                     | Instruction::Apply
+                    | Instruction::SuperCall { .. }
+                    | Instruction::SuperForward
             )
         })
     };
@@ -6646,9 +6695,7 @@ fn emit_instruction(
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
-        | Instruction::Await
-        | Instruction::SuperCall { .. }
-        | Instruction::SuperForward => {
+        | Instruction::Await => {
             unreachable!("verification rejects these instructions before emission")
         }
         Instruction::Const(constant) => match &constants[*constant as usize] {
@@ -6872,6 +6919,30 @@ fn emit_instruction(
                 "    { kiln_value constructor = stack[--sp]; int answer; int status = kiln_c99_instance_of(stack[sp - 1], constructor, &answer); if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
+        // Both halves of `super` are an ordinary call with `this` threaded through: the parent
+        // initialises the instance that already exists rather than building one, which is the
+        // whole difference between `super()` and `new Parent()`.
+        Instruction::SuperCall { argc } => {
+            let argc = usize::from(*argc);
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                argc + 1
+            )
+            .unwrap();
+        }
+        // A derived class with no constructor behaves as `constructor(...args) { super(...args) }`.
+        // Its arity is not known where it is synthesized, so the forwarding happens here from
+        // whatever the frame was actually given.
+        Instruction::SuperForward => {
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value produced; int status = kiln_c99_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+            )
+            .unwrap();
+        }
         Instruction::New { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers);
@@ -6969,7 +7040,7 @@ fn emit_instruction(
         // of `D` find a method of `C`.
         Instruction::SetPrototype => {
             output.push_str(
-                "    { kiln_value prototype = stack[--sp]; if (stack[sp - 1].tag != KILN_VALUE_OBJECT) return KILN_C99_CONTROL_ERROR; kiln_c99_object_of(stack[sp - 1])->prototype = prototype; }\n",
+                "    { kiln_value prototype = stack[--sp]; int status = kiln_c99_set_prototype(stack[sp - 1], prototype); if (status != KILN_C99_OK) return status; }\n",
             );
         }
         // The stack height is recorded with the handler, because a `catch` starts from the
