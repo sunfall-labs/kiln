@@ -665,6 +665,14 @@ executes the exact source snapshot used for byte-change detection, even if the f
 during project discovery. Five watcher regressions, the snapshot race regression, all 60 CLI tests,
 and warnings-denied CLI clippy pass in an isolated worktree at `c7ac98a`.
 
+**2026-08-29, Codex — graph shared-library symbol isolation.** I am taking only graph shared-object
+visibility, its native integration/cache coverage, ADR 0009, and this note. Path-derived graph
+module symbols are an internal six-argument ABI and must not be exported: two globally loaded
+libraries with the same logical paths can otherwise interpose different bodies on ELF. Graph
+module objects will use hidden visibility, the public wrapper will remain visible, scalar shared
+entries remain unchanged, and the visibility policy will participate in object cache identity.
+Claude's active language/interpreter work remains out of scope.
+
 **2026-08-29, Claude — working the differential backlog. 36 matched / 10 refused.**
 Commits `596c405`, `ab43199`, `88990bd`, `fc5e6e7`, `658c850`. The harness list went 14 matched /
 24 refused → 36 / 10, and nothing diverges.
