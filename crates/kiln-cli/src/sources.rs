@@ -86,6 +86,14 @@ pub(crate) fn is_discoverable(root: &Path, path: &Path) -> bool {
     if !is_source(relative) {
         return false;
     }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => return false,
+        Ok(_) => {}
+        // A removal event names a path that no longer exists and still needs an authoritative
+        // reconciliation. Other inspection failures are not safe to turn into source uploads.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
     relative
         .parent()
         .into_iter()
@@ -195,5 +203,26 @@ mod tests {
         ));
         assert!(!is_discoverable(root, Path::new("/other/main.js")));
         assert!(!is_discoverable(root, Path::new("/project/README.md")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn event_filter_and_walk_both_reject_symlinks_and_source_named_directories() {
+        let tree = Tree::new("event-file-types");
+        tree.file("real.js");
+        std::os::unix::fs::symlink(tree.0.join("real.js"), tree.0.join("linked.js"))
+            .expect("create source-shaped symlink");
+        std::fs::create_dir(tree.0.join("fake.js")).expect("create source-shaped directory");
+
+        let walk = collect(&tree.0).expect("walk succeeds");
+        assert_eq!(walk.files, [tree.0.join("real.js")]);
+        assert!(!is_discoverable(&tree.0, &tree.0.join("linked.js")));
+        assert!(!is_discoverable(&tree.0, &tree.0.join("fake.js")));
+
+        std::fs::remove_file(tree.0.join("linked.js")).expect("remove source-shaped symlink");
+        assert!(
+            is_discoverable(&tree.0, &tree.0.join("linked.js")),
+            "a deletion event must still trigger authoritative reconciliation"
+        );
     }
 }
