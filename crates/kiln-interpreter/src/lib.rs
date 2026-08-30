@@ -1559,6 +1559,8 @@ pub enum ExecutionError {
     RevokedProxy,
     /// A proxy nested inside a value being serialised.
     ProxyNotSerialisable,
+    /// `array.length = x` where `x` is not a whole number in range.
+    InvalidArrayLength,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -1638,6 +1640,7 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "cannot perform this operation on a revoked proxy"
             ),
+            Self::InvalidArrayLength => write!(formatter, "invalid array length"),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -1709,6 +1712,7 @@ impl ExecutionError {
                 ErrorKind::Type,
                 "Cannot perform this operation on a revoked proxy".to_owned(),
             ),
+            Self::InvalidArrayLength => (ErrorKind::Range, "Invalid array length".to_owned()),
             Self::ProxyNotSerialisable => (
                 ErrorKind::Type,
                 "Cannot serialise a proxy nested inside a value".to_owned(),
@@ -6576,6 +6580,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         items.resize(index + 1, Value::Undefined);
                     }
                     items[index] = value;
+                    Ok(())
+                }
+                // `length` is derived, not stored: writing it truncates or extends. This is how
+                // a program empties an array in place -- `arr.length = 0` -- and storing it as an
+                // ordinary property left the array untouched while the write appeared to work.
+                None if key.property_key() == "length" => {
+                    let length = value.as_number();
+                    // A length that is not a whole number in range is a RangeError, not a
+                    // silently ignored write: `arr.length = -1` is a bug in the program.
+                    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
+                        return Err(ExecutionError::InvalidArrayLength);
+                    }
+                    {
+                        let length = length as usize;
+                        let mut items = items.borrow_mut();
+                        if length <= items.len() {
+                            items.truncate(length);
+                        } else {
+                            // Growing leaves holes, which read as undefined and are not the same
+                            // thing: `1 in a` is false for one.
+                            items.resize(length, Value::Native(Native::Hole));
+                        }
+                    }
                     Ok(())
                 }
                 // Not an index, so it is an ordinary named property of the array.
