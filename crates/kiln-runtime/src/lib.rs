@@ -15,7 +15,7 @@ pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AcceptedTcpStream, AsyncHostError, AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion,
     FileStat, HostError, HostOp, HostOps, HostValue, RequestId, ResourceId, ResourceInfo,
-    ResourceKind,
+    ResourceKind, ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -361,7 +361,13 @@ pub struct TokioHost {
 struct HostCompletion {
     request: RequestId,
     sequence: u64,
+    lifecycle: Option<ResourceLifecycleUpdate>,
     result: Result<HostCompletionValue, AsyncHostError>,
+}
+
+enum ResourceLifecycleUpdate {
+    ReadClosed(ResourceId),
+    WriteClosed(ResourceId),
 }
 
 enum HostCompletionValue {
@@ -377,11 +383,15 @@ enum HostCompletionValue {
 enum HostResource {
     TcpListener {
         listener: Rc<TcpListener>,
+        info: ResourceInfo,
         referenced: bool,
     },
     TcpStream {
         stream: Rc<tokio::sync::Mutex<TcpStream>>,
+        info: ResourceInfo,
         referenced: bool,
+        read_closed: bool,
+        write_closed: bool,
     },
 }
 
@@ -469,6 +479,11 @@ impl TokioHost {
                 );
                 return request;
             }
+            AsyncHostOp::ResourceState { resource } => {
+                let result = self.resource_state(resource);
+                self.insert_immediate(request, sequence, referenced, result);
+                return request;
+            }
             AsyncHostOp::TcpListen { host, port } => {
                 let result = self.tcp_listen(host, port, referenced).await;
                 self.insert_immediate(request, sequence, referenced, result);
@@ -478,6 +493,7 @@ impl TokioHost {
                 let Some(HostResource::TcpListener {
                     listener,
                     referenced: resource_referenced,
+                    ..
                 }) = self.resources.get(&listener)
                 else {
                     self.insert_immediate(
@@ -500,6 +516,7 @@ impl TokioHost {
                     let _ = sender.send(HostCompletion {
                         request,
                         sequence,
+                        lifecycle: None,
                         result: result.map(|(stream, peer, referenced)| {
                             HostCompletionValue::TcpStream {
                                 stream,
@@ -538,6 +555,7 @@ impl TokioHost {
                     let _ = sender.send(HostCompletion {
                         request,
                         sequence,
+                        lifecycle: None,
                         result,
                     });
                 });
@@ -552,7 +570,12 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpRead { stream, max_bytes } => {
-                let Some(HostResource::TcpStream { stream, .. }) = self.resources.get(&stream)
+                let stream_id = stream;
+                let Some(HostResource::TcpStream {
+                    stream,
+                    read_closed,
+                    ..
+                }) = self.resources.get(&stream)
                 else {
                     self.insert_immediate(
                         request,
@@ -562,6 +585,15 @@ impl TokioHost {
                     );
                     return request;
                 };
+                if *read_closed {
+                    self.insert_immediate(
+                        request,
+                        sequence,
+                        referenced,
+                        Ok(AsyncHostValue::Bytes(Vec::new())),
+                    );
+                    return request;
+                }
                 let stream = Rc::clone(stream);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
@@ -577,6 +609,11 @@ impl TokioHost {
                     let _ = sender.send(HostCompletion {
                         request,
                         sequence,
+                        lifecycle: result
+                            .as_ref()
+                            .ok()
+                            .filter(|value| matches!(value, AsyncHostValue::Bytes(bytes) if bytes.is_empty()))
+                            .map(|_| ResourceLifecycleUpdate::ReadClosed(stream_id)),
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
@@ -591,7 +628,12 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpWrite { stream, data } => {
-                let Some(HostResource::TcpStream { stream, .. }) = self.resources.get(&stream)
+                let stream_id = stream;
+                let Some(HostResource::TcpStream {
+                    stream,
+                    write_closed,
+                    ..
+                }) = self.resources.get(&stream)
                 else {
                     self.insert_immediate(
                         request,
@@ -601,6 +643,15 @@ impl TokioHost {
                     );
                     return request;
                 };
+                if *write_closed {
+                    self.insert_immediate(
+                        request,
+                        sequence,
+                        referenced,
+                        Err(stream_closed("write", stream_id)),
+                    );
+                    return request;
+                }
                 let stream = Rc::clone(stream);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
@@ -613,6 +664,7 @@ impl TokioHost {
                     let _ = sender.send(HostCompletion {
                         request,
                         sequence,
+                        lifecycle: None,
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
@@ -627,7 +679,12 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpShutdown { stream } => {
-                let Some(HostResource::TcpStream { stream, .. }) = self.resources.get(&stream)
+                let stream_id = stream;
+                let Some(HostResource::TcpStream {
+                    stream,
+                    write_closed,
+                    ..
+                }) = self.resources.get(&stream)
                 else {
                     self.insert_immediate(
                         request,
@@ -637,6 +694,15 @@ impl TokioHost {
                     );
                     return request;
                 };
+                if *write_closed {
+                    self.insert_immediate(
+                        request,
+                        sequence,
+                        referenced,
+                        Ok(AsyncHostValue::Undefined),
+                    );
+                    return request;
+                }
                 let stream = Rc::clone(stream);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
@@ -650,6 +716,10 @@ impl TokioHost {
                     let _ = sender.send(HostCompletion {
                         request,
                         sequence,
+                        lifecycle: result
+                            .as_ref()
+                            .ok()
+                            .map(|_| ResourceLifecycleUpdate::WriteClosed(stream_id)),
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
@@ -671,6 +741,7 @@ impl TokioHost {
             let _ = sender.send(HostCompletion {
                 request,
                 sequence,
+                lifecycle: None,
                 result: result.map(HostCompletionValue::Public),
             });
         });
@@ -725,19 +796,21 @@ impl TokioHost {
             .map_err(|error| socket_error("getsockname", error))?;
         let id = ResourceId::new(self.next_resource);
         self.next_resource = self.next_resource.wrapping_add(1).max(1);
-        self.resources.insert(
-            id,
-            HostResource::TcpListener {
-                listener: Rc::new(listener),
-                referenced,
-            },
-        );
-        Ok(AsyncHostValue::Resource(ResourceInfo {
+        let info = ResourceInfo {
             id,
             kind: ResourceKind::TcpListener,
             address: Some(local.ip().to_string()),
             port: Some(local.port()),
-        }))
+        };
+        self.resources.insert(
+            id,
+            HostResource::TcpListener {
+                listener: Rc::new(listener),
+                info: info.clone(),
+                referenced,
+            },
+        );
+        Ok(AsyncHostValue::Resource(info))
     }
 
     fn close_resource(&mut self, resource: ResourceId) -> Result<AsyncHostValue, AsyncHostError> {
@@ -768,6 +841,35 @@ impl TokioHost {
         Ok(AsyncHostValue::Undefined)
     }
 
+    fn resource_state(&self, resource: ResourceId) -> Result<AsyncHostValue, AsyncHostError> {
+        let Some(entry) = self.resources.get(&resource) else {
+            return Err(invalid_resource("fstat", resource));
+        };
+        let state = match entry {
+            HostResource::TcpListener {
+                info, referenced, ..
+            } => ResourceState {
+                info: info.clone(),
+                referenced: *referenced,
+                read_closed: false,
+                write_closed: false,
+            },
+            HostResource::TcpStream {
+                info,
+                referenced,
+                read_closed,
+                write_closed,
+                ..
+            } => ResourceState {
+                info: info.clone(),
+                referenced: *referenced,
+                read_closed: *read_closed,
+                write_closed: *write_closed,
+            },
+        };
+        Ok(AsyncHostValue::ResourceState(state))
+    }
+
     fn collect_ready(&mut self, completion: HostCompletion) {
         self.promote_completion(completion);
         while let Ok(completion) = self.receiver.try_recv() {
@@ -782,6 +884,25 @@ impl TokioHost {
     }
 
     fn promote_completion(&mut self, completion: HostCompletion) {
+        if completion.result.is_ok() {
+            match completion.lifecycle {
+                Some(ResourceLifecycleUpdate::ReadClosed(resource)) => {
+                    if let Some(HostResource::TcpStream { read_closed, .. }) =
+                        self.resources.get_mut(&resource)
+                    {
+                        *read_closed = true;
+                    }
+                }
+                Some(ResourceLifecycleUpdate::WriteClosed(resource)) => {
+                    if let Some(HostResource::TcpStream { write_closed, .. }) =
+                        self.resources.get_mut(&resource)
+                    {
+                        *write_closed = true;
+                    }
+                }
+                None => {}
+            }
+        }
         let result = completion.result.map(|value| match value {
             HostCompletionValue::Public(value) => value,
             HostCompletionValue::TcpStream {
@@ -793,19 +914,22 @@ impl TokioHost {
                 let local = stream.local_addr().ok();
                 let id = ResourceId::new(self.next_resource);
                 self.next_resource = self.next_resource.wrapping_add(1).max(1);
-                self.resources.insert(
-                    id,
-                    HostResource::TcpStream {
-                        stream: Rc::new(tokio::sync::Mutex::new(stream)),
-                        referenced,
-                    },
-                );
                 let resource = ResourceInfo {
                     id,
                     kind: ResourceKind::TcpStream,
                     address: local.map(|address| address.ip().to_string()),
                     port: local.map(|address| address.port()),
                 };
+                self.resources.insert(
+                    id,
+                    HostResource::TcpStream {
+                        stream: Rc::new(tokio::sync::Mutex::new(stream)),
+                        info: resource.clone(),
+                        referenced,
+                        read_closed: false,
+                        write_closed: false,
+                    },
+                );
                 if accepted {
                     AsyncHostValue::AcceptedTcpStream(AcceptedTcpStream {
                         resource,
@@ -858,6 +982,7 @@ impl AsyncHostOps for TokioHost {
             let _ = sender.send(HostCompletion {
                 request,
                 sequence,
+                lifecycle: None,
                 result,
             });
         });
@@ -917,6 +1042,7 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             .map_err(|error| io_error("stat", path, error)),
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }
+        | AsyncHostOp::ResourceState { .. }
         | AsyncHostOp::TcpListen { .. }
         | AsyncHostOp::TcpAccept { .. }
         | AsyncHostOp::TcpConnect { .. }
@@ -934,6 +1060,15 @@ fn invalid_resource(syscall: &str, resource: ResourceId) -> AsyncHostError {
         syscall,
         None,
         format!("unknown or closed resource {}", resource.get()),
+    )
+}
+
+fn stream_closed(syscall: &str, resource: ResourceId) -> AsyncHostError {
+    AsyncHostError::new(
+        "EPIPE",
+        syscall,
+        None,
+        format!("stream resource {} has ended", resource.get()),
     )
 }
 
@@ -1590,15 +1725,25 @@ mod tests {
             .next_host_completion()
             .expect("connection completes");
         let second = runtime.next_host_completion().expect("accept completes");
-        assert_eq!((first.request, second.request), (accept, connect));
-        let accepted = match first.result.expect("accept succeeds") {
-            AsyncHostValue::AcceptedTcpStream(accepted) => accepted,
-            other => panic!("expected accepted stream, got {other:?}"),
-        };
-        let client = match second.result.expect("connect succeeds") {
-            AsyncHostValue::Resource(resource) => resource,
-            other => panic!("expected connected stream, got {other:?}"),
-        };
+        let mut accepted = None;
+        let mut client = None;
+        for completion in [first, second] {
+            if completion.request == accept {
+                accepted = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected connected stream, got {other:?}"),
+                });
+            } else {
+                panic!("unexpected connection request");
+            }
+        }
+        let accepted = accepted.expect("accept result observed");
+        let client = client.expect("connect result observed");
         assert_eq!(accepted.resource.kind, ResourceKind::TcpStream);
         assert_eq!(client.kind, ResourceKind::TcpStream);
         assert_eq!(accepted.peer_address, "127.0.0.1");
@@ -1660,6 +1805,180 @@ mod tests {
             );
         }
         assert!(!runtime.host().has_referenced_work());
+    }
+
+    fn resource_state(runtime: &mut RealmRuntime, resource: ResourceId) -> ResourceState {
+        runtime.start_host_op(AsyncHostOp::ResourceState { resource }, false);
+        match runtime
+            .next_host_completion()
+            .expect("state completes")
+            .result
+            .expect("state succeeds")
+        {
+            AsyncHostValue::ResourceState(state) => state,
+            other => panic!("expected resource state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resource_state_is_the_single_source_of_stream_lifecycle_truth() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            true,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let listener_state = resource_state(&mut runtime, listener.id);
+        assert_eq!(listener_state.info, listener);
+        assert!(listener_state.referenced);
+        assert!(!listener_state.read_closed);
+        assert!(!listener_state.write_closed);
+
+        runtime.start_host_op(
+            AsyncHostOp::SetResourceReferenced {
+                resource: listener.id,
+                referenced: false,
+            },
+            false,
+        );
+        runtime.next_host_completion().expect("unref completes");
+        assert!(!resource_state(&mut runtime, listener.id).referenced);
+
+        runtime.start_host_op(
+            AsyncHostOp::CloseResource {
+                resource: listener.id,
+            },
+            false,
+        );
+        runtime.next_host_completion().expect("close completes");
+    }
+
+    #[test]
+    fn stream_half_close_is_idempotent_and_persistently_observable() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let port = listener.port.expect("ephemeral port assigned");
+        let accept_request = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect_request = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            false,
+        );
+        let mut accepted = None;
+        let mut client = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection operation completes");
+            if completion.request == accept_request {
+                accepted = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect_request {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected connected stream, got {other:?}"),
+                });
+            } else {
+                panic!("unexpected connection request");
+            }
+        }
+        let accepted = accepted.expect("accept result observed");
+        let client = client.expect("connect result observed");
+
+        for _ in 0..2 {
+            runtime.start_host_op(AsyncHostOp::TcpShutdown { stream: client.id }, false);
+            assert_eq!(
+                runtime
+                    .next_host_completion()
+                    .expect("shutdown completes")
+                    .result,
+                Ok(AsyncHostValue::Undefined)
+            );
+        }
+        assert!(resource_state(&mut runtime, client.id).write_closed);
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: client.id,
+                data: b"too late".to_vec(),
+            },
+            false,
+        );
+        let error = runtime
+            .next_host_completion()
+            .expect("write completes")
+            .result
+            .expect_err("write after end is rejected");
+        assert_eq!(error.code, "EPIPE");
+
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: accepted.id,
+                max_bytes: 32,
+            },
+            false,
+        );
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("EOF completes")
+                .result,
+            Ok(AsyncHostValue::Bytes(Vec::new()))
+        );
+        assert!(resource_state(&mut runtime, accepted.id).read_closed);
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: accepted.id,
+                max_bytes: 32,
+            },
+            false,
+        );
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("cached EOF completes")
+                .result,
+            Ok(AsyncHostValue::Bytes(Vec::new()))
+        );
+
+        for resource in [client.id, accepted.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime.next_host_completion().expect("close completes");
+        }
     }
 
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {
