@@ -20,15 +20,21 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
-use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path};
+#[cfg(test)]
+use kiln_backend_c::emit_module_with_logical_path;
+use kiln_backend_c::{
+    C_ABI_VERSION, EmitError, GRAPH_MODULE_C_ABI_VERSION, emit_c,
+    emit_graph_module_with_logical_path,
+};
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolvedExport};
 use kiln_native_runtime::{
-    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RESULT_PATH_ENV,
-    NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result, launcher_source,
-    runtime_source,
+    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
+    GRAPH_SCHEDULER_ABI_VERSION, NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION,
+    RuntimeSourceError, decode_native_result, embedding_module_api_symbol, launcher_source,
+    runtime_source, scheduler_source,
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
@@ -185,9 +191,12 @@ pub struct NativeSharedLibraryReport {
     /// Package this file with the requested output alias and add its parent directory to the
     /// embedding host's dynamic-loader search path.
     pub loader: PathBuf,
-    /// Program-specific C header declaring `module_symbol` against the stable embedding ABI.
+    /// Program-specific C header declaring both the legacy entry and owned-result API accessor.
     pub header: PathBuf,
+    /// Legacy ABI-v1 entry point with a borrowed scalar result.
     pub module_symbol: String,
+    /// ABI-v2 descriptor accessor with an explicitly owned scalar result.
+    pub module_api_symbol: String,
     pub tool: ToolIdentity,
     pub cache_hits: NativeSharedLibraryCacheHits,
     pub sizes: NativeSharedLibrarySizes,
@@ -438,6 +447,7 @@ impl NativeBuilder {
         let paths = BuildPaths::new(workspace.path());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
+        let dynamic_runtime = dynamic_cli_runtime_enabled(profile);
         let module_abi = module_abi_identity();
         let runtime_abi = runtime_abi_identity();
         let target = target_identity(&identity);
@@ -485,6 +495,19 @@ impl NativeBuilder {
 
         let object_options =
             Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
+        let runtime_object_options = if dynamic_runtime {
+            Digest::hash(
+                format!(
+                    "c11\0{}\0{}\0pic=true\0zig-macos-no-ubsan={}",
+                    identity.kind,
+                    profile.as_str(),
+                    macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
+                )
+                .as_bytes(),
+            )
+        } else {
+            object_options
+        };
         let application_key = key(
             ArtifactKind::NativeObject,
             &compiler,
@@ -496,13 +519,21 @@ impl NativeBuilder {
             [module_source_digest],
         );
         let runtime_key = key(
-            ArtifactKind::RuntimeLibrary,
+            if dynamic_runtime {
+                ArtifactKind::NativeObject
+            } else {
+                ArtifactKind::RuntimeLibrary
+            },
             &compiler,
-            Backend::Custom("native-runtime".to_owned()),
+            Backend::Custom(if dynamic_runtime {
+                "native-cli-runtime-pic".to_owned()
+            } else {
+                "native-runtime".to_owned()
+            }),
             &runtime_abi,
             &target,
             profile.cache(),
-            object_options,
+            runtime_object_options,
             [runtime_source_digest],
         );
         let launcher_key = key(
@@ -520,6 +551,12 @@ impl NativeBuilder {
             profile: profile.toolchain(),
             ..CompileOptions::default()
         };
+        let mut runtime_compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            position_independent: dynamic_runtime,
+            ..CompileOptions::default()
+        };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut runtime_compile_options);
         let compile_started = Instant::now();
         let ((application_result, runtime_result), launcher_result) = rayon::join(
             || {
@@ -570,8 +607,28 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest =
-            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes());
+        let link_options_digest = if dynamic_runtime {
+            Digest::hash(
+                format!(
+                    "{}\0system-math\0dynamic-cli-runtime=true\0provider-linkage=static-executable-v1\0{}",
+                    profile.as_str(),
+                    shared_library_link_policy(),
+                )
+                .as_bytes(),
+            )
+        } else {
+            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes())
+        };
+        let runtime_link_digest = runtime_dso
+            .as_ref()
+            .map_or(runtime_digest, |runtime| runtime.digest);
+        let executable_inputs = executable_link_inputs(
+            [application_digest],
+            runtime_link_digest,
+            launcher_digest,
+            number_provider_digest,
+            dynamic_runtime,
+        );
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -580,46 +637,51 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [
-                application_digest,
-                runtime_digest,
-                launcher_digest,
-                number_provider_digest,
-            ],
+            executable_inputs,
         );
-        let (executable, executable_digest, executable_hit, link_elapsed) =
-            match self.cache.lookup(&executable_key)? {
-                Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
-                Lookup::Miss => {
-                    materialize(&paths.module_o, &application, false)?;
+        let (executable, executable_digest, executable_hit, link_elapsed) = match self
+            .cache
+            .lookup(&executable_key)?
+        {
+            Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
+            Lookup::Miss => {
+                materialize(&paths.module_o, &application, false)?;
+                materialize(&paths.launcher_o, &launcher_object, false)?;
+                materialize(&paths.number_provider_a, &number_provider, false)?;
+                if let Some(runtime_dso) = &runtime_dso {
+                    materialize(&paths.runtime_dso, &runtime_dso.bytes, false)?;
+                } else {
                     materialize(&paths.runtime_o, &runtime_object, false)?;
-                    materialize(&paths.launcher_o, &launcher_object, false)?;
-                    materialize(&paths.number_provider_a, &number_provider, false)?;
-                    let mut link_options = LinkOptions {
-                        profile: profile.toolchain(),
-                        ..LinkOptions::default()
-                    };
-                    if cfg!(not(target_os = "windows")) {
-                        link_options.libraries.push("m".to_owned());
-                    }
+                }
+                let mut link_options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    link_options.libraries.push("m".to_owned());
+                }
+                if runtime_dso.is_some() {
                     link_options
                         .runtime_libraries
-                        .push(paths.number_provider_a.clone());
-                    let report = self.toolchain.link_executable(
-                        &[
-                            paths.module_o.clone(),
-                            paths.runtime_o.clone(),
-                            paths.launcher_o.clone(),
-                        ],
-                        &paths.executable,
-                        &link_options,
-                    )?;
-                    let bytes = read(&paths.executable, "read linked executable")?;
-                    let digest = Digest::hash(&bytes);
-                    self.cache.put(&executable_key, &bytes)?;
-                    (bytes, digest, false, report.elapsed)
+                        .push(paths.runtime_dso.clone());
+                    configure_cli_runtime_rpath(&mut link_options);
                 }
-            };
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
+                let mut objects = vec![paths.module_o.clone(), paths.launcher_o.clone()];
+                if runtime_dso.is_none() {
+                    objects.push(paths.runtime_o.clone());
+                }
+                let report =
+                    self.toolchain
+                        .link_executable(&objects, &paths.executable, &link_options)?;
+                let bytes = read(&paths.executable, "read linked executable")?;
+                let digest = Digest::hash(&bytes);
+                self.cache.put(&executable_key, &bytes)?;
+                (bytes, digest, false, report.elapsed)
+            }
+        };
         debug_assert_eq!(executable_digest, Digest::hash(&executable));
         materialize(&options.output, &executable, true)?;
 
@@ -661,9 +723,10 @@ impl NativeBuilder {
 
     /// Build one scalar bytecode module as a shared library for an embedding host.
     ///
-    /// The resulting library exports the module's generated entry point and expects the caller to
-    /// provide the stable `kiln_host` callback ABI. It deliberately does not link the CLI runtime
-    /// or launcher, so host policy remains in the embedding process.
+    /// The resulting library exports the module's legacy entry point plus its owned-result API-v2
+    /// descriptor accessor and expects the caller to provide the stable `kiln_host` callback ABI.
+    /// It deliberately does not link the CLI runtime or launcher, so host policy remains in the
+    /// embedding process.
     pub fn build_shared_library(
         &self,
         program: &Program,
@@ -672,6 +735,13 @@ impl NativeBuilder {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let module = emit_c(program)?;
+        let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
+        let module_wrapper = owned_result_wrapper_source(
+            &module.symbol,
+            "scalar",
+            &format!("{}(&proxy_host, &value)", module.symbol),
+            "",
+        );
         let header = shared_library_header_path(&options.output);
         if options
             .output
@@ -691,10 +761,15 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
-        let embedding_abi = runtime_abi_identity();
+        let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        // Keep the plain generated unit on the same cache identity as executable builds.  The
+        // shared-only adapter is cached as a second generated-C artifact, so building a DSO does
+        // not poison the reusable non-PIC module source cache.
         let module_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-c-abi-{C_ABI_VERSION}"),
@@ -705,13 +780,29 @@ impl NativeBuilder {
             Digest::hash(b"deterministic-c11"),
             [Digest::hash(module.source.as_bytes())],
         );
-        let (module_source, module_source_digest, generated_c_hit) =
+        let (base_source, base_source_digest, _) =
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
+        let shared_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
+            Backend::Custom("native-shared-library-source".to_owned()),
+            &embedding_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"deterministic-c11-owned-result-v2"),
+            [base_source_digest, Digest::hash(module_wrapper.as_bytes())],
+        );
+        let mut shared_module_source = base_source;
+        shared_module_source.push(b'\n');
+        shared_module_source.extend_from_slice(module_wrapper.as_bytes());
+        let (module_source, module_source_digest, generated_c_hit) =
+            self.cached_payload(&shared_source_key, &shared_module_source)?;
         let object_options = Digest::hash(
             format!(
-                "shared-library\0pic\0c11\0{}\0{}",
+                "shared-library\0pic\0c11\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
@@ -725,11 +816,12 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
-        let compile_options = CompileOptions {
+        let mut compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut compile_options);
         let compile_started = Instant::now();
         let (object, object_digest, object_hit, object_elapsed) = self.object(
             &object_key,
@@ -748,28 +840,30 @@ impl NativeBuilder {
         let loader = shared_library_loader_path(
             &options.output,
             shared_library_content_identity(
-                &compiler,
+                &link_compiler,
                 Backend::Custom("native-shared-library-loader".to_owned()),
                 &embedding_abi,
                 &target,
                 profile,
-                &module.symbol,
+                &[module.symbol.as_str(), module_api_symbol.as_str()],
                 link_inputs,
             ),
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-library\0{}\0system-math\0{}\0{}\0{}",
+                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
+                EMBEDDING_MODULE_API_VERSION,
+                [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
             )
             .as_bytes(),
         );
         let library_key = key(
             ArtifactKind::LinkedArtifact,
-            &compiler,
+            &link_compiler,
             Backend::Custom("native-shared-library".to_owned()),
             &embedding_abi,
             &target,
@@ -795,13 +889,12 @@ impl NativeBuilder {
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
-                    &module.symbol,
+                    &[module.symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
                 )?;
                 let objects = [paths.module_o.clone()];
                 let report =
-                    self.toolchain
-                        .link_shared_library(&objects, &paths.library, &link_options)?;
+                    link_toolchain.link_shared_library(&objects, &paths.library, &link_options)?;
                 let bytes = read(&paths.library, "read linked shared library")?;
                 self.cache.put(&library_key, &bytes)?;
                 (bytes, false, report.elapsed)
@@ -814,7 +907,11 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: module.symbol,
-            tool: identity,
+            module_api_symbol,
+            // Shared-library reports identify the driver that produced the linked artifact. On
+            // macOS a Zig-selected build is compiled with Zig but finalized with clang/ld64 so
+            // the exported-symbols policy is actually enforced.
+            tool: link_toolchain.identity().clone(),
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: generated_c_hit,
                 object: object_hit,
@@ -836,11 +933,11 @@ impl NativeBuilder {
 
     /// Build an acyclic module graph as one embedding shared library.
     ///
-    /// The public entry point is a graph-specific two-argument wrapper using the stable embedding
-    /// ABI. Individual generated modules retain their internal six-argument ABI; the wrapper
-    /// evaluates them in dependency-first order and wires imports from the provider export arrays.
-    /// Only the wrapper is declared in the emitted public header. No CLI runtime or launcher is
-    /// linked into the resulting library.
+    /// The public surface is a graph-specific legacy wrapper plus an owned-result API-v2 accessor.
+    /// Individual generated modules use a private seven-argument graph ABI carrying an
+    /// invocation-owned scheduler; the wrapper evaluates them in dependency-first order and wires
+    /// imports from the provider export arrays. Only the public wrapper and accessor are declared
+    /// in the emitted header. No CLI runtime or launcher is linked into the resulting library.
     pub fn build_shared_graph(
         &self,
         graph: &ModuleGraph,
@@ -852,7 +949,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_graph_module_with_logical_path(&node.program, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -868,8 +965,12 @@ impl NativeBuilder {
             ));
         }
         let topology = graph_shared_topology_digest(graph, &modules);
-        let wrapper_symbol = format!("kiln_shared_graph_{}", topology.to_hex());
+        let wrapper_symbol = format!(
+            "kiln_shared_graph_{}",
+            graph_shared_public_digest(topology, &modules).to_hex()
+        );
         let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
+        let module_api_symbol = embedding_module_api_symbol(&wrapper_symbol)?;
         let mut header_source = graph_shared_header(&wrapper_symbol)?;
         let emit_elapsed = emit_started.elapsed();
 
@@ -892,16 +993,18 @@ impl NativeBuilder {
         let paths = SharedGraphLibraryPaths::new(workspace.path(), modules.len());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
-        let embedding_abi = runtime_abi_identity();
+        let module_abi = graph_module_abi_identity();
+        let embedding_abi = shared_graph_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
         let mut module_sources = Vec::with_capacity(modules.len());
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-graph-abi-{GRAPH_MODULE_C_ABI_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -914,12 +1017,14 @@ impl NativeBuilder {
         }
         let wrapper_source_key = key(
             ArtifactKind::GeneratedC,
-            format!("kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}"),
+            format!(
+                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
+            ),
             Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
             &embedding_abi,
             &target,
             CacheProfile::Debug,
-            Digest::hash(b"deterministic-c11-shared-graph-wrapper"),
+            Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
             [Digest::hash(wrapper.as_bytes()), topology],
         );
         let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
@@ -927,24 +1032,26 @@ impl NativeBuilder {
 
         let module_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}",
+                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
         let wrapper_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0{}\0{}",
+                "shared-graph\0pic\0c11\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
         // Graph module symbols are an internal link protocol. Different shared libraries can
         // contain the same logical path with different bytecode, so exporting those symbols lets
         // a dynamic loader interpose one library's module into another library's wrapper. Keep
-        // the six-argument entries externally linkable inside this DSO but hidden outside it.
+        // the private seven-argument entries externally linkable inside this DSO but hidden outside it.
         let mut module_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
@@ -953,11 +1060,13 @@ impl NativeBuilder {
         module_compile_options
             .extra_args
             .push("-fvisibility=hidden".into());
-        let wrapper_compile_options = CompileOptions {
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut module_compile_options);
+        let mut wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut wrapper_compile_options);
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, _) in modules.iter().enumerate() {
             let (_, source_digest, _) = &module_sources[index];
@@ -965,7 +1074,7 @@ impl NativeBuilder {
                 ArtifactKind::NativeObject,
                 &compiler,
                 Backend::Custom("native-shared-graph-module".to_owned()),
-                &embedding_abi,
+                &module_abi,
                 &target,
                 profile.cache(),
                 module_object_options,
@@ -1030,28 +1139,30 @@ impl NativeBuilder {
         let loader = shared_library_loader_path(
             &options.output,
             shared_library_content_identity(
-                &compiler,
+                &link_compiler,
                 Backend::Custom("native-shared-graph-loader".to_owned()),
                 &embedding_abi,
                 &target,
                 profile,
-                &wrapper_symbol,
+                &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                 link_inputs.iter().copied(),
             ),
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-graph\0{}\0system-math\0{}\0{}\0{}",
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
+                EMBEDDING_MODULE_API_VERSION,
+                [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
             )
             .as_bytes(),
         );
         let library_key = key(
             ArtifactKind::LinkedArtifact,
-            &compiler,
+            &link_compiler,
             Backend::Custom("native-shared-graph".to_owned()),
             &embedding_abi,
             &target,
@@ -1083,12 +1194,11 @@ impl NativeBuilder {
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
-                    &wrapper_symbol,
+                    &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
                 )?;
                 let report =
-                    self.toolchain
-                        .link_shared_library(&objects, &paths.library, &link_options)?;
+                    link_toolchain.link_shared_library(&objects, &paths.library, &link_options)?;
                 let bytes = read(&paths.library, "read linked shared library")?;
                 self.cache.put(&library_key, &bytes)?;
                 (bytes, false, report.elapsed)
@@ -1101,7 +1211,8 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: wrapper_symbol,
-            tool: identity,
+            module_api_symbol,
+            tool: link_toolchain.identity().clone(),
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
                     && wrapper_generated_c_hit,
@@ -1148,7 +1259,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_graph_module_with_logical_path(&node.program, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1165,8 +1276,9 @@ impl NativeBuilder {
         let paths = GraphBuildPaths::new(workspace.path(), modules.len());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
-        let runtime_abi = runtime_abi_identity();
+        let dynamic_runtime = dynamic_cli_runtime_enabled(profile);
+        let module_abi = graph_module_abi_identity();
+        let runtime_abi = graph_module_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
@@ -1175,7 +1287,7 @@ impl NativeBuilder {
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-graph-abi-{GRAPH_MODULE_C_ABI_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -1215,10 +1327,29 @@ impl NativeBuilder {
 
         let object_options =
             Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
+        let runtime_object_options = if dynamic_runtime {
+            Digest::hash(
+                format!(
+                    "c11\0{}\0{}\0pic=true\0zig-macos-no-ubsan={}",
+                    identity.kind,
+                    profile.as_str(),
+                    macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
+                )
+                .as_bytes(),
+            )
+        } else {
+            object_options
+        };
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             ..CompileOptions::default()
         };
+        let mut runtime_compile_options = CompileOptions {
+            profile: profile.toolchain(),
+            position_independent: dynamic_runtime,
+            ..CompileOptions::default()
+        };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut runtime_compile_options);
         let compile_started = Instant::now();
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, (_, _module)) in modules.iter().enumerate() {
@@ -1235,13 +1366,21 @@ impl NativeBuilder {
             ));
         }
         let runtime_key = key(
-            ArtifactKind::RuntimeLibrary,
+            if dynamic_runtime {
+                ArtifactKind::NativeObject
+            } else {
+                ArtifactKind::RuntimeLibrary
+            },
             &compiler,
-            Backend::Custom("native-runtime".to_owned()),
+            Backend::Custom(if dynamic_runtime {
+                "native-cli-runtime-pic".to_owned()
+            } else {
+                "native-runtime".to_owned()
+            }),
             &runtime_abi,
             &target,
             profile.cache(),
-            object_options,
+            runtime_object_options,
             [runtime_source_digest],
         );
         let launcher_key = key(
@@ -1304,6 +1443,38 @@ impl NativeBuilder {
         let launcher_object = launcher_object?;
         let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object;
         let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object;
+        let runtime_dso = if dynamic_runtime {
+            let link_compiler =
+                compiler_identity(shared_link_toolchain(&self.toolchain)?.identity());
+            let loader = shared_library_loader_path(
+                &options.output,
+                cli_runtime_content_identity(
+                    &link_compiler,
+                    &runtime_abi,
+                    &target,
+                    profile,
+                    true,
+                    [runtime_digest, number_provider_digest],
+                ),
+            )?;
+            Some(self.cli_runtime_dso(
+                &runtime_object,
+                runtime_digest,
+                &number_provider,
+                number_provider_digest,
+                &paths.runtime_o,
+                &paths.number_provider_a,
+                &paths.runtime_dso,
+                loader,
+                &runtime_abi,
+                &target,
+                profile,
+                true,
+                workspace.path(),
+            )?)
+        } else {
+            None
+        };
         let compile_elapsed =
             if module_objects.iter().all(|(_, _, hit)| *hit) && runtime_hit && launcher_hit {
                 Duration::ZERO
@@ -1311,15 +1482,28 @@ impl NativeBuilder {
                 compile_started.elapsed()
             };
 
-        let link_options_digest =
-            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes());
-        let mut link_inputs = module_objects
-            .iter()
-            .map(|(_, digest, _)| *digest)
-            .collect::<Vec<_>>();
-        link_inputs.push(runtime_digest);
-        link_inputs.push(launcher_digest);
-        link_inputs.push(number_provider_digest);
+        let link_options_digest = if dynamic_runtime {
+            Digest::hash(
+                format!(
+                    "{}\0system-math\0dynamic-cli-runtime=true\0provider-linkage=static-executable-v1\0{}",
+                    profile.as_str(),
+                    shared_library_link_policy(),
+                )
+                .as_bytes(),
+            )
+        } else {
+            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes())
+        };
+        let runtime_link_digest = runtime_dso
+            .as_ref()
+            .map_or(runtime_digest, |runtime| runtime.digest);
+        let link_inputs = executable_link_inputs(
+            module_objects.iter().map(|(_, digest, _)| *digest),
+            runtime_link_digest,
+            launcher_digest,
+            number_provider_digest,
+            dynamic_runtime,
+        );
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -1341,10 +1525,14 @@ impl NativeBuilder {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
                 }
-                materialize(&paths.runtime_o, &runtime_object, false)?;
                 materialize(&paths.launcher_o, &launcher_object, false)?;
                 materialize(&paths.number_provider_a, &number_provider, false)?;
-                objects.push(paths.runtime_o.clone());
+                if let Some(runtime_dso) = &runtime_dso {
+                    materialize(&paths.runtime_dso, &runtime_dso.bytes, false)?;
+                } else {
+                    materialize(&paths.runtime_o, &runtime_object, false)?;
+                    objects.push(paths.runtime_o.clone());
+                }
                 objects.push(paths.launcher_o.clone());
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
@@ -1352,6 +1540,12 @@ impl NativeBuilder {
                 };
                 if cfg!(not(target_os = "windows")) {
                     link_options.libraries.push("m".to_owned());
+                }
+                if runtime_dso.is_some() {
+                    link_options
+                        .runtime_libraries
+                        .push(paths.runtime_dso.clone());
+                    configure_cli_runtime_rpath(&mut link_options);
                 }
                 link_options
                     .runtime_libraries
@@ -1452,6 +1646,9 @@ impl NativeBuilder {
             })?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
+        if dynamic_cli_runtime_enabled(options.profile) {
+            publish_runtime_loaders(&private_output, &options.output)?;
+        }
         materialize(&options.output, &executable, true)?;
         build.output = options.output.clone();
         Ok(NativeRunReport {
@@ -1491,6 +1688,9 @@ impl NativeBuilder {
             })?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
+        if dynamic_cli_runtime_enabled(options.profile) {
+            publish_runtime_loaders(&private_output, &options.output)?;
+        }
         materialize(&options.output, &executable, true)?;
         build.output = options.output.clone();
         Ok(NativeRunReport {
@@ -1508,6 +1708,62 @@ impl NativeBuilder {
         expected: &[u8],
     ) -> Result<(Vec<u8>, Digest, bool), NativeError> {
         cached_payload(&self.cache, key, expected)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cli_runtime_dso(
+        &self,
+        runtime_object: &[u8],
+        runtime_digest: Digest,
+        provider: &[u8],
+        provider_digest: Digest,
+        runtime_object_path: &Path,
+        provider_path: &Path,
+        dso_path: &Path,
+        loader: PathBuf,
+        runtime_abi: &str,
+        target: &str,
+        profile: NativeProfile,
+        graph_scheduler: bool,
+        workspace: &Path,
+    ) -> Result<CliRuntimeDso, NativeError> {
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
+        let key = cli_runtime_content_key(
+            &link_compiler,
+            runtime_abi,
+            target,
+            profile,
+            graph_scheduler,
+            [runtime_digest, provider_digest],
+        );
+        let (bytes, digest) = match self.cache.lookup(&key)? {
+            Lookup::Hit(artifact) => (artifact.bytes, artifact.digest),
+            Lookup::Miss => {
+                materialize(runtime_object_path, runtime_object, false)?;
+                materialize(provider_path, provider, false)?;
+                let mut options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    options.libraries.push("m".to_owned());
+                }
+                options.runtime_libraries.push(provider_path.to_path_buf());
+                configure_cli_runtime_link(&mut options, &loader, workspace, graph_scheduler)?;
+                let report = link_toolchain.link_shared_library(
+                    &[runtime_object_path.to_path_buf()],
+                    dso_path,
+                    &options,
+                )?;
+                let bytes = read(dso_path, "read CLI runtime shared library")?;
+                let digest = self.cache.put(&key, &bytes)?.digest;
+                debug_assert_eq!(report.output_size, bytes.len() as u64);
+                (bytes, digest)
+            }
+        };
+        materialize_immutable(&loader, &bytes)?;
+        Ok(CliRuntimeDso { bytes, digest })
     }
 
     fn object(
@@ -1580,19 +1836,97 @@ fn runtime_abi_identity() -> String {
     format!("{};runtime-{NATIVE_RUNTIME_VERSION}", module_abi_identity())
 }
 
+fn shared_embedding_abi_identity() -> String {
+    format!(
+        "{};module-api-{EMBEDDING_MODULE_API_VERSION}",
+        runtime_abi_identity()
+    )
+}
+
+fn shared_graph_embedding_abi_identity() -> String {
+    format!(
+        "{};graph-scheduler-abi-{GRAPH_SCHEDULER_ABI_VERSION}",
+        shared_embedding_abi_identity()
+    )
+}
+
+fn graph_module_abi_identity() -> String {
+    format!(
+        "{};graph-module-c-{};graph-scheduler-abi-{}",
+        runtime_abi_identity(),
+        GRAPH_MODULE_C_ABI_VERSION,
+        GRAPH_SCHEDULER_ABI_VERSION,
+    )
+}
+
 fn native_number_abi_identity() -> String {
     format!("kiln-native-number-provider-{PROVIDER_ABI_VERSION}")
 }
 
 fn target_identity(identity: &ToolIdentity) -> String {
-    let sdk_root = std::env::var("SDKROOT").unwrap_or_default();
-    let deployment = std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default();
-    format!(
-        "compiler-target={};host={}-{};sdk={sdk_root};deployment={deployment}",
-        identity.target,
-        std::env::consts::ARCH,
-        std::env::consts::OS,
-    )
+    let sdk_root = std::env::var_os("SDKROOT");
+    let deployment = std::env::var_os("MACOSX_DEPLOYMENT_TARGET");
+    target_identity_from_parts(&identity.target, sdk_root.as_deref(), deployment.as_deref())
+}
+
+/// Build an injective cache identity for the compiler target and platform settings.
+///
+/// Environment values are framed as raw bytes, rather than interpolated into a delimiter-based
+/// string, so values containing separators (or invalid UTF-8 on Unix) cannot alias one another.
+/// The presence marker also keeps an unset variable distinct from a variable set to the empty
+/// string. The version prefix intentionally invalidates identities generated by the old format.
+fn target_identity_from_parts(
+    compiler_target: &str,
+    sdk_root: Option<&std::ffi::OsStr>,
+    deployment: Option<&std::ffi::OsStr>,
+) -> String {
+    fn frame(output: &mut String, bytes: &[u8]) {
+        write!(output, "{}:", bytes.len()).expect("writing target identity to String");
+        for byte in bytes {
+            write!(output, "{byte:02x}").expect("writing target identity to String");
+        }
+    }
+
+    fn field(output: &mut String, name: &str, value: Option<&[u8]>) {
+        frame(output, name.as_bytes());
+        output.push('=');
+        match value {
+            Some(value) => {
+                output.push('1');
+                frame(output, value);
+            }
+            None => output.push('0'),
+        }
+        output.push(';');
+    }
+
+    let mut identity = String::from("kiln-native-target-v2;");
+    field(
+        &mut identity,
+        "compiler-target",
+        Some(compiler_target.as_bytes()),
+    );
+    field(
+        &mut identity,
+        "host-arch",
+        Some(std::env::consts::ARCH.as_bytes()),
+    );
+    field(
+        &mut identity,
+        "host-os",
+        Some(std::env::consts::OS.as_bytes()),
+    );
+    field(
+        &mut identity,
+        "sdk-root",
+        sdk_root.map(std::ffi::OsStr::as_encoded_bytes),
+    );
+    field(
+        &mut identity,
+        "deployment-target",
+        deployment.map(std::ffi::OsStr::as_encoded_bytes),
+    );
+    identity
 }
 
 fn compiler_identity(identity: &ToolIdentity) -> String {
@@ -1788,6 +2122,23 @@ fn graph_shared_topology_digest(
     Digest::hash(&bytes)
 }
 
+/// Derive the public graph wrapper identity from both topology and ordered module bodies. Private
+/// module symbols intentionally remain topology-based, but a public wrapper must not collide with
+/// another DSO containing the same path/import topology and different bytecode.
+fn graph_shared_public_digest(
+    topology: Digest,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) -> Digest {
+    let mut bytes = topology.to_hex().into_bytes();
+    bytes.push(0);
+    for (_, module) in modules {
+        let digest = Digest::hash(module.source.as_bytes());
+        bytes.extend_from_slice(digest.to_hex().as_bytes());
+        bytes.push(0);
+    }
+    Digest::hash(&bytes)
+}
+
 /// Resolve one module import to the concrete export-array slot that owns its binding.
 ///
 /// Raw provider export tables are insufficient here: `export *` deliberately has only one
@@ -1885,6 +2236,8 @@ fn graph_launcher_source(
 #include <stddef.h>
 #include <stdint.h>
 
+#define KILN_C99_OK 0
+
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
     KILN_VALUE_NULL = 1,
@@ -1926,7 +2279,7 @@ extern int kiln_realm_destroy(uint64_t realm);
     for (_, module) in modules {
         writeln!(
             output,
-            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count, kiln_native_scheduler *scheduler);",
             module.symbol
         )
         .unwrap();
@@ -2067,11 +2420,213 @@ fn graph_shared_header(wrapper_symbol: &str) -> Result<String, NativeError> {
     embedding_module_header(wrapper_symbol).map_err(NativeError::from)
 }
 
+/// Append the v2 owned-result ABI adapter to a shared-library translation unit.
+///
+/// The adapter deliberately calls the already-generated v1 entry point.  That keeps the two
+/// entry points semantically identical while making ownership explicit at the DSO boundary.
+/// `prefix` is only used to make the private helper names easy to identify in generated C; the
+/// public accessor always follows the ABI-mandated `{base}_api_v2` spelling.
+fn owned_result_wrapper_source(
+    base: &str,
+    prefix: &str,
+    invocation: &str,
+    post_invoke_cleanup: &str,
+) -> String {
+    let stem = format!("{}_{}", prefix, base);
+    let arena = format!("kiln_v2_{stem}_arena");
+    let proxy = format!("kiln_v2_{stem}_proxy");
+    let run = format!("kiln_v2_{stem}_run");
+    let read = format!("kiln_v2_{stem}_read");
+    let dispose = format!("kiln_v2_{stem}_dispose");
+    let descriptor = format!("kiln_v2_{stem}_descriptor");
+    let api_symbol = format!("{base}_api_v2");
+    format!(
+        r#"
+/* Kiln native owned-result API v2 adapter for {base}. */
+#ifndef KILN_MODULE_API_VERSION
+#define KILN_MODULE_API_VERSION {api_version}
+typedef struct kiln_result_v2 kiln_result_v2;
+typedef struct kiln_module_api_v2 {{
+    uint32_t abi_version;
+    uint32_t struct_size;
+    int (*run)(kiln_host *host, kiln_result_v2 **result);
+    int (*read)(const kiln_result_v2 *result, kiln_value *value);
+    void (*dispose)(kiln_result_v2 **result);
+}} kiln_module_api_v2;
+#endif
+
+struct kiln_result_v2 {{
+    kiln_value value;
+}};
+
+typedef struct {arena} {{
+    void **allocations;
+    size_t count;
+    size_t capacity;
+}} {arena};
+
+typedef struct {proxy} {{
+    kiln_host *upstream;
+    {arena} *arena;
+    int failure_status;
+}} {proxy};
+
+static void {arena}_clear({arena} *arena) {{
+    size_t index;
+    if (arena == NULL) return;
+    for (index = 0; index < arena->count; ++index) free(arena->allocations[index]);
+    free(arena->allocations);
+    arena->allocations = NULL;
+    arena->count = 0;
+    arena->capacity = 0;
+}}
+
+static int {arena}_track({arena} *arena, void *allocation) {{
+    size_t capacity;
+    void **grown;
+    if (arena == NULL || allocation == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (arena->count == arena->capacity) {{
+        capacity = arena->capacity == 0 ? 8 : arena->capacity;
+        if (capacity > (size_t)-1 / 2) return KILN_C99_HOST_ERROR;
+        capacity *= 2;
+        if (capacity > (size_t)-1 / sizeof(*grown)) return KILN_C99_HOST_ERROR;
+        grown = (void **)realloc(arena->allocations, capacity * sizeof(*grown));
+        if (grown == NULL) return KILN_C99_HOST_ERROR;
+        arena->allocations = grown;
+        arena->capacity = capacity;
+    }}
+    arena->allocations[arena->count++] = allocation;
+    return KILN_C99_OK;
+}}
+
+static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
+                             const kiln_value *arguments, kiln_value *result) {{
+    {proxy} *proxy = ({proxy} *)context;
+    kiln_host *upstream;
+    char *copy;
+    int status;
+    if (proxy == NULL || proxy->upstream == NULL || proxy->upstream->call == NULL ||
+        result == NULL) return KILN_C99_HOST_ERROR;
+    upstream = proxy->upstream;
+    status = upstream->call(upstream->context, operation, argc, arguments, result);
+    if (status != KILN_C99_OK) return status;
+    if (result->tag > KILN_VALUE_STRING) {{
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+        return KILN_C99_INVALID_ARGUMENT;
+    }}
+    result->reserved = 0;
+    if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
+    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+        return KILN_C99_INVALID_ARGUMENT;
+    }}
+    copy = (char *)malloc(result->len == 0 ? 1 : result->len);
+    if (copy == NULL) {{
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }}
+    if (result->len != 0) memcpy(copy, result->ptr, result->len);
+    status = {arena}_track(proxy->arena, copy);
+    if (status != KILN_C99_OK) {{
+        free(copy);
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }}
+    result->ptr = copy;
+    return KILN_C99_OK;
+}}
+
+static int {run}(kiln_host *host, kiln_result_v2 **out) {{
+    {arena} arena = {{ NULL, 0, 0 }};
+    {proxy} proxy = {{ host, &arena, KILN_C99_OK }};
+    kiln_host proxy_host = {{ {stem}_proxy_call, &proxy }};
+    kiln_value value = {{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+    kiln_result_v2 *owned = NULL;
+    char *copy = NULL;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out = NULL;
+    status = {invocation};
+    if (proxy.failure_status != KILN_C99_OK) status = proxy.failure_status;
+    if (status != KILN_C99_OK && status != KILN_C99_THROWN) goto cleanup;
+    if (value.tag > KILN_VALUE_STRING) {{
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto cleanup;
+    }}
+    value.reserved = 0;
+    if (value.tag == KILN_VALUE_STRING &&
+        (value.len == (size_t)-1 || (value.len != 0 && value.ptr == NULL))) {{
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto cleanup;
+    }}
+    owned = (kiln_result_v2 *)malloc(sizeof(*owned));
+    if (owned == NULL) {{
+        status = KILN_C99_HOST_ERROR;
+        goto cleanup;
+    }}
+    owned->value = value;
+    owned->value.reserved = 0;
+    if (value.tag == KILN_VALUE_STRING) {{
+        copy = (char *)malloc(value.len == 0 ? 1 : value.len);
+        if (copy == NULL) {{
+            status = KILN_C99_HOST_ERROR;
+            goto cleanup;
+        }}
+        if (value.len != 0) memcpy(copy, value.ptr, value.len);
+        owned->value.ptr = copy;
+        copy = NULL;
+    }} else {{
+        owned->value.ptr = NULL;
+        owned->value.len = 0;
+    }}
+    *out = owned;
+    owned = NULL;
+cleanup:
+    {post_invoke_cleanup}
+    free(copy);
+    free(owned);
+    {arena}_clear(&arena);
+    return status;
+}}
+
+static int {read}(const kiln_result_v2 *result, kiln_value *value) {{
+    if (result == NULL || value == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *value = result->value;
+    return KILN_C99_OK;
+}}
+
+static void {dispose}(kiln_result_v2 **result) {{
+    if (result == NULL || *result == NULL) return;
+    free((void *)(*result)->value.ptr);
+    (*result)->value.ptr = NULL;
+    (*result)->value.len = 0;
+    free(*result);
+    *result = NULL;
+}}
+
+static const kiln_module_api_v2 {descriptor} = {{
+    KILN_MODULE_API_VERSION,
+    (uint32_t)sizeof(kiln_module_api_v2),
+    {run},
+    {read},
+    {dispose}
+}};
+
+const kiln_module_api_v2 *{api_symbol}(void) {{
+    return &{descriptor};
+}}
+"#,
+        api_version = EMBEDDING_MODULE_API_VERSION,
+        api_symbol = api_symbol,
+    )
+}
+
 fn graph_shared_wrapper_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     wrapper_symbol: &str,
 ) -> Result<String, NativeError> {
+    let impl_symbol = format!("{}_impl", wrapper_symbol);
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
@@ -2104,7 +2659,7 @@ extern int kiln_realm_is_active(void);
     for (_, module) in modules {
         writeln!(
             output,
-            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count, kiln_native_scheduler *scheduler);",
             module.symbol
         )
         .unwrap();
@@ -2120,6 +2675,7 @@ typedef struct kiln_proxy_arena {
 typedef struct kiln_proxy_host {
     kiln_host *upstream;
     kiln_proxy_arena *arena;
+    int failure_status;
 } kiln_proxy_host;
 
 static void kiln_proxy_arena_clear(kiln_proxy_arena *arena) {
@@ -2164,15 +2720,21 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     status = upstream->call(upstream->context, operation, argc, arguments, result);
     if (status != KILN_C99_OK) return status;
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
-    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL))
+    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {
+        proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
+    }
     copy = (char *)malloc(result->len == 0 ? 1 : result->len);
-    if (copy == NULL) return KILN_C99_HOST_ERROR;
+    if (copy == NULL) {
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
+    }
     if (result->len != 0) memcpy(copy, result->ptr, result->len);
     status = kiln_proxy_arena_track(arena, copy);
     if (status != KILN_C99_OK) {
         free(copy);
-        return status;
+        proxy->failure_status = KILN_C99_HOST_ERROR;
+        return KILN_C99_HOST_ERROR;
     }
     result->ptr = copy;
     return KILN_C99_OK;
@@ -2186,6 +2748,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         count = modules.len(),
     )
     .unwrap();
+    output.push_str("    proxy.failure_status = KILN_C99_OK;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if !node.program.imports.is_empty() {
             writeln!(
@@ -2457,6 +3020,66 @@ fn publish_shared_artifacts(
     materialize(output, library, false)
 }
 
+fn publish_runtime_loaders(
+    from_executable: &Path,
+    to_executable: &Path,
+) -> Result<(), NativeError> {
+    let source_parent = from_executable
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let source_directory = source_parent.join(".kiln-loaders");
+    let source_metadata =
+        fs::symlink_metadata(&source_directory).map_err(|source| NativeError::Io {
+            operation: "inspect private CLI runtime loader directory",
+            path: source_directory.clone(),
+            source,
+        })?;
+    if !source_metadata.file_type().is_dir() {
+        return Err(NativeError::ImmutableArtifactCollision {
+            path: source_directory,
+        });
+    }
+    let destination_parent = to_executable
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(destination_parent).map_err(|source| NativeError::Io {
+        operation: "create native output directory",
+        path: destination_parent.to_path_buf(),
+        source,
+    })?;
+    let destination_parent =
+        fs::canonicalize(destination_parent).map_err(|source| NativeError::Io {
+            operation: "canonicalize native output directory",
+            path: destination_parent.to_path_buf(),
+            source,
+        })?;
+    let destination_directory = destination_parent.join(".kiln-loaders");
+    for entry in fs::read_dir(&source_directory).map_err(|source| NativeError::Io {
+        operation: "read private CLI runtime loader directory",
+        path: source_directory.clone(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| NativeError::Io {
+            operation: "read private CLI runtime loader entry",
+            path: source_directory.clone(),
+            source,
+        })?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|source| NativeError::Io {
+            operation: "inspect private CLI runtime loader",
+            path: entry.path(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(NativeError::ImmutableArtifactCollision { path: entry.path() });
+        }
+        let bytes = read(&entry.path(), "read private CLI runtime loader")?;
+        materialize_immutable(&destination_directory.join(entry.file_name()), &bytes)?;
+    }
+    Ok(())
+}
+
 fn materialize_immutable(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
     let parent = path
         .parent()
@@ -2650,6 +3273,7 @@ struct BuildPaths {
     module_o: PathBuf,
     runtime_c: PathBuf,
     runtime_o: PathBuf,
+    runtime_dso: PathBuf,
     launcher_c: PathBuf,
     launcher_o: PathBuf,
     number_provider_a: PathBuf,
@@ -2677,6 +3301,7 @@ struct GraphBuildPaths {
     module_o: Vec<PathBuf>,
     runtime_c: PathBuf,
     runtime_o: PathBuf,
+    runtime_dso: PathBuf,
     launcher_c: PathBuf,
     launcher_o: PathBuf,
     number_provider_a: PathBuf,
@@ -2696,6 +3321,7 @@ impl GraphBuildPaths {
             module_o,
             runtime_c: root.join("runtime.c"),
             runtime_o: root.join("runtime.o"),
+            runtime_dso: root.join("runtime-dso.so"),
             launcher_c: root.join("launcher.c"),
             launcher_o: root.join("launcher.o"),
             number_provider_a: root.join("libkiln_native_number_provider.a"),
@@ -2715,6 +3341,7 @@ impl BuildPaths {
             module_o: root.join("module.o"),
             runtime_c: root.join("runtime.c"),
             runtime_o: root.join("runtime.o"),
+            runtime_dso: root.join("runtime-dso.so"),
             launcher_c: root.join("launcher.c"),
             launcher_o: root.join("launcher.o"),
             number_provider_a: root.join("libkiln_native_number_provider.a"),
@@ -2799,15 +3426,16 @@ fn shared_library_content_identity(
     embedding_abi: &str,
     target: &str,
     profile: NativeProfile,
-    public_symbol: &str,
+    public_symbols: &[&str],
     inputs: impl IntoIterator<Item = Digest>,
 ) -> Digest {
     let identity_options = Digest::hash(
         format!(
-            "shared-loader-content-v1\0{}\0system-math\0{}\0{}",
+            "shared-loader-content-v2\0{}\0system-math\0{}\0module-api-v{}\0exports={}",
             profile.as_str(),
             shared_library_link_policy(),
-            public_symbol,
+            EMBEDDING_MODULE_API_VERSION,
+            public_symbols.join(","),
         )
         .as_bytes(),
     );
@@ -2865,7 +3493,7 @@ fn shared_library_loader_path(output: &Path, identity: Digest) -> Result<PathBuf
 
 const fn shared_library_link_policy() -> &'static str {
     if cfg!(target_os = "macos") {
-        "macos-content-loader-install-name-rpath-export-list-v3"
+        "macos-content-loader-install-name-rpath-export-list-v4"
     } else if cfg!(target_os = "linux") {
         "linux-content-loader-soname-version-script-v3"
     } else {
@@ -2873,17 +3501,52 @@ const fn shared_library_link_policy() -> &'static str {
     }
 }
 
+/// Zig 0.16's Mach-O linker drops the exported-symbols-list option when an archive is reachable,
+/// which leaks the Rust number provider from a shared graph library. Apple clang links the same
+/// objects with ld64 and enforces the private graph wrapper's export list. Compilation remains on
+/// the caller-selected toolchain; only this macOS shared-link step uses clang when Zig is selected.
+fn shared_link_toolchain(toolchain: &Toolchain) -> Result<Toolchain, NativeError> {
+    #[cfg(target_os = "macos")]
+    if toolchain.identity().kind == CompilerKind::Zig {
+        return Toolchain::from_compiler("/usr/bin/clang").map_err(NativeError::from);
+    }
+    Ok(toolchain.clone())
+}
+
+fn macos_zig_default_ubsan_suppressed(toolchain: &Toolchain, profile: NativeProfile) -> bool {
+    cfg!(target_os = "macos")
+        && toolchain.identity().kind == CompilerKind::Zig
+        && profile == NativeProfile::Dev
+}
+
+fn suppress_macos_zig_default_ubsan(
+    toolchain: &Toolchain,
+    profile: NativeProfile,
+    options: &mut CompileOptions,
+) {
+    if macos_zig_default_ubsan_suppressed(toolchain, profile) {
+        // Zig 0.16 instruments even NativeDev arithmetic by default. The objects are finalized
+        // by Apple clang on macOS, so disable that implicit instrumentation; NativeCheck keeps
+        // its explicit sanitizer flags from the selected build profile.
+        options.extra_args.push("-fno-sanitize=undefined".into());
+    }
+}
+
 fn configure_shared_library_link(
     options: &mut LinkOptions,
     output: &Path,
-    public_symbol: &str,
+    public_symbols: &[&str],
     workspace: &Path,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
     {
         let exports = workspace.join("exports.txt");
-        materialize(&exports, format!("_{public_symbol}\n").as_bytes(), false)?;
+        let source = public_symbols
+            .iter()
+            .map(|symbol| format!("_{symbol}\n"))
+            .collect::<String>();
+        materialize(&exports, source.as_bytes(), false)?;
         options
             .extra_args
             .push(format!("-Wl,-install_name,{identity}").into());
@@ -2894,7 +3557,13 @@ fn configure_shared_library_link(
     #[cfg(target_os = "linux")]
     {
         let exports = workspace.join("exports.map");
-        let source = format!("KILN_1 {{\n  global:\n    {public_symbol};\n  local:\n    *;\n}};\n");
+        let source = format!(
+            "KILN_1 {{\n  global:\n{}  local:\n    *;\n}};\n",
+            public_symbols
+                .iter()
+                .map(|symbol| format!("    {symbol};\n"))
+                .collect::<String>()
+        );
         materialize(&exports, source.as_bytes(), false)?;
         options
             .extra_args
@@ -2905,8 +3574,167 @@ fn configure_shared_library_link(
         options.extra_args.push("-Wl,--exclude-libs,ALL".into());
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (options, identity, public_symbol, workspace);
+    let _ = (options, identity, public_symbols, workspace);
     Ok(())
+}
+
+const CLI_RUNTIME_EXPORTS: [&str; 3] = [
+    "kiln_cli_host_call",
+    "kiln_cli_write_result",
+    "kiln_cli_report_failure",
+];
+const GRAPH_CLI_RUNTIME_EXPORTS: [&str; 8] = [
+    "kiln_cli_host_call",
+    "kiln_cli_write_result",
+    "kiln_cli_report_failure",
+    "kiln_native_scheduler_create",
+    "kiln_native_scheduler_begin",
+    "kiln_native_scheduler_finish",
+    "kiln_native_scheduler_destroy",
+    "kiln_native_scheduler_set_runner",
+];
+
+fn cli_runtime_exports(graph_scheduler: bool) -> &'static [&'static str] {
+    if graph_scheduler {
+        &GRAPH_CLI_RUNTIME_EXPORTS
+    } else {
+        &CLI_RUNTIME_EXPORTS
+    }
+}
+
+fn dynamic_cli_runtime_enabled(profile: NativeProfile) -> bool {
+    profile == NativeProfile::Dev && cfg!(any(target_os = "macos", target_os = "linux"))
+}
+
+fn executable_link_inputs(
+    modules: impl IntoIterator<Item = Digest>,
+    runtime: Digest,
+    launcher: Digest,
+    provider: Digest,
+    dynamic_runtime: bool,
+) -> Vec<Digest> {
+    let mut inputs = modules.into_iter().collect::<Vec<_>>();
+    // Artifact inputs preserve linker order. A static runtime is an object before the launcher;
+    // the Dev runtime DSO and provider archive are libraries after the launcher object.
+    if dynamic_runtime {
+        inputs.extend([launcher, runtime, provider]);
+    } else {
+        inputs.extend([runtime, launcher, provider]);
+    }
+    inputs
+}
+
+fn cli_runtime_content_identity(
+    compiler: &str,
+    runtime_abi: &str,
+    target: &str,
+    profile: NativeProfile,
+    graph_scheduler: bool,
+    inputs: impl IntoIterator<Item = Digest>,
+) -> Digest {
+    cli_runtime_content_key(
+        compiler,
+        runtime_abi,
+        target,
+        profile,
+        graph_scheduler,
+        inputs,
+    )
+    .digest()
+}
+
+fn cli_runtime_content_key(
+    compiler: &str,
+    runtime_abi: &str,
+    target: &str,
+    profile: NativeProfile,
+    graph_scheduler: bool,
+    inputs: impl IntoIterator<Item = Digest>,
+) -> ArtifactKey {
+    let exports = cli_runtime_exports(graph_scheduler);
+    let options = Digest::hash(
+        format!(
+            "cli-runtime-dso-v1\0{}\0{}\0{}\0{}",
+            profile.as_str(),
+            shared_library_link_policy(),
+            exports.join(","),
+            shared_library_name(),
+        )
+        .as_bytes(),
+    );
+    key(
+        ArtifactKind::LinkedArtifact,
+        compiler,
+        Backend::Custom("native-cli-runtime-dso".to_owned()),
+        runtime_abi,
+        target,
+        profile.cache(),
+        options,
+        inputs,
+    )
+}
+
+fn configure_cli_runtime_link(
+    options: &mut LinkOptions,
+    output: &Path,
+    workspace: &Path,
+    graph_scheduler: bool,
+) -> Result<(), NativeError> {
+    let identity = shared_library_link_identity(output);
+    let export_names = cli_runtime_exports(graph_scheduler);
+    #[cfg(target_os = "macos")]
+    {
+        let exports = workspace.join("runtime-exports.txt");
+        let source = export_names
+            .iter()
+            .map(|symbol| format!("_{symbol}\n"))
+            .collect::<String>();
+        materialize(&exports, source.as_bytes(), false)?;
+        options
+            .extra_args
+            .push(format!("-Wl,-install_name,{identity}").into());
+        options
+            .extra_args
+            .push(format!("-Wl,-exported_symbols_list,{}", exports.to_string_lossy()).into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let exports = workspace.join("runtime-exports.map");
+        let source = format!(
+            "KILN_1 {{\n  global:\n{}  local:\n    *;\n}};\n",
+            export_names
+                .iter()
+                .map(|symbol| format!("    {symbol};\n"))
+                .collect::<String>()
+        );
+        materialize(&exports, source.as_bytes(), false)?;
+        options
+            .extra_args
+            .push(format!("-Wl,-soname,{identity}").into());
+        options
+            .extra_args
+            .push(format!("-Wl,--version-script,{}", exports.to_string_lossy()).into());
+        options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = (options, identity, workspace, export_names);
+    Ok(())
+}
+
+fn configure_cli_runtime_rpath(options: &mut LinkOptions) {
+    #[cfg(target_os = "macos")]
+    options
+        .extra_args
+        .push("-Wl,-rpath,@loader_path/.kiln-loaders".into());
+    #[cfg(target_os = "linux")]
+    options
+        .extra_args
+        .push("-Wl,-rpath,$ORIGIN/.kiln-loaders".into());
+}
+
+struct CliRuntimeDso {
+    bytes: Vec<u8>,
+    digest: Digest,
 }
 
 #[cfg(test)]
@@ -2938,6 +3766,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
+        let source = owned_result_wrapper_source(
+            "kiln_probe",
+            "scalar",
+            "kiln_probe(&proxy_host, &value)",
+            "",
+        );
+        assert_eq!(
+            source,
+            owned_result_wrapper_source(
+                "kiln_probe",
+                "scalar",
+                "kiln_probe(&proxy_host, &value)",
+                "",
+            )
+        );
+        for fragment in [
+            "kiln_probe_api_v2",
+            "kiln_module_api_v2",
+            "kiln_result_v2",
+            "kiln_v2_scalar_kiln_probe_run",
+            "kiln_v2_scalar_kiln_probe_read",
+            "kiln_v2_scalar_kiln_probe_dispose",
+            "failure_status",
+            "*out = NULL",
+            "memcpy(copy, value.ptr, value.len)",
+        ] {
+            assert!(
+                source.contains(fragment),
+                "missing generated fragment: {fragment}"
+            );
+        }
+        assert!(!source.contains("static kiln_result_v2"));
+        assert!(!source.contains("static kiln_value result"));
     }
 
     fn environment_digest(kind: CompilerKind, entries: &[(&str, &str)]) -> Digest {
@@ -3900,6 +4765,96 @@ int main(void) {{
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn native_dev_runtime_is_a_relocatable_three_symbol_dso() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native runtime DSO integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-runtime-dso");
+        let output = root.path.join("bin").join("program");
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let mut program = stdout_program("dynamic", 7.0);
+        let pattern = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::String("dynamic".to_owned()));
+        let flags = program.constants.len() as u32;
+        program.constants.push(Constant::String(String::new()));
+        program.code.splice(
+            0..0,
+            [Instruction::NewRegExp { pattern, flags }, Instruction::Pop],
+        );
+        let report = builder
+            .run(
+                &program,
+                &NativeBuildOptions {
+                    output: output.clone(),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native-dev DSO run succeeds");
+        assert_eq!(report.stdout, b"dynamic\n");
+        let loaders = output
+            .parent()
+            .expect("output parent")
+            .join(".kiln-loaders");
+        let entries = fs::read_dir(&loaders)
+            .expect("runtime loader survives private workdir cleanup")
+            .map(|entry| entry.expect("loader entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        let _loader = &entries[0];
+        let rerun = Command::new(&output)
+            .output()
+            .expect("published executable launches after build returns");
+        assert!(rerun.status.success());
+        assert_eq!(rerun.stdout, b"dynamic\n");
+
+        #[cfg(target_os = "linux")]
+        {
+            let symbols = Command::new("nm")
+                .args(["-D", "--defined-only"])
+                .arg(_loader)
+                .output()
+                .expect("nm is available");
+            assert!(symbols.status.success());
+            let symbols = String::from_utf8_lossy(&symbols.stdout);
+            let exported = symbols
+                .lines()
+                .filter_map(|line| line.split_whitespace().last())
+                .filter(|symbol| symbol.starts_with("kiln_"))
+                .collect::<Vec<_>>();
+            let mut exported = exported;
+            exported.sort_unstable();
+            assert_eq!(
+                exported,
+                vec![
+                    "kiln_cli_host_call",
+                    "kiln_cli_report_failure",
+                    "kiln_cli_write_result"
+                ]
+            );
+            let dynamic = Command::new("readelf")
+                .args(["-d"])
+                .arg(&output)
+                .output()
+                .expect("readelf is available");
+            let dynamic = String::from_utf8_lossy(&dynamic.stdout);
+            assert!(dynamic.contains("$ORIGIN/.kiln-loaders"));
+            assert!(
+                dynamic.contains(
+                    _loader
+                        .file_name()
+                        .expect("loader name")
+                        .to_string_lossy()
+                        .as_ref()
+                )
+            );
+        }
+    }
+
     #[test]
     fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -4120,6 +5075,344 @@ int main(void) {
     }
 
     #[test]
+    fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping owned-result native integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping owned-result native integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-test");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("left\0right".to_owned())],
+            code: vec![Instruction::Const(0), Instruction::Return],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let report = builder
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build owned-result scalar library");
+        assert_eq!(
+            report.module_api_symbol,
+            format!("{}_api_v2", report.module_symbol)
+        );
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("owned-result header file name");
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    kiln_value value;
+    kiln_value legacy;
+    int index;
+    if (api == NULL || api->abi_version != KILN_MODULE_API_VERSION ||
+        api->struct_size < sizeof(*api) || api->run == NULL || api->read == NULL ||
+        api->dispose == NULL) return 1;
+    if ({module_symbol}(NULL, &legacy) != KILN_C99_OK ||
+        legacy.tag != KILN_VALUE_STRING || legacy.len != 10 ||
+        memcmp(legacy.ptr, "left\0right", 10) != 0) return 2;
+    for (index = 0; index < 64; ++index) {{
+        if (api->run(NULL, &owned) != KILN_C99_OK || owned == NULL) return 3;
+        if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
+            value.len != 10 || value.ptr == NULL || memcmp(value.ptr, "left\0right", 10) != 0)
+            return 4;
+        api->dispose(&owned);
+        if (owned != NULL) return 5;
+        api->dispose(&owned);
+    }}
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+                module_symbol = report.module_symbol,
+            ),
+        )
+        .expect("write owned-result host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile owned-result host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link owned-result host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run owned-result host");
+        assert!(
+            output.status.success(),
+            "owned-result host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            let symbols = Command::new("nm")
+                .args(["-D", "--defined-only"])
+                .arg(&report.loader)
+                .output()
+                .expect("nm is available");
+            assert!(symbols.status.success());
+            let mut exported = String::from_utf8_lossy(&symbols.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().last())
+                .filter(|symbol| symbol.starts_with("kiln_"))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            exported.sort_unstable();
+            let mut expected = vec![report.module_symbol, report.module_api_symbol];
+            expected.sort_unstable();
+            assert_eq!(exported, expected);
+        }
+    }
+
+    #[test]
+    fn owned_result_scalar_api_rejects_malformed_host_strings() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!(
+                "skipping owned-result scalar malformed-host integration on unsupported platform"
+            );
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!(
+                "skipping owned-result scalar malformed-host integration: no C compiler found"
+            );
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-malformed-scalar-test");
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 0,
+                },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_library(
+            &program,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build malformed-host scalar library");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("malformed-host scalar header file name");
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+
+static int malformed_call(void *context, uint16_t operation, uint16_t argc,
+                          const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    (void)operation;
+    (void)argc;
+    (void)arguments;
+    if (result == NULL) return KILN_C99_HOST_ERROR;
+    *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 3}};
+    return KILN_C99_OK;
+}}
+
+int main(void) {{
+    kiln_host host = {{malformed_call, NULL}};
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    if (api == NULL) return 1;
+    if (api->run(&host, &owned) != KILN_C99_INVALID_ARGUMENT || owned != NULL)
+        return 2;
+    api->dispose(&owned);
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+            ),
+        )
+        .expect("write malformed-host scalar host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile malformed-host scalar host");
+        let host_executable = root.path.join("host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link malformed-host scalar host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run malformed-host scalar host");
+        assert!(
+            output.status.success(),
+            "malformed-host scalar failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping owned-result graph throw integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping owned-result graph throw integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-owned-result-throw-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create throw graph project");
+        fs::write(project.join("main.js"), "").expect("write throw graph entry");
+        let thrown = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::String("thrown\0value".to_owned())],
+                code: vec![Instruction::Const(0), Instruction::Throw],
+                local_count: 0,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| {
+            thrown.clone()
+        })
+        .expect("construct throw graph");
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build throw graph");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("throw graph header file name");
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    const kiln_module_api_v2 *api = {api_symbol}();
+    kiln_result_v2 *owned = NULL;
+    kiln_value value;
+    int status;
+    if (api == NULL) return 1;
+    status = api->run(NULL, &owned);
+    if (status != KILN_C99_THROWN || owned == NULL) return 2;
+    if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
+        value.len != 12 || value.ptr == NULL || memcmp(value.ptr, "thrown\0value", 12) != 0)
+        return 3;
+    api->dispose(&owned);
+    if (owned != NULL) return 4;
+    api->dispose(&owned);
+    return 0;
+}}
+"#,
+                api_symbol = report.module_api_symbol,
+            ),
+        )
+        .expect("write throw graph host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile throw graph host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link throw graph host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run throw graph host");
+        assert!(
+            output.status.success(),
+            "throw graph host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn concurrent_runs_with_one_public_output_launch_their_private_program() {
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native concurrency integration: no C compiler found");
@@ -4243,8 +5536,17 @@ int main(void) {
         let dependency = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
-                constants: vec![Constant::Number(42.0_f64.to_bits())],
+                constants: vec![
+                    Constant::Number(42.0_f64.to_bits()),
+                    Constant::String("graph".to_owned()),
+                    Constant::String(String::new()),
+                ],
                 code: vec![
+                    Instruction::NewRegExp {
+                        pattern: 1,
+                        flags: 2,
+                    },
+                    Instruction::Pop,
                     Instruction::Const(0),
                     Instruction::StoreLocal(0),
                     Instruction::Const(0),
@@ -4360,8 +5662,17 @@ int main(void) {
         let edited_dependency = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
-                constants: vec![Constant::Number(43.0_f64.to_bits())],
+                constants: vec![
+                    Constant::Number(43.0_f64.to_bits()),
+                    Constant::String("graph".to_owned()),
+                    Constant::String(String::new()),
+                ],
                 code: vec![
+                    Instruction::NewRegExp {
+                        pattern: 1,
+                        flags: 2,
+                    },
+                    Instruction::Pop,
                     Instruction::Const(0),
                     Instruction::StoreLocal(0),
                     Instruction::Const(0),
@@ -4514,6 +5825,11 @@ int main(void) {
         let wrapper =
             graph_shared_wrapper_source(&graph, &modules, &wrapper_symbol).expect("wrapper emits");
         assert!(wrapper.contains(embedding_header()));
+        assert!(wrapper.contains(&format!("{}_api_v2", wrapper_symbol)));
+        assert!(wrapper.contains("preserve_result"));
+        assert!(wrapper.contains("kiln_module_api_v2"));
+        assert!(wrapper.contains("static int kiln_v2_graph_"));
+        assert!(!wrapper.contains("static kiln_result_v2"));
         assert!(wrapper.contains("extern int kiln_module_path_"));
         assert!(wrapper.contains("malloc((size_t)"));
         assert!(!wrapper.contains("static kiln_value kiln_import"));
@@ -4540,7 +5856,7 @@ int main(void) {
                 },
             )
             .expect("build shared graph succeeds");
-        assert_eq!(report.module_symbol, wrapper_symbol);
+        assert!(report.module_symbol.starts_with("kiln_shared_graph_"));
         assert!(report.output.is_file());
         let cached = builder
             .build_shared_graph(
@@ -4622,8 +5938,9 @@ int main(void) {
         fs::write(
             &host_source,
             format!(
-                "#include \"wrapper.h\"\nint main(void) {{ kiln_value result; return {}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER; }}\n",
-                wrapper_symbol
+                "#include \"wrapper.h\"\nint main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 1; if ({}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 2; return 0; }}\n",
+                wrapper_symbol,
+                wrapper_symbol,
             ),
         )
         .expect("write null-host source");
@@ -4786,7 +6103,11 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
                memcmp(arguments[0].ptr, "dep", 3) != 0) {{
         return KILN_C99_HOST_ERROR;
     }}
-    *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+    if (context->mode == 0) {{
+        *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, context->storage, 3}};
+    }} else {{
+        *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+    }}
     return KILN_C99_OK;
 }}
 
@@ -4805,10 +6126,32 @@ int main(void) {{
     context.mode = 3;
     if ({symbol}(&host, &result) != KILN_C99_HOST_ERROR) return 5;
     if ({symbol}(NULL, &result) != KILN_C99_HOST_ERROR) return 6;
+    {{
+        const kiln_module_api_v2 *api = {api_symbol}();
+        kiln_result_v2 *owned = NULL;
+        if (api == NULL || api->abi_version != KILN_MODULE_API_VERSION) return 7;
+        context.mode = 0;
+        for (index = 0; index < 64; ++index) {{
+            if (api->run(&host, &owned) != KILN_C99_OK || owned == NULL) return 8;
+            if (api->read(owned, &result) != KILN_C99_OK || result.tag != KILN_VALUE_STRING ||
+                result.len != 3 || result.ptr == NULL || memcmp(result.ptr, "dep", 3) != 0)
+                return 9;
+            api->dispose(&owned);
+            if (owned != NULL) return 10;
+            api->dispose(&owned);
+        }}
+        context.mode = 2;
+        if (api->run(&host, &owned) != KILN_C99_HOST_ERROR || owned != NULL)
+            return 11;
+        context.mode = 3;
+        if (api->run(&host, &owned) != KILN_C99_INVALID_ARGUMENT || owned != NULL)
+            return 12;
+    }}
     return 0;
 }}
 "#,
                 symbol = report.module_symbol,
+                api_symbol = report.module_api_symbol,
             ),
         )
         .expect("write shared graph host");
@@ -4835,6 +6178,293 @@ int main(void) {{
         assert!(
             output.status.success(),
             "shared graph host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn shared_graph_preserves_well_known_symbol_keys_across_translation_units() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph symbol integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph symbol integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-symbol-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph symbol project");
+        fs::write(project.join("main.js"), "").expect("write shared graph symbol entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph symbol dependency");
+
+        // The provider and consumer each get a separate generated C translation unit.  The
+        // provider's object stores a value under its own copy of Symbol.iterator; the consumer
+        // has to recognise that imported symbol as the same well-known key by its reserved
+        // spelling, rather than by pointer identity.
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(123.0_f64.to_bits())],
+                code: vec![
+                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                    Instruction::Const(0),
+                    Instruction::NewObject { count: 1 },
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                    Instruction::GetComputed,
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared graph symbol graph");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared graph symbol library");
+
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph symbol header file name");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+#include <string.h>
+
+int main(void) {{
+    kiln_value result;
+    double number;
+    if ({symbol}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 1;
+    memcpy(&number, &result.bits, sizeof number);
+    return number == 123.0 ? 0 : 2;
+}}
+"#,
+                symbol = report.module_symbol,
+            ),
+        )
+        .expect("write shared graph symbol host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared graph symbol host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared graph symbol host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run shared graph symbol host");
+        assert!(
+            output.status.success(),
+            "shared graph symbol host failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn shared_graph_keeps_same_spelling_private_brands_isolated_across_translation_units() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping native shared graph private integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native shared graph private integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-graph-private-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared graph private project");
+        fs::write(project.join("main.js"), "").expect("write shared graph private entry");
+        fs::write(project.join("dep.js"), "").expect("write shared graph private dependency");
+
+        // Both generated units deliberately use the same printable private spelling. Their
+        // static token objects must nevertheless remain distinct, so the consumer's brand check
+        // does not accept an object branded by the provider.
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("@@private:0:x".into()),
+                    Constant::Number(1.0_f64.to_bits()),
+                    Constant::Undefined,
+                ],
+                code: vec![
+                    Instruction::NewObject { count: 0 },
+                    Instruction::Dup,
+                    Instruction::Const(1),
+                    Instruction::InitPrivate(0),
+                    Instruction::Pop,
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(2),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "value".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::String("@@private:0:x".into())],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::PrivateIn(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "value".into(),
+                local: "value".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dependency_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared graph private graph");
+        let builder = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        );
+        let report = builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("build shared graph private library");
+
+        let host_source = root.path.join("host.c");
+        let host_object = root.path.join("host.o");
+        let host_executable = root.path.join("host");
+        let header_name = report
+            .header
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("shared graph private header file name");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{header_name}"
+
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 1;
+    return result.tag == KILN_VALUE_BOOLEAN && result.bits == 0 ? 0 : 2;
+}}
+"#,
+                symbol = report.module_symbol,
+            ),
+        )
+        .expect("write shared graph private host");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared graph private host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        let loader_directory = report.loader.parent().expect("loader has directory");
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared graph private host");
+        let mut command = Command::new(&host_executable);
+        #[cfg(target_os = "linux")]
+        command.env("LD_LIBRARY_PATH", loader_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", loader_directory);
+        let output = command.output().expect("run shared graph private host");
+        assert!(
+            output.status.success(),
+            "shared graph private host failed with {:?}: {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -4969,8 +6599,8 @@ int main(void) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-shared-graph-visibility-test");
-        let first_graph = one_module_graph(&root.path.join("first-project"), 11.0, "first");
-        let second_graph = one_module_graph(&root.path.join("second-project"), 22.0, "second");
+        let first_graph = one_module_graph(&root.path.join("first-project"), 11.0, "value");
+        let second_graph = one_module_graph(&root.path.join("second-project"), 22.0, "value");
         let first_internal = emit_module_with_logical_path(
             &first_graph
                 .modules()
@@ -5030,6 +6660,10 @@ int main(void) {{
             first.module_symbol, second.module_symbol,
             "the host must be able to address both public wrappers independently"
         );
+        assert_ne!(
+            first.module_api_symbol, second.module_api_symbol,
+            "owned-result accessors must not interpose across same-topology DSOs"
+        );
 
         let first_header = first
             .header
@@ -5071,22 +6705,7 @@ int main(void) {{
 #include <stdint.h>
 #include <string.h>
 
-typedef int (*kiln_entry_fn)(kiln_host *, kiln_value *);
-
-static kiln_entry_fn load_entry(void *handle, const char *name) {{
-    void *address = dlsym(handle, name);
-    kiln_entry_fn entry = NULL;
-    if (address == NULL) return NULL;
-    _Static_assert(sizeof(entry) == sizeof(address), "dlsym function pointer size");
-    memcpy(&entry, &address, sizeof(entry));
-    return entry;
-}}
-
 int main(int argc, char **argv) {{
-    void *first;
-    void *second;
-    kiln_entry_fn first_entry;
-    kiln_entry_fn second_entry;
     kiln_value result;
     if (argc != 3) return 1;
     first = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
@@ -5101,18 +6720,39 @@ int main(int argc, char **argv) {{
     if (first_entry == NULL || second_entry == NULL) return 5;
     if (first_entry(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits}))
-        return 6;
-    if (second_entry(NULL, &result) != KILN_C99_OK ||
+        return 1;
+    if ({second_symbol}(NULL, &result) != KILN_C99_OK ||
         result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits}))
-        return 7;
-    dlclose(second);
-    dlclose(first);
+        return 2;
+    {{
+        const kiln_module_api_v2 *first_api = {first_api_symbol}();
+        const kiln_module_api_v2 *second_api = {second_api_symbol}();
+        kiln_result_v2 *first_owned = NULL;
+        kiln_result_v2 *second_owned = NULL;
+        if (first_api == NULL || second_api == NULL ||
+            first_api->run(NULL, &first_owned) != KILN_C99_OK || first_owned == NULL ||
+            second_api->run(NULL, &second_owned) != KILN_C99_OK || second_owned == NULL)
+            return 3;
+        if (first_api->read(first_owned, &result) != KILN_C99_OK ||
+            result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({first_bits})) return 4;
+        if (second_api->read(second_owned, &result) != KILN_C99_OK ||
+            result.tag != KILN_VALUE_NUMBER || result.bits != UINT64_C({second_bits})) return 5;
+        first_api->dispose(&first_owned);
+        second_api->dispose(&second_owned);
+        if (first_owned != NULL || second_owned != NULL) return 6;
+        first_api->dispose(&first_owned);
+        second_api->dispose(&second_owned);
+    }}
+    dlclose(second_handle);
+    dlclose(first_handle);
     return 0;
 }}
 "#,
-                internal = first_internal,
                 first_symbol = first.module_symbol,
                 second_symbol = second.module_symbol,
+                first_api_symbol = first.module_api_symbol,
+                second_api_symbol = second.module_api_symbol,
+                internal = first_internal,
                 first_bits = 11.0_f64.to_bits(),
                 second_bits = 22.0_f64.to_bits(),
                 provider_visibility_checks = provider_visibility_checks,
@@ -5126,7 +6766,8 @@ int main(int argc, char **argv) {{
             .compile_c(&host_source, &host_object, &compile_options)
             .expect("compile visibility host");
         let host_executable = root.path.join("host");
-        let link_options = LinkOptions {
+        let mut link_options = LinkOptions {
+            runtime_libraries: vec![first.output.clone(), second.output.clone()],
             libraries: if cfg!(target_os = "linux") {
                 vec!["dl".to_owned()]
             } else {
@@ -5134,6 +6775,14 @@ int main(int argc, char **argv) {{
             },
             ..LinkOptions::default()
         };
+        for directory in [
+            first.loader.parent().expect("first loader directory"),
+            second.loader.parent().expect("second loader directory"),
+        ] {
+            link_options
+                .extra_args
+                .push(format!("-Wl,-rpath,{}", directory.display()).into());
+        }
         toolchain
             .link_executable(&[host_object], &host_executable, &link_options)
             .expect("link visibility host");

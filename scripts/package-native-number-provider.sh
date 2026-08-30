@@ -142,7 +142,7 @@ printf '%s\n' \
 	'{' \
 	'  "schema": 1,' \
 	'  "provider": "kiln-native-number-ffi",' \
-	'  "provider_abi": 1,' \
+	'  "provider_abi": 2,' \
 	'  "format_version": 1,' \
 	'  "parse_version": 1,' \
 	"  \"rust_target\": \"$KILN_PROVIDER_TARGET\"," \
@@ -156,7 +156,7 @@ printf '%s\n' \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
-	'  "exports": ["kiln_number_to_js_string", "kiln_string_to_number"]' \
+	'  "exports": ["kiln_number_to_js_string", "kiln_string_to_number", "kiln_regexp_compile", "kiln_regexp_free", "kiln_regexp_search", "kiln_regexp_group_count", "kiln_regexp_named_group"]' \
 	'}' >"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"

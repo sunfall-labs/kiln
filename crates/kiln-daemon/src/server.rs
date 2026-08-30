@@ -21,11 +21,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
-    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
-    native_program, native_run_graph, native_run_program, prepare_run,
+    Next, check_with_cache, dispatch, dispatch_source, execute_prepared_run, native_build_graph,
+    native_build_output, native_build_program, native_build_shared_graph,
+    native_build_shared_program, native_graph_with_cache, native_program, native_run_graph,
+    native_run_program, prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
+use crate::graph_cache::GraphCache;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -431,6 +433,9 @@ fn begin_sync<E: QueryEngine>(
             None,
         );
     }
+    if let Err(message) = validate_resolutions(&resolutions, &manifest) {
+        return (Response::Error { message }, None);
+    }
 
     let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
     let held = guard
@@ -466,6 +471,61 @@ fn begin_sync<E: QueryEngine>(
             resolutions,
         }),
     )
+}
+
+fn validate_resolutions(
+    resolutions: &ResolutionMap,
+    manifest: &BTreeMap<String, SourceDigest>,
+) -> Result<(), String> {
+    let root = Path::new(&resolutions.project_root);
+    if !root.is_absolute() {
+        return Err("resolution project root must be absolute".to_owned());
+    }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("cannot canonicalize resolution project root: {error}"))?;
+    if canonical_root != root {
+        return Err(format!(
+            "resolution project root must be canonical: {}",
+            root.display()
+        ));
+    }
+    for entry in &resolutions.entries {
+        for (role, path) in [
+            ("importer", entry.importer.as_str()),
+            ("target", entry.target.as_str()),
+            ("package manifest", entry.package_json.as_str()),
+        ] {
+            let path = Path::new(path);
+            if !path.is_absolute() || !path.starts_with(root) {
+                return Err(format!(
+                    "resolution {role} must be absolute and inside project root: {}",
+                    path.display()
+                ));
+            }
+            let components = path.components().collect::<Vec<_>>();
+            let normalized = components.iter().copied().collect::<PathBuf>();
+            if normalized.as_os_str() != path.as_os_str()
+                || components.iter().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "resolution {role} must use a canonical path: {}",
+                    path.display()
+                ));
+            }
+        }
+        if !manifest.contains_key(&entry.importer) || !manifest.contains_key(&entry.target) {
+            return Err(format!(
+                "resolution sources are absent from Sync manifest: {} -> {}",
+                entry.importer, entry.target
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn stage_source(
@@ -551,6 +611,7 @@ fn commit_sync<E: QueryEngine>(
             }
         }));
         if let Err(payload) = mutation {
+            guard.graph_cache.invalidate();
             if let Ok(view) = next_source_view(guard.source_view) {
                 guard.source_view = view;
             }
@@ -588,11 +649,13 @@ fn set_source<E: QueryEngine>(
         guard.engine.set_source(file, text);
     }));
     if let Err(payload) = mutation {
+        guard.graph_cache.invalidate();
         guard.source_view = next_view;
         return internal_error(&*payload);
     }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
-    // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
+    // warm no-op behavior. Graph entries validate only the reachable source revisions, so both a
+    // byte-identical update and an edit outside a graph retain that graph safely.
     guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
@@ -630,6 +693,7 @@ fn handle_source_request<E: QueryEngine>(
         Ok(response) => (response, Next::Continue),
         Err(payload) => {
             if guard.engine.revision().0 != revision {
+                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => guard.source_view = view,
                     Err(message) => return (Response::Error { message }, Next::Continue),
@@ -761,7 +825,7 @@ fn handle<E: QueryEngine>(
                 };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_graph(graph, path, project_root, output, profile)
+                    native_build_graph(&graph, path, project_root, output, profile)
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_build_program(program, path, project_root, output, profile)
@@ -782,7 +846,7 @@ fn handle<E: QueryEngine>(
                 };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_shared_graph(graph, path, project_root, output, profile)
+                    native_build_shared_graph(&graph, path, project_root, output, profile)
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_build_shared_program(program, path, project_root, output, profile)
@@ -801,9 +865,9 @@ fn handle<E: QueryEngine>(
                     Err(response) => return (response, Next::Continue),
                 };
             match prepared {
-                PreparedNative::Graph(graph) => {
-                    run_without_engine_lock(|| native_run_graph(graph, path, project_root, profile))
-                }
+                PreparedNative::Graph(graph) => run_without_engine_lock(|| {
+                    native_run_graph(&graph, path, project_root, profile)
+                }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_run_program(program, path, project_root, profile)
                 }),
@@ -854,6 +918,7 @@ fn handle_run<E: QueryEngine>(
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
                 if guard.engine.revision().0 != revision {
+                    guard.graph_cache.invalidate();
                     match next_source_view(guard.source_view) {
                         Ok(view) => guard.source_view = view,
                         Err(message) => return (Response::Error { message }, Next::Continue),
@@ -908,6 +973,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
                 if guard.engine.revision().0 != current_revision {
+                    guard.graph_cache.invalidate();
                     match next_source_view(guard.source_view) {
                         Ok(view) => guard.source_view = view,
                         Err(message) => return (Response::Error { message }, Next::Continue),
@@ -959,7 +1025,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
     let temp_output = snapshot_temp_output(&final_output);
     let response = run_without_engine_lock(|| match prepared {
         PreparedNative::Graph(graph) => native_build_graph(
-            graph,
+            &graph,
             path.clone(),
             project_root.clone(),
             Some(temp_output.to_string_lossy().into_owned()),
@@ -1007,7 +1073,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
 }
 
 enum PreparedNative {
-    Graph(ModuleGraph),
+    Graph(Arc<ModuleGraph>),
     Program(kiln_ir::Program),
 }
 
@@ -1043,7 +1109,14 @@ fn prepare_native_snapshot<E: QueryEngine>(
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph))
             }
-            Some(_) | None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
+            Some(graph) => {
+                // Graph construction canonicalized this entry already. Reuse that spelling for
+                // the scalar fallback; reusing the request's relative alias would reactivate an
+                // alias that ensure_canonical_source just removed and make every retry stale.
+                let canonical_path = graph.entry().to_string_lossy().into_owned();
+                native_program(&mut guard.engine, &canonical_path).map(PreparedNative::Program)
+            }
+            None => native_program(&mut guard.engine, path).map(PreparedNative::Program),
         }
     })) {
         Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
@@ -1059,6 +1132,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
         Ok(Err(message)) => Err(Response::Error { message }),
         Err(payload) => {
             if guard.engine.revision().0 != revision {
+                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => guard.source_view = view,
                     Err(message) => return Err(Response::Error { message }),
@@ -1085,6 +1159,18 @@ fn handle_engine_request<E: QueryEngine>(
         Ok(outcome) => outcome,
         Err(payload) => (internal_error(&*payload), Next::Continue),
     }
+}
+
+fn daemon_stats<E: QueryEngine>(state: &DaemonState<E>) -> Stats {
+    let mut stats = crate::dispatch::stats(&state.engine);
+    let cache = state.graph_cache.stats();
+    stats.graph_cache_hits = cache.hits;
+    stats.graph_cache_misses = cache.misses;
+    stats.graph_cache_evictions = cache.evictions;
+    stats.graph_cache_invalidations = cache.invalidations;
+    stats.graph_cache_entries = state.graph_cache.entries();
+    stats.graph_cache_modules = state.graph_cache.cached_modules();
+    stats
 }
 
 fn internal_error(payload: &(dyn std::any::Any + Send)) -> Response {

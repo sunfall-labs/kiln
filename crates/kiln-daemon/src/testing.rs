@@ -459,7 +459,7 @@ expected_stdout = "bundle\n"
         )
         .expect("the changed manifest test is runnable");
 
-        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.discovered, 21);
         assert_eq!(summary.selected, 1);
         assert_eq!(summary.cases.len(), 1);
         assert_eq!(summary.cases[0].path, "guard/g01-spread-symbols");
@@ -524,8 +524,8 @@ expected_stdout = "bundle\n"
         )
         .expect("the manifest change is runnable");
 
-        assert_eq!(summary.discovered, 20);
-        assert_eq!(summary.selected, 20);
+        assert_eq!(summary.discovered, 21);
+        assert_eq!(summary.selected, 21);
     }
 
     #[test]
@@ -538,7 +538,7 @@ expected_stdout = "bundle\n"
         )
         .expect("the baseline change is runnable");
 
-        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.discovered, 21);
         assert_eq!(summary.selected, 0);
         assert!(summary.cases.is_empty());
     }
@@ -580,15 +580,15 @@ expected_stdout = "bundle\n"
     fn the_manifest_corpus_runs_and_every_non_pass_keeps_a_reason() {
         let summary = run_corpus("conformance/guard");
 
-        assert_eq!(summary.discovered, 20);
+        assert_eq!(summary.discovered, 21);
         assert_eq!(
-            summary.selected, 20,
+            summary.selected, 21,
             "a recorded stdout is one observation, so a manifest test has one variant"
         );
         assert_eq!(summary.skipped, 0, "the probes are plain JavaScript");
         assert_eq!(
             summary.passed + summary.failed,
-            20,
+            21,
             "every probe is either measured as passing or measured as failing"
         );
         // Deliberately not asserting the pass count. It is a measurement, and pinning it here
@@ -647,7 +647,7 @@ expected_stdout = "bundle\n"
     fn one_manifest_serves_each_of_its_groups_and_the_whole_corpus() {
         let whole = run_corpus("conformance");
         assert_eq!(
-            whole.discovered, 39,
+            whole.discovered, 40,
             "pointing at the corpus root picks up all groups"
         );
         assert!(

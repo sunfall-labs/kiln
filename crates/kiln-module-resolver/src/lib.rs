@@ -129,6 +129,10 @@ pub enum ResolveError {
         role: PathRole,
         path: PathBuf,
     },
+    NonCanonicalPath {
+        role: PathRole,
+        path: PathBuf,
+    },
     Io {
         role: PathRole,
         path: PathBuf,
@@ -191,6 +195,12 @@ impl fmt::Display for ResolveError {
             Self::NonUtf8Path { role, path } => write!(
                 formatter,
                 "{} contains a non-UTF-8 path: {}",
+                role.as_str(),
+                display_path(path)
+            ),
+            Self::NonCanonicalPath { role, path } => write!(
+                formatter,
+                "{} is not a canonical absolute path: {}",
                 role.as_str(),
                 display_path(path)
             ),
