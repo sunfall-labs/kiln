@@ -10392,6 +10392,17 @@ impl JsonReader<'_> {
         }
     }
 
+    /// The four hex digits after a `\u`, consumed.
+    fn code_unit(&mut self) -> Result<u32, ExecutionError> {
+        let (digits, rest) = self
+            .rest
+            .split_at_checked(4)
+            .ok_or(ExecutionError::InvalidJson)?;
+        let code = u32::from_str_radix(digits, 16).map_err(|_| ExecutionError::InvalidJson)?;
+        self.rest = rest;
+        Ok(code)
+    }
+
     fn escape(&mut self) -> Result<char, ExecutionError> {
         let mut characters = self.rest.chars();
         let Some(marker) = characters.next() else {
@@ -10408,13 +10419,23 @@ impl JsonReader<'_> {
             'r' => '\r',
             't' => '\t',
             'u' => {
-                let (digits, rest) = self
-                    .rest
-                    .split_at_checked(4)
-                    .ok_or(ExecutionError::InvalidJson)?;
-                let code =
-                    u32::from_str_radix(digits, 16).map_err(|_| ExecutionError::InvalidJson)?;
-                self.rest = rest;
+                let code = self.code_unit()?;
+                // A pair is two escapes and one character. Decoding each half on its own gave
+                // two replacement characters for every emoji that arrived escaped, which is how
+                // a JSON document written by any other engine spells one outside the BMP.
+                if (0xD800..0xDC00).contains(&code)
+                    && let Some(rest) = self.rest.strip_prefix("\\u")
+                {
+                    let saved = self.rest;
+                    self.rest = rest;
+                    let low = self.code_unit()?;
+                    if (0xDC00..0xE000).contains(&low) {
+                        let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                        return Ok(char::from_u32(combined).unwrap_or(char::REPLACEMENT_CHARACTER));
+                    }
+                    // Not a low half after all, so the second escape is not ours to consume.
+                    self.rest = saved;
+                }
                 // A lone surrogate has no scalar value. Replacing it keeps the string readable
                 // rather than failing the whole parse over one unpaired half.
                 char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER)

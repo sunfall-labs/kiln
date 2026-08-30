@@ -2178,18 +2178,37 @@ Object spread (`{ ...source }`) fell out of the same work, because an object lit
 accessor with a data property lowers *through* it -- I found that by writing the accessor probe
 and watching it refuse.
 
-**Still refused, and this is the queue in order:** `JSON` (8), generators and `async` (6), `Date`
-(5), `NewRegExp` (4), array spread and `IterableToArray` (3 each), `Map`/`Set`, `in`, `delete`,
-`EnumerateKeys`, `SuperCall`/`SuperForward` (so `class D extends C` still refuses). Generators
-need a suspended frame, which an automatic C frame cannot be, so they are a different shape
-rather than more of the same.
+**`JSON` was the next block and it is done both ways**, taking the count 31 to 37 -- the single
+biggest jump so far, because so much of the corpus round-trips something. A replacer and a
+reviver are *refused* rather than ignored: honouring half of either gives a document missing
+exactly what the program asked to control, which is worse than saying no.
+
+**Two more interpreter bugs came out of it, and the second was found by the native backend.**
+
+`JSON.stringify` ignored `toJSON` entirely, so any object defining one serialised as its raw
+fields. Adding the step then made a latent problem load-bearing: the Date table mapped `toJSON`
+and `toISOString` to one native, and they differ exactly where JSON cares -- an instant with no
+ISO spelling makes `toISOString` throw where `toJSON` answers null so the enclosing document
+still serialises. Two functions now.
+
+Then `conformance/native/json.ts` disagreed on one line and **the native backend was right**:
+kiln's JSON parser decoded each `\u` escape on its own, so `"\ud83d\ude00"` -- which is how
+every other engine spells an emoji in JSON -- came back as two replacement characters. A pair is
+two escapes and one character. `conformance/differential/json-surrogates.js` covers it, unpaired
+halves included.
+
+**Still refused, and this is the queue in order:** `Date` (6), generators and `async` (6),
+`NewRegExp` (4), `Map`/`Set` (3), `in` (3), array spread and `IterableToArray` (3 each), then
+`delete`, `EnumerateKeys` and `SuperCall`/`SuperForward` (so `class D extends C` still refuses).
+Generators need a suspended frame, which an automatic C frame cannot be, so they are a different
+shape rather than more of the same.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 11/11, differential 93/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 12/12, differential 95/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
