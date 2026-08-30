@@ -10,15 +10,15 @@ use kiln_digest::Digest;
 
 /// Default executable path for `source` under `project_root`.
 ///
-/// A project-relative source keeps its directory structure below `.kiln/bin`, so
-/// `src/main.ts` and `tests/main.ts` remain distinct. Sources outside the project are placed
-/// below `_external/<full path digest>` so two same-named external entries cannot collide and no
-/// source component can escape the publication directory.
+/// A project-relative source keeps its complete relative filename below `.kiln/bin`, so both
+/// `src/main.ts` versus `tests/main.ts` and `src/main.ts` versus `src/main.js` remain distinct.
+/// Sources outside the project are placed below `_external/<full path digest>` so two same-named
+/// external entries cannot collide and no source component can escape the publication directory.
 pub fn default_native_output(project_root: &Path, source: &Path) -> PathBuf {
     with_platform_extension(
         project_root
             .join(".kiln/bin")
-            .join(output_stem(project_root, source)),
+            .join(output_identity(project_root, source)),
         false,
     )
 }
@@ -28,12 +28,12 @@ pub fn default_native_shared_output(project_root: &Path, source: &Path) -> PathB
     with_platform_extension(
         project_root
             .join(".kiln/lib")
-            .join(output_stem(project_root, source)),
+            .join(output_identity(project_root, source)),
         true,
     )
 }
 
-fn output_stem(project_root: &Path, source: &Path) -> PathBuf {
+fn output_identity(project_root: &Path, source: &Path) -> PathBuf {
     let relative = if source.is_relative() {
         Some(source.to_path_buf())
     } else {
@@ -51,16 +51,15 @@ fn output_stem(project_root: &Path, source: &Path) -> PathBuf {
             })
     };
 
-    if let Some(mut stem) = relative.filter(|path| safe_relative(path)) {
-        stem.set_extension("");
-        if stem.file_name().is_some_and(|name| !name.is_empty()) {
-            return stem;
-        }
+    if let Some(identity) = relative.filter(|path| safe_relative(path))
+        && identity.file_name().is_some_and(|name| !name.is_empty())
+    {
+        return identity;
     }
 
-    let file_stem = source
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
+    let file_name = source
+        .file_name()
+        .filter(|name| !name.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("module"));
     let identity = if source.is_absolute() {
@@ -70,7 +69,7 @@ fn output_stem(project_root: &Path, source: &Path) -> PathBuf {
     };
     let identity = std::fs::canonicalize(&identity).unwrap_or(identity);
     let digest = Digest::hash(identity.as_os_str().as_encoded_bytes()).to_hex();
-    Path::new("_external").join(digest).join(file_stem)
+    Path::new("_external").join(digest).join(file_name)
 }
 
 fn safe_relative(path: &Path) -> bool {
@@ -80,19 +79,29 @@ fn safe_relative(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn with_platform_extension(mut output: PathBuf, shared: bool) -> PathBuf {
-    if shared {
-        output.set_extension(if cfg!(target_os = "macos") {
+fn with_platform_extension(output: PathBuf, shared: bool) -> PathBuf {
+    let extension = if shared {
+        Some(if cfg!(target_os = "macos") {
             "dylib"
         } else if cfg!(windows) {
             "dll"
         } else {
             "so"
-        });
+        })
     } else if cfg!(windows) {
-        output.set_extension("exe");
+        Some("exe")
+    } else {
+        None
+    };
+    match extension {
+        Some(extension) => {
+            let mut name = output.into_os_string();
+            name.push(".");
+            name.push(extension);
+            PathBuf::from(name)
+        }
+        None => output,
     }
-    output
 }
 
 #[cfg(test)]
@@ -124,11 +133,12 @@ mod tests {
 
         assert_eq!(
             default_native_output(root, Path::new("src/main.ts")),
-            root.join(".kiln/bin/src").join(executable_name("main"))
+            root.join(".kiln/bin/src").join(executable_name("main.ts"))
         );
         assert_eq!(
             default_native_output(root, Path::new("tests/main.ts")),
-            root.join(".kiln/bin/tests").join(executable_name("main"))
+            root.join(".kiln/bin/tests")
+                .join(executable_name("main.ts"))
         );
         assert_ne!(
             default_native_output(root, Path::new("src/main.ts")),
@@ -137,12 +147,20 @@ mod tests {
     }
 
     #[test]
-    fn root_entries_keep_the_existing_default() {
+    fn source_extensions_distinguish_same_directory_entries() {
         let root = Path::new("/tmp/project");
 
         assert_eq!(
             default_native_output(root, Path::new("main.ts")),
-            root.join(".kiln/bin").join(executable_name("main"))
+            root.join(".kiln/bin").join(executable_name("main.ts"))
+        );
+        assert_ne!(
+            default_native_output(root, Path::new("src/main.ts")),
+            default_native_output(root, Path::new("src/main.js"))
+        );
+        assert_ne!(
+            default_native_shared_output(root, Path::new("src/main.ts")),
+            default_native_shared_output(root, Path::new("src/main.js"))
         );
     }
 
@@ -152,7 +170,7 @@ mod tests {
 
         assert_eq!(
             default_native_shared_output(root, Path::new("src/main.ts")),
-            root.join(".kiln/lib/src").join(shared_name("main"))
+            root.join(".kiln/lib/src").join(shared_name("main.ts"))
         );
     }
 
@@ -164,8 +182,11 @@ mod tests {
 
         assert!(first.starts_with(root.join(".kiln/bin/_external")));
         assert!(second.starts_with(root.join(".kiln/bin/_external")));
-        assert_eq!(first.file_name(), Some(executable_name("main").as_ref()));
-        assert_eq!(second.file_name(), Some(executable_name("main").as_ref()));
+        assert_eq!(first.file_name(), Some(executable_name("main.ts").as_ref()));
+        assert_eq!(
+            second.file_name(),
+            Some(executable_name("main.ts").as_ref())
+        );
         assert_ne!(first, second);
         assert!(!first.components().any(|part| part == Component::ParentDir));
         assert!(!second.components().any(|part| part == Component::ParentDir));

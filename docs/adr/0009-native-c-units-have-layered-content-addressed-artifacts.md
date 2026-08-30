@@ -98,6 +98,10 @@ shared library, then reports both paths over the versioned protocol. Library out
 `.h` are rejected, and coordination layers reject a derived header that would overwrite the source.
 Each file publication is atomic, but the pair is not transactional; the library is the final ready
 signal until a future versioned package-directory design can swap a manifest for the pair.
+Default executable and shared-library paths preserve the entry's complete project-relative source
+filename before appending a platform artifact suffix. Thus `src/main.ts` and `src/main.js` publish
+as distinct artifacts just as `src/main.ts` and `tests/main.ts` do; an extension is part of source
+identity and must not be discarded by the publication mapping. Explicit output paths remain exact.
 
 A shared-library build compiles the application unit and internal native number runtime as
 position-independent code, then links those units plus required system libraries. PIC objects and

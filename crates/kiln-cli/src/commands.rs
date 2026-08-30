@@ -1036,7 +1036,11 @@ mod tests {
     #[test]
     fn native_output_defaults_preserve_project_relative_directories_and_explicit_paths() {
         let root = Path::new("/tmp/project");
-        let executable = if cfg!(windows) { "main.exe" } else { "main" };
+        let executable = if cfg!(windows) {
+            "main.ts.exe"
+        } else {
+            "main.ts"
+        };
         assert_eq!(
             native_output_path(Path::new("src/main.ts"), root, None, false)
                 .expect("default output"),
@@ -1088,7 +1092,7 @@ mod tests {
             .join(".kiln")
             .join("lib")
             .join("src")
-            .join(format!("main.{expected_extension}"));
+            .join(format!("main.ts.{expected_extension}"));
         assert_eq!(
             native_output_path(Path::new("src/main.ts"), root, None, true).expect("shared output"),
             expected.to_str().expect("utf-8")
@@ -1121,9 +1125,9 @@ mod tests {
         assert!(
             output
                 .as_deref()
-                .is_some_and(|path| path.ends_with(".kiln/lib/main.so")
-                    || path.ends_with(".kiln/lib/main.dylib")
-                    || path.ends_with(".kiln/lib/main.dll"))
+                .is_some_and(|path| path.ends_with(".kiln/lib/main.ts.so")
+                    || path.ends_with(".kiln/lib/main.ts.dylib")
+                    || path.ends_with(".kiln/lib/main.ts.dll"))
         );
         let _ = std::fs::remove_dir_all(&root);
     }
