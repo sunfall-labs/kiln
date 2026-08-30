@@ -80,7 +80,7 @@ env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --release --features regexp \
+	-p kiln-native-number-ffi --release --features regexp,bigint \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"

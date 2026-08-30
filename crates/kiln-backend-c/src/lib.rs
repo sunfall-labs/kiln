@@ -251,7 +251,9 @@ enum kiln_value_tag {
     /* A property key with an identity of its own. bits holds a kiln_symbol*. */
     KILN_VALUE_SYMBOL = 19,
     /* A compiled pattern and its cursor. bits holds a kiln_regexp*. */
-    KILN_VALUE_REGEXP = 20
+    KILN_VALUE_REGEXP = 20,
+    /* An arbitrary-precision integer. bits holds the provider's opaque handle. */
+    KILN_VALUE_BIGINT = 21
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -276,6 +278,9 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_FUNCTION_PROTOTYPE 26
 /* `Function`, reached for its `prototype` rather than to construct. */
 #define KILN_C99_BUILTIN_FUNCTION 27
+/* `BigInt`, which converts and never constructs: `new BigInt(1)` is a TypeError in the
+ * specification, and the reason is that a BigInt is a primitive. */
+#define KILN_C99_BUILTIN_BIGINT 28
 
 /* Array methods, part two.
  *
@@ -919,6 +924,18 @@ int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject
 size_t kiln_regexp_group_count(const void *handle);
 int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
                                size_t capacity);
+/* Arbitrary-precision integers. The handles are opaque: everything that knows what one contains
+ * is on the other side of this boundary, which is the point (ADR 0025). */
+int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out);
+int32_t kiln_bigint_from_double(double value, void **out);
+void kiln_bigint_free(void *handle);
+double kiln_bigint_to_double(const void *handle);
+int32_t kiln_bigint_to_string(const void *handle, uint32_t radix, unsigned char *buffer,
+                              size_t capacity);
+int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *right, void **out);
+int32_t kiln_bigint_negate(const void *handle, void **out);
+int32_t kiln_bigint_compare(const void *left, const void *right);
+int32_t kiln_bigint_is_zero(const void *handle);
 
 
 /* Forward declarations.
@@ -974,6 +991,11 @@ static int kiln_c99_is_namespace(uint64_t builtin);
 static uint64_t kiln_c99_callable_method(const char *key, size_t key_len);
 static kiln_value kiln_c99_property_key(kiln_value key);
 static uint32_t kiln_c99_to_uint32(double value);
+static kiln_value kiln_c99_bigint_text(kiln_value value, uint32_t radix);
+static kiln_value kiln_c99_bigint_value(void *handle);
+static const void *kiln_c99_bigint_one(void);
+static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len,
+                                    kiln_value *out);
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
                                        size_t subject_count, const int64_t *ranges, size_t groups);
@@ -1034,6 +1056,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
+                                   kiln_value *out, kiln_value *thrown);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
@@ -1909,6 +1933,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_STRING: return "String";
     case KILN_C99_BUILTIN_MATH: return "Math";
     case KILN_C99_BUILTIN_NUMBER: return "Number";
+    case KILN_C99_BUILTIN_BIGINT: return "BigInt";
     case KILN_C99_BUILTIN_OBJECT: return "Object";
     case KILN_C99_BUILTIN_ARRAY: return "Array";
     case KILN_C99_BUILTIN_JSON: return "JSON";
@@ -2047,6 +2072,7 @@ static int kiln_c99_global_object(kiln_value *out) {
         uint64_t builtin;
     } constructors[] = {{"String", KILN_C99_BUILTIN_STRING},
                         {"Number", KILN_C99_BUILTIN_NUMBER},
+                        {"BigInt", KILN_C99_BUILTIN_BIGINT},
                         {"Boolean", KILN_C99_BUILTIN_BOOLEAN},
                         {"Object", KILN_C99_BUILTIN_OBJECT},
                         {"Array", KILN_C99_BUILTIN_ARRAY},
@@ -2137,6 +2163,70 @@ static int kiln_c99_global_object(kiln_value *out) {
     }
     *out = kiln_c99_globals;
     return KILN_C99_OK;
+}
+
+/* A BigInt written out in `radix`.
+ *
+ * The provider owns the digits, so this asks twice: once for the length and once for the bytes.
+ * A negative answer is the length it wanted, which is what makes one retry enough. */
+static kiln_value kiln_c99_bigint_text(kiln_value value, uint32_t radix) {
+    const void *handle = (const void *)(uintptr_t)value.bits;
+    char inline_buffer[64];
+    int32_t written = kiln_bigint_to_string(handle, radix, (unsigned char *)inline_buffer,
+                                            sizeof inline_buffer);
+    if (written >= 0) {
+        return kiln_c99_copy_text(inline_buffer, (size_t)written);
+    }
+    {
+        size_t needed = (size_t)(-(int64_t)written);
+        char *wide = (char *)malloc(needed == 0 ? 1 : needed);
+        kiln_value text;
+        if (wide == NULL) {
+            return kiln_c99_undefined();
+        }
+        written = kiln_bigint_to_string(handle, radix, (unsigned char *)wide, needed);
+        if (written < 0) {
+            free(wide);
+            return kiln_c99_undefined();
+        }
+        text = kiln_c99_copy_text(wide, (size_t)written);
+        free(wide);
+        return text;
+    }
+}
+
+/* A BigInt literal, parsed on first use and kept.
+ *
+ * The handle is shared by every load of the same literal, which is sound because a BigInt is
+ * immutable: the provider's arithmetic always allocates its answer rather than writing back. */
+static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len,
+                                    kiln_value *out) {
+    if (*cache == NULL) {
+        void *handle = NULL;
+        if (kiln_bigint_parse((const unsigned char *)digits, len, 10, &handle) != 0) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *cache = handle;
+    }
+    *out = kiln_c99_bigint_value(*cache);
+    return KILN_C99_OK;
+}
+
+/* `1n`, built once. Nothing frees a BigInt handle here, so a shared one is safe to keep. */
+static const void *kiln_c99_bigint_one(void) {
+    static void *one = NULL;
+    if (one == NULL) {
+        static const unsigned char digit[] = {'1'};
+        if (kiln_bigint_parse(digit, sizeof digit, 10, &one) != 0) {
+            return NULL;
+        }
+    }
+    return one;
+}
+
+/* Wrap a handle the provider just produced. */
+static kiln_value kiln_c99_bigint_value(void *handle) {
+    return kiln_c99_value(KILN_VALUE_BIGINT, (uint64_t)(uintptr_t)handle, NULL, 0);
 }
 
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
@@ -2658,6 +2748,33 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             /* `Number()` with no argument is zero, not NaN: there is nothing to fail to convert. */
             *result = kiln_c99_number(argc == 0 ? 0.0 : kiln_c99_as_number(args[0]));
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_BIGINT: {
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_number(0.0);
+            void *handle = NULL;
+            if (subject.tag == KILN_VALUE_BIGINT) {
+                *result = subject;
+                return KILN_C99_OK;
+            }
+            if (subject.tag == KILN_VALUE_STRING) {
+                /* A string that is not an integer is a SyntaxError, unlike `Number("x")` which
+                 * is NaN -- a BigInt has no NaN to be. */
+                if (kiln_bigint_parse((const unsigned char *)subject.ptr, subject.len, 10,
+                                      &handle) != 0) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                "Cannot convert this string to a BigInt");
+                }
+                *result = kiln_c99_bigint_value(handle);
+                return KILN_C99_OK;
+            }
+            /* Only an exact integer converts: `BigInt(1.5)` is a RangeError rather than a
+             * rounding, because rounding is the thing this type exists to avoid. */
+            if (kiln_bigint_from_double(kiln_c99_as_number(subject), &handle) != 0) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "The number is not a safe integer");
+            }
+            *result = kiln_c99_bigint_value(handle);
+            return KILN_C99_OK;
+        }
         case KILN_C99_BUILTIN_SYMBOL:
             return kiln_c99_new_symbol(result, argc > 0 ? args[0] : kiln_c99_undefined());
         case KILN_C99_BUILTIN_REGEXP: {
@@ -2759,6 +2876,11 @@ static kiln_value kiln_c99_number_bits(uint64_t bits) {
 static double kiln_c99_as_number(kiln_value value) {
     double number;
     switch (value.tag) {
+    case KILN_VALUE_BIGINT:
+        /* Lossy on purpose and only where the language asks for it: `Number(big)` and a
+         * comparison against a number. Arithmetic never comes through here -- mixing is a
+         * TypeError, which is what stops the precision being lost quietly. */
+        return kiln_bigint_to_double((const void *)(uintptr_t)value.bits);
     case KILN_VALUE_NULL:
         return 0.0;
     case KILN_VALUE_BOOLEAN:
@@ -2803,6 +2925,9 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
         return 1;
+    case KILN_VALUE_BIGINT:
+        /* Truthiness follows zero, not sign: `-1n` is truthy and `0n` is not. */
+        return !kiln_bigint_is_zero((const void *)(uintptr_t)value.bits);
     default:
         return 0;
     }
@@ -2914,6 +3039,11 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
     }
+    case KILN_VALUE_BIGINT: {
+        /* No `n` suffix: that is the literal's spelling, not the value's -- `String(1n)` is
+         * `"1"`. A console adds it back, which is a different question and answered there. */
+        return kiln_c99_bigint_text(value, 10);
+    }
     case KILN_VALUE_REGEXP: {
         /* `String(/a/g)` is the literal as written, which is what `toString` returns. */
         kiln_regexp *regexp = kiln_c99_regexp_of(value);
@@ -3014,6 +3144,12 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
         double r = kiln_c99_as_number(right);
         return l == r;
     }
+    if (left.tag == KILN_VALUE_BIGINT) {
+        /* A BigInt is a primitive: two are equal when the numbers are, however they were built.
+         * `1n === 1n` is true and the two handles are different allocations. */
+        return kiln_bigint_compare((const void *)(uintptr_t)left.bits,
+                                   (const void *)(uintptr_t)right.bits) == 0;
+    }
     if (left.tag == KILN_VALUE_STRING) {
         return left.len == right.len &&
                (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
@@ -3043,6 +3179,14 @@ static int kiln_c99_loose_equal(kiln_value left, kiln_value right) {
     if ((left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_STRING) ||
         (left.tag == KILN_VALUE_STRING && right.tag == KILN_VALUE_NUMBER)) {
         return kiln_c99_as_number(left) == kiln_c99_as_number(right);
+    }
+    /* `==` crosses the numeric types where `===` does not: `1n == 1` is true and `1n === 1` is
+     * false, which is the whole reason both operators exist. */
+    if (left.tag == KILN_VALUE_BIGINT || right.tag == KILN_VALUE_BIGINT) {
+        if (left.tag == KILN_VALUE_NUMBER || right.tag == KILN_VALUE_NUMBER ||
+            left.tag == KILN_VALUE_STRING || right.tag == KILN_VALUE_STRING) {
+            return kiln_c99_as_number(left) == kiln_c99_as_number(right);
+        }
     }
     return kiln_c99_strict_equal(left, right);
 }
@@ -3729,6 +3873,23 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                     target.tag == KILN_VALUE_NULL
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
+    case KILN_VALUE_BIGINT:
+        /* `toString` and `valueOf` share the number codes: the dispatch reads the receiver, and
+         * the receiver is what tells the two types apart. */
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toString") ||
+            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
     case KILN_VALUE_NUMBER:
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
@@ -4110,6 +4271,16 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
             return kiln_c99_text_append_c(text, "-0");
         }
         break;
+    }
+    case KILN_VALUE_BIGINT: {
+        /* The `n` belongs to the console, not to the value: `String(1n)` is "1" and
+         * `console.log(1n)` is `1n`, and the suffix is the only difference between them. */
+        kiln_value digits = kiln_c99_bigint_text(value, 10);
+        if (digits.tag != KILN_VALUE_STRING ||
+            kiln_c99_text_append(text, digits.ptr, digits.len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append_c(text, "n");
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(value);
@@ -5072,10 +5243,25 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_NUMBER_VALUE_OF:
             /* The three below are the exception to the comment above: they are reached through a
              * number rather than through a namespace, so the receiver is the whole subject. */
+            if (receiver.tag == KILN_VALUE_BIGINT) {
+                /* `valueOf` hands back the primitive it was called on, whichever type it is. */
+                *result = receiver;
+                return KILN_C99_OK;
+            }
             *result = kiln_c99_number(kiln_c99_as_number(receiver));
             return KILN_C99_OK;
         case KILN_C99_METHOD_NUMBER_TO_STRING: {
-            double subject = kiln_c99_as_number(receiver);
+            double subject;
+            if (receiver.tag == KILN_VALUE_BIGINT) {
+                double base = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED ? first : 10.0;
+                if (!(base >= 2.0 && base <= 36.0)) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "toString() radix must be between 2 and 36");
+                }
+                *result = kiln_c99_bigint_text(receiver, (uint32_t)base);
+                return KILN_C99_OK;
+            }
+            subject = kiln_c99_as_number(receiver);
             double radix = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED ? first : 10.0;
             if (radix == 10.0) {
                 /* Radix 10 is exactly `String(n)`, exponent rules included. */
@@ -6356,6 +6542,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             case KILN_VALUE_REGEXP: tag = "RegExp"; break;
             case KILN_VALUE_PROMISE: tag = "Promise"; break;
             case KILN_VALUE_SYMBOL: tag = "Symbol"; break;
+            case KILN_VALUE_BIGINT: tag = "BigInt"; break;
             case KILN_VALUE_FUNCTION:
             case KILN_VALUE_BUILTIN:
             case KILN_VALUE_METHOD:
@@ -9606,7 +9793,10 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     static const char string_text[] = "string";
     static const char function_text[] = "function";
     static const char symbol_text[] = "symbol";
+    static const char bigint_text[] = "bigint";
     switch (value.tag) {
+    case KILN_VALUE_BIGINT:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, bigint_text, sizeof(bigint_text) - 1);
     case KILN_VALUE_SYMBOL:
         return kiln_c99_value(KILN_VALUE_STRING, 0, symbol_text, sizeof(symbol_text) - 1);
     case KILN_VALUE_NULL:
@@ -9667,6 +9857,25 @@ static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 }
 
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
+    /* A BigInt stays one under negation and bitwise-not; `+x` is the exception, and is a
+     * TypeError in the specification precisely so that `+` cannot silently narrow one. */
+    if (value.tag == KILN_VALUE_BIGINT) {
+        void *answer = NULL;
+        if (operation == 2 && kiln_bigint_negate((const void *)(uintptr_t)value.bits, &answer) == 0) {
+            return kiln_c99_bigint_value(answer);
+        }
+        if (operation == 5) {
+            /* `~x` is `-(x + 1)`, which the provider's own arithmetic gets right for a width
+             * it does not have to guess at. */
+            const void *one = kiln_c99_bigint_one();
+            void *sum = NULL;
+            if (one != NULL &&
+                kiln_bigint_binary(1, (const void *)(uintptr_t)value.bits, one, &sum) == 0 &&
+                kiln_bigint_negate(sum, &answer) == 0) {
+                return kiln_c99_bigint_value(answer);
+            }
+        }
+    }
     /* Only the numeric operators coerce.  `typeof` reports a type, `void` discards, and `!` asks
      * whether the value is truthy -- a function always is. */
     if (kiln_c99_is_reference(value) &&
@@ -9764,6 +9973,73 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
     }
 }
 
+/* The operators that can throw.
+ *
+ * Only BigInt makes an operator throw before anything is called, so this wraps
+ * `kiln_c99_binary` rather than replacing it: everything without a BigInt operand takes the
+ * same path it always did, and only the three throwing cases are spelled out here.
+ *
+ * The provider owns the arithmetic (ADR 0025) -- writing arbitrary-precision division twice is
+ * exactly the duplication that pattern exists to prevent -- so this is the type dispatch and the
+ * error surface around it, nothing more. */
+static int kiln_c99_binary_checked(uint16_t operation, kiln_value left, kiln_value right,
+                                   kiln_value *out, kiln_value *thrown) {
+    int left_big = left.tag == KILN_VALUE_BIGINT;
+    int right_big = right.tag == KILN_VALUE_BIGINT;
+    const void *a;
+    const void *b;
+    uint32_t provider_op = 0;
+    void *answer = NULL;
+    int32_t status;
+    if (!left_big && !right_big) {
+        *out = kiln_c99_binary(operation, left, right);
+        return KILN_C99_OK;
+    }
+    if (!left_big || !right_big) {
+        /* Comparison across the two *is* allowed -- only arithmetic is not -- and so is `==`.
+         * Both are answered by the ordinary numeric path, which reads a BigInt as a double. */
+        if (operation >= 1 && operation <= 6) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot mix BigInt and other types, use explicit conversions");
+        }
+        *out = kiln_c99_binary(operation, left, right);
+        return KILN_C99_OK;
+    }
+    a = (const void *)(uintptr_t)left.bits;
+    b = (const void *)(uintptr_t)right.bits;
+    switch (operation) {
+    case 7: case 15: *out = kiln_c99_boolean(kiln_bigint_compare(a, b) == 0); return KILN_C99_OK;
+    case 8: case 16: *out = kiln_c99_boolean(kiln_bigint_compare(a, b) != 0); return KILN_C99_OK;
+    case 9:  *out = kiln_c99_boolean(kiln_bigint_compare(a, b) < 0); return KILN_C99_OK;
+    case 10: *out = kiln_c99_boolean(kiln_bigint_compare(a, b) <= 0); return KILN_C99_OK;
+    case 11: *out = kiln_c99_boolean(kiln_bigint_compare(a, b) > 0); return KILN_C99_OK;
+    case 12: *out = kiln_c99_boolean(kiln_bigint_compare(a, b) >= 0); return KILN_C99_OK;
+    /* The provider numbers its arithmetic 1..6 the same way; only the bitwise three differ. */
+    case 1: case 2: case 3: case 4: case 5: case 6: provider_op = operation; break;
+    case 17: provider_op = 7; break;
+    case 18: provider_op = 8; break;
+    case 19: provider_op = 9; break;
+    default:
+        /* `in`, `instanceof` and the shifts are not BigInt operators here; the numeric path
+         * answers them the way it answers any other value. */
+        *out = kiln_c99_binary(operation, left, right);
+        return KILN_C99_OK;
+    }
+    status = kiln_bigint_binary(provider_op, a, b, &answer);
+    if (status != 0) {
+        /* Division truncates toward zero and by zero is a RangeError, neither of which matches
+         * what a number would do. A negative exponent is the other one. */
+        if (provider_op == 6) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Exponent must be non-negative");
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Division by zero");
+    }
+    *out = kiln_c99_bigint_value(answer);
+    return KILN_C99_OK;
+}
+
+
 "#;
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled
@@ -9789,17 +10065,6 @@ fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
     if program.code.is_empty() {
         return Err(EmitError::InvalidProgram {
             message: "program has no instructions".into(),
-        });
-    }
-    // The native value representation has no arbitrary-precision integer, and truncating one
-    // into a double is the one thing a BigInt exists to prevent.
-    if program
-        .constants
-        .iter()
-        .any(|constant| matches!(constant, Constant::BigInt(_)))
-    {
-        return Err(EmitError::Unsupported {
-            feature: "BigInt literals in the native backend".to_string(),
         });
     }
     for proto in &program.functions {
@@ -10051,6 +10316,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Symbol
             | kiln_ir::Builtin::RegExp
             | kiln_ir::Builtin::GlobalThis
+            | kiln_ir::Builtin::BigInt
             | kiln_ir::Builtin::Function,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
@@ -10507,7 +10773,14 @@ fn produces_references(program: &Program) -> bool {
             )
         })
     };
-    !scalar_only(&program.code)
+    // A BigInt is the exception to the list above: it makes an *operator* throw -- `1n + 1` is
+    // a TypeError and `1n / 0n` a RangeError -- so a body holding one needs somewhere to put the
+    // thrown value even when every instruction in it is scalar.
+    program
+        .constants
+        .iter()
+        .any(|constant| matches!(constant, Constant::BigInt(_)))
+        || !scalar_only(&program.code)
         || !program
             .functions
             .iter()
@@ -10836,6 +11109,34 @@ fn render_function(
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
 }
 
+/// The constant table.
+///
+/// A string is its bytes. A BigInt is its digits plus a slot for the handle the provider builds
+/// from them on first use: parsing is not free and a literal's value never changes, so the unit
+/// pays for it once however often the literal is loaded.
+fn render_constant_declarations(output: &mut String, program: &Program, symbol: &str) {
+    for (index, constant) in program.constants.iter().enumerate() {
+        match constant {
+            Constant::String(value) => writeln!(
+                output,
+                "static const char {symbol}_constant_{index}[] = {};",
+                c_string(value)
+            )
+            .unwrap(),
+            Constant::BigInt(digits) => {
+                writeln!(
+                    output,
+                    "static const char {symbol}_constant_{index}[] = {};",
+                    c_string(digits)
+                )
+                .unwrap();
+                writeln!(output, "static void *{symbol}_bigint_{index} = NULL;").unwrap();
+            }
+            Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
+        }
+    }
+}
+
 fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     let plan = validate_program(program).expect("render called after validation");
     let max_stack = plan.body;
@@ -10846,16 +11147,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         "/* Program hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}. */"
     )
     .unwrap();
-    for (index, constant) in program.constants.iter().enumerate() {
-        if let Constant::String(value) = constant {
-            writeln!(
-                output,
-                "static const char {symbol}_constant_{index}[] = {};",
-                c_string(value)
-            )
-            .unwrap();
-        }
-    }
+    render_constant_declarations(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -10938,16 +11230,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         module.exports.len()
     )
     .unwrap();
-    for (index, constant) in program.constants.iter().enumerate() {
-        if let Constant::String(value) = constant {
-            writeln!(
-                output,
-                "static const char {symbol}_constant_{index}[] = {};",
-                c_string(value)
-            )
-            .unwrap();
-        }
-    }
+    render_constant_declarations(&mut output, program, symbol);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -11198,9 +11481,12 @@ fn emit_instruction(
             Constant::String(value) => {
                 writeln!(output, "    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant}, {});", value.len()).unwrap()
             }
-            Constant::BigInt(_) => {
-                unreachable!("verification rejects a BigInt constant before emission")
-            }
+            Constant::BigInt(digits) => writeln!(
+                output,
+                "    {{ int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }}",
+                digits.len()
+            )
+            .unwrap(),
         },
         // A cell is a shared box: the slot stops holding the value and starts holding a
         // pointer to it, so that a closure over the variable and the frame that declared it are
@@ -11637,6 +11923,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::Symbol => "kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL)",
                 kiln_ir::Builtin::RegExp => "kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP)",
                 kiln_ir::Builtin::Function => "kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION)",
+                kiln_ir::Builtin::BigInt => "kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT)",
                 kiln_ir::Builtin::SetTimeout => "kiln_c99_method(KILN_C99_METHOD_SET_TIMEOUT)",
                 kiln_ir::Builtin::SetInterval => "kiln_c99_method(KILN_C99_METHOD_SET_INTERVAL)",
                 kiln_ir::Builtin::ClearTimeout => {
@@ -11669,8 +11956,17 @@ fn emit_instruction(
         Instruction::Unary(operator) => {
             writeln!(output, "    stack[sp - 1] = kiln_c99_unary({}, stack[sp - 1]);", unary_code(*operator)).unwrap()
         }
-        Instruction::Binary(operator) => {
+        Instruction::Binary(operator) if !*callables => {
+            // A scalar program has no BigInt in it and so no operator in it can throw. It also
+            // has nowhere to put a thrown value -- the entry point declares that slot only when
+            // something can reach it -- so this is the form that program has to keep.
             writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap()
+        }
+        Instruction::Binary(operator) => {
+            // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
+            // hands every other case straight back to `kiln_c99_binary`.
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, left, right, &answer, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap()
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
@@ -12219,13 +12515,14 @@ mod tests {
         }
     }
 
-    /// The regexp half of the provider ABI, for tests that link the vendored C number runtime.
+    /// The engine half of the provider ABI, for tests that link the vendored C number runtime.
     ///
     /// `kiln-native-number`'s C is a *test fixture*: production links the Rust provider archive,
     /// which defines these. Tests here exercise the emitted C's own logic and none of them
-    /// compiles a pattern -- so a fixture that refuses every pattern is honest, and a test that
-    /// did need one would get a visible SyntaxError rather than a quiet wrong answer. Such a test
-    /// belongs in `conformance/native`, where the real archive is linked.
+    /// compiles a pattern or does arbitrary-precision arithmetic -- so a fixture that refuses
+    /// every one is honest, and a test that did need one would get a visible error rather than a
+    /// quiet wrong answer. Such a test belongs in `conformance/native`, where the real archive is
+    /// linked.
     const REGEXP_FIXTURE: &str = r#"
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle) {
@@ -12245,6 +12542,28 @@ int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *
     (void)handle; (void)index; (void)buffer; (void)capacity;
     return -1;
 }
+int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out) {
+    (void)text; (void)len; (void)radix; (void)out;
+    return -1;
+}
+int32_t kiln_bigint_from_double(double value, void **out) { (void)value; (void)out; return -1; }
+void kiln_bigint_free(void *handle) { (void)handle; }
+double kiln_bigint_to_double(const void *handle) { (void)handle; return 0.0; }
+int32_t kiln_bigint_to_string(const void *handle, uint32_t radix, unsigned char *buffer,
+                              size_t capacity) {
+    (void)handle; (void)radix; (void)buffer; (void)capacity;
+    return -1;
+}
+int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *right, void **out) {
+    (void)operation; (void)left; (void)right; (void)out;
+    return -1;
+}
+int32_t kiln_bigint_negate(const void *handle, void **out) { (void)handle; (void)out; return -1; }
+int32_t kiln_bigint_compare(const void *left, const void *right) {
+    (void)left; (void)right;
+    return 0;
+}
+int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
 "#;
 
     fn linked_source(module_source: &str, wrapper: &str) -> String {

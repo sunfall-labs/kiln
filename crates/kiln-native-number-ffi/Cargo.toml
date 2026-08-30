@@ -18,6 +18,7 @@ crate-type = ["rlib"]
 # panic handlers and no way to compile.
 default = []
 regexp = ["dep:regress"]
+bigint = ["dep:num-bigint", "dep:num-traits"]
 
 [dependencies]
 kiln-number-core = { workspace = true }
@@ -28,3 +29,8 @@ regress = { version = "0.12", default-features = false, features = [
 	"alloc",
 	"utf16",
 ], optional = true }
+# The arbitrary-precision integers, in their `no_std` shape -- the same crate the interpreter
+# links, for the same reason `regress` is: two implementations of one exactly-specified thing
+# agree until one of them has a bug, and then nothing can tell which.
+num-bigint = { version = "0.4", default-features = false, optional = true }
+num-traits = { version = "0.2", default-features = false, optional = true }

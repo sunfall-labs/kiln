@@ -1,8 +1,9 @@
 //! Private C ABI adapter for the semantics a generated artifact cannot compute for itself.
 //!
-//! Two of those so far: ECMAScript number conversion, whose shortest spelling no printf
-//! conversion can express, and regular expressions, which are an engine rather than a function
-//! (ADR 0025). Both are here for the same reason -- one implementation, shared with the
+//! Three of those so far: ECMAScript number conversion, whose shortest spelling no printf
+//! conversion can express; regular expressions, which are an engine rather than a function; and
+//! arbitrary-precision integers, which are exactly specified and still no easier to get right
+//! twice (ADR 0025). All three are here for the same reason -- one implementation, shared with the
 //! interpreter, rather than two that agree until they do not.
 //!
 //! The exported names are link-time implementation details of generated artifacts, not additions
@@ -21,7 +22,7 @@
     clippy::unwrap_used
 )]
 
-#[cfg(feature = "regexp")]
+#[cfg(any(feature = "regexp", feature = "bigint"))]
 extern crate alloc;
 
 #[cfg(not(test))]
@@ -34,7 +35,7 @@ const INVALID_ARGUMENT: i32 = -1;
 /// `malloc` and `free`, because the generated artifact this is linked into already has them and a
 /// second allocator would be a second heap in one process. Alignment above `max_align_t` goes
 /// through `posix_memalign`, which is the only part `malloc` cannot promise.
-#[cfg(all(not(test), feature = "regexp"))]
+#[cfg(all(not(test), any(feature = "regexp", feature = "bigint")))]
 mod heap {
     use core::alloc::{GlobalAlloc, Layout};
 
@@ -386,6 +387,272 @@ mod regexp {
     /// An offset that fits the boundary type, saturating rather than wrapping.
     fn as_offset(value: usize) -> i64 {
         i64::try_from(value).unwrap_or(i64::MAX)
+    }
+}
+
+/// Arbitrary-precision integers, exactly as the interpreter holds them.
+///
+/// A BigInt exists to be exact, so the one thing this must never do is lose a digit. Handing the
+/// work to `num-bigint` -- the crate the interpreter already links -- is what makes "the two
+/// engines agree" a property of the build rather than of the test suite.
+//
+// The crate denies `arithmetic_side_effects` because a fixed-width overflow is a silent wrong
+// answer. Arbitrary-precision arithmetic has no such failure -- it grows instead -- and the two
+// operations that *can* fail, division by zero and an exponent no machine can hold, are checked
+// before they run.
+#[expect(clippy::arithmetic_side_effects)]
+#[cfg(feature = "bigint")]
+mod bigint {
+    use super::INVALID_ARGUMENT;
+    use alloc::boxed::Box;
+    use num_bigint::BigInt;
+    use num_traits::{FromPrimitive, Pow, Signed, ToPrimitive, Zero};
+
+    /// An operation the language defines but this cannot perform: division by zero, or an
+    /// exponent no machine could represent. The caller turns it into a RangeError.
+    const OUT_OF_RANGE: i32 = -2;
+
+    /// The binary operators, numbered. Stable only within one generated unit, like every other
+    /// operation code in the emitted runtime.
+    const ADD: u32 = 1;
+    const SUBTRACT: u32 = 2;
+    const MULTIPLY: u32 = 3;
+    const DIVIDE: u32 = 4;
+    const REMAINDER: u32 = 5;
+    const EXPONENTIATE: u32 = 6;
+    const BITWISE_AND: u32 = 7;
+    const BITWISE_OR: u32 = 8;
+    const BITWISE_XOR: u32 = 9;
+
+    /// Parse a digit string in `radix`, with an optional leading sign.
+    ///
+    /// # Safety
+    ///
+    /// `text` must name a readable span of `len` bytes when `len` is nonzero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_parse(
+        text: *const u8,
+        len: usize,
+        radix: u32,
+        out: *mut *mut BigInt,
+    ) -> i32 {
+        if out.is_null() || !(2..=36).contains(&radix) {
+            return INVALID_ARGUMENT;
+        }
+        if len == 0 {
+            return INVALID_ARGUMENT;
+        }
+        if text.is_null() || len > isize::MAX as usize {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: checked above and guaranteed by the caller contract.
+        let bytes = unsafe { core::slice::from_raw_parts(text, len) };
+        let Ok(digits) = core::str::from_utf8(bytes) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(parsed) = BigInt::parse_bytes(digits.trim().as_bytes(), radix) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: `out` is a writable slot by the caller contract.
+        unsafe { out.write(Box::into_raw(Box::new(parsed))) };
+        0
+    }
+
+    /// `BigInt(n)`, which requires an integral finite number: rounding here would be the one thing
+    /// a BigInt exists to prevent.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_from_double(value: f64, out: *mut *mut BigInt) -> i32 {
+        if out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // `trunc` rather than `fract`: `num_traits` brings its own `fract` into scope here and
+        // the two disagree about nothing except which one the compiler picks.
+        if !value.is_finite() || value != libm_trunc(value) {
+            return OUT_OF_RANGE;
+        }
+        let Some(converted) = BigInt::from_f64(value) else {
+            return OUT_OF_RANGE;
+        };
+        // SAFETY: `out` is a writable slot by the caller contract.
+        unsafe { out.write(Box::into_raw(Box::new(converted))) };
+        0
+    }
+
+    /// # Safety
+    ///
+    /// `handle` must have come from one of the constructors above and must not be used again.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_free(handle: *mut BigInt) {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the caller contract guarantees the pointer came from `Box::into_raw`.
+        drop(unsafe { Box::from_raw(handle) });
+    }
+
+    /// The nearest double, which is what a comparison against a number needs -- and is lossy by
+    /// definition, which is why nothing else uses it.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_to_double(handle: *const BigInt) -> f64 {
+        if handle.is_null() {
+            return f64::NAN;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        unsafe { &*handle }.to_f64().unwrap_or(f64::NAN)
+    }
+
+    /// Whether the value is zero, which is the whole of a BigInt's truthiness.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_is_zero(handle: *const BigInt) -> i32 {
+        if handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        i32::from(unsafe { &*handle }.is_zero())
+    }
+
+    /// `-1`, `0` or `1`, or `-2` when either handle is null.
+    ///
+    /// # Safety
+    ///
+    /// Both handles must be live.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_compare(left: *const BigInt, right: *const BigInt) -> i32 {
+        if left.is_null() || right.is_null() {
+            return OUT_OF_RANGE;
+        }
+        // SAFETY: the caller contract guarantees both handles are live.
+        let (left, right) = unsafe { (&*left, &*right) };
+        match left.cmp(right) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        }
+    }
+
+    /// The value written in `radix`, as UTF-8 without a terminator, or the required length as a
+    /// negative number when the buffer is too small.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and `buffer` must be writable for `capacity` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_to_string(
+        handle: *const BigInt,
+        radix: u32,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> i32 {
+        if handle.is_null() || !(2..=36).contains(&radix) {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        let text = unsafe { &*handle }.to_str_radix(radix);
+        let bytes = text.as_bytes();
+        let Ok(length) = i32::try_from(bytes.len()) else {
+            return INVALID_ARGUMENT;
+        };
+        if bytes.len() > capacity || buffer.is_null() {
+            // Negative, so the caller can size a buffer and ask again rather than guessing.
+            return length.saturating_neg();
+        }
+        // SAFETY: the length is within the capacity the caller promised.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+        length
+    }
+
+    /// One binary operation.
+    ///
+    /// # Safety
+    ///
+    /// Both handles must be live and `out` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_binary(
+        operation: u32,
+        left: *const BigInt,
+        right: *const BigInt,
+        out: *mut *mut BigInt,
+    ) -> i32 {
+        if left.is_null() || right.is_null() || out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees both handles are live.
+        let (left, right) = unsafe { (&*left, &*right) };
+        let produced = match operation {
+            ADD => left + right,
+            SUBTRACT => left - right,
+            MULTIPLY => left * right,
+            // Division truncates toward zero and by zero is a RangeError, neither of which
+            // matches what a number would do.
+            DIVIDE | REMAINDER => {
+                if right.is_zero() {
+                    return OUT_OF_RANGE;
+                }
+                if operation == DIVIDE {
+                    left / right
+                } else {
+                    left % right
+                }
+            }
+            EXPONENTIATE => {
+                if right.is_negative() {
+                    return OUT_OF_RANGE;
+                }
+                let Some(exponent) = right.to_u32() else {
+                    return OUT_OF_RANGE;
+                };
+                Pow::pow(left.clone(), exponent)
+            }
+            BITWISE_AND => left & right,
+            BITWISE_OR => left | right,
+            BITWISE_XOR => left ^ right,
+            _ => return INVALID_ARGUMENT,
+        };
+        // SAFETY: `out` is a writable slot by the caller contract.
+        unsafe { out.write(Box::into_raw(Box::new(produced))) };
+        0
+    }
+
+    /// `trunc` without pulling in a math library: a double's integral part.
+    fn libm_trunc(value: f64) -> f64 {
+        // `as i64` would saturate for anything large, which is exactly the case that matters.
+        if value.abs() >= 9_007_199_254_740_992.0 {
+            return value;
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        let whole = value as i64;
+        #[expect(clippy::cast_precision_loss)]
+        let whole = whole as f64;
+        whole
+    }
+
+    /// `-x`, which is the only unary operation a BigInt has that is not a comparison.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and `out` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_negate(handle: *const BigInt, out: *mut *mut BigInt) -> i32 {
+        if handle.is_null() || out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        let negated = -(unsafe { &*handle }).clone();
+        // SAFETY: `out` is a writable slot by the caller contract.
+        unsafe { out.write(Box::into_raw(Box::new(negated))) };
+        0
     }
 }
 

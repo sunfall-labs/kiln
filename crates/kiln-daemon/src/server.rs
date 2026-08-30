@@ -7,7 +7,7 @@
 
 use kiln_db::{MemoEngine, QueryEngine};
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{Request, Response, SourceDigest, SourceView, SyncId};
+use kiln_proto::{Request, ResolutionMap, Response, SourceDigest, SourceView, SyncId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{self, BufReader, ErrorKind};
@@ -53,6 +53,16 @@ struct PendingSync {
     manifest: BTreeMap<String, SourceDigest>,
     needed: BTreeSet<String>,
     staged: BTreeMap<String, String>,
+    /// The package resolutions the client pinned for this snapshot.
+    ///
+    /// Carried rather than consumed: linking does not read them yet, and dropping them at the
+    /// door would make the field look optional when the protocol says it is not. Held here, the
+    /// commit that starts using them has them already. See NOTES.md.
+    #[expect(
+        dead_code,
+        reason = "held for the commit path that will link against it"
+    )]
+    resolutions: ResolutionMap,
 }
 
 impl fmt::Display for DaemonError {
@@ -400,6 +410,7 @@ fn begin_sync<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     id: SyncId,
     files: Vec<kiln_proto::SourceHash>,
+    resolutions: ResolutionMap,
 ) -> (Response, Option<PendingSync>) {
     let mut manifest = BTreeMap::new();
     let mut duplicates = BTreeSet::new();
@@ -451,6 +462,7 @@ fn begin_sync<E: QueryEngine>(
             manifest,
             needed,
             staged: BTreeMap::new(),
+            resolutions,
         }),
     )
 }
@@ -646,10 +658,10 @@ fn handle<E: QueryEngine>(
     request: Request,
 ) -> (Response, Next) {
     match request {
-        Request::Sync { files } => {
+        Request::Sync { files, resolutions } => {
             let id = SyncId(*next_sync_id);
             *next_sync_id = next_sync_id.wrapping_add(1);
-            let (response, transaction) = begin_sync(state, id, files);
+            let (response, transaction) = begin_sync(state, id, files, resolutions);
             if let Some(transaction) = transaction {
                 *pending = Some(transaction);
             }

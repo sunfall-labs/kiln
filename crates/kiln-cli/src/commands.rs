@@ -15,8 +15,8 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome, TestSummary,
-    source_digest,
+    NativeProfile, ResolutionMap, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome,
+    TestSummary, source_digest,
 };
 use serde_json::json;
 
@@ -669,7 +669,12 @@ fn sync_project_sources_with_override(
     // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
     // never re-walk the filesystem or mix snapshots.
     for attempt in 0..=1 {
-        let plan = backend.begin_sync(files.clone())?;
+        // An empty map, anchored at the project root: this client does not resolve packages
+        // against a lockfile yet, and the protocol wants what the client actually pinned rather
+        // than a plausible-looking one. See NOTES.md.
+        let resolutions = ResolutionMap::new(root.to_string_lossy().as_ref(), Vec::new())
+            .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
+        let plan = backend.begin_sync(files.clone(), resolutions)?;
         let needed = plan.paths.into_iter().collect::<HashSet<_>>();
         for (path, text) in &texts {
             if needed.contains(path) {
@@ -1147,7 +1152,7 @@ mod tests {
                 // A cold daemon: it holds nothing, so everything named is needed. That keeps
                 // these tests asserting the push path rather than the skip path; the skip path
                 // is covered end to end in the daemon's own tests.
-                Request::Sync { files } => Response::Needed {
+                Request::Sync { files, .. } => Response::Needed {
                     sync_id: kiln_proto::SyncId(1),
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
@@ -1587,7 +1592,7 @@ mod tests {
             backend.inner.names(),
             ["Sync", "StageSource", "CommitSync", "NativeBuild"]
         );
-        let Request::Sync { files } = &backend.inner.seen[0] else {
+        let Request::Sync { files, .. } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
@@ -1628,7 +1633,7 @@ mod tests {
             backend.inner.names(),
             ["Sync", "StageSource", "CommitSync", "NativeRun"]
         );
-        let Request::Sync { files } = &backend.inner.seen[0] else {
+        let Request::Sync { files, .. } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
@@ -1959,7 +1964,7 @@ mod tests {
             ],
             "the two sources are named once, then pushed because the fake holds nothing"
         );
-        let Request::Sync { files } = &fake.seen[1] else {
+        let Request::Sync { files, .. } = &fake.seen[1] else {
             panic!("second request must be the sync handshake");
         };
         assert_eq!(
@@ -2086,7 +2091,7 @@ mod tests {
 
         let mut fake = Fake::new();
         sync_project_sources(&mut fake, &dir).expect("initial sync");
-        let Request::Sync { files } = &fake.seen[0] else {
+        let Request::Sync { files, .. } = &fake.seen[0] else {
             panic!("first request must be the sync handshake");
         };
         let first_paths: BTreeSet<_> = files.iter().map(|file| file.path.as_str()).collect();
@@ -2098,7 +2103,7 @@ mod tests {
         let second_start = fake.seen.len();
         sync_project_sources(&mut fake, &dir).expect("sync after deletion");
         let second_requests = &fake.seen[second_start..];
-        let Request::Sync { files } = &second_requests[0] else {
+        let Request::Sync { files, .. } = &second_requests[0] else {
             panic!("first request after deletion must be the sync handshake");
         };
         assert_eq!(files.len(), 1);
@@ -2134,7 +2139,7 @@ mod tests {
         run_source(&mut fake, &path, &dir, &canonical, captured.to_owned())
             .expect("captured snapshot runs");
 
-        let Request::Sync { files } = &fake.seen[0] else {
+        let Request::Sync { files, .. } = &fake.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);

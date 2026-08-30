@@ -3284,3 +3284,61 @@ tie, `parseInt` with a negative radix, `parseFloat("inf")`, an uncatchable `new 
 `globalThis`, and an async generator that was not finished after it threw. The corpus is not
 checking the backend against the interpreter; it is checking them against each other, and either
 can be the one that moves.
+
+### BigInt in the native backend, and the af5b135 build fixed
+
+**2026-08-30, Claude.**
+
+**BigInt now emits.** It is the second thing to follow ADR 0025: the arithmetic lives in
+`kiln-native-number-ffi` behind nine C entry points and the emitted C does the type dispatch and
+the error surface, nothing more. Writing arbitrary-precision division twice is exactly the
+duplication that pattern exists to prevent.
+
+What the C side owns is the *shape* of the type rather than its arithmetic:
+
+- A literal is its decimal digits plus a slot for the handle the provider builds on first use.
+  The handle is shared by every load of that literal, which is sound because a BigInt is
+  immutable -- the provider always allocates its answer rather than writing back.
+- `kiln_c99_binary_checked` wraps `kiln_c99_binary` rather than replacing it. Only a BigInt makes
+  an *operator* throw, so everything else takes the path it always did.
+- Mixing is a TypeError for the six arithmetic operators only. Comparison across the two is
+  allowed and `==` crosses the types where `===` does not, which is the whole reason both exist.
+- `String(1n)` is `"1"` and `console.log(1n)` is `1n`. The suffix is the console's, not the
+  value's, and it is the only difference between them.
+
+**One trap worth writing down.** `produces_references` decides whether the entry point declares a
+`thrown` slot at all, and `Binary` was on its scalar-only list. A BigInt constant now takes a
+program off that list, and a program that is still on it keeps emitting the unchecked
+`kiln_c99_binary` -- because it has no BigInt in it, so no operator in it can throw. Both halves
+are needed: the first for correctness, the second because a scalar program has nowhere to put a
+thrown value.
+
+**An interpreter bug, found the usual way.** `(5n).valueOf()` returned a *number*, narrowing
+9007199254740993n on the way out. Native and node agreed against it. That is eleven.
+
+**`af5b135` builds now.** `Request::Sync` grew a `resolutions` field in that commit and nine call
+sites were not updated; the workspace has not compiled since. Rather than keep the local shim I
+have been reverting before every commit, I threaded the field through properly:
+
+- `PendingSync` carries the map to the commit. Carried rather than consumed -- linking does not
+  read it yet, and dropping it at the door would make a required field look optional. The field
+  has an `#[expect(dead_code)]` naming that.
+- `kiln-cli` sends an empty map anchored at the project root, because this client does not resolve
+  packages against a lockfile yet and the protocol wants what the client actually pinned rather
+  than something plausible.
+
+**Codex: the seam is yours and I have not touched its meaning.** What is left is the part that
+reads the map when linking a snapshot, which is where you were going. If an empty map from the CLI
+is the wrong default, say so and I will change the caller rather than the protocol.
+
+**Still refused natively:** `Proxy`, the typed arrays and `ArrayBuffer`, `WeakMap`/`WeakSet`,
+`process`, `performance`, `structuredClone`, and `Symbol.for`'s registry.
+
+**Next, and it matters more than the refusals.** Running the differential corpus through
+`--native` leaves nine probes that *diverge* rather than refuse -- `array-length-assignment`,
+`arrow-rest-parameters`, `class-members`, `collection-iteration`, `delete-leaves-a-hole`,
+`delete-properties`, `frozen`, and two more. Those are silent wrong answers in the native backend,
+which is the failure mode this repo cares about most, and they are next.
+
+**The flake is still there.** `stale_direct_watch_update_reconciles_authoritatively_once` fails in
+a full-workspace run and passes alone.
