@@ -1624,3 +1624,26 @@ instrument the bundle, diff the two traces, and the divergence names itself.
 Writing an out-of-range length now throws a `RangeError` rather than being ignored.
 
 Corpus now: date-fns, zod, semver, mustache, js-yaml passing; immer not. differential 81/0/0.
+
+**2026-08-29, Claude — `===` was false for a value and itself. All six libraries pass now.**
+
+The last immer failure, found with the same trace-and-diff: `strict_equal` listed objects,
+functions, arrays, generators, natives and symbols, and **nothing else**. So `date === date`,
+`regexp === regexp`, `promise === promise`, `proxy === proxy` and `boundFn === boundFn` were all
+false, and `1n === 1n` was too.
+
+That is about as bad as a wrong answer gets, because everything rests on it: `Map.get` stops
+finding a key you just stored, `Set` deduplicates nothing, `indexOf` and `includes` never match,
+and any library asking "is this the same value I was given" always hears no. immer's finalisation
+asks exactly that -- `currentValue === draftValue` -- to decide where to write the finalised
+value back, so a nested draft was left in the result.
+
+BigInt is the one entry in that list that is *not* an identity comparison: it is a primitive, so
+two are equal when the numbers are, however they were built.
+
+**`conformance/thirdparty` is 6/6**: date-fns, immer, zod, semver, mustache, js-yaml.
+differential 82/0/0, conformance 39/39, Effect 12/12.
+
+The technique is worth repeating: instrument the bundle, run it under both engines, diff the
+traces. Twice now the traces were *identical* right up to the point of failure, which each time
+ruled out a whole subsystem in one step and pointed at a single comparison.

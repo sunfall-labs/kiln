@@ -10328,6 +10328,20 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::Callback(a), Value::Callback(b)) => a == b,
         (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
         (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
+        // Every other object kind compares by identity for the same reason: each is one object,
+        // and `x === x` has to hold for it. Leaving any of them out of this list makes a value
+        // unequal to itself, which is the kind of wrong answer nothing recovers from -- a `Map`
+        // keyed on one stops finding it, and a library checking whether a value is the same one
+        // it stored always says no.
+        (Value::Date(a), Value::Date(b)) => Rc::ptr_eq(a, b),
+        (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
+        (Value::Promise(a), Value::Promise(b)) => Rc::ptr_eq(a, b),
+        (Value::Proxy(a), Value::Proxy(b)) => Rc::ptr_eq(a, b),
+        (Value::Bound(a), Value::Bound(b)) => Rc::ptr_eq(a, b),
+        (Value::Settler(a, one), Value::Settler(b, other)) => Rc::ptr_eq(a, b) && one == other,
+        // A BigInt is a primitive: two of them are equal when the numbers are, however they were
+        // built. That is the one entry here that is not an identity comparison.
+        (Value::BigInt(a), Value::BigInt(b)) => a == b,
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
         _ => false,
     }

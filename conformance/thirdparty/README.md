@@ -11,9 +11,9 @@ than a missing feature:
 - **date-fns** found that `s[0]` on a string was `undefined`, that a `Date` had no setters, and
   that no intrinsic value answered `constructor`.
 - **immer** found that `globalThis` was a fresh object on every read, so anything stored on it
-  vanished and `globalThis === globalThis` was false. It is the one that does not pass yet. `Proxy` exists now
-  and immer gets much further with it -- drafts are created, writes go through -- but its finalisation leaves a nested
-  draft in the result where node replaces it with a plain object.
+  vanished and `globalThis === globalThis` was false. It later found the larger one: `===` was
+  false for a proxy, and for a date, a regexp, a promise, a bound function and a BigInt. Every
+  one of those was unequal to itself.
 - **semver** found that `Map.prototype.values()` and `.keys()` yielded whole `[key, value]`
   pairs, so `[...map.values()]` was an array of pairs; that `Map`/`Set` had no `forEach`; and that
   a regexp's `toString` was `Error.prototype.toString`, so every regexp stringified as "Error".
@@ -25,6 +25,8 @@ than a missing feature:
   ordinary property called "length" and the speculative events stayed, so a nested mapping
   composed against a duplicated event stream. Only nested mappings failed, which is what made it
   worth chasing: a flat one and a sequence both parsed.
+All six pass. What each found is kept because it is the record of what only real code finds:
+
 - **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
   instead of defining an own property, that a named function expression could not call itself,
   and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
