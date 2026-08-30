@@ -443,11 +443,12 @@ mod tests {
     #[test]
     fn unsupported_hir_is_not_a_negative_runtime_pass() {
         // Whatever construct stands in here has to be one the frontend still refuses, so this
-        // test moves as the language coverage grows -- it has already been `function f() {}`,
-        // `switch (0) {}` and `async function f() {}`, all of which stopped refusing. That churn
-        // is the signal working: a refused construct must never be scored as a negative test's
-        // expected failure.
-        let mut negative = case("class Probe { #hidden = 1; }\n");
+        // test has moved four times as coverage grew -- `function f() {}`, `switch (0) {}`,
+        // `async function f() {}` and `#private` all stopped refusing. `with` should be the last
+        // move: it is forbidden in strict mode, modules are always strict, and implementing it
+        // would be a step backwards. That churn was the signal working, though: a refused
+        // construct must never be scored as a negative test's expected failure.
+        let mut negative = case("with (this) {}\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,

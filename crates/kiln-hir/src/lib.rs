@@ -143,6 +143,10 @@ pub enum ObjectMember {
 pub enum ObjectKey {
     Static(String),
     Computed(Expression),
+    /// `#name`. Not a string key that happens to start with a hash: a private name is not
+    /// inherited, is not enumerable, and cannot be reached by any computed access -- so the only
+    /// thing it shares with a string key is where it is written.
+    Private(String),
 }
 
 /// A class: a constructor function plus methods installed on its prototype.
@@ -537,6 +541,26 @@ pub enum ExpressionKind {
     /// `yield` are different in the source and a diagnostic that named the wrong one would be
     /// confusing.
     Await(Box<Expression>),
+    /// `object.#name`.
+    ///
+    /// Its own node because the lookup is different in kind: a private name is found on the
+    /// object itself or nowhere, and "nowhere" is a TypeError rather than `undefined`. That
+    /// own-only rule *is* the brand check -- an object of another class simply does not have it.
+    PrivateMember {
+        object: Box<Expression>,
+        name: String,
+    },
+    /// `object.#name = value`, including the compound forms.
+    ///
+    /// Separate from [`ExpressionKind::MemberAssignment`] for the same reason the read is
+    /// separate: the target must already exist, and it not existing is an error rather than a
+    /// property being created.
+    PrivateAssignment {
+        operator: AssignmentOperator,
+        object: Box<Expression>,
+        name: String,
+        value: Box<Expression>,
+    },
     /// `delete object.property`.
     ///
     /// Not a unary operator over a member expression: the operand must not be *read*, and a

@@ -122,16 +122,14 @@ fn a_manifest_entry_whose_file_is_missing_fails_and_names_it() {
 
 #[test]
 fn a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason() {
-    // The construct here only has to be one the compiler still refuses, so it moves as coverage
-    // grows -- it has already been `typeof {}`, `switch` and `async function`. What is being
-    // tested is that a refusal is reported as a refusal, never as a pass.
+    // The construct here only has to be one the compiler still refuses. It has moved four times
+    // as coverage grew; `with` should be the last, being forbidden in strict mode and so never
+    // worth implementing. What is being tested is that a refusal is reported as a refusal, never
+    // as a pass.
     let root = corpus(
         "refused",
         &entry("refused", "refused.js", "unreachable\n"),
-        &[(
-            "refused.js",
-            "class Probe { #hidden = 1; }\nconsole.log('unreachable');",
-        )],
+        &[("refused.js", "with (this) { console.log('unreachable'); }")],
     );
 
     let result = &run_all(&root)[0].1;

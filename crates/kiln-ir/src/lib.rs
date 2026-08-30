@@ -202,6 +202,13 @@ pub enum Instruction {
     DeleteProperty(u32),
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Read `object.#name`, where the name is a constant. Stack: `[object] -> [value]`.
+    ///
+    /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
+    /// an object of another class simply does not carry the name.
+    GetPrivate(u32),
+    /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
+    SetPrivate(u32),
     /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
@@ -2264,6 +2271,12 @@ impl Compiler {
                 property,
                 value,
             } => self.member_assignment(*operator, object, property, value),
+            ExpressionKind::PrivateAssignment {
+                operator,
+                object,
+                name,
+                value,
+            } => self.private_assignment(*operator, object, name, value),
             ExpressionKind::Object { members } => self.object_literal(members, expression.span),
             // Concatenation, starting from a string so that every `+` after it is a string
             // append rather than a numeric add. `${1}${2}` is "12" for exactly that reason.
@@ -2284,9 +2297,19 @@ impl Compiler {
                     }
                 }
             }
+            ExpressionKind::PrivateMember { object, name } => {
+                self.expression(object);
+                let name = self.constant_index(Constant::String(private_key(name)));
+                self.code.push(Instruction::GetPrivate(name));
+            }
             ExpressionKind::Delete { object, property } => {
                 self.expression(object);
                 match property.as_ref() {
+                    // `delete obj.#x` is a syntax error, so the frontend never builds one.
+                    ObjectKey::Private(name) => self.error(
+                        Some(expression.span),
+                        format!("`delete` of the private name `#{name}`"),
+                    ),
                     ObjectKey::Static(key) => {
                         let name = self.constant_index(Constant::String(key.clone()));
                         self.code.push(Instruction::DeleteProperty(name));
@@ -2365,6 +2388,11 @@ impl Compiler {
             match member {
                 ObjectMember::Property(property) => {
                     match &property.key {
+                        // Only a class body can declare one, so a literal never has one.
+                        ObjectKey::Private(name) => self.error(
+                            Some(span),
+                            format!("private name `#{name}` in an object literal"),
+                        ),
                         ObjectKey::Static(key) => {
                             self.push_constant(Constant::String(key.clone()));
                         }
@@ -2392,6 +2420,10 @@ impl Compiler {
                     self.emit_object_segment(&mut pending, accumulating);
                     accumulating = true;
                     match key {
+                        ObjectKey::Private(name) => self.error(
+                            Some(span),
+                            format!("private name `#{name}` in an object literal"),
+                        ),
                         ObjectKey::Static(name) => {
                             self.push_constant(Constant::String(name.clone()));
                         }
@@ -2593,10 +2625,32 @@ impl Compiler {
             },
         };
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
+        // A private instance method is installed on each *instance*, not on the prototype: that
+        // is what carries the brand, and what makes `D.f()` on a sibling class a TypeError rather
+        // than a call. Modelled as a field whose value is the function, so the constructor
+        // prologue that already installs fields installs these too.
+        let private_methods: Vec<ClassField> = class
+            .methods
+            .iter()
+            .filter(|method| {
+                !method.is_static
+                    && matches!(method.key, ObjectKey::Private(_))
+                    && matches!(method.kind, kiln_hir::MethodKind::Normal)
+            })
+            .map(|method| ClassField {
+                key: method.key.clone(),
+                value: Some(Expression {
+                    kind: ExpressionKind::Function(Box::new(method.function.clone())),
+                    span: method.function.span,
+                }),
+                is_static: false,
+            })
+            .collect();
         let instance_fields: Vec<&ClassField> = class
             .fields
             .iter()
             .filter(|field| !field.is_static)
+            .chain(private_methods.iter())
             .collect();
         let Some(index) = self.compile_constructor(
             &constructor,
@@ -2643,6 +2697,11 @@ impl Compiler {
         for field in class.fields.iter().filter(|field| field.is_static) {
             self.load_local_or_cell(local);
             match &field.key {
+                ObjectKey::Private(name) => {
+                    let name = self.constant_index(Constant::String(private_key(name)));
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetProperty(name));
+                }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.emit_field_value(field);
@@ -2670,6 +2729,16 @@ impl Compiler {
 
             let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
+                // Installed on each instance by the constructor prologue instead.
+                ObjectKey::Private(_) if !method.is_static && !accessor => {
+                    self.code.push(Instruction::Pop);
+                    continue;
+                }
+                ObjectKey::Private(name) => {
+                    let name = self.constant_index(Constant::String(private_key(name)));
+                    self.code.push(Instruction::MakeFunction(body));
+                    self.code.push(Instruction::SetProperty(name));
+                }
                 ObjectKey::Static(key) if !accessor => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.code.push(Instruction::MakeFunction(body));
@@ -2917,6 +2986,11 @@ impl Compiler {
         for field in fields {
             self.code.push(Instruction::LoadThis);
             match &field.key {
+                ObjectKey::Private(name) => {
+                    let name = self.constant_index(Constant::String(private_key(name)));
+                    self.emit_field_value(field);
+                    self.code.push(Instruction::SetProperty(name));
+                }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.emit_field_value(field);
@@ -3134,6 +3208,31 @@ impl Compiler {
         self.code.push(Instruction::SetComputed);
     }
 
+    /// `object.#name = value`, and the compound forms.
+    ///
+    /// The same shape as a member assignment with a different pair of instructions, which is the
+    /// whole difference: the private ones check that the name is already there.
+    fn private_assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        object: &Expression,
+        name: &str,
+        value: &Expression,
+    ) {
+        let name = self.constant_index(Constant::String(private_key(name)));
+        self.expression(object);
+        if operator != AssignmentOperator::Assign {
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::GetPrivate(name));
+            self.expression(value);
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
+        } else {
+            self.expression(value);
+        }
+        self.code.push(Instruction::SetPrivate(name));
+    }
+
     fn member_assignment(
         &mut self,
         operator: AssignmentOperator,
@@ -3239,6 +3338,19 @@ impl Compiler {
                     "spread into a `super` call is not supported yet",
                 );
                 self.push_constant(Constant::Undefined);
+                return;
+            }
+            // `this.#m()` is a method call: the private name is read off the receiver and the
+            // receiver becomes `this`. Reached through `Apply` rather than a `CallPrivate`
+            // instruction, because the shape `Apply` already takes -- receiver, callee,
+            // arguments -- is exactly this one.
+            ExpressionKind::PrivateMember { object, name } => {
+                let name = self.constant_index(Constant::String(private_key(name)));
+                self.expression(object);
+                self.code.push(Instruction::Dup);
+                self.code.push(Instruction::GetPrivate(name));
+                self.array_literal(arguments, span);
+                self.code.push(Instruction::Apply);
                 return;
             }
             ExpressionKind::StaticMember {
@@ -3662,6 +3774,27 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
 }
 
 /// Every name a pattern binds.
+/// The binary operation a compound assignment performs before storing.
+fn compound_operator(operator: AssignmentOperator) -> BinaryOp {
+    match operator {
+        AssignmentOperator::Add => BinaryOp::Add,
+        AssignmentOperator::Subtract => BinaryOp::Subtract,
+        AssignmentOperator::Multiply => BinaryOp::Multiply,
+        AssignmentOperator::Divide => BinaryOp::Divide,
+        AssignmentOperator::Remainder => BinaryOp::Remainder,
+        AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
+        AssignmentOperator::Assign => unreachable!("a plain assignment performs no operation"),
+    }
+}
+
+/// The reserved property name a private member is stored under.
+///
+/// Reserved rather than ordinary, so nothing that enumerates own string properties can see it and
+/// no computed access can spell it -- `obj["#x"]` names a different property, as it should.
+fn private_key(name: &str) -> String {
+    format!("@@private:{name}")
+}
+
 /// The names a pattern binds, in source order.
 ///
 /// Ordered, unlike [`collect_pattern_names`], because these decide slot numbering and the
@@ -3814,6 +3947,13 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             collect_identifiers(expression, names, collecting);
         }
+        ExpressionKind::PrivateMember { object, .. } => {
+            collect_identifiers(object, names, collecting);
+        }
+        ExpressionKind::PrivateAssignment { object, value, .. } => {
+            collect_identifiers(object, names, collecting);
+            collect_identifiers(value, names, collecting);
+        }
         ExpressionKind::Template { expressions, .. } => {
             for expression in expressions {
                 collect_identifiers(expression, names, collecting);
@@ -3919,6 +4059,10 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
             .any(|argument| expression_references(argument, name)),
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             expression_references(expression, name)
+        }
+        ExpressionKind::PrivateMember { object, .. } => expression_references(object, name),
+        ExpressionKind::PrivateAssignment { object, value, .. } => {
+            expression_references(object, name) || expression_references(value, name)
         }
         ExpressionKind::Template { expressions, .. } => expressions
             .iter()

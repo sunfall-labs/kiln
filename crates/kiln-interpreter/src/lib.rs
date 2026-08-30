@@ -1546,6 +1546,24 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::Binary(operator) => {
                     let right = self.pop(current)?;
                     let left = self.pop(current)?;
+                    // `+` and the ordering comparisons reduce an object to a primitive first,
+                    // which is a *call* -- so it cannot happen inside `binary`, which has no
+                    // machine to call with. Everything else works on the values as they are.
+                    let (left, right) = if matches!(
+                        operator,
+                        BinaryOp::Add
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                    ) {
+                        (
+                            self.as_primitive(&left, false, current)?,
+                            self.as_primitive(&right, false, current)?,
+                        )
+                    } else {
+                        (left, right)
+                    };
                     self.stack.push(binary(*operator, left, right));
                 }
                 Instruction::JumpIfFalse(target) => {
@@ -1970,6 +1988,57 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Some(local) => *local = marker,
                         None => return Err(ExecutionError::LocalOutOfBounds { index: slot }),
                     }
+                }
+                Instruction::GetPrivate(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    // Own-only, and a miss is a TypeError. That own-only rule *is* the brand
+                    // check: an object of another class does not carry the name, however much
+                    // of the rest of the shape it shares.
+                    let found = match &target {
+                        Value::Object(object) => object.borrow().get_own(&name).cloned(),
+                        Value::Function(closure) => {
+                            closure.properties.borrow().get_own(&name).cloned()
+                        }
+                        _ => None,
+                    };
+                    let Some(value) = found else {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read private member #{} from an object whose class did not declare it",
+                                name.trim_start_matches("@@private:")
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    };
+                    self.stack.push(value);
+                }
+                Instruction::SetPrivate(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let present = match &target {
+                        Value::Object(object) => object.borrow().get_own(&name).is_some(),
+                        Value::Function(closure) => {
+                            closure.properties.borrow().get_own(&name).is_some()
+                        }
+                        _ => false,
+                    };
+                    if !present {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot write private member #{} to an object whose class did not declare it",
+                                name.trim_start_matches("@@private:")
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.set_computed(&target, &Value::String(name), value.clone(), current)?;
+                    self.stack.push(value);
                 }
                 Instruction::DefineAccessor { setter } => {
                     let function = self.pop(current)?;
@@ -2566,6 +2635,15 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let items = self.drain_iterable(&source, instruction)?;
                 self.combine(native, items)
+            }
+            Native::StringConstructor => {
+                let Some(value) = arguments.first() else {
+                    return Ok(Value::String(String::new()));
+                };
+                // A string hint, because that is what `String(x)` asks for -- so an object with
+                // both `valueOf` and `toString` uses the second.
+                let primitive = self.as_primitive(value, true, instruction)?;
+                Ok(Value::String(primitive.to_display_string()))
             }
             Native::JsonStringify => {
                 let indent = json_indent(arguments.get(2));
@@ -3803,6 +3881,55 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// `"abc".length` needs `String.prototype`, which does not exist yet. Returning undefined is
     /// wrong for those, and it is wrong in the direction that shows up as a visibly missing
     /// value rather than a plausible one.
+    /// `ToPrimitive`: reduce an object to a value the operators can work on.
+    ///
+    /// Named `as_primitive` rather than `to_primitive` because it takes `&mut self`: reducing an
+    /// object *runs* one of its methods, which is the whole reason it lives here.
+    ///
+    /// An object becomes a primitive by *calling* one of its own methods, which is why this is on
+    /// the machine and why `"" + obj` cannot be decided by looking at the value alone. `valueOf`
+    /// is tried first unless a string is wanted, which is the order the specification gives and
+    /// the reason `new Date() - 0` is a number while `` `${date}` `` is a sentence.
+    ///
+    /// A method that hands back another object is skipped rather than used: the point is to reach
+    /// a primitive, and one that does not is no closer.
+    fn as_primitive(
+        &mut self,
+        value: &Value,
+        prefer_string: bool,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !matches!(
+            value,
+            Value::Object(_) | Value::Function(_) | Value::Array(_)
+        ) {
+            return Ok(value.clone());
+        }
+        let order = if prefer_string {
+            ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
+        };
+        for name in order {
+            let method = self.property(value, name);
+            if !matches!(
+                method,
+                Value::Function(_) | Value::Native(_) | Value::Callback(_)
+            ) {
+                continue;
+            }
+            let result = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
+            if !matches!(
+                result,
+                Value::Object(_) | Value::Function(_) | Value::Array(_)
+            ) {
+                return Ok(result);
+            }
+        }
+        // Nothing usable, so the built-in conversion stands.
+        Ok(Value::String(value.to_display_string()))
+    }
+
     /// Read a property, calling a getter when the slot holds one.
     ///
     /// Separate from [`Vm::property`], which answers with the slot's contents, because reading an
@@ -4550,14 +4677,10 @@ fn call_native(
             };
             Value::Array(Rc::new(RefCell::new(keys)))
         }
-        Native::StringConstructor => Value::String(match arguments.first() {
-            // `String(e)` on an error goes through `Error.prototype.toString`. Looking the
-            // method up rather than sniffing for `name` and `message` means an ordinary object
-            // that happens to have both is unaffected.
-            Some(value @ Value::Object(_)) if has_error_to_string(value) => error_to_string(value),
-            Some(value) => value.to_display_string(),
-            None => String::new(),
-        }),
+        // Converting an object means calling its `toString`, which needs the machine.
+        Native::StringConstructor => {
+            unreachable!("`String` is dispatched by the interpreter")
+        }
         Native::ErrorToString => Value::String(error_to_string(receiver)),
         Native::ObjectSetPrototypeOf => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
