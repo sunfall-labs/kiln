@@ -64,6 +64,16 @@ when installed, but it is not a mandatory bootstrap dependency; a compatible sys
 supported fallback. Unix links request the system math library because generated exponent and
 remainder operations use `pow` and `fmod`.
 
+The compiler identity also hashes the inherited search-policy variables relevant to the selected
+driver and C11 language mode. Every driver includes `CPATH`, `C_INCLUDE_PATH`, and `LIBRARY_PATH`;
+GCC and an unidentified `cc` additionally include `COMPILER_PATH` and `GCC_EXEC_PREFIX`, while Zig
+includes `ZIG_LIB_DIR`. Names and raw platform values are length-framed, and unset remains distinct
+from empty. `SDKROOT` and `MACOSX_DEPLOYMENT_TARGET` remain part of target identity; variables for
+other source languages and shell conventions such as `CFLAGS` and `LDFLAGS` are not inputs because
+Kiln compiles C11 directly and does not interpret those conventions. Changing applicable compiler
+search policy therefore misses object and link artifacts instead of reusing an artifact built
+against a different inherited environment.
+
 The cache coordinator treats generated module C, application object, runtime object, launcher
 object, and linked executable as separate artifacts. Cache records are containers rather than
 direct linker inputs, so validated payloads are materialized into process-owned work paths. A cached
