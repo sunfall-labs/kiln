@@ -4321,9 +4321,6 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// its own top-level slots -- and this is what lets both be true at once.
     global_base: usize,
     instruction: usize,
-    /// One shared name per proto, so making a closure copies a pointer rather than a string.
-    function_names: Vec<Option<Rc<str>>>,
-    /// Declared parameter count per proto, which is what `f.length` reports.
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
     realm: Realm<Job, Timer>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
@@ -4366,12 +4363,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         limits: ExecutionLimits,
     ) -> Self {
         Self {
-            // Both derived from `program` before it is moved into the struct.
-            function_names: program
-                .functions
-                .iter()
-                .map(|proto| proto.name.as_deref().map(Rc::from))
-                .collect(),
             program,
             host,
             stack: Vec::new(),
@@ -6394,6 +6385,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectEntries | Native::ObjectValues | Native::ReflectOwnKeys => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(native, Native::ReflectOwnKeys) {
+                    let items = self
+                        .own_keys(&source, instruction)?
+                        .into_iter()
+                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                        .map(Value::String)
+                        .collect();
+                    return Ok(Value::Array(ArrayData::new(items)));
+                }
                 // A proxy answers "what keys do you have" with a trap, not with a property
                 // store, so the walk below has nothing to read.
                 if matches!(source, Value::Proxy(_)) {
@@ -6403,7 +6403,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                         items.push(match native {
-                            Native::ReflectOwnKeys => Value::String(key),
                             Native::ObjectValues => {
                                 self.read_property(&source, &key, instruction)?
                             }
@@ -6418,10 +6417,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut items = Vec::new();
                 for (key, property) in own_properties(&self.intrinsics, &source) {
                     if key.starts_with(RESERVED_KEY_PREFIX) {
-                        continue;
-                    }
-                    if matches!(native, Native::ReflectOwnKeys) {
-                        items.push(Value::String(key));
                         continue;
                     }
                     let value = match property {
@@ -9805,7 +9800,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let closure = Rc::new(Closure {
             function,
-            name: self.function_names[function as usize].clone(),
+            // Read from the proto rather than from a table on the machine. A cached table can
+            // only ever describe *one* program, and `self.program` is not one program: it is
+            // whichever program the running frame belongs to, which changes on every eval and on
+            // every call into a function from another module. Indexed by a number that means
+            // something different in each of them, such a table answered `eval("(function f(){})")`
+            // with the name of the caller's function number 0 -- and panicked outright when the
+            // caller had fewer functions than the eval did.
+            name: proto.name.as_deref().map(Rc::from),
             upvalues,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
             // how it is called, so it captures nothing here.
@@ -14323,6 +14325,19 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
             items.properties.borrow().lookup(&name).is_some()
                 || name == "length"
                 || !matches!(array_property(&name), Value::Undefined)
+                || !matches!(
+                    inherited_object_property(intrinsics, &name),
+                    Value::Undefined
+                )
+        }
+        Value::TypedArray(view) => {
+            if let Some(index) = array_index(key) {
+                return view.get(index).is_some();
+            }
+            matches!(
+                name.as_str(),
+                "length" | "byteLength" | "byteOffset" | "BYTES_PER_ELEMENT" | "buffer"
+            ) || !matches!(typed_array_method(&name), Value::Undefined)
                 || !matches!(
                     inherited_object_property(intrinsics, &name),
                     Value::Undefined
