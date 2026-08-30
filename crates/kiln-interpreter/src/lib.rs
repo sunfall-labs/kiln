@@ -1104,7 +1104,7 @@ impl Native {
                     // is why reading it here rather than there would be the wrong shape.
                     PrototypeTable::TypedArrayFor(kind) => match name {
                         "BYTES_PER_ELEMENT" => Value::Number(kind.width() as f64),
-                        _ => typed_array_method(name),
+                        _ => Value::Undefined,
                     },
                     PrototypeTable::DataView => data_view_method(name),
                     PrototypeTable::Iterator => iterator_method(name),
@@ -12464,10 +12464,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     _ if string_exotic(target, name).is_some() => {
                         string_exotic(target, name).unwrap_or(Value::Undefined)
                     }
-                    answered => identity_property(target, name).unwrap_or_else(|| match answered {
-                        Some(found) => found,
-                        None => function_property(&self.intrinsics, name),
-                    }),
+                    Some(Value::Undefined) => {
+                        native_inherited_property(&self.intrinsics, target, name)
+                    }
+                    Some(found) => found,
+                    None => identity_property(target, name)
+                        .unwrap_or_else(|| function_property(&self.intrinsics, name)),
                 },
             },
             // `f.prototype` is the object `new f()` gives instances. Reading it creates it, so
@@ -12600,6 +12602,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "BYTES_PER_ELEMENT" => Value::Number(view.kind.width() as f64),
                 "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
                 "constructor" => Value::Native(Native::TypedArrayConstructor(view.kind)),
+                key if key == WellKnown::ToStringTag.property_key() => {
+                    Value::String(view.kind.name().to_owned())
+                }
                 // Everything else comes from the same table `%TypedArray%.prototype` answers
                 // from, so an instance and the prototype can never resolve a name differently.
                 other => match typed_array_method(other) {
@@ -20520,6 +20525,17 @@ impl Intrinsics {
 /// one link up -- which is why a table goes straight to the object methods.
 fn native_inherited_property(intrinsics: &Intrinsics, target: &Value, name: &str) -> Value {
     match target {
+        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_))) => match table_step(
+            intrinsics,
+            PrototypeTable::TypedArray,
+            name,
+            Native::PrototypeOf(PrototypeTable::TypedArray)
+                .property(name)
+                .unwrap_or(Value::Undefined),
+        ) {
+            Value::Undefined => inherited_object_property(intrinsics, name),
+            found => found,
+        },
         Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect)
         // The `Intl` namespace and the six prototypes are ordinary objects, so they inherit
         // from `Object.prototype` rather than from `Function.prototype`. An `Intl` instance

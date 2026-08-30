@@ -111,3 +111,30 @@ console.log(
   "set" in reflected,
   "push" in reflected,
 );
+
+// Each concrete constructor owns one prototype marker; those markers share the common typed-array
+// prototype that carries the methods and toStringTag accessor.
+console.log(
+  reflected[Symbol.toStringTag],
+  Object.prototype.toString.call(reflected),
+);
+console.log(
+  typeof Uint8Array.prototype,
+  Uint8Array.prototype.constructor === Uint8Array,
+  Uint8Array.prototype.BYTES_PER_ELEMENT,
+);
+console.log(
+  typeof Uint8Array.prototype.set,
+  typeof Uint8Array.prototype.subarray,
+  typeof Uint8Array.prototype.values,
+);
+console.log(
+  Object.hasOwn(Uint8Array.prototype, "constructor"),
+  Uint8Array.prototype.hasOwnProperty("BYTES_PER_ELEMENT"),
+  Object.hasOwn(Uint8Array.prototype, "set"),
+);
+console.log(
+  Object.getPrototypeOf(reflected) === Uint8Array.prototype,
+  Object.getPrototypeOf(Uint8Array.prototype) ===
+    Object.getPrototypeOf(Int8Array.prototype),
+);
