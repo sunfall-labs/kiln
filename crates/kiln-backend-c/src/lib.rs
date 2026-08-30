@@ -165,6 +165,7 @@ fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
 }
 
 const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
+#include <ctype.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -211,7 +212,11 @@ enum kiln_value_tag {
     /* A callable the runtime supplies rather than the program.  bits holds the builtin's code
      * below.  It is a separate tag from a closure because it has no body to point at and no
      * captures to carry. */
-    KILN_VALUE_BUILTIN = 8
+    KILN_VALUE_BUILTIN = 8,
+    /* bits holds a kiln_object*.  Objects and arrays are separate tags because `typeof` and the
+     * two index paths differ; they share nothing but the tag space. */
+    KILN_VALUE_OBJECT = 9,
+    KILN_VALUE_ARRAY = 10
 };
 
 /* `String(x)`.  A template's `${x}` lowers to a call to it rather than to `+`, because the two
@@ -250,10 +255,45 @@ typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upv
                             const kiln_value *args, size_t argc, int depth);
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
+     * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
+    const char *name;
+    size_t name_len;
     uint32_t proto;
     uint32_t upvalue_count;
     kiln_value *upvalues;
 } kiln_closure;
+
+/* A plain data object: own string-keyed properties, scanned linearly.
+ *
+ * There is deliberately no shape here.  A shape identity has to be globally stable and never
+ * recycled to be sound (see ADR 0021), and inventing one before there is anything to guard is
+ * how that goes wrong; a list has no identity to get wrong.  It is also uniformly slow rather
+ * than fast-until-megamorphic, which is the honest starting point.
+ *
+ * Keys point at the generated constant table or at heap bytes from a computed key, and are
+ * compared by content, never by pointer -- two spellings of one name must be one property. */
+typedef struct kiln_property {
+    const char *key;
+    size_t key_len;
+    kiln_value value;
+} kiln_property;
+
+typedef struct kiln_object {
+    kiln_property *properties;
+    size_t count;
+    size_t capacity;
+} kiln_object;
+
+/* An array's elements are dense and its `length` is derived, not stored: writing past the end
+ * grows it and the gap reads as undefined.  Holes are not represented -- a program that can
+ * observe the difference between a hole and an undefined element needs `in`, which this backend
+ * refuses. */
+typedef struct kiln_array {
+    kiln_value *elements;
+    size_t count;
+    size_t capacity;
+} kiln_array;
 
 /* Internal link-time runtime contract. The final executable/shared library supplies this symbol
  * from kiln-native-number; it is not part of the public embedding ABI. */
@@ -274,6 +314,135 @@ static kiln_value kiln_c99_undefined(void) {
     return kiln_c99_value(KILN_VALUE_UNDEFINED, 0, NULL, 0);
 }
 
+static kiln_object *kiln_c99_object_of(kiln_value value) {
+    return (kiln_object *)(uintptr_t)value.bits;
+}
+
+static kiln_array *kiln_c99_array_of(kiln_value value) {
+    return (kiln_array *)(uintptr_t)value.bits;
+}
+
+static int kiln_c99_new_object(kiln_value *out) {
+    kiln_object *object = (kiln_object *)malloc(sizeof *object);
+    if (object == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    object->properties = NULL;
+    object->count = 0;
+    object->capacity = 0;
+    *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_new_array(kiln_value *out) {
+    kiln_array *array = (kiln_array *)malloc(sizeof *array);
+    if (array == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    array->elements = NULL;
+    array->count = 0;
+    array->capacity = 0;
+    *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* Doubling, so building an object or an array one member at a time stays linear overall. */
+static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
+    size_t grown = *capacity == 0 ? 4 : *capacity;
+    void *moved;
+    if (needed <= *capacity) {
+        return KILN_C99_OK;
+    }
+    while (grown < needed) {
+        if (grown > ((size_t)-1) / 2 / item_size) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        grown *= 2;
+    }
+    moved = realloc(*items, grown * item_size);
+    if (moved == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *items = moved;
+    *capacity = grown;
+    return KILN_C99_OK;
+}
+
+/* The index a key names, or -1.  A key is an index only when it round-trips through the
+ * canonical decimal spelling, which is what keeps `a["01"]` a named property and `a["1"]` an
+ * element -- the distinction the language draws and the one a naive `atoi` erases. */
+static double kiln_c99_key_index(const char *key, size_t key_len) {
+    char buffer[64];
+    double number;
+    int length;
+    if (key_len == 0 || key_len > 20) {
+        return -1.0;
+    }
+    number = kiln_string_to_number(key, key_len);
+    if (!(number >= 0.0) || floor(number) != number || number > 4294967294.0) {
+        return -1.0;
+    }
+    length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
+    if (length < 0 || (size_t)length != key_len || memcmp(buffer, key, key_len) != 0) {
+        return -1.0;
+    }
+    return number;
+}
+
+static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
+    return property->key_len == key_len &&
+           (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+}
+
+/* A write to an existing key replaces it in place, so insertion order is the order of first
+ * appearance -- which is the order `Object.keys` reports and the order a console prints. */
+static int kiln_c99_put(kiln_value target, const char *key, size_t key_len, kiln_value value) {
+    kiln_object *object;
+    size_t index;
+    int status;
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            object->properties[index].value = value;
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
+                              sizeof *object->properties);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    /* Integer-like keys come first, in ascending numeric order, and everything else follows in
+     * insertion order.  That is the order the language specifies for own properties, so it is
+     * the order a console prints and the order `Object.keys` would report -- keeping the list
+     * sorted on insert means nothing downstream has to re-derive it. */
+    {
+        double slot_index = kiln_c99_key_index(key, key_len);
+        size_t position = object->count;
+        if (slot_index >= 0.0) {
+            for (index = 0; index < object->count; ++index) {
+                double existing = kiln_c99_key_index(object->properties[index].key,
+                                                     object->properties[index].key_len);
+                if (existing < 0.0 || existing > slot_index) {
+                    break;
+                }
+            }
+            position = index;
+        }
+        for (index = object->count; index > position; --index) {
+            object->properties[index] = object->properties[index - 1];
+        }
+        object->properties[position].key = key;
+        object->properties[position].key_len = key_len;
+        object->properties[position].value = value;
+    }
+    object->count += 1;
+    return KILN_C99_OK;
+}
+
 static kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
@@ -282,6 +451,20 @@ static kiln_value kiln_c99_builtin(uint64_t code) {
  * `valueOf` hands the object back, so `toString` decides. */
 static int kiln_c99_is_callable(kiln_value value) {
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN;
+}
+
+/* Every reference value reduces to a primitive before a coercing operator, and none of them can
+ * do it by calling: this backend has no user `valueOf` to reach, because a property holding a
+ * function is refused at the point it would be called. So reduction is conversion to text. */
+static int kiln_c99_is_reference(kiln_value value) {
+    return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
+           value.tag == KILN_VALUE_ARRAY;
+}
+
+/* Negative zero compares equal to zero, so the sign is the only thing that tells them apart --
+ * and a console shows the difference where `String` does not. */
+static int kiln_c99_signbit(double value) {
+    return signbit(value) != 0;
 }
 
 static kiln_value kiln_c99_uninitialized(void) {
@@ -333,8 +516,9 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
-static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, uint32_t proto,
-                                 const kiln_value *captured, uint32_t count) {
+static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
+                                 size_t name_len, uint32_t proto, const kiln_value *captured,
+                                 uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
@@ -352,6 +536,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, uint32_t pr
         }
     }
     closure->body = body;
+    closure->name = name;
+    closure->name_len = name_len;
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
@@ -430,6 +616,9 @@ static int kiln_c99_truthy(kiln_value value) {
         return value.len != 0;
     case KILN_VALUE_FUNCTION:
     case KILN_VALUE_BUILTIN:
+    /* An object is always truthy, empty or not. */
+    case KILN_VALUE_OBJECT:
+    case KILN_VALUE_ARRAY:
         return 1;
     default:
         return 0;
@@ -445,6 +634,30 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
         memcpy(copy, text, len);
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
+}
+
+typedef struct kiln_text {
+    char *bytes;
+    size_t len;
+    size_t capacity;
+} kiln_text;
+
+static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
+    int status;
+    if (len == 0) {
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_reserve((void **)&text->bytes, &text->capacity, text->len + len, 1);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    memcpy(text->bytes + text->len, bytes, len);
+    text->len += len;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
+    return kiln_c99_text_append(text, literal, strlen(literal));
 }
 
 static kiln_value kiln_c99_text(kiln_value value) {
@@ -472,6 +685,36 @@ static kiln_value kiln_c99_text(kiln_value value) {
             return kiln_c99_undefined();
         }
         return kiln_c99_copy_text(buffer, (size_t)len);
+    }
+    case KILN_VALUE_OBJECT: {
+        static const char object_text[] = "[object Object]";
+        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+    }
+    case KILN_VALUE_ARRAY: {
+        /* `String([1, , 3])` is "1,,3": the separator is a comma and a nullish element
+         * contributes nothing, which is `Array.prototype.join` with its default. */
+        kiln_array *array = kiln_c99_array_of(value);
+        kiln_text joined = {NULL, 0, 0};
+        size_t index;
+        for (index = 0; index < array->count; ++index) {
+            kiln_value element = array->elements[index];
+            if (index != 0 && kiln_c99_text_append(&joined, ",", 1) != KILN_C99_OK) {
+                free(joined.bytes);
+                return kiln_c99_undefined();
+            }
+            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL) {
+                continue;
+            }
+            {
+                kiln_value shown = kiln_c99_text(element);
+                if (shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return kiln_c99_undefined();
+                }
+            }
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
     }
     case KILN_VALUE_BUILTIN: {
         /* The interpreter names a runtime-supplied callable by the native it resolves to, and
@@ -593,31 +836,6 @@ static uint32_t kiln_c99_shift_right(uint32_t value, uint32_t count) {
     return (value >> count) | (~UINT32_C(0) << (UINT32_C(32) - count));
 }
 
-static kiln_value kiln_c99_typeof(kiln_value value) {
-    static const char undefined_text[] = "undefined";
-    static const char object_text[] = "object";
-    static const char boolean_text[] = "boolean";
-    static const char number_text[] = "number";
-    static const char string_text[] = "string";
-    static const char function_text[] = "function";
-    switch (value.tag) {
-    case KILN_VALUE_NULL:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
-    case KILN_VALUE_BOOLEAN:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, boolean_text, sizeof(boolean_text) - 1);
-    case KILN_VALUE_NUMBER:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
-    case KILN_VALUE_STRING:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
-    case KILN_VALUE_FUNCTION:
-    case KILN_VALUE_BUILTIN:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
-    case KILN_VALUE_UNDEFINED:
-    default:
-        return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
-    }
-}
-
 /* Decode the UTF-8 used at the C boundary into Unicode scalar values.  Generated constants are
  * valid UTF-8, and host strings are required to use the same representation.  Treating malformed
  * bytes as U+FFFD keeps comparison bounded and deterministic if a host violates that contract. */
@@ -702,6 +920,421 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
     return 1;
 }
 
+/* `length` in UTF-16 code units, which is what JavaScript counts and is neither bytes nor
+ * characters. */
+static size_t kiln_c99_string_length(kiln_value value) {
+    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
+    size_t units = 0;
+    uint16_t unit;
+    while (kiln_c99_utf16_next(&iterator, &unit)) {
+        units += 1;
+    }
+    return units;
+}
+
+/* An array index, or -1 for anything else.  A key is an index when it round-trips through the
+ * canonical decimal spelling, which is what keeps `a["01"]` a named property and `a["1"]` an
+ * element -- the distinction the language draws and the one a naive `atoi` erases. */
+static double kiln_c99_array_index(kiln_value key) {
+    double number;
+    if (key.tag == KILN_VALUE_NUMBER) {
+        number = kiln_c99_as_number(key);
+    } else if (key.tag == KILN_VALUE_STRING) {
+        char buffer[64];
+        int length;
+        number = kiln_string_to_number(key.ptr, key.len);
+        if (!isfinite(number) || number < 0.0 || floor(number) != number) {
+            return -1.0;
+        }
+        length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
+        if (length < 0 || (size_t)length != key.len ||
+            memcmp(buffer, key.ptr, key.len) != 0) {
+            return -1.0;
+        }
+        return number;
+    } else {
+        return -1.0;
+    }
+    if (!isfinite(number) || number < 0.0 || floor(number) != number ||
+        number > 4294967294.0) {
+        return -1.0;
+    }
+    return number;
+}
+
+/* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
+ * error, because that is a TypeError in the language and answering undefined would hide it. */
+static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln_value *out) {
+    static const char length_key[] = "length";
+    size_t index;
+    int is_length = key_len == sizeof(length_key) - 1 &&
+                    memcmp(key, length_key, sizeof(length_key) - 1) == 0;
+    switch (target.tag) {
+    case KILN_VALUE_OBJECT: {
+        kiln_object *object = kiln_c99_object_of(target);
+        for (index = 0; index < object->count; ++index) {
+            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                *out = object->properties[index].value;
+                return KILN_C99_OK;
+            }
+        }
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    case KILN_VALUE_ARRAY:
+        if (is_length) {
+            *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
+            return KILN_C99_OK;
+        }
+        /* Every other name on an array is a method this backend does not have.  Answering
+         * undefined would turn `a.map(f)` into "undefined is not a function" three frames from
+         * the cause, so it says so here instead. */
+        return KILN_C99_CONTROL_ERROR;
+    case KILN_VALUE_STRING:
+        if (is_length) {
+            *out = kiln_c99_number((double)kiln_c99_string_length(target));
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_NULL:
+        return KILN_C99_CONTROL_ERROR;
+    default:
+        /* A number, boolean or callable has no own properties here. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+}
+
+static int kiln_c99_get_computed(kiln_value target, kiln_value key, kiln_value *out) {
+    double index = kiln_c99_array_index(key);
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        if (index < 0.0) {
+            return kiln_c99_get(target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
+                                key.tag == KILN_VALUE_STRING ? key.len : 0, out);
+        }
+        *out = (size_t)index < array->count ? array->elements[(size_t)index]
+                                            : kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_STRING && index >= 0.0) {
+        kiln_c99_utf16_iter iterator = {target.ptr, target.len, 0, 0, 0};
+        size_t position = 0;
+        uint16_t unit;
+        while (kiln_c99_utf16_next(&iterator, &unit)) {
+            if (position == (size_t)index) {
+                /* One code unit, re-encoded.  A lone surrogate is what indexing a string
+                 * actually yields, and it has no scalar value, so it is written as the
+                 * three-byte form of its own code point rather than paired with anything. */
+                char bytes[3];
+                bytes[0] = (char)(0xE0 | (unit >> 12));
+                bytes[1] = (char)(0x80 | ((unit >> 6) & 0x3F));
+                bytes[2] = (char)(0x80 | (unit & 0x3F));
+                if (unit < 0x80) {
+                    char one = (char)unit;
+                    *out = kiln_c99_copy_text(&one, 1);
+                } else {
+                    *out = kiln_c99_copy_text(bytes, 3);
+                }
+                return KILN_C99_OK;
+            }
+            position += 1;
+        }
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    {
+        /* An object key is a string, whatever it was written as. */
+        kiln_value text = kiln_c99_text(key);
+        if (text.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_get(target, text.ptr, text.len, out);
+    }
+}
+
+static int kiln_c99_set_computed(kiln_value target, kiln_value key, kiln_value value) {
+    double index = kiln_c99_array_index(key);
+    if (target.tag == KILN_VALUE_ARRAY && index >= 0.0) {
+        kiln_array *array = kiln_c99_array_of(target);
+        size_t slot = (size_t)index;
+        size_t fill;
+        int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
+                                      sizeof *array->elements);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        /* Writing past the end grows the array and leaves undefined behind, which is what the
+         * language does; a hole and an undefined element are only distinguishable through `in`,
+         * which this backend refuses. */
+        for (fill = array->count; fill < slot; ++fill) {
+            array->elements[fill] = kiln_c99_undefined();
+        }
+        array->elements[slot] = value;
+        if (slot + 1 > array->count) {
+            array->count = slot + 1;
+        }
+        return KILN_C99_OK;
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    {
+        kiln_value text = kiln_c99_text(key);
+        if (text.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_put(target, text.ptr, text.len, value);
+    }
+}
+
+static int kiln_c99_array_push(kiln_value target, kiln_value value) {
+    kiln_array *array = kiln_c99_array_of(target);
+    int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, array->count + 1,
+                                  sizeof *array->elements);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    array->elements[array->count] = value;
+    array->count += 1;
+    return KILN_C99_OK;
+}
+
+/* What a console shows, which is not what `String(x)` gives: `String({})` is "[object Object]"
+ * and a console prints the contents.  The interpreter does this on the host side; the native
+ * path has to do it inside the generated unit, because a reference never crosses the embedding
+ * boundary -- so this is the one place the two engines have to agree character for character.
+ *
+ * Node's format, which the interpreter already matches: quoted strings only when nested, keys
+ * quoted unless they are identifiers, and a placeholder past two levels of nesting. */
+#define KILN_C99_INSPECT_DEPTH 2
+
+
+/* The quote is whichever the string does not already contain, so the common case needs no
+ * escaping at all: "it's" rather than 'it\'s'.  Single, then double, then backtick, which is
+ * node's order of preference.  Bytes rather than characters is safe here: every byte this
+ * inspects is ASCII, and a UTF-8 continuation byte can never equal one. */
+static int kiln_c99_quote(kiln_text *text, const char *bytes, size_t len) {
+    char quote = '\'';
+    size_t index;
+    int has_single = 0;
+    int has_double = 0;
+    int has_backtick = 0;
+    int has_template = 0;
+    for (index = 0; index < len; ++index) {
+        if (bytes[index] == '\'') has_single = 1;
+        if (bytes[index] == '"') has_double = 1;
+        if (bytes[index] == '`') has_backtick = 1;
+        if (bytes[index] == '$' && index + 1 < len && bytes[index + 1] == '{') has_template = 1;
+    }
+    if (has_single) {
+        if (!has_double) {
+            quote = '"';
+        } else if (!has_backtick && !has_template) {
+            quote = '`';
+        }
+    }
+    if (kiln_c99_text_append(text, &quote, 1) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = 0; index < len; ++index) {
+        char byte = bytes[index];
+        const char *escape = NULL;
+        char pair[2];
+        char hex[4];
+        static const char digits[] = "0123456789ABCDEF";
+        if (byte == quote || byte == '\\') {
+            pair[0] = '\\';
+            pair[1] = byte;
+            if (kiln_c99_text_append(text, pair, 2) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            continue;
+        }
+        switch (byte) {
+        case '\n': escape = "\\n"; break;
+        case '\r': escape = "\\r"; break;
+        case '\t': escape = "\\t"; break;
+        case '\b': escape = "\\b"; break;
+        case '\f': escape = "\\f"; break;
+        default: break;
+        }
+        if (escape != NULL) {
+            if (kiln_c99_text_append_c(text, escape) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            continue;
+        }
+        if ((unsigned char)byte < 0x20) {
+            hex[0] = '\\';
+            hex[1] = 'x';
+            hex[2] = digits[((unsigned char)byte >> 4) & 0xF];
+            hex[3] = digits[(unsigned char)byte & 0xF];
+            if (kiln_c99_text_append(text, hex, 4) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            continue;
+        }
+        if (kiln_c99_text_append(text, &byte, 1) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    return kiln_c99_text_append(text, &quote, 1);
+}
+
+static int kiln_c99_inspect_key(kiln_text *text, const char *key, size_t len) {
+    size_t index;
+    int identifier = len != 0 && (isalpha((unsigned char)key[0]) || key[0] == '_');
+    for (index = 1; identifier && index < len; ++index) {
+        identifier = isalnum((unsigned char)key[index]) || key[index] == '_';
+    }
+    if (identifier) {
+        return kiln_c99_text_append(text, key, len);
+    }
+    return kiln_c99_quote(text, key, len);
+}
+
+static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth);
+
+static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth) {
+    size_t index;
+    if (value.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(value);
+        if (array->count == 0) {
+            return kiln_c99_text_append_c(text, "[]");
+        }
+        if (kiln_c99_text_append_c(text, "[ ") != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < array->count; ++index) {
+            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_inspect_into(text, array->elements[index], depth + 1) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        return kiln_c99_text_append_c(text, " ]");
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(value);
+        if (object->count == 0) {
+            return kiln_c99_text_append_c(text, "{}");
+        }
+        if (kiln_c99_text_append_c(text, "{ ") != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < object->count; ++index) {
+            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_inspect_key(text, object->properties[index].key,
+                                     object->properties[index].key_len) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_text_append_c(text, ": ") != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_inspect_into(text, object->properties[index].value, depth + 1) !=
+                KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        return kiln_c99_text_append_c(text, " }");
+    }
+}
+
+static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
+    switch (value.tag) {
+    case KILN_VALUE_STRING:
+        return kiln_c99_quote(text, value.ptr, value.len);
+    case KILN_VALUE_NUMBER: {
+        /* `-0` prints as itself here, where `String(-0)` is "0": a console shows the value
+         * rather than converting it. */
+        double number = kiln_c99_as_number(value);
+        if (number == 0.0 && kiln_c99_signbit(number)) {
+            return kiln_c99_text_append_c(text, "-0");
+        }
+        break;
+    }
+    case KILN_VALUE_FUNCTION: {
+        kiln_closure *closure = kiln_c99_closure_of(value);
+        if (closure->name == NULL) {
+            return kiln_c99_text_append_c(text, "[Function (anonymous)]");
+        }
+        if (kiln_c99_text_append_c(text, "[Function: ") != KILN_C99_OK ||
+            kiln_c99_text_append(text, closure->name, closure->name_len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append_c(text, "]");
+    }
+    case KILN_VALUE_BUILTIN:
+        return kiln_c99_text_append_c(text, "[Function: StringConstructor]");
+    case KILN_VALUE_OBJECT:
+        if (depth > KILN_C99_INSPECT_DEPTH) {
+            return kiln_c99_text_append_c(text, "[Object]");
+        }
+        return kiln_c99_inspect_members(text, value, depth);
+    case KILN_VALUE_ARRAY:
+        if (depth > KILN_C99_INSPECT_DEPTH) {
+            return kiln_c99_text_append_c(text, "[Array]");
+        }
+        return kiln_c99_inspect_members(text, value, depth);
+    default:
+        break;
+    }
+    {
+        kiln_value shown = kiln_c99_text(value);
+        if (shown.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_text_append(text, shown.ptr, shown.len);
+    }
+}
+
+/* A top-level string prints as itself; only a nested one is quoted. */
+static kiln_value kiln_c99_inspect(kiln_value value) {
+    kiln_text text = {NULL, 0, 0};
+    if (value.tag == KILN_VALUE_STRING) {
+        return value;
+    }
+    if (kiln_c99_inspect_into(&text, value, 0) != KILN_C99_OK) {
+        free(text.bytes);
+        return kiln_c99_undefined();
+    }
+    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+}
+
+static kiln_value kiln_c99_typeof(kiln_value value) {
+    static const char undefined_text[] = "undefined";
+    static const char object_text[] = "object";
+    static const char boolean_text[] = "boolean";
+    static const char number_text[] = "number";
+    static const char string_text[] = "string";
+    static const char function_text[] = "function";
+    switch (value.tag) {
+    case KILN_VALUE_NULL:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+    case KILN_VALUE_BOOLEAN:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, boolean_text, sizeof(boolean_text) - 1);
+    case KILN_VALUE_NUMBER:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, number_text, sizeof(number_text) - 1);
+    case KILN_VALUE_STRING:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, string_text, sizeof(string_text) - 1);
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
+    case KILN_VALUE_OBJECT:
+    case KILN_VALUE_ARRAY:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
+    case KILN_VALUE_UNDEFINED:
+    default:
+        return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
+    }
+}
+
+
+
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
     kiln_c99_utf16_iter left_iterator = {left.ptr, left.len, 0, 0, 0};
     kiln_c99_utf16_iter right_iterator = {right.ptr, right.len, 0, 0, 0};
@@ -724,7 +1357,7 @@ static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
     /* Only the numeric operators coerce.  `typeof` reports a type, `void` discards, and `!` asks
      * whether the value is truthy -- a function always is. */
-    if (kiln_c99_is_callable(value) &&
+    if (kiln_c99_is_reference(value) &&
         (operation == 1 || operation == 2 || operation == 5)) {
         value = kiln_c99_text(value);
     }
@@ -744,7 +1377,7 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
      * the interpreter: its `valueOf` hands back the object itself, so `toString` decides.
      * Strict equality is identity and never coerces, and a nullish `==` is answered without any
      * conversion at all. */
-    if (kiln_c99_is_callable(left) || kiln_c99_is_callable(right)) {
+    if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
         int coerces = 1;
         if (operation == 7 || operation == 8) {
             coerces = 0;
@@ -754,10 +1387,10 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
             coerces = 0;
         }
         if (coerces) {
-            if (kiln_c99_is_callable(left)) {
+            if (kiln_c99_is_reference(left)) {
                 left = kiln_c99_text(left);
             }
-            if (kiln_c99_is_callable(right)) {
+            if (kiln_c99_is_reference(right)) {
                 right = kiln_c99_text(right);
             }
         }
@@ -916,6 +1549,25 @@ fn validate_code(
                     format!("constant {constant} is out of bounds"),
                 ));
             }
+            // A property name is emitted by naming the constant's own C symbol, and only a
+            // string constant has one.
+            Instruction::GetProperty(name) | Instruction::SetProperty(name) => {
+                match program.constants.get(*name as usize) {
+                    Some(Constant::String(_)) => {}
+                    Some(_) => {
+                        return Err(invalid(
+                            index,
+                            format!("property name constant {name} is not a string"),
+                        ));
+                    }
+                    None => {
+                        return Err(invalid(
+                            index,
+                            format!("property name constant {name} is out of bounds"),
+                        ));
+                    }
+                }
+            }
             Instruction::LoadLocal(local)
             | Instruction::StoreLocal(local)
             | Instruction::NewCell(local)
@@ -1054,6 +1706,12 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::LoadUpvalue(_)
         | Instruction::StoreUpvalue(_)
         | Instruction::MarkUninitialized(_)
+        | Instruction::NewObject { .. }
+        | Instruction::GetProperty(_)
+        | Instruction::SetProperty(_)
+        | Instruction::NewArray { .. }
+        | Instruction::GetComputed
+        | Instruction::SetComputed
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -1129,12 +1787,8 @@ fn stack_effect(
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::NewObject { .. }
-        | Instruction::GetProperty(_)
-        | Instruction::SetProperty(_)
         | Instruction::New { .. }
         | Instruction::Dup2
-        | Instruction::NewArray { .. }
         | Instruction::SpreadInto
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
@@ -1149,8 +1803,6 @@ fn stack_effect(
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
-        | Instruction::GetComputed
-        | Instruction::SetComputed
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
@@ -1173,6 +1825,55 @@ fn stack_effect(
         | Instruction::LoadUpvalue(_)
         | Instruction::LoadBuiltin(_)
         | Instruction::MakeFunction(_) => Ok((height + 1, false)),
+        // A literal consumes what it is built from and leaves the container.
+        Instruction::NewObject { count } => {
+            let needed = usize::try_from(*count)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(2);
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
+        Instruction::NewArray { count } => {
+            let needed = usize::try_from(*count).unwrap_or(usize::MAX);
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
+        // The object is replaced by what was read; the key and value are consumed with it.
+        Instruction::GetProperty(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
+        Instruction::GetComputed => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        // A write leaves the value it wrote, which is what makes `a = b.c = d` work.
+        Instruction::SetProperty(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::SetComputed => {
+            if height < 3 {
+                Err(underflow(3))
+            } else {
+                Ok((height - 2, false))
+            }
+        }
         // The callee sits under its arguments, and the result replaces both.
         Instruction::Call { argc } => {
             let needed = usize::from(*argc) + 1;
@@ -1328,6 +2029,16 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
             "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, const kiln_value *args, size_t argc, int depth);"
         )
         .unwrap();
+    }
+    for (index, proto) in program.functions.iter().enumerate() {
+        if let Some(name) = &proto.name {
+            writeln!(
+                output,
+                "static const char {symbol}_name_{index}[] = {};",
+                c_string(name)
+            )
+            .unwrap();
+        }
     }
     for (index, proto) in program.functions.iter().enumerate() {
         render_function(output, program, proto, plan.functions[index], index, symbol);
@@ -1589,12 +2300,8 @@ fn emit_instruction(
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::NewObject { .. }
-        | Instruction::GetProperty(_)
-        | Instruction::SetProperty(_)
         | Instruction::New { .. }
         | Instruction::Dup2
-        | Instruction::NewArray { .. }
         | Instruction::SpreadInto
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
@@ -1609,8 +2316,6 @@ fn emit_instruction(
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
-        | Instruction::GetComputed
-        | Instruction::SetComputed
         | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
         | Instruction::LoadThis
@@ -1683,12 +2388,19 @@ fn emit_instruction(
             writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = stack[--sp];").unwrap();
         }
         Instruction::MakeFunction(proto) => {
-            let captures = &functions[*proto as usize].upvalues;
+            let target = &functions[*proto as usize];
+            let captures = &target.upvalues;
+            // A console prints `[Function: name]`, and an anonymous function is a distinct
+            // answer rather than a missing one.
+            let (name, name_len) = match &target.name {
+                Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
+                None => ("NULL".to_owned(), 0),
+            };
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, UINT32_C({proto}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -1708,7 +2420,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, UINT32_C({proto}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -1735,6 +2447,76 @@ fn emit_instruction(
             writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
         }
         Instruction::StoreLocal(local) => writeln!(output, "    locals[{local}] = stack[--sp];").unwrap(),
+        // The keys are on the stack with their values, so the object is filled from the stack
+        // and only then replaces it -- a key that failed to convert must not leave a half-built
+        // object where the program can see it.
+        Instruction::NewObject { count } => {
+            let count = usize::try_from(*count).unwrap();
+            output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
+            output.push_str("        status = kiln_c99_new_object(&built);\n");
+            output.push_str("        if (status != KILN_C99_OK) return status;\n");
+            if count > 0 {
+                writeln!(
+                    output,
+                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_set_computed(built, key, member); if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+                writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
+            } else {
+                output.push_str("        (void)pair;\n");
+            }
+            output.push_str("        stack[sp++] = built;\n    }\n");
+        }
+        Instruction::NewArray { count } => {
+            let count = usize::try_from(*count).unwrap();
+            output.push_str("    {\n        kiln_value built; size_t element; int status;\n");
+            output.push_str("        status = kiln_c99_new_array(&built);\n");
+            output.push_str("        if (status != KILN_C99_OK) return status;\n");
+            if count > 0 {
+                writeln!(
+                    output,
+                    "        for (element = 0; element < (size_t){count}; ++element) {{ status = kiln_c99_array_push(built, stack[sp - (size_t){count} + element]); if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+                writeln!(output, "        sp -= (size_t){count};").unwrap();
+            } else {
+                output.push_str("        (void)element;\n");
+            }
+            output.push_str("        stack[sp++] = built;\n    }\n");
+        }
+        Instruction::GetProperty(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value read; int status = kiln_c99_get(stack[sp - 1], {symbol}_constant_{name}, {}, &read); if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::SetProperty(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            // The written value stays on the stack, which is what makes `a = b.c = d` work.
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(stack[sp - 1], {symbol}_constant_{name}, {}, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::GetComputed => {
+            output.push_str(
+                "    { kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(stack[sp - 1], key, &read); if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }\n",
+            );
+        }
+        Instruction::SetComputed => {
+            output.push_str(
+                "    { kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(stack[sp - 1], key, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }\n",
+            );
+        }
         Instruction::LoadBuiltin(_) => {
             // Verification admits only `String`, so this needs no discrimination.
             output.push_str("    stack[sp++] = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);\n");
@@ -1762,7 +2544,7 @@ fn emit_instruction(
             // is reduced to its text before the host sees it -- which is also what the
             // interpreter prints for one.
             if *argc > 0 && *callables {
-                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_is_callable(stack[arg])) stack[arg] = kiln_c99_text(stack[arg]); }}").unwrap();
+                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_is_reference(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
             }
             writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
         }
@@ -1774,7 +2556,7 @@ fn emit_instruction(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry { exports: None } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_is_callable(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; if (kiln_c99_is_reference(*result)) *result = kiln_c99_text(*result); return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
@@ -1784,7 +2566,7 @@ fn emit_instruction(
                 );
                 if *callables {
                     output.push_str(
-                        "    if (kiln_c99_is_callable(*result)) *result = kiln_c99_text(*result);\n",
+                        "    if (kiln_c99_is_reference(*result)) *result = kiln_c99_text(*result);\n",
                     );
                 }
                 for (index, binding) in exports.iter().enumerate() {

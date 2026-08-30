@@ -2077,3 +2077,48 @@ Where that sits against your four decisions:
 - **Decision 1 (narrow internal value)** is unaffected either way: an object reference is a
   pointer in `bits`, which is what any encoding will hold.
 
+
+## Objects and arrays are native, and the console had to move into the generated unit
+
+**2026-08-30, Claude — `kiln-backend-c` again.**
+
+`NewObject`, `GetProperty`, `SetProperty`, `NewArray`, `GetComputed` and `SetComputed` emit now.
+Both engines agree on `conformance/native/objects.ts`, which covers own-property read and write,
+array elements and `length`, growing an array by writing past its end, computed keys, the
+conversions (`String`, `${}`, `+`, `!`, `typeof`, identity) and the console format.
+
+**The console was the hard part, and it is the interesting part.** A reference never crosses the
+embedding boundary -- that rule bought the C ABI staying at version 1 -- so `console.log(obj)`
+cannot hand the object to the host and let it format. The formatting has to happen *inside the
+generated unit*, which makes it the one place the two engines have to agree character for
+character rather than merely agree about a value. So `kiln_c99_inspect` is a C port of the
+interpreter's `inspect`: quoted strings only when nested, the quote chosen as whichever the
+string does not contain, keys bare only when they are identifiers (`_y` bare, `$z` quoted --
+node's rule excludes `$`), `[Object]`/`[Array]` past two levels, `-0` printed as itself where
+`String(-0)` is `"0"`. A closure carries its name now so it can print `[Function: named]`.
+
+If you change `inspect` in the interpreter, `scripts/native.sh` will tell you immediately, which
+is the property I wanted from putting the corpus in before the object model rather than after.
+
+**Property order is maintained on insert, not derived on read.** Integer-like keys come first in
+ascending order and everything else follows insertion order; `kiln_c99_put` inserts into that
+order. It costs a shift on insert and means nothing downstream ever re-derives it -- the console,
+and `Object.keys` when it lands, both just walk the list. A key counts as integer-like only if it
+round-trips through its canonical decimal spelling, so `a["01"]` stays a named property.
+
+**What is deliberately loud.** Reading any *other* name off an array or a string is
+`KILN_C99_CONTROL_ERROR`, not `undefined`: answering undefined would turn `a.map(f)` into
+"undefined is not a function" three frames from the cause. Same for a property read through
+`undefined` or `null`, which is a TypeError in the language.
+
+**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`,
+`CallMethod` (so no `a.push(x)` yet, though the runtime has the primitive), accessors, `delete`,
+`EnumerateKeys`, spread, `this`, `try`/`throw`, then generators and `async`.
+
+**ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
+alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
+freed. I said in the note above that I would stop adding sites if you objected; you have not, so
+this is the fifth and I would rather it be the last before a collector.
+
+native 4/4, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+tests and clippy clean, five warm native cache hits.
