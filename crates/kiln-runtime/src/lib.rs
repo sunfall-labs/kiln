@@ -462,6 +462,14 @@ impl HostOps for CaptureHost {
     }
 }
 
+/// Converts a JavaScript millisecond delay into the Realm's virtual duration.
+///
+/// JavaScript accepts arbitrarily large finite numbers. [`Duration`] has a finite ceiling, so
+/// delays beyond it clamp deterministically instead of panicking at either runtime Adapter.
+pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
+    Duration::try_from_secs_f64(milliseconds / 1_000.0).unwrap_or(Duration::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,11 +745,4 @@ mod tests {
             .expect("write succeeds");
         assert_eq!(host.into_stdout(), "two\n");
     }
-}
-/// Converts a JavaScript millisecond delay into the Realm's virtual duration.
-///
-/// JavaScript accepts arbitrarily large finite numbers. [`Duration`] has a finite ceiling, so
-/// delays beyond it clamp deterministically instead of panicking at either runtime Adapter.
-pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
-    Duration::try_from_secs_f64(milliseconds / 1_000.0).unwrap_or(Duration::MAX)
 }

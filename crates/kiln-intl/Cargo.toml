@@ -1,0 +1,17 @@
+[package]
+name = "kiln-intl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+icu_locale_core = { workspace = true }
+icu_locale = { workspace = true }
+icu_decimal = { workspace = true }
+icu_plurals = { workspace = true }
+icu_list = { workspace = true }
+icu_collator = { workspace = true }
+icu_segmenter = { workspace = true }
+fixed_decimal = { workspace = true }
+writeable = { workspace = true }

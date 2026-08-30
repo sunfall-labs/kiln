@@ -30,6 +30,7 @@ mod harness;
 mod manifest;
 mod program;
 mod reasons;
+mod source_compiler;
 mod test262;
 mod toml_lite;
 

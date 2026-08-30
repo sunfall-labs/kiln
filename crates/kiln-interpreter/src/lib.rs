@@ -5,14 +5,22 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use std::fmt;
+use kiln_host_abi::{HostOps, HostValue};
+use kiln_ir::{
+    BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
+};
+use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
 
+// `Temporal` is glue over a linked calendar engine, and it is long enough that inlining a ninth
+// built-in family here would bury the machine. ADR 0025 links the engine; ADR 0029 §4 names it.
+mod temporal;
+// `Intl` is glue over the same kind of linked engine, and its option-reading half is long
+// enough to bury the machine for the same reason. ADR 0025 links it; ADR 0029 §4 names ICU4X.
+mod intl;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fmt;
 use std::rc::{Rc, Weak};
-use kiln_host_abi::{HostOps, HostValue};
-use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
-use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -155,6 +163,16 @@ impl ErrorKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
+    /// A `Temporal` namespace, constructor, prototype or method; the payload says which.
+    ///
+    /// One variant with a payload rather than ninety flat ones: `Temporal`'s eight types answer
+    /// almost the same set of methods, so the receiver decides what a method *means*.
+    Temporal(temporal::Op),
+    /// An `Intl` namespace, constructor, prototype or method; the payload says which.
+    ///
+    /// One variant with a payload for the reason `Temporal` has one: the six services answer
+    /// to overlapping method names and the receiver decides what a name means.
+    Intl(intl::Op),
     Error(ErrorKind),
     SymbolConstructor,
     ArrayConstructor,
@@ -333,6 +351,13 @@ pub enum Native {
     CollectionEntries(bool),
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
+    /// `eval` as a *value*: the global function, reached by any route but a direct call.
+    ///
+    /// A direct `eval(...)` never becomes this. It compiles to [`Instruction::DirectEval`],
+    /// because it evaluates in the caller's scope and no value can carry a scope. Everything
+    /// else -- `(0, eval)(s)`, `globalThis.eval(s)`, a saved reference -- is an indirect eval
+    /// and runs in global scope, which is exactly what a plain callable can do.
+    Eval,
     /// `Proxy`, which is only ever reached through `new`.
     ProxyConstructor,
     /// `ArrayBuffer`, and one constructor per view kind.
@@ -693,6 +718,12 @@ impl Native {
 
     fn property(self, name: &str) -> Option<Value> {
         match (self, name) {
+            // Every `Temporal` namespace, constructor and prototype answers from one place, so
+            // the eight types cannot drift on what they expose.
+            (Self::Temporal(op), name) => temporal::static_property(op, name),
+            // The same arrangement for `Intl`: one table for the namespace, the six
+            // constructors and their prototypes, so none of them can drift from the others.
+            (Self::Intl(op), name) => intl::static_property(op, name),
             (Self::Error(_), "captureStackTrace") => {
                 Some(Value::Native(Self::ErrorCaptureStackTrace))
             }
@@ -2012,9 +2043,9 @@ impl TypedKind {
             Self::Float32 => Value::Number(f64::from(f32::from_le_bytes(
                 bytes.try_into().expect("four bytes"),
             ))),
-            Self::Float64 => Value::Number(f64::from_le_bytes(
-                bytes.try_into().expect("eight bytes"),
-            )),
+            Self::Float64 => {
+                Value::Number(f64::from_le_bytes(bytes.try_into().expect("eight bytes")))
+            }
             // The same eight bytes the `DataView` pair reads, and read the same way, so a
             // buffer written through `setBigInt64` and read through a `BigInt64Array` agrees
             // with itself.
@@ -2633,6 +2664,21 @@ pub enum Value {
     /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same
     /// instant are still two objects and `===` has to say so.
     Date(Rc<std::cell::Cell<f64>>),
+    /// One of the eight `Temporal` types, held opaquely by the linked calendar engine.
+    ///
+    /// Its own value kind rather than an object with reserved state, for the same reason `Date` is
+    /// one: every operation on it has to reach the engine, and a `Temporal.PlainDate` that could be
+    /// confused with an ordinary object would answer field reads from the wrong place. Behind an
+    /// `Rc` for identity, not for mutation -- every `Temporal` type is immutable, so nothing here
+    /// ever writes through it.
+    Temporal(Rc<kiln_temporal::TemporalValue>),
+    /// A built `Intl` formatter, held opaquely by the linked internationalization engine.
+    ///
+    /// Its own value kind rather than an object with reserved slots, for the same reason
+    /// `Temporal` is one: the state is the engine's, rebuilding it per call would be both
+    /// slow and observably different, and the brand check that stops
+    /// `NumberFormat.prototype.format` running on a `Collator` needs a shape to check.
+    Intl(Rc<intl::IntlValue>),
     /// An arbitrary-precision integer. A separate numeric type rather than a wider `Number`,
     /// because the language keeps them apart on purpose: mixing one with a number in arithmetic
     /// is a TypeError, and precision that does not silently stop is the reason to reach for it.
@@ -2722,7 +2768,9 @@ impl Value {
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect) => "object",
+            Self::Native(Native::Math | Native::Json | Native::Reflect)
+            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
+            | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
@@ -2732,7 +2780,8 @@ impl Value {
             | Self::Generator(_)
             | Self::Promise(_)
             | Self::RegExp(_)
-            | Self::Date(_) => "object",
+            | Self::Date(_)
+            | Self::Temporal(_) => "object",
             Self::BigInt(_) => "bigint",
             // A settler is a function the program can call, hold and pass on, so it says so.
             Self::Settler(..) => "function",
@@ -2756,7 +2805,9 @@ impl Value {
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect) => "object",
+            Self::Native(Native::Math | Native::Json | Native::Reflect)
+            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
+            | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
@@ -2767,6 +2818,7 @@ impl Value {
             Self::Promise(_) => "promise",
             Self::RegExp(_) => "regexp",
             Self::Date(_) => "date",
+            Self::Temporal(value) => value.kind().tag(),
             Self::BigInt(_) => "bigint",
             Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
@@ -2812,6 +2864,12 @@ impl Value {
                 join(&view.items(), ",").map_or(f64::NAN, |text| parse_number(&text))
             }
             Self::ArrayBuffer(_) | Self::DataView(_) => f64::NAN,
+            // Temporal objects do not have a numeric primitive conversion. Operations that
+            // accept one ask the linked engine explicitly rather than passing through Number.
+            Self::Temporal(_) => f64::NAN,
+            // Nor does an `Intl` formatter: `+new Intl.NumberFormat()` is NaN, the same as
+            // for any object with no numeric primitive.
+            Self::Intl(_) => f64::NAN,
             // A date converts to its instant, which is what makes `end - start` a duration.
             Self::Date(time) => time.get(),
             // Only where a number is explicitly asked for; arithmetic refuses the mix.
@@ -2855,6 +2913,8 @@ impl Value {
             | Self::TypedArray(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::Temporal(_)
+            | Self::Intl(_)
             | Self::Symbol(_) => true,
             Self::BigInt(value) => !num_traits::Zero::is_zero(value.as_ref()),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -2905,6 +2965,15 @@ impl Value {
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
             Self::Date(time) => date_to_string(time.get()),
+            Self::Temporal(value) => value
+                .to_temporal_string(&kiln_temporal::Options::default())
+                .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
+            // `Intl.Locale` stringifies as its tag, which is what `toString` returns; the
+            // formatters have no string form of their own and fall back to the object tag.
+            Self::Intl(value) => match value.as_ref() {
+                intl::IntlValue::Locale(tag) => tag.clone(),
+                other => format!("[object {}]", other.service().tag()),
+            },
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
             Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
@@ -3011,6 +3080,125 @@ impl Default for ExecutionLimits {
             // is the one failure a compiler must never have, so it is bounded well below.
             max_native_depth: 192,
         }
+    }
+}
+
+/// Source text handed to a run-time compilation, with everything the compiler cannot see.
+///
+/// `outer` is empty for an indirect eval and for `Function`, both of which evaluate in global
+/// scope. A direct eval fills it with the caller's visible bindings, in the slot order
+/// [`kiln_ir::compile_eval`] promises to bind them to.
+pub struct EvalSource<'a> {
+    pub source: &'a str,
+    pub outer: &'a [kiln_ir::EvalOuter],
+    pub strict: bool,
+}
+
+/// Why a run-time compilation produced no program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvalCompileError {
+    /// The source is not a program. A `SyntaxError` the calling code can catch, which is what
+    /// `assert.throws(SyntaxError, () => eval(bad))` is written to see.
+    Syntax(String),
+    /// A program this compiler does not implement yet. Kept apart from a syntax error on
+    /// purpose: reporting `SyntaxError` for a gap tells the program its source was invalid, and
+    /// a program that believes that will take a different branch rather than fail.
+    Unsupported(String),
+}
+
+/// How a host turns source text into a program while a program is already running.
+///
+/// `eval` and `Function` are the only two things in the language that need a compiler at run
+/// time, and the interpreter cannot own one: ADR 0007 keeps it downstream of the bytecode and
+/// clear of the frontend, so an `eval` that parsed its own source would pull Oxc into every build
+/// of the VM. The frontend is injected instead -- the same shape ADR 0006 gives `kiln-db`, one
+/// function pointer over owned data -- and a host that installs none simply has no `eval`.
+pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<Program, EvalCompileError>;
+
+thread_local! {
+    /// Per thread rather than per VM, because it is a property of the *build* -- which frontend
+    /// this process was linked with -- and not of any one execution. A `Cell` of a function
+    /// pointer costs nothing to read, which matters because every `eval` reads it.
+    static SOURCE_COMPILER: std::cell::Cell<Option<SourceCompiler>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Give this thread's VMs a compiler, so `eval` and `Function` can build programs at run time.
+pub fn install_source_compiler(compiler: SourceCompiler) {
+    SOURCE_COMPILER.with(|slot| slot.set(Some(compiler)));
+}
+
+fn source_compiler() -> Option<SourceCompiler> {
+    SOURCE_COMPILER.with(std::cell::Cell::get)
+}
+
+/// Whether a program reads or writes module scope through the frame stack.
+///
+/// True of every ordinary program with a nested function over a module binding, and false of
+/// every eval program, which boxes its top-level bindings instead. That asymmetry is the point:
+/// a `LoadGlobal` reaches the frame `global_base` names, and for an eval that frame belongs to a
+/// program with entirely different slots.
+fn reads_module_scope(program: &Program) -> bool {
+    fn reaches(code: &[Instruction]) -> bool {
+        code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::LoadGlobal(_) | Instruction::StoreGlobal(_)
+            )
+        })
+    }
+    reaches(&program.code) || program.functions.iter().any(|proto| reaches(&proto.code))
+}
+
+/// Whether source text opens with a `"use strict"` directive of its own.
+///
+/// Read from the text because a directive prologue does not survive lowering: the frontend keeps
+/// statements, and a directive is not one. Only the leading run of string-literal statements is
+/// examined, which is what a prologue is, and an escaped spelling -- `"use\u0020strict"` -- is
+/// deliberately not a directive and is not recognised here either, exactly as the specification
+/// requires.
+fn source_is_strict(source: &str) -> bool {
+    let mut rest = source;
+    loop {
+        rest = skip_trivia(rest);
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            return false;
+        };
+        let body = &rest[quote.len_utf8()..];
+        let Some(end) = body.find([quote, '\\', '\n', '\r']) else {
+            return false;
+        };
+        // A backslash means the literal is escaped, so its characters are not the ones written
+        // and it cannot be the directive whatever it spells.
+        if body.as_bytes()[end] != quote as u8 {
+            return false;
+        }
+        if &body[..end] == "use strict" {
+            return true;
+        }
+        rest = &body[end + 1..];
+        rest = skip_trivia(rest);
+        rest = rest.strip_prefix(';').unwrap_or(rest);
+    }
+}
+
+/// Source with leading whitespace and comments removed.
+fn skip_trivia(source: &str) -> &str {
+    let mut rest = source;
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix("//") {
+            rest = after.find(['\n', '\r']).map_or("", |end| &after[end..]);
+            continue;
+        }
+        if let Some(after) = trimmed.strip_prefix("/*") {
+            let Some(end) = after.find("*/") else {
+                return "";
+            };
+            rest = &after[end + 2..];
+            continue;
+        }
+        return trimmed;
     }
 }
 
@@ -3124,6 +3312,17 @@ pub enum ExecutionError {
     /// its own variant rather than borrowing the cycle's because the two share nothing but their
     /// error kind, and a program that catches this should not be told its value contains itself.
     BigIntNotSerialisable,
+    /// `eval("...")` or `Function("...")`: building a function from source at run time.
+    ///
+    /// A catchable error, in the specification and here -- see [`Self::CyclicJson`]. It is not a
+    /// missing builtin but a missing *realm capability*: compiling source during execution needs
+    /// the compiler present at run time, which is a different kind of realm from the one an
+    /// ahead-of-time compiler targets. `Error` rather than `Type`, because nothing about the
+    /// argument is wrong -- this realm cannot do it.
+    ///
+    /// Non-string arguments are unaffected: `eval(1)` is specified to hand back its argument, and
+    /// still does.
+    FunctionFromSource,
     /// ToPrimitive reached the end without a primitive: no `@@toPrimitive`, and `valueOf` and
     /// `toString` either absent or both answering objects.
     ///
@@ -3218,6 +3417,21 @@ pub enum ExecutionError {
     /// A symbol reaching `ToString`, which has no spelling to give back. `String(symbol)` is the
     /// deliberate conversion and the only one the specification allows.
     SymbolIsNotAString,
+    /// A calendar-engine failure that arrives already classified, so a `RangeError` from
+    /// `temporal_rs` reaches the program as a `RangeError` rather than as a generic fault.
+    TemporalFailure {
+        kind: ErrorKind,
+        message: String,
+    },
+    /// An `Intl` refusal, carrying the constructor ECMA-402 names for it.
+    ///
+    /// The kind travels with the message because the specification is unusually precise
+    /// about which of the two it is -- an out-of-range option value is a `RangeError` and a
+    /// wrong-typed one is a `TypeError` -- and a large part of the corpus tests only that.
+    IntlFailure {
+        kind: ErrorKind,
+        message: String,
+    },
     /// `ToNumber` of a BigInt. Refused for the same reason the other direction is: the two
     /// numeric types never cross implicitly.
     BigIntIsNotANumber,
@@ -3260,8 +3474,24 @@ pub enum ExecutionError {
     MalformedUri,
     /// `push` and its siblings on a frozen array.
     FrozenArray,
-    /// `new Function(source)`, which needs a compiler at run time.
-    FunctionFromSource,
+    /// `eval` or `new Function` reached with no compiler installed for this realm.
+    ///
+    /// Deliberately absent from `as_javascript_error`: this is the *engine* saying it has no
+    /// frontend, not the language saying anything, and a program that caught it would carry on
+    /// as though the source had been rejected on its merits.
+    NoSourceCompiler,
+    /// Source handed to `eval` or `new Function` that is not a program.
+    SyntaxErrorMessage {
+        message: String,
+    },
+    /// Source that parses but that this compiler cannot lower yet.
+    ///
+    /// Absent from `as_javascript_error` for the same reason [`Self::NoSourceCompiler`] is: a
+    /// program told `SyntaxError` would believe its own source was rejected, and take the branch
+    /// it wrote for that instead of failing.
+    EvalUnsupported {
+        message: String,
+    },
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -3346,6 +3576,8 @@ impl fmt::Display for ExecutionError {
                 write!(formatter, "generator is already running")
             }
             Self::InvalidArrayLength => write!(formatter, "invalid array length"),
+            Self::TemporalFailure { message, .. } => write!(formatter, "{message}"),
+            Self::IntlFailure { message, .. } => write!(formatter, "{message}"),
             Self::BufferTooLarge { bytes } => write!(
                 formatter,
                 "buffer of {bytes} bytes exceeds what this implementation will allocate"
@@ -3406,10 +3638,12 @@ impl fmt::Display for ExecutionError {
             }
             Self::MalformedUri => write!(formatter, "URI malformed"),
             Self::FrozenArray => write!(formatter, "cannot change the length of a frozen array"),
-            Self::FunctionFromSource => write!(
+            Self::NoSourceCompiler => write!(
                 formatter,
-                "`Function` cannot build a function from source at run time"
+                "no source compiler is installed, so `eval` and `Function` cannot compile at run time"
             ),
+            Self::SyntaxErrorMessage { message } => write!(formatter, "{message}"),
+            Self::EvalUnsupported { message } => write!(formatter, "{message}"),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -3417,6 +3651,10 @@ impl fmt::Display for ExecutionError {
             Self::BigIntNotSerialisable => {
                 write!(formatter, "do not know how to serialize a BigInt")
             }
+            Self::FunctionFromSource => write!(
+                formatter,
+                "building a function from source needs the compiler at run time"
+            ),
             Self::NotPrimitive => {
                 write!(formatter, "cannot convert object to primitive value")
             }
@@ -3492,6 +3730,11 @@ impl ExecutionError {
                 "Cannot perform this operation on a revoked proxy".to_owned(),
             ),
             Self::InvalidArrayLength => (ErrorKind::Range, "Invalid array length".to_owned()),
+            // Catchable, and with the engine's own classification kept: a program that asks for
+            // an impossible date is told `RangeError` because that is what the specification
+            // says, not because this is the nearest kind to hand.
+            Self::TemporalFailure { kind, message } => (*kind, message.clone()),
+            Self::IntlFailure { kind, message } => (*kind, message.clone()),
             Self::TypeErrorMessage { message } => (ErrorKind::Type, message.clone()),
             Self::BufferNotResizable => (
                 ErrorKind::Type,
@@ -3573,10 +3816,7 @@ impl ExecutionError {
                 ErrorKind::Type,
                 "Cannot add property, object is not extensible".to_owned(),
             ),
-            Self::FunctionFromSource => (
-                ErrorKind::Type,
-                "Function cannot be built from source at run time".to_owned(),
-            ),
+            Self::SyntaxErrorMessage { message } => (ErrorKind::Syntax, message.clone()),
             Self::ProxyNotSerialisable => (
                 ErrorKind::Type,
                 "Cannot serialise a proxy nested inside a value".to_owned(),
@@ -3588,6 +3828,10 @@ impl ExecutionError {
             Self::BigIntNotSerialisable => (
                 ErrorKind::Type,
                 "Do not know how to serialize a BigInt".to_owned(),
+            ),
+            Self::FunctionFromSource => (
+                ErrorKind::Error,
+                "Building a function from source is not supported in this realm".to_owned(),
             ),
             Self::NotPrimitive => (
                 ErrorKind::Type,
@@ -3967,6 +4211,12 @@ struct Frame {
     /// constructor yields its instance unless the body returned an object, which wins.
     constructing: Option<Value>,
     locals: Vec<Value>,
+    /// Which frame's locals were module scope for the code that pushed this one.
+    ///
+    /// Every ordinary call inherits it, because a callee shares its module's bindings. An eval
+    /// does not: its program has module-scope slots of its own, and reading them out of the
+    /// caller's module frame would find unrelated bindings by number.
+    global_base: usize,
     /// Where to resume in the caller.
     instruction: usize,
     /// Stack height when the call began, so a callee that leaves debris cannot corrupt the
@@ -4034,6 +4284,13 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// ordinary call has none, and an arrow uses the one from where it was written.
     new_target: Value,
     frames: Vec<Frame>,
+    /// The frame whose locals are module scope for the running code, or the running frame itself
+    /// when the stack has not grown past it.
+    ///
+    /// Zero for every program that contains no `eval`: module scope is the bottom of the stack,
+    /// which is what `LoadGlobal` has always meant. An eval program is a second bottom -- it has
+    /// its own top-level slots -- and this is what lets both be true at once.
+    global_base: usize,
     instruction: usize,
     /// One shared name per proto, so making a closure copies a pointer rather than a string.
     function_names: Vec<Option<Rc<str>>>,
@@ -4103,6 +4360,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             intrinsics: Intrinsics::default(),
             native_depth: 0,
             frames: Vec::new(),
+            global_base: 0,
             instruction: 0,
             steps: 0,
             symbol_serial: 0,
@@ -4669,6 +4927,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let prototype = self.error_prototype(kind);
                     self.stack.push(prototype);
                 }
+                Instruction::DirectEval(site) => {
+                    // No callee sits under the arguments: a direct eval names no value, which is
+                    // exactly why it is an instruction rather than a call.
+                    let arguments = match site.argc {
+                        Some(argc) => {
+                            let argc = usize::from(argc);
+                            if self.stack.len() < argc {
+                                return Err(ExecutionError::StackUnderflow {
+                                    instruction: current,
+                                });
+                            }
+                            self.stack.split_off(self.stack.len() - argc)
+                        }
+                        None => match self.pop(current)? {
+                            Value::Array(arguments) => arguments.borrow().clone(),
+                            argument => vec![argument],
+                        },
+                    };
+                    // An eval of anything but a string *is* that value, per the specification,
+                    // which is what makes `eval(someObject)` harmless rather than a coercion.
+                    let source = match arguments.into_iter().next() {
+                        Some(Value::String(source)) => source,
+                        Some(other) => {
+                            self.stack.push(other);
+                            continue;
+                        }
+                        None => {
+                            self.stack.push(Value::Undefined);
+                            continue;
+                        }
+                    };
+                    // Entered rather than driven: the interpreter loop runs the eval's frame
+                    // next, and its `Return` leaves the completion value where this instruction's
+                    // result belongs. Nothing is pushed here.
+                    let entered = self.enter_eval(&source, Some(site));
+                    if self.catchable(entered, current)?.is_none() {
+                        continue;
+                    }
+                }
                 Instruction::LoadBuiltin(builtin) => {
                     self.stack.push(Value::Native(match builtin {
                         kiln_ir::Builtin::Error => Native::Error(ErrorKind::Error),
@@ -4720,6 +5017,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Reflect => Native::Reflect,
                         kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
                         kiln_ir::Builtin::Function => Native::FunctionConstructor,
+                        kiln_ir::Builtin::Eval => Native::Eval,
                         kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
@@ -5251,6 +5549,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
+                    self.global_base = frame.global_base;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
                         && !matches!(value, Value::Object(_) | Value::Array(_))
@@ -5319,6 +5618,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
+                self.global_base = frame.global_base;
                 self.instruction = frame.instruction;
             }
             self.stack.truncate(handler.stack_height);
@@ -5333,6 +5633,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
             self.arguments = frame.arguments;
+            self.global_base = frame.global_base;
             self.instruction = frame.instruction;
         }
         self.stack.truncate(handler.stack_height);
@@ -5473,6 +5774,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments: std::mem::replace(&mut self.arguments, arguments),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
+            // A generator body belongs to the module that wrote it, and so does the module scope
+            // it reads -- which is the caller's here for the same reason an ordinary call's is.
+            global_base: self.global_base,
             instruction: self.instruction,
             stack_base,
         });
@@ -5574,6 +5878,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
         self.arguments = frame.arguments;
+        self.global_base = frame.global_base;
         self.instruction = frame.instruction;
     }
 
@@ -5710,6 +6015,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // Ahead of the wrapper and proxy preambles below: a `Temporal` value is neither a boxed
+        // primitive nor a shape-inspecting built-in, and its own dispatch decides which of the
+        // eight types a method belongs to.
+        if let Native::Temporal(op) = native {
+            return self.temporal_dispatch(op, receiver, arguments, instruction);
+        }
+        // And ahead of them for `Intl`, for a sharper reason: every constructor here reads an
+        // options bag, and the *order* those reads happen in is observable through getters and
+        // proxies. That needs the machine, so there is no machine-free path to fall back to.
+        if let Native::Intl(op) = native {
+            return self.intl_dispatch(op, receiver, arguments, instruction);
+        }
         // The same wrapper opening `call_native` does, applied before the machine's own arms so
         // that the two halves of a built-in cannot disagree about what its receiver is.
         if let Some(boxed) = receiver_for(native, receiver) {
@@ -5748,21 +6065,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // the way the proxy case above does keeps the machine out of `call_native`'s thirty-five
         // numeric call sites. The recursion terminates because a reduced argument is a primitive,
         // so the second pass finds nothing left to reduce.
-        if let Some(prefer_string) = native.primitive_argument_hint() {
-            if arguments.iter().any(|argument| {
+        if let Some(prefer_string) = native.primitive_argument_hint()
+            && arguments.iter().any(|argument| {
                 matches!(
                     argument,
                     Value::Object(_) | Value::Function(_) | Value::Array(_)
                 )
-            }) {
-                let mut reduced = Vec::with_capacity(arguments.len());
-                for argument in arguments {
-                    // Left to right, because each reduction can run user code and the order in
-                    // which those calls happen is observable.
-                    reduced.push(self.as_primitive(argument, prefer_string, instruction)?);
-                }
-                return self.dispatch_native(native, receiver, &reduced, instruction);
+            })
+        {
+            let mut reduced = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                // Left to right, because each reduction can run user code and the order in which
+                // those calls happen is observable.
+                reduced.push(self.as_primitive(argument, prefer_string, instruction)?);
             }
+            return self.dispatch_native(native, receiver, &reduced, instruction);
         }
         // Each of these begins with `ToObject` of its first argument, and that step throws for
         // `null` and `undefined`. The rest of the coercion is invisible here: a primitive has
@@ -6653,6 +6970,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     },
                 }))))
             }
+            // The two built-ins that compile. Both need the machine -- a compiled program is
+            // entered as a frame and run -- so neither can live in `call_native`, which is a
+            // free function with no VM to enter one on.
+            Native::Eval => self.indirect_eval(arguments),
+            Native::FunctionConstructor => self.function_from_source(arguments),
             _ => call_native(&self.intrinsics, native, receiver, arguments),
         }
     }
@@ -8030,7 +8352,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn set_global(&mut self, slot: usize, value: Value) -> Result<(), ExecutionError> {
-        let locals = match self.frames.first_mut() {
+        let locals = match self.frames.get_mut(self.global_base) {
             Some(module) => &mut module.locals,
             None => &mut self.locals,
         };
@@ -8041,7 +8363,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn module_locals(&self) -> &[Value] {
-        match self.frames.first() {
+        match self.frames.get(self.global_base) {
             Some(module) => &module.locals,
             None => &self.locals,
         }
@@ -8866,6 +9188,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Array", Value::Native(Native::ArrayConstructor));
         globals.set_non_enumerable("Object", Value::Native(Native::ObjectConstructor));
         globals.set_non_enumerable("JSON", Value::Native(Native::Json));
+        globals.set_non_enumerable(
+            "Temporal",
+            Value::Native(Native::Temporal(temporal::Op::Namespace)),
+        );
         globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor));
         globals.set_non_enumerable("String", Value::Native(Native::StringConstructor));
         globals.set_non_enumerable("Math", Value::Native(Native::Math));
@@ -8878,10 +9204,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor));
         globals.set_non_enumerable("performance", Value::Native(Native::Performance));
         globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect));
+        globals.set_non_enumerable("Intl", Value::Native(Native::Intl(intl::Op::Namespace)));
         globals.set_non_enumerable("BigInt", Value::Native(Native::BigIntConstructor));
         globals.set_non_enumerable("Number", Value::Native(Native::NumberConstructor));
         globals.set_non_enumerable("Boolean", Value::Native(Native::BooleanConstructor));
         globals.set_non_enumerable("Function", Value::Native(Native::FunctionConstructor));
+        globals.set_non_enumerable("eval", Value::Native(Native::Eval));
         globals.set_non_enumerable("escape", Value::Native(Native::Escape));
         globals.set_non_enumerable("unescape", Value::Native(Native::Unescape));
         globals.set_non_enumerable("encodeURI", Value::Native(Native::EncodeUri));
@@ -9165,6 +9493,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         current: usize,
     ) -> Result<(), ExecutionError> {
         match callee {
+            // `new Temporal.PlainDate(...)`. The engine builds the value; what is decided here is
+            // only what the arguments meant, which is the half the language owns.
+            Value::Native(Native::Temporal(temporal::Op::Constructor(kind))) => {
+                let built = self.temporal_construct(kind, &arguments, current)?;
+                self.stack.push(built);
+            }
             // `new Proxy(target, handler)` is the constructor; a proxy *of* something
             // constructible is the `construct` trap.
             Value::Native(Native::ProxyConstructor) => {
@@ -9239,6 +9573,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.dispatch_native(native, &Value::Undefined, &arguments, current)?;
                 self.stack.push(wrap_primitive(primitive));
             }
+            // `new Function(source)` and `Function(source)` build the same function: the
+            // specification routes both through the same steps and differs only in a `NewTarget`
+            // that decides which prototype the result inherits, which this realm does not model.
+            Value::Native(Native::FunctionConstructor) => {
+                let built = self.function_from_source(&arguments)?;
+                self.stack.push(built);
+            }
             Value::Native(Native::ArrayBufferConstructor) => {
                 let built = self.construct_array_buffer(false, &arguments, current)?;
                 self.stack.push(built);
@@ -9249,6 +9590,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::DataViewConstructor) => {
                 let built = self.construct_data_view(&arguments, current)?;
+                self.stack.push(built);
+            }
+            // `new Intl.NumberFormat(...)`. The engine builds the formatter; what is decided
+            // here is only what the options meant, which is the half the language owns.
+            Value::Native(Native::Intl(intl::Op::Constructor(service))) => {
+                let built = self.intl_construct(service, &arguments, current)?;
                 self.stack.push(built);
             }
             Value::Native(Native::DateConstructor) => {
@@ -9870,6 +10217,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return constructor;
         }
         match target {
+            // A `Temporal` value's fields and methods both come from its own table: `day` is a
+            // question only the calendar engine can answer, and which methods exist depends on
+            // which of the eight types this is.
+            Value::Temporal(value) => {
+                temporal::instance_property(value, name).unwrap_or(Value::Undefined)
+            }
             // A Set or Map instance is an object whose reserved state marks it. Its methods come
             // from one table shared with `in`, so the two cannot disagree -- and this arm has to
             // precede the ordinary object case, which would otherwise answer `undefined` first.
@@ -10226,6 +10579,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "hasIndices" => Value::Boolean(regexp.flags.contains('d')),
                 "lastIndex" => Value::Number(regexp.last_index.get() as f64),
                 _ => Value::Undefined,
+            },
+            // An `Intl` instance answers from the same table its prototype does, so the two
+            // cannot resolve a name differently -- and `Intl.Locale`'s accessors are plain reads
+            // here, as every other built-in getter in this interpreter is.
+            Value::Intl(value) => match intl::instance_property(value, name) {
+                Some(found) => found,
+                None => inherited_object_property(&self.intrinsics, name),
             },
             // The same table `Promise.prototype` answers from, so an instance and the
             // prototype can never resolve a name differently.
@@ -10901,12 +11261,176 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments: std::mem::replace(&mut self.arguments, received),
             constructing,
             locals: std::mem::replace(&mut self.locals, locals),
+            // Inherited: a called function reads the same module bindings its caller does.
+            global_base: self.global_base,
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
         self.function = Some(closure);
         self.instruction = 0;
         Ok(())
+    }
+
+    /// Compile source that arrived at run time and enter it as a frame of its own.
+    ///
+    /// An eval is a *program*, not a function: it has module-scope slots, and running it inside
+    /// the caller's frame would put its bindings in the caller's numbered slots. So it gets a
+    /// frame like a call does, and `global_base` moves with it so that its own top-level slots
+    /// are what its nested functions call module scope.
+    ///
+    /// `site` is what makes it direct. With one, the caller's bindings arrive as cells the eval
+    /// program binds by name, and its `this`, `arguments` and `new.target` are the caller's --
+    /// which is the whole of what "evaluates in the caller's scope" means. Without one, this is
+    /// an indirect eval: global scope, the global object as `this`, and no arguments.
+    fn enter_eval(&mut self, source: &str, site: Option<&EvalSite>) -> Result<(), ExecutionError> {
+        let Some(compile) = source_compiler() else {
+            return Err(ExecutionError::NoSourceCompiler);
+        };
+        // Strict either because the caller is -- which only the compiler knew, so the site
+        // carries it -- or because this source says so itself.
+        let strict = site.is_some_and(|site| site.strict) || source_is_strict(source);
+        let outer: Vec<kiln_ir::EvalOuter> = site
+            .map(|site| {
+                site.bindings
+                    .iter()
+                    .map(|binding| kiln_ir::EvalOuter {
+                        name: binding.name.clone(),
+                        declaration: binding.declaration,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let program = compile(&EvalSource {
+            source,
+            outer: &outer,
+            strict,
+        })
+        .map_err(|error| match error {
+            EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
+            EvalCompileError::Unsupported(message) => ExecutionError::EvalUnsupported { message },
+        })?;
+        // `compile_eval` boxes every top-level binding precisely so this cannot happen. Checked
+        // anyway, and refused rather than run: a `LoadGlobal` here would read the *caller's*
+        // module frame by slot number and answer with whatever binding happens to share it,
+        // which is the one failure mode an eval must never have.
+        if reads_module_scope(&program) {
+            return Err(ExecutionError::EvalUnsupported {
+                message: "eval produced a program that reads module scope by slot".to_owned(),
+            });
+        }
+
+        let mut locals = vec![Value::Undefined; program.local_count as usize];
+        if let Some(site) = site {
+            // Slot `i` for binding `i`, which is the contract `compile_eval` compiled against.
+            for (slot, binding) in site.bindings.iter().enumerate() {
+                let cell = match binding.access {
+                    EvalAccess::Cell(slot) => self.cell(slot as usize)?,
+                    EvalAccess::Upvalue(index) => self.upvalue(index)?,
+                };
+                locals[slot] = Value::Cell(cell);
+            }
+        }
+
+        if self.frames.len() >= self.limits.max_call_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_call_depth,
+            });
+        }
+        let (this_value, arguments, new_target) = match site {
+            Some(_) => (
+                self.this_value.clone(),
+                self.arguments.clone(),
+                self.new_target.clone(),
+            ),
+            // An indirect eval is called with no receiver from global scope, which makes `this`
+            // the global object -- the one place a sloppy call still gets one.
+            None => (self.global_object(), Vec::new(), Value::Undefined),
+        };
+        self.frames.push(Frame {
+            program: std::mem::replace(&mut self.program, Rc::new(program)),
+            function: self.function.take(),
+            this_value: std::mem::replace(&mut self.this_value, this_value),
+            new_target: std::mem::replace(&mut self.new_target, new_target),
+            arguments: std::mem::replace(&mut self.arguments, arguments),
+            constructing: None,
+            locals: std::mem::replace(&mut self.locals, locals),
+            global_base: self.global_base,
+            instruction: self.instruction,
+            stack_base: self.stack.len(),
+        });
+        // The eval program is its own module scope from here until its frame returns. It is not
+        // in `frames` yet -- its locals are the running ones -- and the index it *will* occupy
+        // when it makes a call of its own is exactly the depth the stack has now.
+        self.global_base = self.frames.len();
+        self.instruction = 0;
+        Ok(())
+    }
+
+    /// Run an eval to completion from inside a built-in, and hand back its value.
+    ///
+    /// The instruction path does not need this: it enters the frame and lets the interpreter
+    /// loop carry on. A built-in cannot, because it owes its caller a value now -- so it drives
+    /// the machine the way every other built-in that calls back into JavaScript does, and pays
+    /// the same Rust frame for it.
+    fn drive_eval(
+        &mut self,
+        source: &str,
+        site: Option<&EvalSite>,
+    ) -> Result<Value, ExecutionError> {
+        if self.native_depth >= self.limits.max_native_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_native_depth,
+            });
+        }
+        self.native_depth += 1;
+        let depth = self.frames.len();
+        let outcome = self
+            .enter_eval(source, site)
+            .and_then(|()| self.run_frames(depth).map(|result| result.value));
+        self.native_depth -= 1;
+        outcome
+    }
+
+    /// `eval(x)` reached as a value: an indirect eval, which evaluates in global scope.
+    ///
+    /// A non-string argument comes straight back. That is not a shortcut -- the specification
+    /// says an eval of anything but a string *is* that value, which is what makes
+    /// `eval(someObject)` harmless.
+    fn indirect_eval(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
+        match arguments.first() {
+            Some(Value::String(source)) => {
+                let source = source.clone();
+                self.drive_eval(&source, None)
+            }
+            Some(value) => Ok(value.clone()),
+            None => Ok(Value::Undefined),
+        }
+    }
+
+    /// `new Function(a, b, "return a + b")`, which is an eval of an assembled function literal.
+    ///
+    /// The specification builds source text and evaluates it, and so does this: the parameters
+    /// are joined with commas and the body is the last argument, both `ToString`-ed by ordinary
+    /// coercion. Parenthesised so that the program's completion value is the function rather
+    /// than a declaration that binds it somewhere and answers `undefined`.
+    ///
+    /// Global scope, never the caller's: `Function` is reached as a value, and a value carries
+    /// no scope. That is the difference between it and a direct `eval`, and it is why a function
+    /// built this way cannot see the locals around the call that built it.
+    fn function_from_source(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
+        let (body, parameters) = match arguments.split_last() {
+            Some((body, parameters)) => (body.to_display_string(), parameters),
+            None => (String::new(), &[] as &[Value]),
+        };
+        let parameters = parameters
+            .iter()
+            .map(Value::to_display_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        // The newlines are the specification's own: they stop a `//` comment in the parameter
+        // list from swallowing the brace, and one in the body from swallowing the close.
+        let source = format!("(function anonymous({parameters}\n) {{\n{body}\n}})");
+        self.drive_eval(&source, None)
     }
 
     fn pop(&mut self, instruction: usize) -> Result<Value, ExecutionError> {
@@ -11302,7 +11826,11 @@ fn json_stringify(
         // None of these has own enumerable properties, so all serialise as the empty object --
         // which is also what a real engine produces for them.
         // A regexp has no own enumerable properties either, so `JSON.stringify(/a/)` is `{}`.
-        Value::Generator(_) | Value::Promise(_) | Value::RegExp(_) => Some("{}".to_owned()),
+        Value::Generator(_)
+        | Value::Promise(_)
+        | Value::RegExp(_)
+        | Value::Temporal(_)
+        | Value::Intl(_) => Some("{}".to_owned()),
         // A date serialises through `toJSON`, which is its ISO form -- or null when it is invalid,
         // since there is no ISO spelling for that.
         Value::Date(time) => Some(match iso_string(time.get()) {
@@ -11424,6 +11952,23 @@ fn call_native(
         return Err(ExecutionError::FrozenArray);
     }
     Ok(match native {
+        // Routed through `Vm::temporal_dispatch` before it can reach here: every `Temporal`
+        // method may read an options bag, and a property read is observable and needs the
+        // machine. Arriving here would mean the two dispatch paths disagree.
+        Native::Temporal(_) => {
+            return Err(ExecutionError::TemporalFailure {
+                kind: ErrorKind::Type,
+                message: "Temporal reached the machine-free dispatch path".to_owned(),
+            });
+        }
+        // Routed the same way, and unreachable for the same reason: an `Intl` option read is
+        // observable, so it cannot happen where there is no machine to observe it with.
+        Native::Intl(_) => {
+            return Err(ExecutionError::IntlFailure {
+                kind: ErrorKind::Type,
+                message: "Intl reached the machine-free dispatch path".to_owned(),
+            });
+        }
         // A proxy of an array *is* an array: `isArray` looks through as many proxies as it
         // takes, which is what lets a library wrap one and still branch on the shape.
         Native::ArrayIsArray => Value::Boolean(matches!(
@@ -11547,6 +12092,16 @@ fn call_native(
                     }
                 }
                 Value::DataView(_) => "DataView",
+                // Every `Intl` prototype carries a `Symbol.toStringTag` of its own, so the tag is
+                // the qualified name rather than the bare `Object` a shape test would give.
+                Value::Intl(built) => built.service().tag(),
+                // A namespace and a method table are objects that happen to be spelled as
+                // natives here; only the callable ones report as functions.
+                Value::Native(native) if namespace_name(native).is_some() => "Object",
+                Value::Native(Native::PrototypeOf(_)) => "Object",
+                // Each `Intl` prototype carries a `Symbol.toStringTag` of its own, so it reports
+                // the qualified name rather than the bare `Object` a shape test would give.
+                Value::Native(Native::Intl(intl::Op::Prototype(service))) => service.tag(),
                 Value::Function(_)
                 | Value::Native(_)
                 | Value::Callback(_)
@@ -11561,14 +12116,15 @@ fn call_native(
         Native::ObjectValueOf => receiver.clone(),
         Native::PrimitiveToString => Value::String(receiver.to_display_string()),
         Native::FunctionToString => Value::String(receiver.to_display_string()),
-        // `Function` is here for its prototype and its `toString`. Building a function from a
-        // string needs the compiler at run time, which is a different kind of realm from the one
-        // an ahead-of-time compiler targets -- and saying so is better than the `undefined` this
-        // used to return, which turned up three frames later as "undefined is not a function".
-        Native::FunctionConstructor if !arguments.is_empty() => {
-            return Err(ExecutionError::FunctionFromSource);
+        // Both build a program from source, which needs the machine: a compilation has to be
+        // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
+        // every call of a built-in goes through it -- so reaching here means a caller found a
+        // route around the machine, and refusing says so rather than answering `undefined`.
+        Native::FunctionConstructor | Native::Eval => {
+            return Err(ExecutionError::EvalUnsupported {
+                message: "source compilation reached without a machine to run it".to_owned(),
+            });
         }
-        Native::FunctionConstructor => Value::Undefined,
         // `Proxy()` without `new` is a TypeError in the specification; there is nothing useful
         // to return either way.
         Native::ProxyConstructor => Value::Undefined,
@@ -13446,6 +14002,11 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             return matches!(value, Value::Promise(_));
         }
         Value::Native(Native::DateConstructor) => return matches!(value, Value::Date(_)),
+        // An `Intl` value is an instance of its own service and of nothing else: a `Collator`
+        // is not an `Intl.NumberFormat` even though both are `Value::Intl`.
+        Value::Native(Native::Intl(intl::Op::Constructor(service))) => {
+            return matches!(value, Value::Intl(built) if built.service() == *service);
+        }
         Value::Native(Native::RegExpConstructor) => return matches!(value, Value::RegExp(_)),
         Value::Native(Native::ArrayConstructor) => return matches!(value, Value::Array(_)),
         // A view is an instance of the constructor that names its element type, and of nothing
@@ -14591,6 +15152,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
         }
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
+        Value::Intl(value) => format!("{} {{}}", value.service().tag()),
         Value::Settler(..) => "[Function (anonymous)]".to_owned(),
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
@@ -14626,6 +15188,9 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         ),
         Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
         Value::Date(time) => iso_string(time.get()).unwrap_or_else(|| "Invalid Date".to_owned()),
+        Value::Temporal(value) => value
+            .to_temporal_string(&kiln_temporal::Options::default())
+            .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
         // A console shows the literal's spelling, which is how it is told from a number.
         Value::BigInt(value) => format!("{value}n"),
         Value::Promise(promise) => match &promise.borrow().settled {
@@ -16058,6 +16623,12 @@ const fn native_length(native: Native) -> Option<f64> {
         N::PrototypeOf(PrototypeTable::Function) => 0.0,
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
+        // `Intl`'s arities come from its own table: the namespace and the six prototypes are
+        // not callable, and the constructors do not all take the same number of arguments.
+        N::Intl(op) => match intl::length(op) {
+            Some(length) => length,
+            None => return None,
+        },
 
         // The zero-argument built-ins: every accessor, every `toString`, and the collection
         // constructors, which take their contents through an optional argument.
@@ -16376,9 +16947,12 @@ impl Intrinsics {
 /// one link up -- which is why a table goes straight to the object methods.
 fn native_inherited_property(intrinsics: &Intrinsics, target: &Value, name: &str) -> Value {
     match target {
-        Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect) => {
-            inherited_object_property(intrinsics, name)
-        }
+        Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect)
+        // The `Intl` namespace and the six prototypes are ordinary objects, so they inherit
+        // from `Object.prototype` rather than from `Function.prototype`. An `Intl` instance
+        // does too: its own methods are found first, and everything else comes from there.
+        | Value::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
+        | Value::Intl(_) => inherited_object_property(intrinsics, name),
         _ => function_property(intrinsics, name),
     }
 }
@@ -16687,6 +17261,9 @@ fn empty_items(count: usize) -> String {
 /// name is derived, for the reason [`builtin_js_name`] gives.
 fn native_js_name(native: &Native) -> String {
     match native {
+        // Derivation cannot reach these: the payload is the whole of the name.
+        Native::Intl(op) => intl::js_name(*op),
+        Native::Temporal(op) => temporal::js_name(*op),
         Native::Error(kind) => kind.name().to_owned(),
         // A view constructor is named for its element type -- `Uint8Array`, `BigInt64Array` --
         // and the derivation cannot reach it: the payload it discards as "not part of the name"
@@ -16716,6 +17293,8 @@ const fn namespace_name(native: &Native) -> Option<&'static str> {
     match native {
         Native::Math => Some("Math"),
         Native::Json => Some("JSON"),
+        Native::Intl(op) => intl::namespace_name(*op),
+        Native::Temporal(op) => temporal::namespace_name(*op),
         Native::Reflect => Some("Reflect"),
         _ => None,
     }
@@ -17069,6 +17648,83 @@ mod tests {
             ExecutionLimits::default(),
         )
         .map(|result| result.value)
+    }
+
+    /// A stand-in frontend for the eval tests: it ignores the source and returns one program.
+    ///
+    /// The interpreter has no compiler of its own -- that is the point of the injected seam -- so
+    /// a test of the *machine* side of `eval` has to supply the program directly. What is being
+    /// checked here is the plumbing: that the eval'd program runs in a frame of its own, and
+    /// that slot 0 is the caller's cell rather than a copy of the value in it.
+    fn stub_eval_compiler(request: &EvalSource<'_>) -> Result<Program, EvalCompileError> {
+        assert_eq!(
+            request.outer.len(),
+            1,
+            "the direct eval hands over the one binding in scope"
+        );
+        assert_eq!(request.outer[0].name, "x");
+        Ok(Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            // `x = 2; x` against the cell installed in slot 0.
+            constants: vec![Constant::Number(2.0f64.to_bits())],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::StoreCell(0),
+                Instruction::LoadCell(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: Vec::new(),
+        })
+    }
+
+    /// A direct eval writes the caller's binding, not a copy of it.
+    ///
+    /// This is the whole reason the site hands over cells: the eval'd program is compiled against
+    /// slot numbers of its own, and only a shared cell can make `eval("x = 2")` visible to the
+    /// caller afterwards. A copy would leave the caller reading 1 and look entirely plausible.
+    #[test]
+    fn a_direct_eval_writes_through_to_the_callers_binding() {
+        install_source_compiler(stub_eval_compiler);
+        let mut program = program(
+            vec![
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("x = 2; x".to_owned()),
+            ],
+            vec![
+                Instruction::NewCell(0),
+                Instruction::Const(0),
+                Instruction::StoreCell(0),
+                Instruction::Const(1),
+                Instruction::DirectEval(Box::new(EvalSite {
+                    bindings: vec![kiln_ir::EvalBinding {
+                        name: "x".to_owned(),
+                        access: EvalAccess::Cell(0),
+                        declaration: kiln_ir::EvalDeclaration::Var,
+                    }],
+                    strict: false,
+                    argc: Some(1),
+                })),
+                // The eval's completion value is discarded; the caller's binding is the answer.
+                Instruction::Pop,
+                Instruction::LoadCell(0),
+                Instruction::Return,
+            ],
+        );
+        program.local_count = 1;
+        assert_eq!(run(&program), Ok(Value::Number(2.0)));
+    }
+
+    /// A directive prologue decides an eval's strictness, and an escaped spelling is not one.
+    #[test]
+    fn a_use_strict_directive_is_recognised_only_when_it_is_written_literally() {
+        assert!(source_is_strict("\"use strict\"; x"));
+        assert!(source_is_strict("  // a comment\n /* b */ 'use strict'"));
+        assert!(source_is_strict("\"other\"; \"use strict\";"));
+        assert!(!source_is_strict("x; \"use strict\";"));
+        // `"use\u0020strict"` spells the same characters and is deliberately not the directive.
+        assert!(!source_is_strict("\"use\\u0020strict\";"));
+        assert!(!source_is_strict(""));
     }
 
     /// An object with the given own properties, in order.

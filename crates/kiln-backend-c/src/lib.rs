@@ -10807,6 +10807,13 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
+        // A direct `eval` needs the compiler at run time: it reads the caller's bindings and
+        // compiles source that does not exist until the call happens. The native backend ships
+        // without a compiler, so this is refused rather than approximated -- an indirect `eval`
+        // is a different instruction and is unaffected.
+        Instruction::DirectEval(_) => Err(EmitError::Unsupported {
+            feature: "a direct `eval` call in the native backend".to_owned(),
+        }),
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
@@ -11096,6 +11103,19 @@ fn stack_effect(
         // The callee sits under its arguments, and the result replaces both.
         Instruction::Call { argc } => {
             let needed = usize::from(*argc) + 1;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
+        // Refused by `validate_supported_instruction`, so nothing is ever emitted for it. The
+        // arithmetic is still written out rather than waved away: `stack_effect` is what proves
+        // the height claims of a program consistent, and a lie here would be a lie about a
+        // program the interpreter runs happily. `argc` is `None` when a spread put the arguments
+        // in one array, which leaves exactly one value to consume.
+        Instruction::DirectEval(site) => {
+            let needed = usize::from(site.argc.unwrap_or(1));
             if height < needed {
                 Err(underflow(needed))
             } else {
@@ -11993,6 +12013,12 @@ fn emit_instruction(
         Instruction::LoadNewTarget => {
             output.push_str("    stack[sp++] = kiln_c99_new_target;\n");
         }
+        // `validate_supported_instruction` refuses this, so reaching here means verification and
+        // emission disagree about the instruction set -- a compiler bug rather than a program
+        // one, which is the same reading the arms above take.
+        Instruction::DirectEval(_) => {
+            unreachable!("verification rejects a direct `eval` before emission")
+        }
         Instruction::NewRegExp { pattern, flags } => {
             let (Constant::String(source), Constant::String(letters)) =
                 (&constants[*pattern as usize], &constants[*flags as usize])
@@ -12828,6 +12854,9 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::DeleteComputed => byte(&mut hash, 47),
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::SuperApply => byte(&mut hash, 61),
+            // 62: the next free tag. Never reuse one -- two programs hashing alike would serve
+            // one's object file for the other.
+            Instruction::DirectEval(_) => byte(&mut hash, 62),
             Instruction::EnumerateKeys => byte(&mut hash, 50),
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
@@ -12847,10 +12876,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 54);
                 word(&mut hash, u64::from(*value));
             }
-            Instruction::DefineAccessor {
-                setter,
-                enumerable,
-            } => {
+            Instruction::DefineAccessor { setter, enumerable } => {
                 byte(&mut hash, 52);
                 byte(&mut hash, u8::from(*setter));
                 byte(&mut hash, u8::from(*enumerable));
