@@ -3286,6 +3286,14 @@ const GRAPH_CLI_RUNTIME_EXPORTS: [&str; 8] = [
     "kiln_native_scheduler_set_runner",
 ];
 
+fn cli_runtime_exports(graph_scheduler: bool) -> &'static [&'static str] {
+    if graph_scheduler {
+        &GRAPH_CLI_RUNTIME_EXPORTS
+    } else {
+        &CLI_RUNTIME_EXPORTS
+    }
+}
+
 fn dynamic_cli_runtime_enabled(profile: NativeProfile) -> bool {
     profile == NativeProfile::Dev && cfg!(any(target_os = "macos", target_os = "linux"))
 }
@@ -3335,11 +3343,7 @@ fn cli_runtime_content_key(
     graph_scheduler: bool,
     inputs: impl IntoIterator<Item = Digest>,
 ) -> ArtifactKey {
-    let exports = if graph_scheduler {
-        GRAPH_CLI_RUNTIME_EXPORTS.as_slice()
-    } else {
-        CLI_RUNTIME_EXPORTS.as_slice()
-    };
+    let exports = cli_runtime_exports(graph_scheduler);
     let options = Digest::hash(
         format!(
             "cli-runtime-dso-v1\0{}\0{}\0{}\0{}",
@@ -3369,14 +3373,10 @@ fn configure_cli_runtime_link(
     graph_scheduler: bool,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
+    let export_names = cli_runtime_exports(graph_scheduler);
     #[cfg(target_os = "macos")]
     {
         let exports = workspace.join("runtime-exports.txt");
-        let export_names = if graph_scheduler {
-            GRAPH_CLI_RUNTIME_EXPORTS.as_slice()
-        } else {
-            CLI_RUNTIME_EXPORTS.as_slice()
-        };
         let source = export_names
             .iter()
             .map(|symbol| format!("_{symbol}\n"))
@@ -3409,7 +3409,7 @@ fn configure_cli_runtime_link(
         options.extra_args.push("-Wl,--exclude-libs,ALL".into());
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (options, identity, workspace);
+    let _ = (options, identity, workspace, export_names);
     Ok(())
 }
 
