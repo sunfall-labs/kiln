@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted, unimplemented. The decision is recorded before the work because the work touches
-packaging, and packaging is where two people editing the same repository collide.
+Accepted, implemented with provider ABI v2. The provider is still packaged under the historical
+`kiln-native-number-ffi` name; renaming that crate and archive remains packaging cleanup rather
+than a change to this decision.
 
 ## Context
 
