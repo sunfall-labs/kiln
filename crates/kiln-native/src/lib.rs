@@ -492,7 +492,13 @@ impl NativeBuilder {
             Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
         let runtime_object_options = if dynamic_runtime {
             Digest::hash(
-                format!("c11\0{}\0{}\0pic=true", identity.kind, profile.as_str()).as_bytes(),
+                format!(
+                    "c11\0{}\0{}\0pic=true\0zig-macos-no-ubsan={}",
+                    identity.kind,
+                    profile.as_str(),
+                    macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
+                )
+                .as_bytes(),
             )
         } else {
             object_options
@@ -540,11 +546,12 @@ impl NativeBuilder {
             profile: profile.toolchain(),
             ..CompileOptions::default()
         };
-        let runtime_compile_options = CompileOptions {
+        let mut runtime_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: dynamic_runtime,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut runtime_compile_options);
         let compile_started = Instant::now();
         let (application_result, runtime_result, launcher_result) = std::thread::scope(|scope| {
             let application = scope.spawn(|| {
@@ -585,13 +592,16 @@ impl NativeBuilder {
         let (runtime_object, runtime_digest, runtime_hit, _runtime_elapsed) = runtime_result??;
         let (launcher_object, launcher_digest, launcher_hit, _launcher_elapsed) = launcher_result??;
         let runtime_dso = if dynamic_runtime {
+            let link_compiler =
+                compiler_identity(shared_link_toolchain(&self.toolchain)?.identity());
             let loader = shared_library_loader_path(
                 &options.output,
                 cli_runtime_content_identity(
-                    &compiler,
+                    &link_compiler,
                     &runtime_abi,
                     &target,
                     profile,
+                    false,
                     [runtime_digest, number_provider_digest],
                 ),
             )?;
@@ -604,10 +614,10 @@ impl NativeBuilder {
                 &paths.number_provider_a,
                 &paths.runtime_dso,
                 loader,
-                &compiler,
                 &runtime_abi,
                 &target,
                 profile,
+                false,
                 workspace.path(),
             )?)
         } else {
@@ -768,6 +778,8 @@ impl NativeBuilder {
         let embedding_abi = runtime_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
         let module_source_key = key(
             ArtifactKind::GeneratedC,
@@ -783,9 +795,10 @@ impl NativeBuilder {
             self.cached_payload(&module_source_key, module.source.as_bytes())?;
         let object_options = Digest::hash(
             format!(
-                "shared-library\0pic\0c11\0{}\0{}",
+                "shared-library\0pic\0c11\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
@@ -799,11 +812,12 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
-        let compile_options = CompileOptions {
+        let mut compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut compile_options);
         let compile_started = Instant::now();
         let (object, object_digest, object_hit, object_elapsed) = self.object(
             &object_key,
@@ -822,7 +836,7 @@ impl NativeBuilder {
         let loader = shared_library_loader_path(
             &options.output,
             shared_library_content_identity(
-                &compiler,
+                &link_compiler,
                 Backend::Custom("native-shared-library-loader".to_owned()),
                 &embedding_abi,
                 &target,
@@ -843,7 +857,7 @@ impl NativeBuilder {
         );
         let library_key = key(
             ArtifactKind::LinkedArtifact,
-            &compiler,
+            &link_compiler,
             Backend::Custom("native-shared-library".to_owned()),
             &embedding_abi,
             &target,
@@ -874,8 +888,7 @@ impl NativeBuilder {
                 )?;
                 let objects = [paths.module_o.clone()];
                 let report =
-                    self.toolchain
-                        .link_shared_library(&objects, &paths.library, &link_options)?;
+                    link_toolchain.link_shared_library(&objects, &paths.library, &link_options)?;
                 let bytes = read(&paths.library, "read linked shared library")?;
                 self.cache.put(&library_key, &bytes)?;
                 (bytes, false, report.elapsed)
@@ -888,7 +901,10 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: module.symbol,
-            tool: identity,
+            // Shared-library reports identify the driver that produced the linked artifact. On
+            // macOS a Zig-selected build is compiled with Zig but finalized with clang/ld64 so
+            // the exported-symbols policy is actually enforced.
+            tool: link_toolchain.identity().clone(),
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: generated_c_hit,
                 object: object_hit,
@@ -971,6 +987,8 @@ impl NativeBuilder {
         let embedding_abi = graph_module_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
         let mut module_sources = Vec::with_capacity(modules.len());
         for (_, module) in &modules {
@@ -1002,9 +1020,10 @@ impl NativeBuilder {
 
         let module_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}",
+                "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
@@ -1028,11 +1047,13 @@ impl NativeBuilder {
         module_compile_options
             .extra_args
             .push("-fvisibility=hidden".into());
-        let wrapper_compile_options = CompileOptions {
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut module_compile_options);
+        let mut wrapper_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut wrapper_compile_options);
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, _) in modules.iter().enumerate() {
             let (_, source_digest, _) = &module_sources[index];
@@ -1146,7 +1167,7 @@ impl NativeBuilder {
         let loader = shared_library_loader_path(
             &options.output,
             shared_library_content_identity(
-                &compiler,
+                &link_compiler,
                 Backend::Custom("native-shared-graph-loader".to_owned()),
                 &embedding_abi,
                 &target,
@@ -1167,7 +1188,7 @@ impl NativeBuilder {
         );
         let library_key = key(
             ArtifactKind::LinkedArtifact,
-            &compiler,
+            &link_compiler,
             Backend::Custom("native-shared-graph".to_owned()),
             &embedding_abi,
             &target,
@@ -1203,8 +1224,7 @@ impl NativeBuilder {
                     workspace.path(),
                 )?;
                 let report =
-                    self.toolchain
-                        .link_shared_library(&objects, &paths.library, &link_options)?;
+                    link_toolchain.link_shared_library(&objects, &paths.library, &link_options)?;
                 let bytes = read(&paths.library, "read linked shared library")?;
                 self.cache.put(&library_key, &bytes)?;
                 (bytes, false, report.elapsed)
@@ -1217,7 +1237,7 @@ impl NativeBuilder {
             loader,
             header,
             module_symbol: wrapper_symbol,
-            tool: identity,
+            tool: link_toolchain.identity().clone(),
             cache_hits: NativeSharedLibraryCacheHits {
                 generated_c: module_sources.iter().all(|(_, _, hit)| *hit)
                     && wrapper_generated_c_hit,
@@ -1334,7 +1354,13 @@ impl NativeBuilder {
             Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
         let runtime_object_options = if dynamic_runtime {
             Digest::hash(
-                format!("c11\0{}\0{}\0pic=true", identity.kind, profile.as_str()).as_bytes(),
+                format!(
+                    "c11\0{}\0{}\0pic=true\0zig-macos-no-ubsan={}",
+                    identity.kind,
+                    profile.as_str(),
+                    macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
+                )
+                .as_bytes(),
             )
         } else {
             object_options
@@ -1343,11 +1369,12 @@ impl NativeBuilder {
             profile: profile.toolchain(),
             ..CompileOptions::default()
         };
-        let runtime_compile_options = CompileOptions {
+        let mut runtime_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: dynamic_runtime,
             ..CompileOptions::default()
         };
+        suppress_macos_zig_default_ubsan(&self.toolchain, profile, &mut runtime_compile_options);
         let compile_started = Instant::now();
         let mut module_keys = Vec::with_capacity(modules.len());
         for (index, (_, _module)) in modules.iter().enumerate() {
@@ -1479,13 +1506,16 @@ impl NativeBuilder {
         let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object;
         let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object;
         let runtime_dso = if dynamic_runtime {
+            let link_compiler =
+                compiler_identity(shared_link_toolchain(&self.toolchain)?.identity());
             let loader = shared_library_loader_path(
                 &options.output,
                 cli_runtime_content_identity(
-                    &compiler,
+                    &link_compiler,
                     &runtime_abi,
                     &target,
                     profile,
+                    true,
                     [runtime_digest, number_provider_digest],
                 ),
             )?;
@@ -1498,10 +1528,10 @@ impl NativeBuilder {
                 &paths.number_provider_a,
                 &paths.runtime_dso,
                 loader,
-                &compiler,
                 &runtime_abi,
                 &target,
                 profile,
+                true,
                 workspace.path(),
             )?)
         } else {
@@ -1753,17 +1783,20 @@ impl NativeBuilder {
         provider_path: &Path,
         dso_path: &Path,
         loader: PathBuf,
-        compiler: &str,
         runtime_abi: &str,
         target: &str,
         profile: NativeProfile,
+        graph_scheduler: bool,
         workspace: &Path,
     ) -> Result<CliRuntimeDso, NativeError> {
+        let link_toolchain = shared_link_toolchain(&self.toolchain)?;
+        let link_compiler = compiler_identity(link_toolchain.identity());
         let key = cli_runtime_content_key(
-            compiler,
+            &link_compiler,
             runtime_abi,
             target,
             profile,
+            graph_scheduler,
             [runtime_digest, provider_digest],
         );
         let (bytes, digest) = match self.cache.lookup(&key)? {
@@ -1779,8 +1812,8 @@ impl NativeBuilder {
                     options.libraries.push("m".to_owned());
                 }
                 options.runtime_libraries.push(provider_path.to_path_buf());
-                configure_cli_runtime_link(&mut options, &loader, workspace)?;
-                let report = self.toolchain.link_shared_library(
+                configure_cli_runtime_link(&mut options, &loader, workspace, graph_scheduler)?;
+                let report = link_toolchain.link_shared_library(
                     &[runtime_object_path.to_path_buf()],
                     dso_path,
                     &options,
@@ -3161,11 +3194,42 @@ fn shared_library_loader_path(output: &Path, identity: Digest) -> Result<PathBuf
 
 const fn shared_library_link_policy() -> &'static str {
     if cfg!(target_os = "macos") {
-        "macos-content-loader-install-name-rpath-export-list-v3"
+        "macos-content-loader-install-name-rpath-export-list-v4"
     } else if cfg!(target_os = "linux") {
         "linux-content-loader-soname-version-script-v3"
     } else {
         "unsupported-content-loader-shared-link-v2"
+    }
+}
+
+/// Zig 0.16's Mach-O linker drops the exported-symbols-list option when an archive is reachable,
+/// which leaks the Rust number provider from a shared graph library. Apple clang links the same
+/// objects with ld64 and enforces the private graph wrapper's export list. Compilation remains on
+/// the caller-selected toolchain; only this macOS shared-link step uses clang when Zig is selected.
+fn shared_link_toolchain(toolchain: &Toolchain) -> Result<Toolchain, NativeError> {
+    #[cfg(target_os = "macos")]
+    if toolchain.identity().kind == CompilerKind::Zig {
+        return Toolchain::from_compiler("/usr/bin/clang").map_err(NativeError::from);
+    }
+    Ok(toolchain.clone())
+}
+
+fn macos_zig_default_ubsan_suppressed(toolchain: &Toolchain, profile: NativeProfile) -> bool {
+    cfg!(target_os = "macos")
+        && toolchain.identity().kind == CompilerKind::Zig
+        && profile == NativeProfile::Dev
+}
+
+fn suppress_macos_zig_default_ubsan(
+    toolchain: &Toolchain,
+    profile: NativeProfile,
+    options: &mut CompileOptions,
+) {
+    if macos_zig_default_ubsan_suppressed(toolchain, profile) {
+        // Zig 0.16 instruments even NativeDev arithmetic by default. The objects are finalized
+        // by Apple clang on macOS, so disable that implicit instrumentation; NativeCheck keeps
+        // its explicit sanitizer flags from the selected build profile.
+        options.extra_args.push("-fno-sanitize=undefined".into());
     }
 }
 
@@ -3210,6 +3274,16 @@ const CLI_RUNTIME_EXPORTS: [&str; 3] = [
     "kiln_cli_write_result",
     "kiln_cli_report_failure",
 ];
+const GRAPH_CLI_RUNTIME_EXPORTS: [&str; 8] = [
+    "kiln_cli_host_call",
+    "kiln_cli_write_result",
+    "kiln_cli_report_failure",
+    "kiln_native_scheduler_create",
+    "kiln_native_scheduler_begin",
+    "kiln_native_scheduler_finish",
+    "kiln_native_scheduler_destroy",
+    "kiln_native_scheduler_set_runner",
+];
 
 fn dynamic_cli_runtime_enabled(profile: NativeProfile) -> bool {
     profile == NativeProfile::Dev && cfg!(any(target_os = "macos", target_os = "linux"))
@@ -3238,9 +3312,18 @@ fn cli_runtime_content_identity(
     runtime_abi: &str,
     target: &str,
     profile: NativeProfile,
+    graph_scheduler: bool,
     inputs: impl IntoIterator<Item = Digest>,
 ) -> Digest {
-    cli_runtime_content_key(compiler, runtime_abi, target, profile, inputs).digest()
+    cli_runtime_content_key(
+        compiler,
+        runtime_abi,
+        target,
+        profile,
+        graph_scheduler,
+        inputs,
+    )
+    .digest()
 }
 
 fn cli_runtime_content_key(
@@ -3248,14 +3331,20 @@ fn cli_runtime_content_key(
     runtime_abi: &str,
     target: &str,
     profile: NativeProfile,
+    graph_scheduler: bool,
     inputs: impl IntoIterator<Item = Digest>,
 ) -> ArtifactKey {
+    let exports = if graph_scheduler {
+        GRAPH_CLI_RUNTIME_EXPORTS.as_slice()
+    } else {
+        CLI_RUNTIME_EXPORTS.as_slice()
+    };
     let options = Digest::hash(
         format!(
             "cli-runtime-dso-v1\0{}\0{}\0{}\0{}",
             profile.as_str(),
             shared_library_link_policy(),
-            CLI_RUNTIME_EXPORTS.join(","),
+            exports.join(","),
             shared_library_name(),
         )
         .as_bytes(),
@@ -3276,12 +3365,18 @@ fn configure_cli_runtime_link(
     options: &mut LinkOptions,
     output: &Path,
     workspace: &Path,
+    graph_scheduler: bool,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
     {
         let exports = workspace.join("runtime-exports.txt");
-        let source = CLI_RUNTIME_EXPORTS
+        let export_names = if graph_scheduler {
+            GRAPH_CLI_RUNTIME_EXPORTS.as_slice()
+        } else {
+            CLI_RUNTIME_EXPORTS.as_slice()
+        };
+        let source = export_names
             .iter()
             .map(|symbol| format!("_{symbol}\n"))
             .collect::<String>();
@@ -3298,7 +3393,7 @@ fn configure_cli_runtime_link(
         let exports = workspace.join("runtime-exports.map");
         let source = format!(
             "KILN_1 {{\n  global:\n{}  local:\n    *;\n}};\n",
-            CLI_RUNTIME_EXPORTS
+            export_names
                 .iter()
                 .map(|symbol| format!("    {symbol};\n"))
                 .collect::<String>()
@@ -3398,6 +3493,46 @@ mod tests {
 
         assert_ne!(unset, empty_sdk_root);
         assert_ne!(unset, empty_deployment);
+    }
+
+    #[test]
+    fn graph_runtime_cache_identity_separates_scheduler_export_set() {
+        let scalar = cli_runtime_content_key(
+            "compiler",
+            "runtime",
+            "target",
+            NativeProfile::Dev,
+            false,
+            [],
+        );
+        let graph = cli_runtime_content_key(
+            "compiler",
+            "runtime",
+            "target",
+            NativeProfile::Dev,
+            true,
+            [],
+        );
+        assert_ne!(scalar, graph);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_zig_shared_link_has_distinct_export_enforcing_identity() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping macOS shared-link toolchain test: no C compiler found");
+            return;
+        };
+        let link_toolchain = shared_link_toolchain(&toolchain).expect("resolve shared linker");
+        if toolchain.identity().kind == CompilerKind::Zig {
+            assert_eq!(link_toolchain.identity().kind, CompilerKind::Clang);
+            assert_ne!(
+                compiler_identity(toolchain.identity()),
+                compiler_identity(link_toolchain.identity())
+            );
+        } else {
+            assert_eq!(link_toolchain.identity(), toolchain.identity());
+        }
     }
 
     #[test]
@@ -3790,6 +3925,199 @@ mod tests {
         };
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
             .expect("construct one-module graph")
+    }
+
+    fn scheduled_module(label: &str, microtask: &str, dependency: Option<&str>) -> ModuleProgram {
+        let body = |constant: u32| {
+            vec![
+                Instruction::Const(constant),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::Return,
+            ]
+        };
+        ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String(label.to_owned()),
+                    Constant::String(microtask.to_owned()),
+                    Constant::Number(0.0_f64.to_bits()),
+                    Constant::String(format!("{label} timer")),
+                ],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Pop,
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::QueueMicrotask),
+                    Instruction::MakeFunction(0),
+                    Instruction::Call { argc: 1 },
+                    Instruction::Pop,
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::SetTimeout),
+                    Instruction::MakeFunction(1),
+                    Instruction::Const(2),
+                    Instruction::Call { argc: 2 },
+                    Instruction::Pop,
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 0,
+                functions: vec![
+                    kiln_ir::FunctionProto {
+                        asynchronous: false,
+                        name: None,
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        local_count: 0,
+                        code: body(1),
+                        upvalues: Vec::new(),
+                    },
+                    kiln_ir::FunctionProto {
+                        asynchronous: false,
+                        name: None,
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        local_count: 0,
+                        code: body(3),
+                        upvalues: Vec::new(),
+                    },
+                ],
+            },
+            dependencies: dependency.into_iter().map(str::to_owned).collect(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn native_graph_drains_one_scheduler_after_all_module_bodies() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native scheduler graph integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-scheduler-graph-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create scheduler graph project");
+        fs::write(project.join("main.js"), "").expect("write scheduler graph entry");
+        fs::write(project.join("dep.js"), "").expect("write scheduler graph dependency");
+        let dep_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
+        let dependency = scheduled_module("dep body", "dep micro", None);
+        let entry = scheduled_module("entry body", "entry micro", Some("./dep.js"));
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dep_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct scheduler graph");
+        let run = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("run scheduler graph");
+        assert_eq!(
+            run.stdout,
+            b"dep body\nentry body\ndep micro\nentry micro\ndep body timer\nentry body timer\n"
+        );
+    }
+
+    #[test]
+    fn shared_graph_scheduler_crosses_translation_units_and_resets_per_call() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping shared scheduler graph integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping shared scheduler graph integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-scheduler-test");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create shared scheduler project");
+        fs::write(project.join("main.js"), "").expect("write shared scheduler entry");
+        fs::write(project.join("dep.js"), "").expect("write shared scheduler dependency");
+        let dep_path = fs::canonicalize(project.join("dep.js")).expect("canonical shared dep");
+        let dependency = scheduled_module("dep body", "dep micro", None);
+        let entry = scheduled_module("entry body", "entry micro", Some("./dep.js"));
+        let graph =
+            ModuleGraph::build_with_modules(project.join("main.js"), &project, move |path| {
+                if path == dep_path {
+                    dependency.clone()
+                } else {
+                    entry.clone()
+                }
+            })
+            .expect("construct shared scheduler graph");
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build shared scheduler graph");
+        let host_source = root.path.join("host.c");
+        fs::write(&host_source, format!(r#"#include "{}"
+#include <stdio.h>
+static int call(void *context, unsigned short op, unsigned short argc,
+                const kiln_value *args, kiln_value *result) {{
+    unsigned short i; (void)context;
+    if (op != KILN_HOST_OP_WRITE_STDOUT || result == NULL) return -1;
+    for (i = 0; i < argc; ++i) {{ if (i != 0) fputc(' ', stdout); fwrite(args[i].ptr, 1, args[i].len, stdout); }}
+    fputc('\n', stdout); result->tag = KILN_VALUE_UNDEFINED; result->reserved = 0; result->bits = 0; result->ptr = NULL; result->len = 0; return 0;
+}}
+int main(void) {{ kiln_host host = {{ call, NULL }}; kiln_value result; if ({}(&host, &result) != 0) return 1; if ({}(&host, &result) != 0) return 2; return 0; }}
+"#, report.header.file_name().unwrap().to_string_lossy(), report.module_symbol, report.module_symbol)).expect("write shared scheduler host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared scheduler host");
+        let host_executable = root.path.join("host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+        if let Some(loader_directory) = report.loader.parent() {
+            link_options
+                .extra_args
+                .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        }
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared scheduler host");
+        let output = Command::new(host_executable)
+            .output()
+            .expect("run shared scheduler host");
+        assert!(
+            output.status.success(),
+            "shared scheduler host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"dep body\nentry body\ndep micro\nentry micro\ndep body timer\nentry body timer\ndep body\nentry body\ndep micro\nentry micro\ndep body timer\nentry body timer\n");
     }
 
     fn star_reexport_graph(project: &Path) -> ModuleGraph {

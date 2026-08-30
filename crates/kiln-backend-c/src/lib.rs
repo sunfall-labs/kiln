@@ -12651,7 +12651,9 @@ fn emit_instruction(
                     // Everything the body queued runs before the module is finished, which is
                     // what "after the synchronous part" means.
                     if *shared_scheduler {
-                        output.push_str("    if (!kiln_native_scheduler_graph_mode(kiln_c99_scheduler)) { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n");
+                        // The private graph ABI defers this module's queue to the graph
+                        // launcher, after every dependency-first body has run. A graph module
+                        // is never a standalone scalar entry point.
                     } else {
                         output.push_str("    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n");
                     }
