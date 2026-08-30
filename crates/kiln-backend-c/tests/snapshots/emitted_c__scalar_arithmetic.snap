@@ -1,0 +1,65 @@
+---
+source: crates/kiln-backend-c/tests/emitted_c.rs
+expression: body(&unit)
+---
+/* Program hash: e3d4d3509b581912; bytecode version: 1. */
+int kiln_module_e3d4d3509b581912a864530dd5905251(kiln_host *host, kiln_value *result) {
+    size_t sp = 0;
+    kiln_value stack[2];
+    kiln_value locals[2];
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    locals[0] = kiln_c99_undefined();
+    locals[1] = kiln_c99_undefined();
+kiln_label_0:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+kiln_label_1:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4615063718147915776));
+kiln_label_2:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(1, left, right); }
+kiln_label_3:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4921056587992461136));
+kiln_label_4:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(3, left, right); }
+kiln_label_5:;
+    locals[0] = stack[--sp];
+kiln_label_6:;
+    stack[sp++] = locals[0];
+kiln_label_7:;
+    stack[sp - 1] = kiln_c99_unary(2, stack[sp - 1]);
+kiln_label_8:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(9223372036854775808));
+kiln_label_9:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(2, left, right); }
+kiln_label_10:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(9221120237041090560));
+kiln_label_11:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(7, left, right); }
+kiln_label_12:;
+    stack[sp - 1] = kiln_c99_unary(3, stack[sp - 1]);
+kiln_label_13:;
+    locals[1] = stack[--sp];
+kiln_label_14:;
+    stack[sp++] = locals[0];
+kiln_label_15:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+kiln_label_16:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(5, left, right); }
+kiln_label_17:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+kiln_label_18:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(6, left, right); }
+kiln_label_19:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+kiln_label_20:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(19, left, right); }
+kiln_label_21:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+kiln_label_22:;
+    { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(22, left, right); }
+kiln_label_23:;
+    stack[sp - 1] = kiln_c99_unary(4, stack[sp - 1]);
+kiln_label_24:;
+    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
+    *result = kiln_c99_undefined();
+    return KILN_C99_CONTROL_ERROR;
+}

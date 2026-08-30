@@ -1,0 +1,44 @@
+---
+source: crates/kiln-backend-c/tests/emitted_c.rs
+expression: body(&unit)
+---
+/* Module hash: 805cdfbf67596de5; bytecode version: 1; imports: 1; exports: 1. */
+int kiln_module_805cdfbf67596de5f97c591d2fe9eab6(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
+    size_t sp = 0;
+    int depth = 0;
+    kiln_value thrown_value = kiln_c99_undefined();
+    kiln_value *thrown = &thrown_value;
+    kiln_value stack[3];
+    kiln_value locals[3];
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (import_count != (size_t)1 || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;
+    if (export_count != (size_t)1 || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;
+    locals[0] = kiln_c99_undefined();
+    locals[1] = kiln_c99_undefined();
+    locals[2] = kiln_c99_undefined();
+    locals[0] = imports[0];
+    if (locals[0].tag != KILN_VALUE_CELL && kiln_c99_make_cell(&locals[0]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+kiln_label_0:;
+    stack[sp++] = *kiln_c99_cell_of(locals[0]);
+kiln_label_1:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
+kiln_label_2:;
+    stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
+kiln_label_3:;
+    { kiln_value call_result; int status; const kiln_value *call_args = 2 == 0 ? NULL : &stack[sp - 2]; status = kiln_c99_call(host, &call_result, stack[sp - 2 - 1], kiln_c99_undefined(), call_args, (size_t)2, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; sp -= (size_t)3; stack[sp++] = call_result; }
+kiln_label_4:;
+    locals[2] = stack[--sp];
+kiln_label_5:;
+    stack[sp++] = locals[2];
+kiln_label_6:;
+    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
+    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }
+    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
+    exports[0] = locals[2];
+    return KILN_C99_OK;
+kiln_uncaught:;
+    *result = kiln_c99_text(*thrown);
+    return KILN_C99_THROWN;
+    *result = kiln_c99_undefined();
+    return KILN_C99_CONTROL_ERROR;
+}
