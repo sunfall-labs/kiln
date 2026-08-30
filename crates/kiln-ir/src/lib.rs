@@ -202,6 +202,13 @@ pub enum Instruction {
     DeleteProperty(u32),
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
+    ///
+    /// Two halves written separately describe one property, so this merges with whichever half
+    /// is already there rather than replacing it.
+    DefineAccessor {
+        setter: bool,
+    },
     /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
     ///
     /// Reading it is a `ReferenceError`. Emitted only where a read could actually reach it --
@@ -2375,6 +2382,29 @@ impl Compiler {
                     self.expression(source);
                     self.code.push(Instruction::SpreadObject);
                 }
+                ObjectMember::Accessor {
+                    key,
+                    kind,
+                    function,
+                } => {
+                    // An accessor is defined on the object rather than pushed as a pair, so the
+                    // pending run has to become an object first.
+                    self.emit_object_segment(&mut pending, accumulating);
+                    accumulating = true;
+                    match key {
+                        ObjectKey::Static(name) => {
+                            self.push_constant(Constant::String(name.clone()));
+                        }
+                        ObjectKey::Computed(key) => self.expression(key),
+                    }
+                    let Some(index) = self.compile_function(function, span) else {
+                        return;
+                    };
+                    self.code.push(Instruction::MakeFunction(index));
+                    self.code.push(Instruction::DefineAccessor {
+                        setter: matches!(kind, kiln_hir::MethodKind::Set),
+                    });
+                }
             }
         }
         self.emit_object_segment(&mut pending, accumulating);
@@ -2638,19 +2668,33 @@ impl Compiler {
                 self.code.push(Instruction::GetProperty(prototype));
             }
 
+            let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
-                ObjectKey::Static(key) => {
+                ObjectKey::Static(key) if !accessor => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.code.push(Instruction::MakeFunction(body));
                     self.code.push(Instruction::SetProperty(name));
                 }
+                ObjectKey::Static(key) => {
+                    self.push_constant(Constant::String(key.clone()));
+                    self.code.push(Instruction::MakeFunction(body));
+                    self.code.push(Instruction::DefineAccessor {
+                        setter: matches!(method.kind, kiln_hir::MethodKind::Set),
+                    });
+                }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::SetComputed);
+                    if accessor {
+                        self.code.push(Instruction::DefineAccessor {
+                            setter: matches!(method.kind, kiln_hir::MethodKind::Set),
+                        });
+                    } else {
+                        self.code.push(Instruction::SetComputed);
+                    }
                 }
             }
-            // Each assignment leaves its value; nothing consumes it.
+            // Each definition leaves something; nothing consumes it.
             self.code.push(Instruction::Pop);
         }
 
@@ -3793,6 +3837,15 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                     ObjectMember::Spread(source) => {
                         collect_identifiers(source, names, collecting);
                     }
+                    ObjectMember::Accessor { key, function, .. } => {
+                        if let ObjectKey::Computed(key) = key {
+                            collect_identifiers(key, names, collecting);
+                        }
+                        // The body is a nested function, so every name in it is a candidate.
+                        for statement in &function.body {
+                            collect_nested_function_names(statement, names, true);
+                        }
+                    }
                 }
             }
         }
@@ -3880,6 +3933,9 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                     || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
             }
             ObjectMember::Spread(source) => expression_references(source, name),
+            ObjectMember::Accessor { key, .. } => {
+                matches!(key, ObjectKey::Computed(key) if expression_references(key, name))
+            }
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Update { target, .. } => target == name,

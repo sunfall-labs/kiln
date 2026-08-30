@@ -969,7 +969,9 @@ impl Lowerer {
             let lowered = self.function(&method.value, span(method.span))?;
             match method.kind {
                 MethodDefinitionKind::Constructor => constructor = Some(lowered),
-                MethodDefinitionKind::Method => {
+                kind @ (MethodDefinitionKind::Method
+                | MethodDefinitionKind::Get
+                | MethodDefinitionKind::Set) => {
                     let key = if method.computed {
                         let key = method.key.as_expression()?;
                         kiln_hir::ObjectKey::Computed(self.expression(key))
@@ -980,11 +982,12 @@ impl Lowerer {
                         key,
                         function: lowered,
                         is_static: method.r#static,
+                        kind: match kind {
+                            MethodDefinitionKind::Get => kiln_hir::MethodKind::Get,
+                            MethodDefinitionKind::Set => kiln_hir::MethodKind::Set,
+                            _ => kiln_hir::MethodKind::Normal,
+                        },
                     });
-                }
-                MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
-                    self.unsupported("accessor method", statement_span);
-                    return None;
                 }
             }
         }
@@ -1206,9 +1209,38 @@ impl Lowerer {
             };
             // A shorthand method is a property whose value is a function expression. It differs
             // from one written longhand only in having no `prototype` and not being constructable,
-            // neither of which is observable yet.
+            // neither of which is observable yet. A getter or setter is not: reading it is a call.
             if !matches!(property.kind, PropertyKind::Init) {
-                return self.unsupported_expression("object getter or setter", expression_span);
+                let key = if property.computed {
+                    match property.key.as_expression() {
+                        Some(key) => kiln_hir::ObjectKey::Computed(self.expression(key)),
+                        None => {
+                            return self
+                                .unsupported_expression("computed object key", expression_span);
+                        }
+                    }
+                } else {
+                    match property.key.static_name() {
+                        Some(key) => kiln_hir::ObjectKey::Static(key.to_string()),
+                        None => return self.unsupported_expression("object key", expression_span),
+                    }
+                };
+                let Expression::FunctionExpression(function) = &property.value else {
+                    return self.unsupported_expression("accessor body", expression_span);
+                };
+                let Some(function) = self.function(function, expression_span) else {
+                    return self.unsupported_expression("accessor body", expression_span);
+                };
+                members.push(kiln_hir::ObjectMember::Accessor {
+                    key,
+                    kind: if matches!(property.kind, PropertyKind::Get) {
+                        kiln_hir::MethodKind::Get
+                    } else {
+                        kiln_hir::MethodKind::Set
+                    },
+                    function,
+                });
+                continue;
             }
             let key = if property.computed {
                 let Some(key) = property.key.as_expression() else {
