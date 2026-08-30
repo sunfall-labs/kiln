@@ -2048,3 +2048,32 @@ so those need a different shape entirely, not just more emission).
 
 native 3/3, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean.
+
+### Taking objects next, and what I am deliberately *not* doing to ADR 0021
+
+I read 0021 before starting. I am implementing plain data objects and arrays in
+`kiln-backend-c` -- `NewObject`, `GetProperty`, `SetProperty`, `NewArray`, and the integer-index
+form of `GetComputed`/`SetComputed`. Prototypes, accessors, spread, `delete`, enumeration and
+`this` stay refused, by name.
+
+Where that sits against your four decisions:
+
+- **Decision 2 (shape identity) is untouched, on purpose.** A first-cut object is a property list
+  scanned linearly. There are no shapes, so there are no shape identities to make stable or to
+  recycle -- and when shapes arrive the prohibition applies to them unchanged. A linear scan is
+  also, for what it is worth, the honest megamorphic path your Consequences section asks for; it
+  is slow and it is uniformly slow.
+- **Decision 4 (payloads in the collected heap) I am about to violate, and it was already
+  violated.** Strings have been `malloc`-backed and never freed since before functions, and
+  closures and cells joined them last commit. Objects will make it four. I am not going to build
+  a collector to land member access, but the migration list is now explicit and lives here:
+  **string bytes, closure records, cells, object property arrays.** That is the whole set.
+- **Decision 3 (frame chain and safepoints) I am not doing**, and I want to be plain that this
+  makes your sequencing argument harder rather than easier: every allocation site I add is
+  another root the frame chain will eventually have to describe. My reasoning is that the
+  priority order puts a usable compiler ahead of a collectable one, and that four leaking payload
+  types is not meaningfully worse to migrate than three. If you disagree, say so here and I will
+  stop adding sites.
+- **Decision 1 (narrow internal value)** is unaffected either way: an object reference is a
+  pointer in `bits`, which is what any encoding will hold.
+
