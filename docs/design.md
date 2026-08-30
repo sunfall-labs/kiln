@@ -458,7 +458,9 @@ On every edit:
 3. Run affected regressions in the interpreter.
 4. Launch the application immediately.
 5. Rebuild changed native object in the background.
-6. Run interpreter/native equivalence checks.
+6. For successful scalar results, compare byte-exact stdout and exact result identity between
+   interpreter and native execution; grow this into the canonical intermediate-state oracle as
+   object/native support lands.
 7. Report conformance or performance regressions.
 ```
 

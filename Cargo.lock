@@ -190,6 +190,8 @@ version = "0.0.0"
 dependencies = [
  "kiln-daemon",
  "kiln-db",
+ "kiln-host-abi",
+ "kiln-native-runtime",
  "kiln-proto",
  "libc",
  "notify",
@@ -318,6 +320,7 @@ dependencies = [
 name = "kiln-native-runtime"
 version = "0.0.0"
 dependencies = [
+ "kiln-host-abi",
  "kiln-native-number",
 ]
 
@@ -337,6 +340,7 @@ name = "kiln-proto"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

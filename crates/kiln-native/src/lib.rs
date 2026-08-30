@@ -22,11 +22,13 @@ use kiln_artifact_cache::{
 };
 use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path};
 use kiln_host_abi::HOST_ABI_VERSION;
+pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
 use kiln_native_runtime::{
-    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
-    RuntimeSourceError, launcher_source, runtime_source,
+    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RESULT_PATH_ENV,
+    NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result, launcher_source,
+    runtime_source,
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
@@ -183,6 +185,8 @@ pub struct NativeRunReport {
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Exact scalar returned by the module. A failed or signalled process has no result.
+    pub result: Option<HostValue>,
 }
 
 impl NativeRunReport {
@@ -219,6 +223,10 @@ pub enum NativeError {
         second: PathBuf,
     },
     NumberProvider {
+        message: String,
+    },
+    RunResult {
+        path: PathBuf,
         message: String,
     },
 }
@@ -260,6 +268,11 @@ impl fmt::Display for NativeError {
             Self::NumberProvider { message } => {
                 write!(formatter, "native number provider failed: {message}")
             }
+            Self::RunResult { path, message } => write!(
+                formatter,
+                "native result from {} was invalid: {message}",
+                path.display()
+            ),
         }
     }
 }
@@ -276,7 +289,8 @@ impl std::error::Error for NativeError {
             Self::WorkerPanic { .. }
             | Self::SymbolCollision { .. }
             | Self::ArtifactPathCollision { .. }
-            | Self::NumberProvider { .. } => None,
+            | Self::NumberProvider { .. }
+            | Self::RunResult { .. } => None,
         }
     }
 }
@@ -1450,16 +1464,18 @@ impl NativeBuilder {
         } else {
             "run-graph"
         });
+        let result_path = workspace.path().join("result.bin");
         let mut private_options = options.clone();
         private_options.output = private_output.clone();
         let mut build = self.build_graph(graph, &private_options)?;
-        let output =
-            Command::new(&private_output)
-                .output()
-                .map_err(|source| NativeError::Launch {
-                    executable: private_output.clone(),
-                    source,
-                })?;
+        let output = Command::new(&private_output)
+            .env(NATIVE_RESULT_PATH_ENV, &result_path)
+            .output()
+            .map_err(|source| NativeError::Launch {
+                executable: private_output.clone(),
+                source,
+            })?;
+        let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
         materialize(&options.output, &executable, true)?;
         build.output = options.output.clone();
@@ -1468,6 +1484,7 @@ impl NativeBuilder {
             exit_code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
+            result,
         })
     }
 
@@ -1486,16 +1503,18 @@ impl NativeBuilder {
         } else {
             "run-program"
         });
+        let result_path = workspace.path().join("result.bin");
         let mut private_options = options.clone();
         private_options.output = private_output.clone();
         let mut build = self.build(program, &private_options)?;
-        let output =
-            Command::new(&private_output)
-                .output()
-                .map_err(|source| NativeError::Launch {
-                    executable: private_output.clone(),
-                    source,
-                })?;
+        let output = Command::new(&private_output)
+            .env(NATIVE_RESULT_PATH_ENV, &result_path)
+            .output()
+            .map_err(|source| NativeError::Launch {
+                executable: private_output.clone(),
+                source,
+            })?;
+        let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
         materialize(&options.output, &executable, true)?;
         build.output = options.output.clone();
@@ -1504,6 +1523,7 @@ impl NativeBuilder {
             exit_code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
+            result,
         })
     }
 
@@ -1769,6 +1789,7 @@ typedef struct kiln_host {
 
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
+extern int kiln_cli_write_result(kiln_value value);
 "#,
     );
     for (_, module) in modules {
@@ -1870,6 +1891,9 @@ int main(void) {
         )
         .unwrap();
         output.push_str("    if (status != 0) return 1;\n");
+        if node.path == graph.entry() {
+            output.push_str("    if (kiln_cli_write_result(result) != 0) return 1;\n");
+        }
     }
     output.push_str("    return 0;\n}\n");
     // Keep this check in the launcher generation path so an unexpectedly empty graph fails as a
@@ -2080,6 +2104,25 @@ fn read(path: &Path, operation: &'static str) -> Result<Vec<u8>, NativeError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn decode_run_result(
+    path: &Path,
+    process_succeeded: bool,
+) -> Result<Option<HostValue>, NativeError> {
+    if !process_succeeded {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|error| NativeError::RunResult {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    decode_native_result(&bytes)
+        .map(Some)
+        .map_err(|error| NativeError::RunResult {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })
 }
 
 fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), NativeError> {
@@ -2440,6 +2483,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn successful_private_runs_require_one_well_formed_scalar_result() {
+        let root = TestDirectory::new("kiln-native-result");
+        let result_path = root.path.join("result.bin");
+
+        assert!(matches!(
+            decode_run_result(&result_path, true),
+            Err(NativeError::RunResult { .. })
+        ));
+        assert_eq!(decode_run_result(&result_path, false).unwrap(), None);
+
+        fs::write(&result_path, b"not-a-result").expect("write malformed result");
+        assert!(matches!(
+            decode_run_result(&result_path, true),
+            Err(NativeError::RunResult { .. })
+        ));
+
+        let expected = HostValue::String("line one\nline two\0".to_owned());
+        fs::write(
+            &result_path,
+            kiln_native_runtime::encode_native_result(&expected),
+        )
+        .expect("write valid result");
+        assert_eq!(
+            decode_run_result(&result_path, true).expect("decode valid result"),
+            Some(expected)
+        );
+    }
+
     fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
         fs::create_dir_all(project).expect("create one-module graph project");
         fs::write(
@@ -2762,7 +2834,7 @@ int main(void) {
         ));
         let shared_output = root.join("shared-program");
         let builder = NativeBuilder::new(ArtifactCache::new(root.join("cache")), toolchain);
-        let programs = [stdout_program("alpha"), stdout_program("beta")];
+        let programs = [stdout_program("alpha", 1.0), stdout_program("beta", 2.0)];
         for program in &programs {
             builder
                 .build(
@@ -2793,7 +2865,6 @@ int main(void) {
                         },
                     )
                     .expect("concurrent native run succeeds")
-                    .stdout
             }));
         }
         for (index, thread) in threads.into_iter().enumerate() {
@@ -2802,7 +2873,13 @@ int main(void) {
             } else {
                 b"beta\n"
             };
-            assert_eq!(thread.join().expect("run thread does not panic"), expected);
+            let report = thread.join().expect("run thread does not panic");
+            assert_eq!(report.stdout, expected);
+            let expected_result = if index % 2 == 0 { 1.0_f64 } else { 2.0_f64 };
+            assert_eq!(
+                report.result,
+                Some(HostValue::Number(expected_result.to_bits()))
+            );
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -2822,13 +2899,14 @@ int main(void) {
 
         for (name, program) in scalar_equivalence_programs() {
             let mut host = kiln_runtime::CaptureHost::new();
-            kiln_interpreter::execute(
+            let interpreted = kiln_interpreter::execute(
                 std::rc::Rc::new(program.clone()),
                 &mut host,
                 Default::default(),
             )
             .unwrap_or_else(|error| panic!("interpreter fixture {name} failed: {error}"));
             let expected = host.into_stdout().into_bytes();
+            let expected_result = HostValue::from(interpreted.value);
             let native = builder
                 .run(
                     &program,
@@ -2841,6 +2919,7 @@ int main(void) {
             assert_eq!(native.exit_code, Some(0), "fixture {name}");
             assert_eq!(native.stdout, expected, "fixture {name}");
             assert!(native.stderr.is_empty(), "fixture {name}");
+            assert_eq!(native.result, Some(expected_result), "fixture {name}");
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -2886,13 +2965,15 @@ int main(void) {
         let entry = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
-                constants: Vec::new(),
+                constants: vec![Constant::Number(99.0_f64.to_bits())],
                 code: vec![
                     Instruction::LoadLocal(0),
                     Instruction::HostCall {
                         op: HostOp::WriteStdout,
                         argc: 1,
                     },
+                    Instruction::Pop,
+                    Instruction::Const(0),
                     Instruction::Return,
                 ],
                 local_count: 1,
@@ -2964,6 +3045,7 @@ int main(void) {
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
         assert_eq!(second.stdout, b"42\n");
+        assert_eq!(second.result, Some(HostValue::Number(99.0_f64.to_bits())));
 
         assert_eq!(
             second
@@ -3626,16 +3708,21 @@ int main(int argc, char **argv) {{
         );
     }
 
-    fn stdout_program(text: &str) -> Program {
+    fn stdout_program(text: &str, result: f64) -> Program {
         Program {
             version: BYTECODE_VERSION,
-            constants: vec![Constant::String(text.to_owned())],
+            constants: vec![
+                Constant::String(text.to_owned()),
+                Constant::Number(result.to_bits()),
+            ],
             code: vec![
                 Instruction::Const(0),
                 Instruction::HostCall {
                     op: HostOp::WriteStdout,
                     argc: 1,
                 },
+                Instruction::Pop,
+                Instruction::Const(1),
                 Instruction::Return,
             ],
             local_count: 0,

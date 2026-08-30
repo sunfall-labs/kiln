@@ -37,7 +37,9 @@ use crate::backend::NativeBuildAtRevision;
 use crate::commands;
 use crate::error::{Error, Result};
 use crate::sources;
-use kiln_proto::NativeProfile;
+use kiln_host_abi::HostValue;
+use kiln_native_runtime::{NATIVE_RESULT_PATH_ENV, decode_native_result};
+use kiln_proto::{NativeProfile, ScalarValueSummary};
 
 pub fn run(
     backend: &mut dyn Backend,
@@ -353,10 +355,14 @@ fn run_once(
         )?,
     };
     let expectation = if output.exit_code == 0 {
-        output.revision.map(|revision| RefreshExpectation {
-            revision,
-            stdout: output.text.clone(),
-        })
+        output
+            .revision
+            .zip(output.value.clone())
+            .map(|(revision, value)| RefreshExpectation {
+                revision,
+                stdout: output.text.clone(),
+                value,
+            })
     } else {
         None
     };
@@ -374,6 +380,7 @@ fn run_once(
 struct RefreshExpectation {
     revision: u64,
     stdout: String,
+    value: ScalarValueSummary,
 }
 
 struct RefreshJob {
@@ -382,6 +389,7 @@ struct RefreshJob {
     path: String,
     project_root: String,
     expected_stdout: String,
+    expected_value: ScalarValueSummary,
 }
 
 struct RefreshResult {
@@ -389,17 +397,20 @@ struct RefreshResult {
     result: Result<NativeRefresh>,
 }
 
+#[derive(Debug)]
 struct NativeExecution {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     timed_out: bool,
+    result: Option<HostValue>,
 }
 
 enum NativeRefresh {
     Executed {
         output_path: String,
         expected_stdout: String,
+        expected_value: ScalarValueSummary,
         execution: NativeExecution,
     },
     Stale {
@@ -430,7 +441,7 @@ impl NativeRun {
     }
 }
 
-type NativeLauncher = Box<dyn Fn(&Path) -> Result<NativeRun> + Send + 'static>;
+type NativeLauncher = Box<dyn Fn(&Path, &Path) -> Result<NativeRun> + Send + 'static>;
 
 #[cfg(test)]
 type NativeExecutor = Box<dyn Fn(&Path) -> Result<NativeExecution> + Send + 'static>;
@@ -506,6 +517,7 @@ impl RefreshQueue {
         &self,
         generation: u64,
         path: &Path,
+        result_path: &Path,
         launcher: &NativeLauncher,
     ) -> Result<Option<(NativeRun, Arc<AtomicBool>)>> {
         let mut state = self
@@ -515,7 +527,7 @@ impl RefreshQueue {
         if state.closed || state.generation != generation {
             return Ok(None);
         }
-        let run = launcher(path)?;
+        let run = launcher(path, result_path)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         state.running = Some(RunningRefresh {
             generation,
@@ -578,7 +590,7 @@ impl Refresher {
     fn new_with_executor(peer: Option<Box<dyn Backend>>, executor: NativeExecutor) -> Refresher {
         Self::new_with_launcher(
             peer,
-            Box::new(move |path| {
+            Box::new(move |path, _| {
                 let result = executor(path);
                 Ok(NativeRun::new(move |_| {
                     result.map(NativeRunResult::Completed)
@@ -595,6 +607,7 @@ impl Refresher {
             let worker = std::thread::spawn(move || {
                 while let Some(job) = worker_jobs.next() {
                     let private_output = watch_native_output(&job.project_root, job.generation);
+                    let private_result = watch_native_result(&private_output);
                     let result = backend
                         .native_build_at_revision(
                             job.path.clone(),
@@ -608,15 +621,18 @@ impl Refresher {
                                 let launched = worker_jobs.launch_if_current(
                                     job.generation,
                                     Path::new(&summary.output_path),
+                                    &private_result,
                                     &launcher,
                                 );
                                 match launched {
                                     Err(error) => {
                                         let _ = std::fs::remove_file(&summary.output_path);
+                                        let _ = std::fs::remove_file(&private_result);
                                         Err(error)
                                     }
                                     Ok(None) => {
                                         let _ = std::fs::remove_file(&summary.output_path);
+                                        let _ = std::fs::remove_file(&private_result);
                                         Ok(NativeRefresh::Stale {
                                             current_revision: job.revision,
                                         })
@@ -625,11 +641,13 @@ impl Refresher {
                                         let execution = run.finish(cancelled);
                                         worker_jobs.finish(job.generation);
                                         let _ = std::fs::remove_file(&summary.output_path);
+                                        let _ = std::fs::remove_file(&private_result);
                                         match execution? {
                                             NativeRunResult::Completed(execution) => {
                                                 Ok(NativeRefresh::Executed {
                                                     output_path: job.path,
                                                     expected_stdout: job.expected_stdout,
+                                                    expected_value: job.expected_value,
                                                     execution,
                                                 })
                                             }
@@ -688,6 +706,7 @@ impl Refresher {
                     path,
                     project_root,
                     expected_stdout: expectation.stdout,
+                    expected_value: expectation.value,
                 }),
                 None => jobs.invalidate(self.generation),
             }
@@ -703,8 +722,15 @@ impl Refresher {
                 Ok(NativeRefresh::Executed {
                     output_path,
                     expected_stdout,
+                    expected_value,
                     execution,
-                }) => report_native_execution(notes, &output_path, &expected_stdout, &execution)?,
+                }) => report_native_execution(
+                    notes,
+                    &output_path,
+                    &expected_stdout,
+                    &expected_value,
+                    &execution,
+                )?,
                 Ok(NativeRefresh::Stale { current_revision }) => {
                     let _ = current_revision;
                 }
@@ -726,13 +752,33 @@ fn watch_native_output(project_root: &str, generation: u64) -> PathBuf {
     output
 }
 
-fn launch_native(path: &Path) -> Result<NativeRun> {
+fn watch_native_result(output: &Path) -> PathBuf {
+    let mut result = output.as_os_str().to_owned();
+    result.push(".result");
+    PathBuf::from(result)
+}
+
+fn launch_native(path: &Path, result_path: &Path) -> Result<NativeRun> {
     const TIMEOUT: Duration = Duration::from_secs(5);
+    match std::fs::remove_file(result_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(Error::io(
+                format!(
+                    "cannot remove stale native refresh result {}",
+                    result_path.display()
+                ),
+                error,
+            ));
+        }
+    }
     let mut command = Command::new(path);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env(NATIVE_RESULT_PATH_ENV, result_path);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -755,6 +801,7 @@ fn launch_native(path: &Path) -> Result<NativeRun> {
     let stdout_reader = std::thread::spawn(move || read_native_pipe(stdout));
     let stderr_reader = std::thread::spawn(move || read_native_pipe(stderr));
     let deadline = Instant::now() + TIMEOUT;
+    let result_path = result_path.to_path_buf();
     Ok(NativeRun::new(move |cancelled| {
         let (status, timed_out, was_cancelled) = loop {
             if cancelled.load(AtomicOrdering::SeqCst) {
@@ -775,13 +822,43 @@ fn launch_native(path: &Path) -> Result<NativeRun> {
         let stdout = join_native_pipe(stdout_reader, "stdout")?;
         let stderr = join_native_pipe(stderr_reader, "stderr")?;
         if was_cancelled {
+            let _ = std::fs::remove_file(&result_path);
             Ok(NativeRunResult::Cancelled)
         } else {
+            let result = if status.success() {
+                let bytes = match std::fs::read(&result_path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&result_path);
+                        return Err(Error::io(
+                            format!(
+                                "cannot read native refresh result {}",
+                                result_path.display()
+                            ),
+                            error,
+                        ));
+                    }
+                };
+                match decode_native_result(&bytes) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&result_path);
+                        return Err(Error::Protocol(format!(
+                            "malformed native refresh result {}: {error}",
+                            result_path.display()
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            let _ = std::fs::remove_file(&result_path);
             Ok(NativeRunResult::Completed(NativeExecution {
                 exit_code: status.code(),
                 stdout,
                 stderr,
                 timed_out,
+                result,
             }))
         }
     }))
@@ -838,7 +915,8 @@ fn stop_native_descendants(_: &mut Child) -> Result<()> {
 
 #[cfg(test)]
 fn execute_native(path: &Path) -> Result<NativeExecution> {
-    match launch_native(path)?.finish(Arc::new(AtomicBool::new(false)))? {
+    let result_path = watch_native_result(path);
+    match launch_native(path, &result_path)?.finish(Arc::new(AtomicBool::new(false)))? {
         NativeRunResult::Completed(execution) => Ok(execution),
         NativeRunResult::Cancelled => Err(Error::Protocol(
             "native test execution was cancelled".into(),
@@ -866,31 +944,47 @@ fn report_native_execution(
     notes: &mut dyn Write,
     output_path: &str,
     expected_stdout: &str,
+    expected_value: &ScalarValueSummary,
     execution: &NativeExecution,
 ) -> Result<()> {
-    // This is an observable-output smoke check, not the canonical state/value oracle required
-    // for full semantic equivalence. The standalone launcher currently discards its kiln_value,
-    // so claiming more here would hide pure-result mismatches.
+    // This is still narrower than the canonical state-dump oracle: it compares stdout and the
+    // final scalar identity, but not locals, operand stacks, object graphs, or intermediate state.
     if !execution.timed_out
         && execution.exit_code == Some(0)
         && execution.stdout == expected_stdout.as_bytes()
         && execution.stderr.is_empty()
+        && execution
+            .result
+            .as_ref()
+            .is_some_and(|actual| scalar_results_equal(expected_value, actual))
     {
         return note(
             notes,
-            format_args!("native refresh stdout matched {output_path}"),
+            format_args!("native refresh stdout and scalar result matched {output_path}"),
         );
     }
     let expected_stdout = debug_excerpt(expected_stdout);
     let native_stdout = debug_bytes_excerpt(&execution.stdout);
     let native_stderr = debug_bytes_excerpt(&execution.stderr);
+    let native_result = &execution.result;
     note(
         notes,
         format_args!(
-            "native refresh mismatch {output_path}: interpreter stdout {expected_stdout}, native stdout {native_stdout}, native exit {:?}, native timeout {}, native stderr {native_stderr}",
-            execution.exit_code, execution.timed_out
+            "native refresh mismatch {output_path}: interpreter stdout {expected_stdout}, native stdout {native_stdout}, interpreter scalar {expected_value:?}, native scalar {native_result:?}, native exit {:?}, native timeout {}, native stderr {native_stderr}",
+            execution.exit_code, execution.timed_out,
         ),
     )
+}
+
+fn scalar_results_equal(expected: &ScalarValueSummary, actual: &HostValue) -> bool {
+    match (expected, actual) {
+        (ScalarValueSummary::Undefined, HostValue::Undefined)
+        | (ScalarValueSummary::Null, HostValue::Null) => true,
+        (ScalarValueSummary::Boolean(expected), HostValue::Boolean(actual)) => expected == actual,
+        (ScalarValueSummary::Number(expected), HostValue::Number(actual)) => expected == actual,
+        (ScalarValueSummary::String(expected), HostValue::String(actual)) => expected == actual,
+        _ => false,
+    }
 }
 
 fn debug_bytes_excerpt(bytes: &[u8]) -> String {
@@ -997,6 +1091,8 @@ mod tests {
                         succeeded: !failed,
                         stdout: format!("program: {}\n", source.trim()),
                         value: Some("undefined".to_string()),
+                        scalar_value: (!failed)
+                            .then_some(kiln_proto::ScalarValueSummary::Undefined),
                         instructions: 1,
                         diagnostics: if failed {
                             vec![Diagnostic {
@@ -1405,6 +1501,7 @@ mod tests {
                     stdout: b"revision 3\n".to_vec(),
                     stderr: Vec::new(),
                     timed_out: false,
+                    result: Some(HostValue::Undefined),
                 })
             }),
         );
@@ -1413,6 +1510,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 1,
                 stdout: "revision 1\n".to_owned(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1439,6 +1537,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 2,
                 stdout: "revision 2\n".to_owned(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1447,6 +1546,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 3,
                 stdout: "revision 3\n".to_owned(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1484,7 +1584,7 @@ mod tests {
         }
         let notes = String::from_utf8(notes).expect("utf-8 notes");
         assert_eq!(
-            notes, "native refresh stdout matched /project/main.js\n",
+            notes, "native refresh stdout and scalar result matched /project/main.js\n",
             "the stale generation stays silent and only the latest result is reported"
         );
         assert_eq!(
@@ -1503,6 +1603,7 @@ mod tests {
             path: "/project/main.js".into(),
             project_root: "/project".into(),
             expected_stdout: "revision 1\n".into(),
+            expected_value: ScalarValueSummary::Undefined,
         });
         assert_eq!(queue.next().expect("first job").generation, 1);
         queue.replace(RefreshJob {
@@ -1511,11 +1612,12 @@ mod tests {
             path: "/project/main.js".into(),
             project_root: "/project".into(),
             expected_stdout: "revision 2\n".into(),
+            expected_value: ScalarValueSummary::Undefined,
         });
 
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
-        let launcher: NativeLauncher = Box::new(move |_| {
+        let launcher: NativeLauncher = Box::new(move |_, _| {
             launch_count.fetch_add(1, Ordering::SeqCst);
             Ok(NativeRun::new(|_| {
                 Ok(NativeRunResult::Completed(NativeExecution {
@@ -1523,12 +1625,18 @@ mod tests {
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                     timed_out: false,
+                    result: Some(HostValue::Undefined),
                 }))
             }))
         });
 
         let launched = queue
-            .launch_if_current(1, Path::new("/project/.kiln/watch/native-1"), &launcher)
+            .launch_if_current(
+                1,
+                Path::new("/project/.kiln/watch/native-1"),
+                Path::new("/project/.kiln/watch/native-1.result"),
+                &launcher,
+            )
             .expect("launch check");
         assert!(launched.is_none());
         assert_eq!(launches.load(Ordering::SeqCst), 0);
@@ -1545,7 +1653,7 @@ mod tests {
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
         let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let launcher: NativeLauncher = Box::new(move |_| {
+        let launcher: NativeLauncher = Box::new(move |_, _| {
             let launch = launch_count.fetch_add(1, Ordering::SeqCst);
             if launch == 0 {
                 let started = started_tx.clone();
@@ -1569,6 +1677,7 @@ mod tests {
                     stdout: b"revision 2\n".to_vec(),
                     stderr: Vec::new(),
                     timed_out: false,
+                    result: Some(HostValue::Undefined),
                 }))
             }))
         });
@@ -1578,6 +1687,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 1,
                 stdout: "revision 1\n".into(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1602,6 +1712,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 2,
                 stdout: "revision 2\n".into(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1630,7 +1741,7 @@ mod tests {
         }
         assert_eq!(
             String::from_utf8(notes).expect("utf-8 notes"),
-            "native refresh stdout matched /project/main.js\n"
+            "native refresh stdout and scalar result matched /project/main.js\n"
         );
         assert_eq!(launches.load(Ordering::SeqCst), 2);
     }
@@ -1654,6 +1765,7 @@ mod tests {
                     stdout: b"obsolete\n".to_vec(),
                     stderr: Vec::new(),
                     timed_out: false,
+                    result: Some(HostValue::Undefined),
                 })
             }),
         );
@@ -1662,6 +1774,7 @@ mod tests {
             Some(RefreshExpectation {
                 revision: 1,
                 stdout: "old success\n".to_owned(),
+                value: ScalarValueSummary::Undefined,
             }),
             "/project/main.js".into(),
             "/project".into(),
@@ -1696,6 +1809,7 @@ mod tests {
             stdout: b"native output\n".to_vec(),
             stderr: b"native error\n".to_vec(),
             timed_out: false,
+            result: None,
         };
         let mut notes = Vec::new();
 
@@ -1703,6 +1817,7 @@ mod tests {
             &mut notes,
             "/project/.kiln/bin/main",
             "interpreter output\n",
+            &ScalarValueSummary::Undefined,
             &execution,
         )
         .expect("mismatch is reported");
@@ -1717,17 +1832,51 @@ mod tests {
     }
 
     #[test]
+    fn native_refresh_compares_exact_scalar_type_and_number_bits() {
+        let mut notes = Vec::new();
+        report_native_execution(
+            &mut notes,
+            "/project/.kiln/bin/main",
+            "same\n",
+            &ScalarValueSummary::Number(1.0_f64.to_bits()),
+            &NativeExecution {
+                exit_code: Some(0),
+                stdout: b"same\n".to_vec(),
+                stderr: Vec::new(),
+                timed_out: false,
+                result: Some(HostValue::String("1".to_owned())),
+            },
+        )
+        .expect("typed mismatch is reported");
+        let notes = String::from_utf8(notes).expect("notes are utf-8");
+        assert!(notes.contains("native refresh mismatch"), "{notes}");
+        assert!(notes.contains("Number"), "{notes}");
+        assert!(notes.contains("String"), "{notes}");
+
+        assert!(!scalar_results_equal(
+            &ScalarValueSummary::Number((-0.0_f64).to_bits()),
+            &HostValue::Number(0.0_f64.to_bits()),
+        ));
+        assert!(!scalar_results_equal(
+            &ScalarValueSummary::Number(f64::NAN.to_bits()),
+            &HostValue::Number(f64::NAN.to_bits() ^ 1),
+        ));
+    }
+
+    #[test]
     fn native_refresh_is_byte_exact_and_rejects_unexpected_stderr() {
         let mut notes = Vec::new();
         report_native_execution(
             &mut notes,
             "/project/.kiln/bin/main",
             "�",
+            &ScalarValueSummary::Undefined,
             &NativeExecution {
                 exit_code: Some(0),
                 stdout: vec![0xff],
                 stderr: Vec::new(),
                 timed_out: false,
+                result: Some(HostValue::Undefined),
             },
         )
         .expect("invalid utf-8 mismatch is reported");
@@ -1740,11 +1889,13 @@ mod tests {
             &mut notes,
             "/project/.kiln/bin/main",
             "same\n",
+            &ScalarValueSummary::Undefined,
             &NativeExecution {
                 exit_code: Some(0),
                 stdout: b"same\n".to_vec(),
                 stderr: b"unexpected\n".to_vec(),
                 timed_out: false,
+                result: Some(HostValue::Undefined),
             },
         )
         .expect("stderr mismatch is reported");
@@ -1784,17 +1935,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cancelling_a_native_refresh_stops_descendants_that_hold_its_pipes() {
+    fn native_refresh_executor_decodes_a_private_scalar_without_touching_stdio() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = scratch("native-process-group");
+        let dir = scratch("native-result-executor");
         let executable = dir.join("program");
-        let descendant_pid = dir.join("descendant.pid");
+        let fixture = dir.join("fixture.result");
+        let expected = HostValue::String("line one\nline two\0".to_owned());
+        std::fs::write(
+            &fixture,
+            kiln_native_runtime::encode_native_result(&expected),
+        )
+        .expect("write result fixture");
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nsleep 10 &\nprintf '%s\\n' \"$!\" > \"{}\"\nwait\n",
-                descendant_pid.display()
+                "#!/bin/sh\ncp '{}' \"${}\"\nprintf 'native stdout\\n'\n",
+                fixture.display(),
+                NATIVE_RESULT_PATH_ENV,
             ),
         )
         .expect("write executable");
@@ -1804,7 +1962,49 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions).expect("make executable");
 
-        let run = launch_native(&executable).expect("launch fixture");
+        let execution = execute_native(&executable).expect("execute fixture");
+        assert_eq!(execution.exit_code, Some(0));
+        assert_eq!(execution.stdout, b"native stdout\n");
+        assert!(execution.stderr.is_empty());
+        assert_eq!(execution.result, Some(expected));
+        assert!(!watch_native_result(&executable).exists());
+
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n")
+            .expect("replace executable without a result writer");
+        let error = execute_native(&executable).expect_err("successful process needs a result");
+        assert!(
+            error.to_string().contains("native refresh result"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_native_refresh_stops_descendants_that_hold_its_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("native-process-group");
+        let executable = dir.join("program");
+        let descendant_pid = dir.join("descendant.pid");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'partial' > \"${}\"\nsleep 10 &\nprintf '%s\\n' \"$!\" > \"{}\"\nwait\n",
+                NATIVE_RESULT_PATH_ENV,
+                descendant_pid.display(),
+            ),
+        )
+        .expect("write executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make executable");
+
+        let result_path = dir.join("result.bin");
+        let run = launch_native(&executable, &result_path).expect("launch fixture");
         for _ in 0..100 {
             if descendant_pid.is_file() {
                 break;
@@ -1825,6 +2025,10 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a descendant retaining the pipes must not delay cancellation"
+        );
+        assert!(
+            !result_path.exists(),
+            "cancellation must remove its sidecar"
         );
 
         let mut descendant_is_gone = false;

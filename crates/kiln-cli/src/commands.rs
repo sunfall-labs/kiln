@@ -24,6 +24,9 @@ pub struct Output {
     pub notes: Vec<String>,
     pub exit_code: i32,
     pub revision: Option<u64>,
+    /// Exact final interpreter scalar retained for watch's private native equivalence check.
+    /// Commands still render only program stdout on the public stdout stream.
+    pub value: Option<kiln_proto::ScalarValueSummary>,
 }
 
 impl Output {
@@ -33,6 +36,7 @@ impl Output {
             notes: Vec::new(),
             exit_code: 0,
             revision: None,
+            value: None,
         }
     }
 }
@@ -124,6 +128,7 @@ fn finish_run(
         notes,
         exit_code: if summary.succeeded { 0 } else { 1 },
         revision: Some(summary.revision),
+        value: summary.scalar_value,
     })
 }
 
@@ -161,6 +166,7 @@ pub fn build(
             notes: project_notes,
             exit_code: 0,
             revision: None,
+            value: None,
         });
     }
     let summary = backend.native_build(canonical, project_root, Some(output), profile)?;
@@ -169,6 +175,7 @@ pub fn build(
         notes: project_notes,
         exit_code: 0,
         revision: None,
+        value: None,
     })
 }
 
@@ -195,6 +202,7 @@ pub fn native_run(
         notes,
         exit_code: summary.exit_code.unwrap_or(1),
         revision: None,
+        value: summary.scalar_value,
     })
 }
 
@@ -283,6 +291,7 @@ pub fn check_source(
         notes,
         exit_code: 0,
         revision: None,
+        value: None,
     })
 }
 
@@ -310,6 +319,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
         notes,
         exit_code: 0,
         revision: None,
+        value: None,
     })
 }
 
@@ -445,6 +455,7 @@ pub fn test(
         notes: Vec::new(),
         exit_code: test_exit_code(&summary),
         revision: None,
+        value: None,
     })
 }
 
@@ -847,6 +858,10 @@ mod tests {
                     succeeded: self.diagnostics.is_empty(),
                     stdout: "hello from kiln\n".to_string(),
                     value: Some("undefined".to_string()),
+                    scalar_value: self
+                        .diagnostics
+                        .is_empty()
+                        .then_some(kiln_proto::ScalarValueSummary::Undefined),
                     instructions: 4,
                     diagnostics: self.diagnostics.clone(),
                 }),
@@ -900,6 +915,7 @@ mod tests {
                     exit_code: Some(0),
                     stdout: "native hello\n".to_owned(),
                     stderr: String::new(),
+                    scalar_value: Some(kiln_proto::ScalarValueSummary::Undefined),
                     build: NativeBuildSummary {
                         module_symbol: "kiln_module_test".to_owned(),
                         output_path: "/tmp/test".to_owned(),

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// A file as the client sees it: the path the daemon knows it by, and `kiln_db::content_hash`
 /// of its text.
@@ -198,6 +198,8 @@ pub struct NativeRunSummary {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// Exact scalar returned by the native entry point. Failed or signalled processes have none.
+    pub scalar_value: Option<ScalarValueSummary>,
     pub build: NativeBuildSummary,
 }
 
@@ -259,8 +261,23 @@ pub struct RunSummary {
     pub succeeded: bool,
     pub stdout: String,
     pub value: Option<String>,
+    /// Exact scalar identity for differential checks. `None` means execution failed or returned
+    /// a value outside the scalar HostOps boundary; `value` remains the human display spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scalar_value: Option<ScalarValueSummary>,
     pub instructions: u64,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Owned, exactly comparable scalar identity shared with native-result observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScalarValueSummary {
+    Undefined,
+    Null,
+    Boolean(bool),
+    /// Raw IEEE-754 binary64 bits, preserving negative zero and NaN payloads.
+    Number(u64),
+    String(String),
 }
 
 /// What the pipeline currently knows about one module.
@@ -305,4 +322,44 @@ pub struct Stats {
     pub validated: u64,
     /// Times a recompute produced an identical value, cutting off its dependents.
     pub early_cutoff: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_value_identity_round_trips_without_losing_number_bits_or_string_bytes() {
+        let values = [
+            ScalarValueSummary::Undefined,
+            ScalarValueSummary::Null,
+            ScalarValueSummary::Boolean(false),
+            ScalarValueSummary::Boolean(true),
+            ScalarValueSummary::Number((-0.0_f64).to_bits()),
+            ScalarValueSummary::Number(f64::NAN.to_bits()),
+            ScalarValueSummary::Number(u64::MAX),
+            ScalarValueSummary::String("line one\nline two\0".to_owned()),
+        ];
+        for value in values {
+            let encoded = serde_json::to_vec(&value).expect("serialize scalar identity");
+            let decoded = serde_json::from_slice(&encoded).expect("deserialize scalar identity");
+            assert_eq!(value, decoded);
+        }
+    }
+
+    #[test]
+    fn older_run_summaries_without_scalar_identity_decode_as_none() {
+        let encoded = serde_json::json!({
+            "revision": 1,
+            "path": "main.js",
+            "file": 1,
+            "succeeded": true,
+            "stdout": "",
+            "value": "undefined",
+            "instructions": 1,
+            "diagnostics": []
+        });
+        let summary: RunSummary = serde_json::from_value(encoded).expect("decode old summary");
+        assert_eq!(summary.scalar_value, None);
+    }
 }

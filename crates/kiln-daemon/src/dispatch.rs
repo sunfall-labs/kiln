@@ -8,7 +8,7 @@ use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
-    Stats,
+    ScalarValueSummary, Stats,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -278,16 +278,20 @@ fn run_graph<E: QueryEngine>(
         Err(error) => Err(error),
     };
     match result {
-        Ok(execution) => Response::Ran(RunSummary {
-            revision: engine.revision().0,
-            path,
-            file: FileId(file.0),
-            succeeded: true,
-            stdout: host.into_stdout(),
-            value: Some(execution.value.to_display_string()),
-            instructions: execution.steps,
-            diagnostics: Vec::new(),
-        }),
+        Ok(execution) => {
+            let scalar_value = scalar_value_summary(&execution.value);
+            Response::Ran(RunSummary {
+                revision: engine.revision().0,
+                path,
+                file: FileId(file.0),
+                succeeded: true,
+                stdout: host.into_stdout(),
+                value: Some(execution.value.to_display_string()),
+                scalar_value,
+                instructions: execution.steps,
+                diagnostics: Vec::new(),
+            })
+        }
         Err(error) => Response::Ran(RunSummary {
             revision: engine.revision().0,
             path,
@@ -295,6 +299,7 @@ fn run_graph<E: QueryEngine>(
             succeeded: false,
             stdout: host.into_stdout(),
             value: None,
+            scalar_value: None,
             instructions: 0,
             diagnostics: module_graph_diagnostics(error),
         }),
@@ -374,6 +379,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
                 succeeded: false,
                 stdout: String::new(),
                 value: None,
+                scalar_value: None,
                 instructions: 0,
                 diagnostics: diagnostics
                     .into_iter()
@@ -389,16 +395,20 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
 
     let mut host = kiln_runtime::CaptureHost::new();
     match kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default()) {
-        Ok(execution) => Response::Ran(RunSummary {
-            revision: engine.revision().0,
-            path,
-            file: FileId(file.0),
-            succeeded: true,
-            stdout: host.into_stdout(),
-            value: Some(execution.value.to_display_string()),
-            instructions: execution.steps,
-            diagnostics: Vec::new(),
-        }),
+        Ok(execution) => {
+            let scalar_value = scalar_value_summary(&execution.value);
+            Response::Ran(RunSummary {
+                revision: engine.revision().0,
+                path,
+                file: FileId(file.0),
+                succeeded: true,
+                stdout: host.into_stdout(),
+                value: Some(execution.value.to_display_string()),
+                scalar_value,
+                instructions: execution.steps,
+                diagnostics: Vec::new(),
+            })
+        }
         Err(error) => Response::Ran(RunSummary {
             revision: engine.revision().0,
             path,
@@ -406,6 +416,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
             succeeded: false,
             stdout: host.into_stdout(),
             value: None,
+            scalar_value: None,
             instructions: 0,
             diagnostics: vec![Diagnostic {
                 message: error.to_string(),
@@ -413,6 +424,17 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
                 end: None,
             }],
         }),
+    }
+}
+
+fn scalar_value_summary(value: &kiln_interpreter::Value) -> Option<ScalarValueSummary> {
+    match value {
+        kiln_interpreter::Value::Undefined => Some(ScalarValueSummary::Undefined),
+        kiln_interpreter::Value::Null => Some(ScalarValueSummary::Null),
+        kiln_interpreter::Value::Boolean(value) => Some(ScalarValueSummary::Boolean(*value)),
+        kiln_interpreter::Value::Number(value) => Some(ScalarValueSummary::Number(value.to_bits())),
+        kiln_interpreter::Value::String(value) => Some(ScalarValueSummary::String(value.clone())),
+        _ => None,
     }
 }
 
@@ -638,6 +660,7 @@ pub(crate) fn native_run_program(
             exit_code: report.exit_code,
             stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
+            scalar_value: report.result.map(native_scalar_value_summary),
             build: native_summary(report.build),
         }),
         Err(error) => Response::Error {
@@ -674,11 +697,22 @@ pub(crate) fn native_run_graph(
             exit_code: report.exit_code,
             stdout: String::from_utf8_lossy(&report.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
+            scalar_value: report.result.map(native_scalar_value_summary),
             build: native_summary(report.build),
         }),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
+    }
+}
+
+fn native_scalar_value_summary(value: kiln_native::HostValue) -> ScalarValueSummary {
+    match value {
+        kiln_native::HostValue::Undefined => ScalarValueSummary::Undefined,
+        kiln_native::HostValue::Null => ScalarValueSummary::Null,
+        kiln_native::HostValue::Boolean(value) => ScalarValueSummary::Boolean(value),
+        kiln_native::HostValue::Number(bits) => ScalarValueSummary::Number(bits),
+        kiln_native::HostValue::String(value) => ScalarValueSummary::String(value),
     }
 }
 

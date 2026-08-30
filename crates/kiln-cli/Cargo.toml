@@ -12,6 +12,8 @@ kiln-proto = { workspace = true }
 kiln-db = { workspace = true }
 serde_json = { workspace = true }
 kiln-daemon = { workspace = true }
+kiln-host-abi = { workspace = true }
+kiln-native-runtime = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 
