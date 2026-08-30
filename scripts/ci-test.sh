@@ -106,3 +106,15 @@ if [[ $KILN_CI_REEXPORTS_STDOUT != "$KILN_CI_REEXPORTS_EXPECTED" ]]; then
 	printf 'expected: %s\nactual: %s\n' "$KILN_CI_REEXPORTS_EXPECTED" "$KILN_CI_REEXPORTS_STDOUT" >&2
 	exit 1
 fi
+
+# An import is a live view of the exporter's binding, not a copy of the value it had when the
+# exporter finished. Only a binding that can change is boxed, which is why `examples/modules`
+# above still compiles natively: its one export is a `const`.
+KILN_CI_LIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+	examples/modules/live/main.ts)"
+KILN_CI_LIVE_EXPECTED=$'0 10\n2 10'
+if [[ $KILN_CI_LIVE_STDOUT != "$KILN_CI_LIVE_EXPECTED" ]]; then
+	echo "an imported binding did not track the exporter" >&2
+	printf 'expected: %s\nactual: %s\n' "$KILN_CI_LIVE_EXPECTED" "$KILN_CI_LIVE_STDOUT" >&2
+	exit 1
+fi

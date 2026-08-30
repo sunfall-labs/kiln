@@ -723,7 +723,19 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         });
     }
 
-    compiler.box_captured_imports();
+    // An exported binding that can *change* is boxed, so the importer holds this module's cell
+    // rather than a copy of the value it had when the module finished. One that cannot change --
+    // a `const`, a function declaration, a class -- is left as a plain slot: a snapshot and a
+    // live view of it are indistinguishable, and boxing it would cost the native backend, which
+    // has no cells, a module it can otherwise compile.
+    let mutable = mutable_module_bindings(&module.body);
+    for export in &module.exports {
+        if let ExportOrigin::Local { local } = &export.origin
+            && mutable.contains(local)
+        {
+            compiler.captured.insert(local.clone());
+        }
+    }
     compiler.compile_body(module);
 
     let mut exports = star_exports;
@@ -1025,35 +1037,15 @@ impl Compiler {
                 imported: true,
                 // An import is bound before the module body runs, so it is never in a dead zone.
                 initialized: true,
-                // Boxed on the same rule as anything else, so a function can capture it. The
-                // value arrives in the raw slot before the first instruction, so the module
-                // prologue is what puts it in the cell.
-                celled: self.captured.contains(name),
+                // *Always* a cell. An import is a live view of the exporter's binding, not a
+                // copy of its value at the moment the exporter finished -- `export let count`
+                // that a function later increments has to read as the new number here. The cell
+                // is the exporter's own, installed by the host before the first instruction, so
+                // there is nothing for the module prologue to box.
+                celled: true,
             },
         );
         Some(slot)
-    }
-
-    /// Move each captured import from its raw slot into a cell, before the body runs.
-    ///
-    /// The host installs import values directly in the slots, which it must do before any
-    /// instruction executes -- so the boxing cannot happen at the declaration the way it does
-    /// for a `let`. Three instructions per captured import, once per module.
-    fn box_captured_imports(&mut self) {
-        let celled: Vec<u32> = self.scopes[0]
-            .values()
-            .filter(|local| local.imported && local.celled)
-            .map(|local| local.slot)
-            .collect();
-        // Sorted so the prologue is the same bytecode however the scope map happened to iterate,
-        // which a content-addressed cache depends on.
-        let mut celled = celled;
-        celled.sort_unstable();
-        for slot in celled {
-            self.code.push(Instruction::LoadLocal(slot));
-            self.code.push(Instruction::NewCell(slot));
-            self.code.push(Instruction::StoreCell(slot));
-        }
     }
 
     /// The reserved key a private field is stored under, in the class being compiled.
@@ -4285,6 +4277,121 @@ impl Compiler {
     }
 }
 
+/// Module-scope names whose value can change after the module body has run.
+///
+/// A `let` or `var` declaration, or any name something assigns to or updates -- including inside
+/// a nested function, which is the case that matters: `export let count` incremented by an
+/// exported `bump()` is the whole reason a live binding is not the same as a snapshot.
+fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for statement in body {
+        if let StatementKind::Variable { kind, declarations } = &statement.kind
+            && *kind != VariableKind::Const
+        {
+            for declaration in declarations {
+                collect_pattern_names(&declaration.pattern, &mut names);
+            }
+        }
+        collect_assigned_names(statement, &mut names);
+    }
+    names
+}
+
+/// Every name assigned or updated anywhere in `statement`, however deeply nested.
+///
+/// Deliberately an over-approximation, like the capture analysis: a name boxed that never changes
+/// costs one pointer chase, where a name *missed* would read as a stale value through an import.
+fn collect_assigned_names(statement: &Statement, names: &mut HashSet<String>) {
+    let mut expressions: Vec<&Expression> = Vec::new();
+    let mut statements: Vec<&Statement> = vec![statement];
+    while let Some(statement) = statements.pop() {
+        match &statement.kind {
+            StatementKind::Variable { declarations, .. } => {
+                for declaration in declarations {
+                    if let Some(initializer) = &declaration.initializer {
+                        expressions.push(initializer);
+                    }
+                }
+            }
+            StatementKind::Function(function) => statements.extend(function.body.iter()),
+            StatementKind::Class(class) => {
+                for method in &class.methods {
+                    statements.extend(method.function.body.iter());
+                }
+                if let Some(constructor) = &class.constructor {
+                    statements.extend(constructor.body.iter());
+                }
+            }
+            StatementKind::Expression(expression)
+            | StatementKind::Throw(expression)
+            | StatementKind::ExportDefault(expression) => expressions.push(expression),
+            StatementKind::Return(value) => expressions.extend(value.iter()),
+            StatementKind::Block(body) => statements.extend(body.iter()),
+            StatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                expressions.push(test);
+                statements.push(consequent);
+                statements.extend(alternate.iter().map(std::convert::AsRef::as_ref));
+            }
+            StatementKind::While { test, body } | StatementKind::DoWhile { test, body } => {
+                expressions.push(test);
+                statements.push(body);
+            }
+            StatementKind::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                statements.extend(init.iter().map(std::convert::AsRef::as_ref));
+                expressions.extend(test.iter());
+                expressions.extend(update.iter());
+                statements.push(body);
+            }
+            StatementKind::ForOf { iterable, body, .. } => {
+                expressions.push(iterable);
+                statements.push(body);
+            }
+            StatementKind::ForIn { object, body, .. } => {
+                expressions.push(object);
+                statements.push(body);
+            }
+            StatementKind::Labelled { body, .. } => statements.push(body),
+            StatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                expressions.push(discriminant);
+                for case in cases {
+                    expressions.extend(case.test.iter());
+                    statements.extend(case.body.iter());
+                }
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                statements.extend(block.iter());
+                if let Some(handler) = handler {
+                    statements.extend(handler.body.iter());
+                }
+                statements.extend(finalizer.iter());
+            }
+            StatementKind::Break { .. }
+            | StatementKind::Continue { .. }
+            | StatementKind::Empty
+            | StatementKind::Unsupported { .. } => {}
+        }
+    }
+    for expression in expressions {
+        collect_identifiers(expression, names, true);
+    }
+}
+
 /// Names that nested functions inside `body` refer to.
 ///
 /// Deliberately an over-approximation: it collects every identifier appearing anywhere inside a
@@ -5660,7 +5767,12 @@ mod tests {
         assert_eq!(linked.imports[0].local_slot, 0);
         assert_eq!(linked.exports[0].exported, "answer");
         assert_eq!(linked.exports[0].local_slot, 1);
-        assert!(linked.program.code.contains(&Instruction::LoadLocal(0)));
+        // The import reads through a cell, because an import is a live view of the exporter's
+        // binding rather than a copy of it. The export here is a `const` and so is *not* boxed:
+        // a snapshot of something that cannot change is the same thing as a live view of it, and
+        // leaving it unboxed is what keeps such a module compilable by the native backend.
+        assert!(linked.program.code.contains(&Instruction::LoadCell(0)));
+        assert!(linked.program.code.contains(&Instruction::StoreLocal(1)));
     }
 
     #[test]

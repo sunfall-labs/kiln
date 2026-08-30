@@ -1995,7 +1995,9 @@ pub fn execute<H: HostOps + ?Sized>(
 pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> Value {
     let mut data = ObjectData::default();
     for (name, value) in exports {
-        data.set(&name, value);
+        // A namespace object holds values, so an exported cell is read through here. Node's
+        // namespace objects are live; this one is a snapshot taken when the provider finished.
+        data.set(&name, read_through_cell(&value));
     }
     data.freeze();
     Value::Object(Rc::new(RefCell::new(data)))
@@ -2010,6 +2012,17 @@ fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
         .functions
         .get(state.closure.function as usize)
         .is_some_and(|proto| proto.async_generator)
+}
+
+/// What a value is, looking through an exported cell.
+///
+/// An export is a cell so that a named import is a live view of it. Everywhere a *value* is
+/// wanted instead -- a namespace object, a star expansion -- goes through this.
+pub fn read_through_cell(value: &Value) -> Value {
+    match value {
+        Value::Cell(cell) => cell.borrow().clone(),
+        other => other.clone(),
+    }
 }
 
 /// The own properties of a namespace object, in the order it holds them.
@@ -2054,7 +2067,15 @@ pub fn execute_module<H: HostOps + ?Sized>(
                 index: binding.local_slot as usize,
             });
         };
-        *local = value.clone();
+        // An import slot always holds a cell, because an import is a live view of the
+        // exporter's binding. When the linker hands over the exporter's own cell that view is
+        // genuinely live; when it hands over a plain value -- a re-export, a star-expanded name,
+        // a namespace object -- it is wrapped here and reads as a snapshot, which is what those
+        // forms are until the linker learns to thread cells through them too.
+        *local = match value {
+            Value::Cell(_) => value.clone(),
+            other => Value::Cell(Rc::new(RefCell::new(other.clone()))),
+        };
     }
 
     let mut vm = Vm {
@@ -2117,13 +2138,12 @@ pub fn execute_module<H: HostOps + ?Sized>(
                 index: binding.local_slot as usize,
             });
         };
+        // The cell itself, not what is in it: the importer holds this module's binding rather
+        // than a copy of the value it had when the module finished. `namespace_object` and the
+        // star expansion read through it, because those *are* snapshots.
         exports.push(ModuleExportValue {
             name: binding.exported.clone(),
-            // A captured binding lives in a cell; the importer wants what is in it, not the box.
-            value: match value {
-                Value::Cell(cell) => cell.borrow().clone(),
-                value => value.clone(),
-            },
+            value: value.clone(),
         });
     }
     Ok(ModuleExecutionResult { execution, exports })
@@ -12223,11 +12243,15 @@ mod tests {
             program: Program {
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: vec![number(2.0)],
+                // An import slot holds a cell and an exported slot must too, which is what the
+                // compiler emits for both -- so the fixture reads through one and writes into
+                // one, as real bytecode does.
                 code: vec![
-                    Instruction::LoadLocal(0),
+                    Instruction::NewCell(1),
+                    Instruction::LoadCell(0),
                     Instruction::Const(0),
                     Instruction::Binary(BinaryOp::Multiply),
-                    Instruction::StoreLocal(1),
+                    Instruction::StoreCell(1),
                     Instruction::Const(0),
                     Instruction::Return,
                 ],
@@ -12257,7 +12281,12 @@ mod tests {
         .expect("module executes");
 
         assert_eq!(result.exports[0].name, "answer");
-        assert_eq!(result.exports[0].value, Value::Number(42.0));
+        // The cell, not its contents: an import is a live view of the exporter's binding, so
+        // what is published is the box rather than what was in it when the module finished.
+        assert_eq!(
+            read_through_cell(&result.exports[0].value),
+            Value::Number(42.0)
+        );
     }
 
     /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.

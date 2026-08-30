@@ -531,7 +531,8 @@ impl ModuleGraph {
                 .iter()
                 .filter(|export| export.name.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
             {
-                for (name, value) in kiln_interpreter::namespace_entries(&star.value) {
+                let expanded = kiln_interpreter::read_through_cell(&star.value);
+                for (name, value) in kiln_interpreter::namespace_entries(&expanded) {
                     // `export *` never forwards a default: a module's default is its own.
                     if name != "default" {
                         exports.entry(name).or_insert(value);
@@ -987,6 +988,63 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["a wide", "alpha,shared"]);
+    }
+
+    /// An import is a live view of the exporter's binding, not a copy of the value it had when
+    /// the exporter finished.
+    ///
+    /// `export let count` that an exported function increments is the case: the importer reads
+    /// the *new* number. Only a binding that can change is boxed -- a `const` cannot, and boxing
+    /// it would cost the native backend a module it can otherwise compile.
+    #[test]
+    fn a_named_import_is_a_live_view_of_the_exported_binding() {
+        let project = TempProject::new();
+        project.write(
+            "counter.js",
+            "export let count = 0;\n\
+             export const limit = 10;\n\
+             export function bump() { count += 1; }",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { count, limit, bump } from './counter.js';\n\
+             console.log(count, limit);\n\
+             bump();\n\
+             bump();\n\
+             console.log(count, limit);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["0 10", "2 10"]);
+    }
+
+    /// A namespace object is a snapshot, and says so.
+    ///
+    /// Node's namespace objects are live; this one reads the exported cells once, when the
+    /// provider finishes. Recorded as a test so the difference is a decision rather than a
+    /// surprise.
+    #[test]
+    fn a_namespace_object_is_a_snapshot_of_the_exports() {
+        let project = TempProject::new();
+        project.write(
+            "counter.js",
+            "export let count = 0;\nexport function bump() { count += 1; }",
+        );
+        let entry = project.write(
+            "main.js",
+            "import * as counter from './counter.js';\n\
+             counter.bump();\n\
+             console.log(counter.count);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["0"]);
     }
 
     #[test]

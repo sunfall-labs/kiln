@@ -639,7 +639,11 @@ fn validate(program: &Program) -> Result<usize, EmitError> {
                     format!("constant {constant} is out of bounds"),
                 ));
             }
-            Instruction::LoadLocal(local) | Instruction::StoreLocal(local)
+            Instruction::LoadLocal(local)
+            | Instruction::StoreLocal(local)
+            | Instruction::NewCell(local)
+            | Instruction::LoadCell(local)
+            | Instruction::StoreCell(local)
                 if (*local as u64) >= u64::from(program.local_count) =>
             {
                 return Err(invalid(index, format!("local {local} is out of bounds")));
@@ -714,6 +718,12 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
+        // A cell is a shared box and only a closure can share one; this backend refuses
+        // `MakeFunction`, so a cell here reaches only the module body that made it and is
+        // indistinguishable from its slot. See the emitter for the same reasoning.
+        | Instruction::NewCell(_)
+        | Instruction::LoadCell(_)
+        | Instruction::StoreCell(_)
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -791,9 +801,6 @@ fn stack_effect(
         | Instruction::Call { .. }
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::NewCell(_)
-        | Instruction::LoadCell(_)
-        | Instruction::StoreCell(_)
         | Instruction::LoadUpvalue(_)
         | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
@@ -836,8 +843,12 @@ fn stack_effect(
         | Instruction::SuperForward => Err(EmitError::Unsupported {
             feature: "functions and objects in the native backend".to_string(),
         }),
-        Instruction::Const(_) | Instruction::LoadLocal(_) => Ok((height + 1, false)),
-        Instruction::StoreLocal(_) | Instruction::Pop => {
+        Instruction::Const(_) | Instruction::LoadLocal(_) | Instruction::LoadCell(_) => {
+            Ok((height + 1, false))
+        }
+        // Making a cell touches no stack: the slot becomes the box in place.
+        Instruction::NewCell(_) => Ok((height, false)),
+        Instruction::StoreLocal(_) | Instruction::StoreCell(_) | Instruction::Pop => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -1040,9 +1051,6 @@ fn emit_instruction(
         | Instruction::Call { .. }
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
-        | Instruction::NewCell(_)
-        | Instruction::LoadCell(_)
-        | Instruction::StoreCell(_)
         | Instruction::LoadUpvalue(_)
         | Instruction::StoreUpvalue(_)
         | Instruction::NewObject { .. }
@@ -1101,6 +1109,18 @@ fn emit_instruction(
                 unreachable!("verification rejects a BigInt constant before emission")
             }
         },
+        // A cell is a shared box, and only a closure can share one. This backend refuses
+        // `MakeFunction`, so nothing here can capture: a cell reaches only the module body that
+        // made it, which makes it indistinguishable from the slot it lives in. Emitting the three
+        // cell instructions as plain slot access is sound *because* of that refusal, and would
+        // stop being sound the moment callable functions land -- which is why it says so here.
+        Instruction::NewCell(_) => {}
+        Instruction::LoadCell(local) => {
+            writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
+        }
+        Instruction::StoreCell(local) => {
+            writeln!(output, "    locals[{local}] = stack[--sp];").unwrap();
+        }
         Instruction::LoadLocal(local) => writeln!(output, "    stack[sp++] = locals[{local}];").unwrap(),
         Instruction::StoreLocal(local) => writeln!(output, "    locals[{local}] = stack[--sp];").unwrap(),
         Instruction::Pop => output.push_str("    --sp;\n"),
