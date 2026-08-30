@@ -607,10 +607,14 @@ typedef struct kiln_host {
 struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                            kiln_value *thrown, struct kiln_generator *frame);
+                            kiln_value receiver, kiln_value new_target, const kiln_value *args,
+                            size_t argc, int depth, kiln_value *thrown,
+                            struct kiln_generator *frame);
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* Arrows have no call-time `this` or `new.target`; both are captured where made. */
+    int arrow;
+    kiln_value captured_new_target;
     /* Calling this builds a generator object instead of running the body. */
     int generator;
     /* ...and, when this is set, drives it to completion against a promise rather than handing
@@ -705,6 +709,7 @@ typedef struct kiln_array {
 typedef struct kiln_generator {
     kiln_value function;
     kiln_value receiver;
+    kiln_value new_target;
     /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --
      * and this is the promise its eventual return value settles. Undefined for a plain one. */
     kiln_value promise;
@@ -1013,7 +1018,7 @@ static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reactio
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
-                                  const kiln_value *args, size_t argc);
+                                  kiln_value new_target, const kiln_value *args, size_t argc);
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
@@ -1035,6 +1040,10 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                kiln_value *thrown);
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
+static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_value callee,
+                                     kiln_value receiver, kiln_value new_target,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);
@@ -1289,7 +1298,7 @@ static kiln_generator *kiln_c99_generator_of(kiln_value value) {
  * Both arrays are sized from the body's own counts, so a suspension has somewhere to put every
  * local and every operand the verifier proved it can hold. */
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
-                                  const kiln_value *args, size_t argc) {
+                                  kiln_value new_target, const kiln_value *args, size_t argc) {
     kiln_closure *closure = kiln_c99_closure_of(function);
     kiln_generator *frame = (kiln_generator *)malloc(sizeof *frame);
     size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
@@ -1325,6 +1334,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     }
     frame->function = function;
     frame->receiver = receiver;
+    frame->new_target = new_target;
     frame->sp = 0;
     frame->resume = 0;
     frame->sent = kiln_c99_undefined();
@@ -2489,10 +2499,10 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, uint32_t proto, int generator, int asynchronous,
-                                 uint32_t local_count, uint32_t stack_size,
-                                 uint32_t handler_depth, const kiln_value *captured,
-                                 uint32_t count) {
+                                 size_t name_len, uint32_t proto, int arrow, int generator,
+                                 int asynchronous, kiln_value new_target, uint32_t local_count,
+                                 uint32_t stack_size, uint32_t handler_depth,
+                                 const kiln_value *captured, uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
@@ -2510,6 +2520,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
         }
     }
     closure->body = body;
+    closure->arrow = arrow;
+    closure->captured_new_target = new_target;
     closure->generator = generator;
     closure->asynchronous = asynchronous;
     closure->local_count = local_count;
@@ -2530,9 +2542,10 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
  * frame is entered rather than discovered by crashing. */
 /* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`
  * is in a module: modules are strict, and strict mode does not substitute the global object. */
-static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                         kiln_value *thrown) {
+static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_value callee,
+                                     kiln_value receiver, kiln_value new_target,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown) {
     kiln_closure *closure;
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "is not a function");
@@ -2551,8 +2564,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         kiln_value *joined;
         int status;
         if (bound->count == 0) {
-            return kiln_c99_call(host, result, bound->target, bound->receiver, args, argc, depth,
-                                 thrown);
+            return kiln_c99_call_with_target(host, result, bound->target, bound->receiver,
+                                             new_target, args, argc, depth, thrown);
         }
         joined = (kiln_value *)malloc((bound->count + argc) * sizeof *joined);
         if (joined == NULL) {
@@ -2562,8 +2575,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         if (argc != 0) {
             memcpy(joined + bound->count, args, argc * sizeof *joined);
         }
-        status = kiln_c99_call(host, result, bound->target, bound->receiver, joined,
-                               bound->count + argc, depth, thrown);
+        status = kiln_c99_call_with_target(host, result, bound->target, bound->receiver,
+                                           new_target, joined, bound->count + argc, depth, thrown);
         free(joined);
         return status;
     }
@@ -2634,7 +2647,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
          * differs only in who drives it, which is this rather than the program. */
         kiln_value built;
-        int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
+        kiln_value target = closure->arrow ? closure->captured_new_target : new_target;
+        int status = kiln_c99_new_generator(&built, callee, receiver, target, args, argc);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -2655,8 +2669,20 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_async_step(host, built, kiln_c99_undefined(), 0, depth, thrown);
         }
     }
-    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1, thrown,
-                         NULL);
+    if (closure->arrow) {
+        new_target = closure->captured_new_target;
+    }
+    return closure->body(host, result, closure->upvalues, receiver, new_target, args, argc,
+                         depth + 1, thrown, NULL);
+}
+
+/* Most runtime callbacks are ordinary calls. Keeping this wrapper makes that default explicit;
+ * only construction and `super()` use the target-aware entry point above. */
+static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                         kiln_value *thrown) {
+    return kiln_c99_call_with_target(host, result, callee, receiver, kiln_c99_undefined(), args,
+                                     argc, depth, thrown);
 }
 
 static kiln_value kiln_c99_number(double value) {
@@ -6362,8 +6388,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
-                status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL,
-                                       0, depth + 1, thrown, frame);
+                status = closure->body(host, &produced, closure->upvalues, frame->receiver,
+                                       frame->new_target, NULL, 0, depth + 1, thrown, frame);
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
                     finished = 0;
@@ -8972,8 +8998,8 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
-                           thrown, frame);
+    status = closure->body(host, &produced, closure->upvalues, frame->receiver, frame->new_target,
+                           NULL, 0, depth + 1, thrown, frame);
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -9201,7 +9227,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return status;
     }
     kiln_c99_object_of(instance)->prototype = prototype;
-    status = kiln_c99_call(host, &produced, callee, instance, args, argc, depth, thrown);
+    status = kiln_c99_call_with_target(host, &produced, callee, instance, callee, args, argc,
+                                       depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -9710,21 +9737,6 @@ fn validate_code(
     Ok(max_height.max(1))
 }
 
-/// Name the instruction a refusal is about.
-///
-/// The catch-all used to answer "functions and objects in the native backend" for all forty of
-/// them, which tells a reader nothing about which one their program actually reached -- the same
-/// defect the frontend's "unsupported expression: expression" had. A variant name is not a
-/// polished feature name, but it is the truth and it sorts a backlog.
-fn instruction_feature(instruction: &Instruction) -> String {
-    let rendered = format!("{instruction:?}");
-    let name = rendered
-        .split(['(', ' ', '{'])
-        .next()
-        .unwrap_or("instruction");
-    format!("`{name}` in the native backend")
-}
-
 fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitError> {
     match instruction {
         // A template's `${x}` lowers to a call to `String`, so this is not an optional extra:
@@ -9771,6 +9783,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
         Instruction::Const(_)
+        | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
         | Instruction::NewCell(_)
@@ -9828,9 +9841,6 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::JumpIfNotNullish(_)
         | Instruction::HostCall { .. }
         | Instruction::Return => Ok(()),
-        _ => Err(EmitError::Unsupported {
-            feature: instruction_feature(instruction),
-        }),
     }
 }
 
@@ -9887,14 +9897,8 @@ fn stack_effect(
         )
     };
     match instruction {
-        // Calls are interpreter-only for now. The native backend emits one C function per
-        // module with a flat local array and no call stack, so these have no lowering yet --
-        // and refusing here is what keeps the two backends from silently disagreeing about
-        // what a program means. `kiln run` works on these; `kiln run --native` says why not.
-        Instruction::LoadNewTarget => Err(EmitError::Unsupported {
-            feature: instruction_feature(instruction),
-        }),
         Instruction::Const(_)
+        | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)
@@ -10359,7 +10363,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, kiln_value new_target, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
         )
         .unwrap();
     }
@@ -10458,7 +10462,7 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {{"
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, kiln_value new_target, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
@@ -10481,7 +10485,7 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n");
         output.push_str("    (void)args; (void)argc; (void)slot;\n");
         // Re-entry. A generator that has not started begins at its first instruction; one that
         // has jumps back to just after the `Yield` that suspended it, with the operand stack
@@ -10515,7 +10519,7 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n");
         writeln!(
             output,
             "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
@@ -10589,6 +10593,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    output.push_str("    kiln_value new_target = kiln_c99_undefined();\n");
+    output.push_str("    (void)new_target;\n");
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -10681,6 +10687,8 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    output.push_str("    kiln_value new_target = kiln_c99_undefined();\n");
+    output.push_str("    (void)new_target;\n");
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -10813,11 +10821,7 @@ fn emit_instruction(
         guarded,
     } = emitter;
     match instruction {
-        // Rejected by `verify` before emission begins, so reaching here means the two passes
-        // disagree about the instruction set -- a compiler bug, not a program error.
-        Instruction::LoadNewTarget => {
-            unreachable!("verification rejects these instructions before emission")
-        }
+        Instruction::LoadNewTarget => output.push_str("    stack[sp++] = new_target;\n"),
         Instruction::NewRegExp { pattern, flags } => {
             let (Constant::String(source), Constant::String(letters)) =
                 (&constants[*pattern as usize], &constants[*flags as usize])
@@ -10970,6 +10974,7 @@ fn emit_instruction(
             };
             // A generator's frame is sized here rather than at the call, because this is where
             // the body's own counts are in scope.
+            let arrow = i32::from(target.arrow);
             let generator = i32::from(target.generator || target.asynchronous);
             let asynchronous = i32::from(target.asynchronous);
             let frame_locals = target.local_count.max(1);
@@ -10981,7 +10986,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -11001,7 +11006,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {generator}, {asynchronous}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), {arrow}, {generator}, {asynchronous}, new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -11137,7 +11142,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call_with_target(host, &produced, stack[sp - {argc} - 1], receiver, new_target, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -11149,7 +11154,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status = kiln_c99_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+                "    {{ kiln_value produced; int status = kiln_c99_call_with_target(host, &produced, stack[sp - 1], receiver, new_target, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
             )
             .unwrap();
         }
@@ -12859,16 +12864,66 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::LoadNewTarget,
+                Instruction::LoadBuiltin(kiln_ir::Builtin::WeakMap),
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadNewTarget`")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("WeakMap")),
             "dead code must not bypass the native instruction allowlist"
         );
+    }
+
+    #[test]
+    fn executable_new_target_is_the_constructing_callee() {
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("target".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::New { argc: 0 },
+                Instruction::GetProperty(0),
+                Instruction::Unary(UnaryOp::TypeOf),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![FunctionProto {
+                code: vec![
+                    Instruction::LoadThis,
+                    Instruction::LoadNewTarget,
+                    Instruction::SetProperty(0),
+                    Instruction::Return,
+                ],
+                ..function(Vec::new())
+            }],
+        })
+        .expect("new.target program emits");
+        let wrapper = r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {
+    (void)context;
+    if (operation != 1 || argc != 1 || arguments[0].tag != KILN_VALUE_STRING ||
+        arguments[0].len != 8 || memcmp(arguments[0].ptr, "function", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}
+int main(void) {
+    kiln_host host = {host_call, NULL};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}
+"#;
+        let wrapper = wrapper.replace("{symbol}", &generated.symbol);
+        let run = run_with_main(&generated, &wrapper, "new-target");
+        assert!(run.status.success(), "new.target runtime probe failed");
     }
 
     /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
