@@ -5,6 +5,8 @@
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
 
+pub mod node_stream;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
 use std::marker::PhantomData;
