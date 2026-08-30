@@ -165,14 +165,17 @@ boundary: the manifest and its single-component sibling archive must be regular 
 bytes behind a symlink are rejected rather than silently making an installation depend on a path
 outside the package.
 
-An acyclic module graph is embedded behind one topology-derived wrapper symbol with the same
-two-argument entry ABI as a scalar shared library. The graph's generated module entries keep their
-private import/export-array ABI. The wrapper allocates those arrays per invocation, evaluates
-modules in dependency-first order, and links their PIC objects, one shared native-number object,
-and its own PIC object: it does not reuse the process-oriented CLI runtime or graph launcher.
-Module C and object cache keys remain independently reusable, while the wrapper source/object keys
-include graph wiring and the final shared-link key includes the ordered module objects, wrapper
-object, and platform library identity.
+An acyclic module graph is embedded behind one content-derived public wrapper symbol with the same
+two-argument entry ABI as a scalar shared library. Its strong identity covers graph topology and
+the ordered generated module sources, so two loaded builds with identical paths and wiring but
+different bodies cannot interpose one public wrapper onto the other. The graph's generated module
+entries keep their private import/export-array ABI and path-derived identities, so their C and
+object cache keys remain independently reusable. The wrapper allocates import/export arrays per
+invocation, evaluates modules in dependency-first order, and links their PIC objects, one shared
+native-number object, and its own PIC object: it does not reuse the process-oriented CLI runtime or
+graph launcher. Wrapper source/object keys include the public graph identity and wiring, while the
+final shared-link key includes the ordered module objects, wrapper object, and platform library
+identity.
 
 The private graph-module ABI is also private at dynamic-loader scope. Graph module objects compile
 with hidden symbol visibility while the public wrapper retains default visibility. Two loaded
@@ -190,9 +193,10 @@ the generated module. A callback-local stack buffer is not a valid result: its l
 before the proxy can inspect it. The copies live through the whole graph invocation and are then
 released with the wrapper's per-call storage. This solves provider-to-consumer lifetime and keeps
 concurrent invocations isolated. It does not broaden ABI v1: callers still cannot assume an
-arbitrary string in the public result remains valid after the wrapper returns. Retainable results
-or leak-free caller ownership require a future versioned ownership/dispose or caller-buffer
-design.
+arbitrary string in the public result remains valid after the wrapper returns. ADR 0030 adds an
+optional ABI-v2 descriptor whose opaque result handle owns a normalized scalar snapshot and
+exposes library-owned disposal; the legacy entry and its borrowed-result contract remain
+unchanged.
 
 ## Consequences
 
@@ -215,8 +219,9 @@ design.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
 - Number formatting and string parsing are ECMAScript-spelled through the versioned native number
-  runtime. Temporary concatenation allocations are still retained for a process lifetime; that
-  ownership gap remains before claiming leak-free long-lived native embedding.
+  runtime. ADR 0030 makes the public scalar result lifetime explicit, but temporary concatenation
+  allocations are still retained for a process lifetime; that internal ownership gap remains
+  before claiming a leak-free realm heap.
 - A 128-bit deterministic module symbol is not the artifact integrity boundary. SHA-256 cache keys
   protect artifact reuse, and multi-module linking rejects any symbol collision before invoking
   the linker.

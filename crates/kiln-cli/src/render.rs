@@ -213,7 +213,8 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
 pub fn native_shared_build(source: &str, summary: &NativeSharedLibrarySummary) -> String {
     let hit = |value: bool| if value { "hit" } else { "built" };
     let mut out = format!("native shared build {source}  {}ms\n", summary.total_millis);
-    row(&mut out, "module", &summary.module_symbol);
+    row(&mut out, "entry", &summary.module_symbol);
+    row(&mut out, "API symbol", &summary.module_api_symbol);
     row(&mut out, "output", &summary.output_path);
     row(&mut out, "loader", &summary.loader_path);
     row(&mut out, "header", &summary.header_path);
@@ -483,6 +484,7 @@ mod tests {
             "src/main.ts",
             &NativeSharedLibrarySummary {
                 module_symbol: "kiln_module_main".to_owned(),
+                module_api_symbol: "kiln_module_main_api_v2".to_owned(),
                 output_path: ".kiln/lib/main.so".to_owned(),
                 loader_path: ".kiln/lib/.kiln-loaders/kiln-content-id.so".to_owned(),
                 header_path: ".kiln/lib/main.h".to_owned(),
@@ -500,6 +502,11 @@ mod tests {
             },
         );
         assert!(out.contains("native shared build src/main.ts"), "{out}");
+        assert!(out.contains("entry           kiln_module_main"), "{out}");
+        assert!(
+            out.contains("API symbol      kiln_module_main_api_v2"),
+            "{out}"
+        );
         assert!(
             out.contains(".kiln/lib/.kiln-loaders/kiln-content-id.so"),
             "{out}"

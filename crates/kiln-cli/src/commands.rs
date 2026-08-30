@@ -1235,6 +1235,7 @@ mod tests {
                     let output_path = output.unwrap_or_default();
                     Response::NativeSharedBuilt(NativeSharedLibrarySummary {
                         module_symbol: "kiln_module_test".to_owned(),
+                        module_api_symbol: "kiln_module_test_api_v2".to_owned(),
                         header_path: Path::new(&output_path)
                             .with_extension("h")
                             .to_string_lossy()

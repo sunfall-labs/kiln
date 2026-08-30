@@ -31,14 +31,14 @@ What exists today:
 | `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
 | `crates/kiln-native-number` | Versioned, locale-free Ryu/fast_float runtime for ECMAScript-exact native number conversion. |
-| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
+| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime, per-module launcher, and generated embedding headers with borrowed ABI-v1 and explicitly owned ABI-v2 results. |
 | `crates/kiln-digest` | Dependency-free, pinned SHA-256 shared by source coherence and artifact keys. |
 | `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
 | `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
 | `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
 | `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
 | `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 17, including collision-resistant source synchronization and structured interpreter, native-build, native-run, shared-library, and test results. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 18, including collision-resistant source synchronization and structured interpreter, native-build, native-run, shared-library, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
@@ -175,6 +175,9 @@ is visible next to the reasoning for it.
 - [0019](docs/adr/0019-a-closure-carries-its-module.md) — a closure holds its own program and its
   module-scope bindings are ordinary captures, so a function value survives the module boundary
   it was exported across.
+- [0030](docs/adr/0030-owned-native-results-use-an-opaque-versioned-handle.md) — native embedding
+  keeps ABI-v1 compatibility while an additive library-specific descriptor returns opaque scalar
+  snapshots with explicit same-library disposal.
 
 ## License
 
