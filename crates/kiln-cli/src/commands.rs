@@ -132,8 +132,9 @@ fn finish_run(
     })
 }
 
-/// Build one source file into a native executable. Source upload is kept in the command layer so
-/// daemon and one-shot backends observe exactly the same file contents.
+/// Build one source file into a native executable. The entry is read before project
+/// synchronization and substituted into that walk, so daemon and one-shot backends observe the
+/// same command-entry snapshot even when an editor saves again during synchronization.
 pub fn build(
     backend: &mut dyn Backend,
     path: &Path,
@@ -143,9 +144,10 @@ pub fn build(
     shared: bool,
 ) -> Result<Output> {
     let display = path.display().to_string();
-    let (project_notes, synced_paths, _) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
+    let (project_notes, synced_paths, _) =
+        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
     }
@@ -179,16 +181,17 @@ pub fn build(
     })
 }
 
-/// Build and execute one source file through the native backend.
+/// Build and execute one source file through the native backend from one command-entry snapshot.
 pub fn native_run(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
     profile: NativeProfile,
 ) -> Result<Output> {
-    let (project_notes, synced_paths, _) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
+    let (project_notes, synced_paths, _) =
+        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
     }
@@ -947,6 +950,33 @@ mod tests {
         }
     }
 
+    /// Simulate a save or watcher race that removes the entry after the command has sent its
+    /// project snapshot but before the daemon answers the synchronization request.
+    struct RemoveEntryDuringSync {
+        inner: Fake,
+        entry: Option<PathBuf>,
+    }
+
+    impl RemoveEntryDuringSync {
+        fn new(entry: PathBuf) -> Self {
+            Self {
+                inner: Fake::new(),
+                entry: Some(entry),
+            }
+        }
+    }
+
+    impl Backend for RemoveEntryDuringSync {
+        fn request(&mut self, request: Request) -> Result<Response> {
+            if matches!(request, Request::Sync { .. })
+                && let Some(entry) = self.entry.take()
+            {
+                std::fs::remove_file(entry).expect("remove entry during sync");
+            }
+            self.inner.request(request)
+        }
+    }
+
     #[test]
     fn check_pushes_the_source_before_asking_and_brackets_it_with_stats() {
         let mut fake = Fake::new();
@@ -1086,6 +1116,81 @@ mod tests {
                     || path.ends_with(".kiln/lib/main.dylib")
                     || path.ends_with(".kiln/lib/main.dll"))
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn native_build_uses_the_entry_snapshot_captured_before_project_sync() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cli-native-build-snapshot-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create native build fixture");
+        let entry = root.join("main.ts");
+        let captured = "export const answer = 42;\n";
+        std::fs::write(&entry, captured).expect("write native build entry");
+        let canonical = canonical_path(&entry).expect("canonical native build entry");
+
+        let mut backend = RemoveEntryDuringSync::new(entry.clone());
+        build(&mut backend, &entry, &root, None, NativeProfile::Dev, false)
+            .expect("native build keeps its captured entry snapshot");
+
+        assert_eq!(backend.inner.names(), ["Sync", "SetSource", "NativeBuild"]);
+        let Request::Sync { files } = &backend.inner.seen[0] else {
+            panic!("first request must advertise the captured snapshot");
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, canonical);
+        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        let Request::SetSource { path, text } = &backend.inner.seen[1] else {
+            panic!("second request must upload the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+        assert_eq!(text, captured);
+        let Request::NativeBuild { path, .. } = &backend.inner.seen[2] else {
+            panic!("third request must build the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn native_run_uses_the_entry_snapshot_captured_before_project_sync() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cli-native-run-snapshot-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create native run fixture");
+        let entry = root.join("main.ts");
+        let captured = "console.log(42);\n";
+        std::fs::write(&entry, captured).expect("write native run entry");
+        let canonical = canonical_path(&entry).expect("canonical native run entry");
+
+        let mut backend = RemoveEntryDuringSync::new(entry.clone());
+        let output = native_run(&mut backend, &entry, &root, NativeProfile::Dev)
+            .expect("native run keeps its captured entry snapshot");
+
+        assert_eq!(output.text, "native hello\n");
+        assert_eq!(backend.inner.names(), ["Sync", "SetSource", "NativeRun"]);
+        let Request::Sync { files } = &backend.inner.seen[0] else {
+            panic!("first request must advertise the captured snapshot");
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, canonical);
+        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        let Request::SetSource { path, text } = &backend.inner.seen[1] else {
+            panic!("second request must upload the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+        assert_eq!(text, captured);
+        let Request::NativeRun { path, .. } = &backend.inner.seen[2] else {
+            panic!("third request must execute the captured snapshot");
+        };
+        assert_eq!(path, &canonical);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
