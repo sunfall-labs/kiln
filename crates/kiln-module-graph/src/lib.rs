@@ -14,7 +14,9 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module};
 use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
-use kiln_module_resolver::{ModuleResolver, PathRole, ResolveError, SUPPORTED_EXTENSIONS};
+use kiln_module_resolver::{
+    ModuleResolver, PathRole, ResolutionPolicy, ResolveError, SUPPORTED_EXTENSIONS,
+};
 
 /// A callback that supplies source text for one canonical module path.
 pub trait SourceLoader {
@@ -352,6 +354,23 @@ impl ModuleGraph {
         Self::build_with_provider(entry, project_root, provider)
     }
 
+    /// Build using a caller-selected resolution policy and already-structured module provider.
+    ///
+    /// The graph owns traversal and linking, while the policy owns how one source spelling maps
+    /// to a canonical module. Keeping that policy behind [`ResolutionPolicy`] lets package and
+    /// explicit-filesystem adapters share this graph without teaching the graph package rules.
+    pub fn build_with_policy<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_policy_provider(entry, resolver, provider)
+    }
+
     fn build_with_provider<P>(
         entry: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
@@ -360,17 +379,29 @@ impl ModuleGraph {
     where
         P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
     {
-        if !entry.as_ref().is_absolute() {
-            return Err(ModuleGraphError::NonAbsoluteEntry {
-                path: entry.as_ref().to_path_buf(),
-            });
-        }
         let resolver =
             ModuleResolver::new(project_root).map_err(|error| ModuleGraphError::Resolve {
                 importer: PathBuf::new(),
                 specifier: String::new(),
                 error,
             })?;
+        Self::build_with_policy_provider(entry, resolver, provider)
+    }
+
+    fn build_with_policy_provider<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        if !entry.as_ref().is_absolute() {
+            return Err(ModuleGraphError::NonAbsoluteEntry {
+                path: entry.as_ref().to_path_buf(),
+            });
+        }
         let entry_path =
             fs::canonicalize(entry.as_ref()).map_err(|error| ModuleGraphError::Entry {
                 path: entry.as_ref().to_path_buf(),
@@ -632,8 +663,8 @@ impl ModuleGraph {
     }
 }
 
-struct Builder<P> {
-    resolver: ModuleResolver,
+struct Builder<P, R> {
+    resolver: R,
     provider: P,
     modules: BTreeMap<PathBuf, ModuleNode>,
     states: HashMap<PathBuf, VisitState>,
@@ -656,9 +687,10 @@ enum VisitState {
     Done,
 }
 
-impl<P> Builder<P>
+impl<P, R> Builder<P, R>
 where
     P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
+    R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
         let mut work = vec![WorkItem::Enter(path)];
@@ -911,6 +943,7 @@ mod tests {
     use super::*;
     use kiln_host_abi::{HostError, HostOp, HostValue};
     use kiln_ir::{BYTECODE_VERSION, Instruction, Program};
+    use kiln_module_resolver::NodePackageResolver;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -995,6 +1028,40 @@ mod tests {
             .expect("execute graph");
         assert_eq!(host.output, ["42"]);
         assert!(result.steps > 0);
+    }
+
+    #[test]
+    fn package_policy_links_a_named_package_import() {
+        let project = TempProject::new();
+        let package = project.root.join("node_modules/pkg");
+        fs::create_dir_all(&package).expect("create package");
+        fs::write(package.join("package.json"), r#"{"exports":"./index.js"}"#)
+            .expect("write package manifest");
+        fs::write(package.join("index.js"), "export const value = 42;")
+            .expect("write package entry");
+        let entry = project.write(
+            "main.js",
+            "import { value } from 'pkg'; console.log(value);",
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("package resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build package graph");
+
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute package graph");
+        assert_eq!(host.output, ["42"]);
     }
 
     /// A function value survives the module boundary it was exported across.

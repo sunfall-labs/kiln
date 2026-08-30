@@ -7,9 +7,11 @@
 //! sorted depth-first traversal so even a bounded result - and therefore every `FileId` - is
 //! reproducible.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use kiln_module_resolver::{NodePackageResolver, ResolutionPolicy};
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
 
@@ -28,6 +30,71 @@ pub struct Walk {
 
 pub fn collect(root: &Path) -> Result<Walk> {
     collect_with_limit(root, MAX_FILES)
+}
+
+/// Add the entry-rooted runtime dependency closure to an already-read project snapshot.
+///
+/// The ordinary walk intentionally skips `node_modules`; recursively walking that tree would make
+/// synchronization scale with installed packages rather than with the program. This pass instead
+/// parses only reachable modules and asks the same resolution-policy interface used by the daemon
+/// for their exact targets. Existing project texts are reused byte-for-byte, while newly reached
+/// package sources are read once and become part of the authoritative source manifest.
+pub(crate) fn include_reachable_dependencies(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let resolver = NodePackageResolver::new(root)
+        .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
+    let entry = PathBuf::from(entry);
+    if !entry.starts_with(resolver.project_root()) {
+        return Ok(());
+    }
+
+    let mut indexes = texts
+        .iter()
+        .enumerate()
+        .map(|(index, (path, _))| (PathBuf::from(path), index))
+        .collect::<HashMap<_, _>>();
+    let mut pending = vec![entry];
+    let mut visited = HashSet::new();
+
+    while let Some(importer) = pending.pop() {
+        if !visited.insert(importer.clone()) {
+            continue;
+        }
+        let Some(&index) = indexes.get(&importer) else {
+            return Err(Error::BadInput(format!(
+                "reachable module was not captured in the source snapshot: {}",
+                importer.display()
+            )));
+        };
+        let importer_text = &texts[index].1;
+        let importer_path = importer.to_str().ok_or_else(|| {
+            Error::BadInput(format!("path is not valid UTF-8: {}", importer.display()))
+        })?;
+        let module = frontend_oxc::parse(importer_path, importer_text);
+
+        for request in module.runtime_requested_modules() {
+            let resolved = ResolutionPolicy::resolve(&resolver, &request.specifier, &importer)
+                .map_err(|error| Error::BadInput(error.to_string()))?;
+            let target = resolved.path;
+            if !indexes.contains_key(&target) {
+                let target_text = std::fs::read_to_string(&target).map_err(|source| {
+                    Error::io(format!("cannot read {}", target.display()), source)
+                })?;
+                let target_path = target.to_str().ok_or_else(|| {
+                    Error::BadInput(format!("path is not valid UTF-8: {}", target.display()))
+                })?;
+                indexes.insert(target.clone(), texts.len());
+                texts.push((target_path.to_owned(), target_text));
+            }
+            pending.push(target);
+        }
+    }
+
+    texts.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(())
 }
 
 fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
@@ -203,6 +270,80 @@ mod tests {
             ]
         );
         assert!(!walk.truncated);
+    }
+
+    #[test]
+    fn adds_only_entry_reachable_package_sources() {
+        let tree = Tree::new("reachable-package");
+        tree.file("src/main.ts");
+        tree.file("src/unrelated.ts");
+        tree.file("node_modules/pkg/index.js");
+        tree.file("node_modules/pkg/nested.js");
+        tree.file("node_modules/pkg/unused.js");
+        std::fs::write(
+            tree.0.join("src/main.ts"),
+            "import { value } from 'pkg'; console.log(value);\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"exports":"./index.js"}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/index.js"),
+            "export { value } from './nested.js';\n",
+        )
+        .expect("write package entry");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/nested.js"),
+            "export const value = 42;\n",
+        )
+        .expect("write package dependency");
+
+        let walk = collect(&tree.0).expect("walk project sources");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let entry = tree
+            .0
+            .join("src/main.ts")
+            .canonicalize()
+            .expect("canonical entry");
+
+        include_reachable_dependencies(&tree.0, entry.to_str().expect("UTF-8 entry"), &mut texts)
+            .expect("include reachable package closure");
+
+        let canonical_root = tree.0.canonicalize().expect("canonical root");
+        let paths = texts
+            .iter()
+            .map(|(path, _)| {
+                Path::new(path)
+                    .strip_prefix(&canonical_root)
+                    .expect("source under root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "node_modules/pkg/index.js",
+                "node_modules/pkg/nested.js",
+                "src/main.ts",
+                "src/unrelated.ts",
+            ]
+        );
     }
 
     #[test]
