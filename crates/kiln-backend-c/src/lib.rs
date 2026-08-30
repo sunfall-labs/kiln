@@ -349,6 +349,11 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_DATE_UTC 88
 #define KILN_C99_METHOD_DATE_PARSE 89
 
+/* The end of every chain is `Object.prototype`, and these are what it carries. */
+#define KILN_C99_METHOD_HAS_OWN_PROPERTY 90
+#define KILN_C99_METHOD_OBJECT_TO_STRING 91
+#define KILN_C99_METHOD_OBJECT_VALUE_OF 92
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -562,6 +567,11 @@ static int kiln_c99_iso_string(kiln_value *out, double time);
 static int kiln_c99_date_to_string(kiln_value *out, double time);
 static double kiln_c99_instant_from_parts(const double parts[7]);
 static double kiln_c99_parse_date(const char *bytes, size_t len);
+static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
+static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
+static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
+static double kiln_c99_key_index(const char *key, size_t key_len);
+static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
                                const char *indent, size_t indent_len, const char *current,
                                size_t current_len, int *serialised, int depth,
@@ -955,6 +965,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_DATE_NOW: return "now";
     case KILN_C99_METHOD_DATE_UTC: return "UTC";
     case KILN_C99_METHOD_DATE_PARSE: return "parse";
+    case KILN_C99_METHOD_HAS_OWN_PROPERTY: return "hasOwnProperty";
+    case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
+    case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
     default: return NULL;
     }
 }
@@ -1642,6 +1655,22 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
                                      depth, thrown);
             }
             current = object->prototype;
+        }
+        /* The chain ends at `Object.prototype`, whose members every object has -- unless the
+         * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
+         * that asks for. */
+        if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+            uint64_t inherited = kiln_c99_lookup_method(key, key_len,
+                                                        KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                                        KILN_C99_METHOD_OBJECT_VALUE_OF);
+            if (inherited != 0) {
+                *out = kiln_c99_method(inherited);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name(key, key_len, "constructor")) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT);
+                return KILN_C99_OK;
+            }
         }
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
@@ -2745,6 +2774,29 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * is why a probe may compare `typeof Date.now()` and nothing more. */
             *result = kiln_c99_number(0.0);
             return KILN_C99_OK;
+        case KILN_C99_METHOD_HAS_OWN_PROPERTY: {
+            kiln_value key = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
+            kiln_object *object;
+            int found = 0;
+            if (receiver.tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            object = kiln_c99_object_of(receiver);
+            for (index = 0; index < object->count && !found; ++index) {
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+            }
+            *result = kiln_c99_boolean(found);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_OBJECT_TO_STRING:
+            /* `Object.prototype.toString`, the oldest type test there is. */
+            *result = kiln_c99_text(receiver);
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_OBJECT_VALUE_OF:
+            /* Returns the receiver unchanged, which is the identity that makes ToPrimitive fall
+             * through to `toString` for a plain object. */
+            *result = receiver;
+            return KILN_C99_OK;
         case KILN_C99_METHOD_DATE_PARSE: {
             /* Parsing accepts the ISO forms and rejects the rest, rather than guessing: a date
              * a program did not write is worse than no date at all. */
@@ -3328,6 +3380,123 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
             return status;
         }
     }
+}
+
+/* `key in target`: whether the name is reachable, own or inherited. Unlike a read this does not
+ * call an accessor -- the question is whether the property exists, not what it produces. */
+static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer) {
+    kiln_value current = target;
+    size_t steps;
+    *answer = 0;
+    if (target.tag == KILN_VALUE_ARRAY) {
+        /* An index is present when it is in range, and `length` always is. */
+        double index = kiln_c99_key_index(key, key_len);
+        if (kiln_c99_same_name(key, key_len, "length")) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+        if (index >= 0.0) {
+            *answer = (size_t)index < kiln_c99_array_of(target)->count;
+            return KILN_C99_OK;
+        }
+        *answer = kiln_c99_array_method(key, key_len) != 0;
+        return KILN_C99_OK;
+    }
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *object;
+        size_t index;
+        if (current.tag != KILN_VALUE_OBJECT) {
+            break;
+        }
+        object = kiln_c99_object_of(current);
+        for (index = 0; index < object->count; ++index) {
+            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        current = object->prototype;
+    }
+    /* `in` has to agree with the read about what the end of the chain carries. */
+    if (target.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+        *answer = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
+                  kiln_c99_same_name(key, key_len, "constructor");
+    }
+    return KILN_C99_OK;
+}
+
+/* `delete target[key]`: remove an own property, answering whether the name is gone afterwards.
+ *
+ * A name that was never there deletes successfully, which is what makes `delete` almost always
+ * true and why the answer is about the *end state* rather than about work done. */
+static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer) {
+    kiln_object *object;
+    size_t index;
+    *answer = 1;
+    if (target.tag == KILN_VALUE_ARRAY) {
+        /* Deleting an element leaves undefined behind rather than shortening the array; a hole
+         * and an undefined element are only distinguishable through `in`, and this backend
+         * cannot represent the difference. */
+        double slot = kiln_c99_key_index(key, key_len);
+        kiln_array *array = kiln_c99_array_of(target);
+        if (slot >= 0.0 && (size_t)slot < array->count) {
+            array->elements[(size_t)slot] = kiln_c99_undefined();
+        }
+        return KILN_C99_OK;
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_OK;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            continue;
+        }
+        /* Shifted rather than swapped with the last: property order is observable, and a
+         * `delete` must not reorder what remains. */
+        for (; index + 1 < object->count; ++index) {
+            object->properties[index] = object->properties[index + 1];
+        }
+        object->count -= 1;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
+/* An array of a value's own enumerable string keys, in enumeration order: what `for...in` walks
+ * and what `Object.keys` reports. A snapshot, which is what the language specifies -- a key added
+ * during the loop may or may not be visited, and this chooses not to. */
+static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
+    kiln_value built;
+    size_t index;
+    int status = kiln_c99_new_array(&built);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(target);
+        for (index = 0; index < object->count; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
+                                                                   object->properties[index].key_len));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    } else if (target.tag == KILN_VALUE_ARRAY) {
+        /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
+         * gives "0" and "1", not 0 and 1. */
+        kiln_array *array = kiln_c99_array_of(target);
+        for (index = 0; index < array->count; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
+    *out = built;
+    return KILN_C99_OK;
 }
 
 /* `{ ...source }`: copy every own property of the source into the target.
@@ -4578,6 +4747,7 @@ fn validate_code(
             // string constant has one.
             Instruction::GetProperty(name)
             | Instruction::SetProperty(name)
+            | Instruction::DeleteProperty(name)
             | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
                 Some(_) => {
@@ -4746,9 +4916,6 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
-        Instruction::Binary(BinaryOp::In) => Err(EmitError::Unsupported {
-            feature: "the `in` operator in the native backend".to_string(),
-        }),
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
@@ -4779,6 +4946,11 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SpreadObject
         | Instruction::SpreadInto
         | Instruction::IterableToArray
+        | Instruction::EnumerateKeys
+        | Instruction::DeleteProperty(_)
+        | Instruction::DeleteComputed
+        | Instruction::Apply
+        | Instruction::RestArguments(_)
         | Instruction::Yield
         | Instruction::Pop
         | Instruction::Dup
@@ -4854,10 +5026,6 @@ fn stack_effect(
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Dup2
-        | Instruction::DeleteProperty(_)
-        | Instruction::DeleteComputed
-        | Instruction::Apply
-        | Instruction::EnumerateKeys
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
@@ -4867,7 +5035,6 @@ fn stack_effect(
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
-        | Instruction::RestArguments(_)
         | Instruction::Await
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
@@ -4879,6 +5046,7 @@ fn stack_effect(
         | Instruction::LoadUpvalue(_)
         | Instruction::LoadBuiltin(_)
         | Instruction::LoadGlobal(_)
+        | Instruction::RestArguments(_)
         | Instruction::MakeFunction(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
@@ -4943,6 +5111,30 @@ fn stack_effect(
         // The half and the key are consumed; the target stays, so a class body can define
         // several accessors on one object without reloading it.
         Instruction::DefineAccessor { .. } => {
+            if height < 3 {
+                Err(underflow(3))
+            } else {
+                Ok((height - 2, false))
+            }
+        }
+        // Replaces the value with an array of its own enumerable keys.
+        Instruction::EnumerateKeys | Instruction::DeleteProperty(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
+        Instruction::DeleteComputed => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        // `[this, callee, arguments] -> [result]`: the arity is the length of an array the
+        // program computed, which is exactly what a spread means.
+        Instruction::Apply => {
             if height < 3 {
                 Err(underflow(3))
             } else {
@@ -5035,9 +5227,6 @@ fn stack_effect(
                 ))
             }
         }
-        Instruction::Binary(BinaryOp::In) => Err(EmitError::Unsupported {
-            feature: "the `in` operator in the native backend".to_string(),
-        }),
         Instruction::Binary(_) => {
             if height < 2 {
                 Err(underflow(2))
@@ -5186,6 +5375,7 @@ fn needs_call_context(program: &Program) -> bool {
                     | Instruction::SpreadObject
                     | Instruction::SpreadInto
                     | Instruction::IterableToArray
+                    | Instruction::Apply
             )
         })
     };
@@ -5653,10 +5843,6 @@ fn emit_instruction(
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::Dup2
-        | Instruction::DeleteProperty(_)
-        | Instruction::DeleteComputed
-        | Instruction::Apply
-        | Instruction::EnumerateKeys
         | Instruction::GetPrivate(_)
         | Instruction::PushHole
         | Instruction::NewRegExp { .. }
@@ -5666,7 +5852,6 @@ fn emit_instruction(
         | Instruction::CallComputed { .. }
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
-        | Instruction::RestArguments(_)
         | Instruction::Await
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
@@ -5909,6 +6094,53 @@ fn emit_instruction(
             writeln!(
                 output,
                 "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_text(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter); if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
+        // `in` asks whether the property exists, not what it produces, so unlike a read it does
+        // not call an accessor.
+        Instruction::Binary(BinaryOp::In) => {
+            output.push_str(
+                "    { kiln_value container = stack[--sp]; kiln_value key = kiln_c99_text(stack[sp - 1]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property(container, key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+            );
+        }
+        Instruction::DeleteProperty(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ int answer; if (kiln_c99_delete(stack[sp - 1], {symbol}_constant_{name}, {}, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::DeleteComputed => {
+            output.push_str(
+                "    { kiln_value key = kiln_c99_text(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+            );
+        }
+        // `...rest` is every argument past the named parameters, as an array. A generator's
+        // arguments were copied into its frame when it was built, so there are none here.
+        Instruction::RestArguments(from) => {
+            writeln!(
+                output,
+                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, args[extra]); if (status != KILN_C99_OK) return status; }} stack[sp++] = rest; }}"
+            )
+            .unwrap();
+        }
+        Instruction::EnumerateKeys => {
+            output.push_str(
+                "    { kiln_value keys; if (kiln_c99_own_keys(stack[sp - 1], &keys) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = keys; }\n",
+            );
+        }
+        // The arity comes from an array the program built, so the arguments are read out of it
+        // rather than off the stack.
+        Instruction::Apply => {
+            let unwind = unwind_or_return(handlers);
+            writeln!(
+                output,
+                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
             )
             .unwrap();
         }
@@ -7429,26 +7661,24 @@ int main(void) {{
         assert!(run.status.success(), "empty host string concat failed");
     }
 
-    /// `instanceof` emits now that a value can carry a prototype chain; `in` does not, because it
-    /// asks whether a *name* is present and nothing here enumerates one yet. The point of the
-    /// test is unchanged: an operator this backend cannot do must say so rather than emit a
-    /// silent undefined.
+    /// Every binary operator emits now. The rule the two refused ones stood for still holds and
+    /// is worth a test of its own: an instruction this backend cannot do must say so rather than
+    /// emit a silent undefined, which is what `unreachable_unsupported_instructions` covers.
     #[test]
-    fn the_in_operator_is_refused_rather_than_emitting_undefined() {
-        let result = emit(&program(
-            vec![Constant::Null],
-            vec![
-                Instruction::Const(0),
-                Instruction::Const(0),
-                Instruction::Binary(BinaryOp::In),
-                Instruction::Return,
-            ],
-            0,
-        ));
-        assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`in` operator")),
-            "`in` must not emit a silent undefined result"
-        );
+    fn the_reference_operators_emit_rather_than_answering_undefined() {
+        for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
+            let result = emit(&program(
+                vec![Constant::Null],
+                vec![
+                    Instruction::Const(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(operator),
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            assert!(result.is_ok(), "{operator:?} should emit");
+        }
     }
 
     #[test]
@@ -7457,14 +7687,14 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::EnumerateKeys,
+                Instruction::LoadArguments,
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`EnumerateKeys`")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadArguments`")),
             "dead code must not bypass the native instruction allowlist"
         );
     }
