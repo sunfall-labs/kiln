@@ -18,12 +18,17 @@ fi
 
 mkdir -p "$SCRATCH"
 cd "$SCRATCH"
-[[ -f package.json ]] || npm init -y >/dev/null
-npm install --no-audit --no-fund zod immer date-fns js-yaml semver mustache marked uuid acorn lodash >/dev/null
+[[ -f package.json ]] || echo '{"name":"kiln-thirdparty-scratch","private":true}' >package.json
+npm install --no-audit --no-fund zod immer date-fns js-yaml semver mustache marked uuid acorn lodash dayjs chalk ms >/dev/null
 
 for probe in "$DIR"/probes/*.mjs; do
 	name=$(basename "$probe" .mjs)
+	cp "$probe" "$SCRATCH/$name.entry.mjs"
+	# The neutral platform configures no main fields at all, so a CommonJS-only
+	# package resolves to nothing without them; `module` stays first so ESM wins.
 	"$ESBUILD" --bundle --format=esm --platform=neutral --target=es2022 \
-		--outfile="$DIR/$name.bundle.js" "$probe"
+		--main-fields=module,main --conditions=import,default \
+		--outfile="$DIR/$name.bundle.js" "$SCRATCH/$name.entry.mjs"
+	rm -f "$SCRATCH/$name.entry.mjs"
 	echo "bundled $name"
 done

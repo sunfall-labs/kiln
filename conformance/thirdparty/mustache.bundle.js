@@ -452,7 +452,7 @@ mustache.Context = Context;
 mustache.Writer = Writer;
 var mustache_default = mustache;
 
-// mustache.mjs
+// mustache.entry.mjs
 console.log(mustache_default.render("Hello {{name}}! {{#items}}[{{.}}]{{/items}}", { name: "kiln", items: [1, 2] }));
 /*! Bundled license information:
 

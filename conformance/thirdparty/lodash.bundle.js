@@ -5522,15 +5522,8 @@ var require_lodash = __commonJS({
   }
 });
 
-// node_modules/lodash/index.js
-var require_lodash2 = __commonJS({
-  "node_modules/lodash/index.js"(exports, module) {
-    module.exports = require_lodash();
-  }
-});
-
-// lodashp2.mjs
-var import_lodash = __toESM(require_lodash2(), 1);
+// lodash.entry.mjs
+var import_lodash = __toESM(require_lodash(), 1);
 console.log(JSON.stringify(import_lodash.default.chunk([1, 2, 3, 4, 5], 2)));
 console.log(JSON.stringify(import_lodash.default.groupBy([1.2, 2.4, 2.9], Math.floor)));
 console.log(JSON.stringify(import_lodash.default.merge({ a: { b: 1 } }, { a: { c: 2 } })));

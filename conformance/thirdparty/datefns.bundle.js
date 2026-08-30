@@ -1778,7 +1778,7 @@ function validateTimezone(_hours, minutes) {
   return minutes >= 0 && minutes <= 59;
 }
 
-// datefns-probe.mjs
+// datefns.entry.mjs
 var start = parseISO("2020-01-01T00:00:00.000Z");
 var later = addDays(start, 45);
 console.log(format(later, "yyyy-MM-dd"));

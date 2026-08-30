@@ -1276,6 +1276,6 @@ var on = f.parseInline;
 var ln = b.parse;
 var un = x.lex;
 
-// marked.mjs
+// marked.entry.mjs
 console.log(f.parse("# Title\n\nSome *emphasis* and a [link](http://x).\n\n- a\n- b\n").trim().split("\n").join("|"));
 console.log(f.parse("```js\nconst a = 1;\n```").trim());

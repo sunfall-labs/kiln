@@ -5695,7 +5695,7 @@ function parse3(input, options) {
   return Parser.parse(input, options);
 }
 
-// acorn.mjs
+// acorn.entry.mjs
 var tree = parse3("const a = 1; function f(x) { return x * 2; } class C { m() {} }", { ecmaVersion: 2022 });
 console.log(tree.type, tree.body.length);
 console.log(tree.body.map((n) => n.type).join(","));

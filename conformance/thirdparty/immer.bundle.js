@@ -1112,7 +1112,7 @@ function enableMapSet() {
 var immer = new Immer2();
 var produce = immer.produce;
 
-// immer-probe.mjs
+// immer.entry.mjs
 enableMapSet();
 var base = { list: [1, 2, 3], nested: { flag: false } };
 var next = produce(base, (draft) => {
