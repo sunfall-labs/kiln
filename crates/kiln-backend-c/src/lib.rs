@@ -327,6 +327,12 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_STRING_MATCH_ALL 247
 #define KILN_C99_METHOD_STRING_SEARCH 248
 
+/* `Error.prototype.toString`, which every error inherits and no other object does. Deliberately
+ * past the end of every range `kiln_c99_lookup_method` searches: it is not reached by name from a
+ * table but handed out by the object read that recognises an error, because an ordinary object
+ * with a `toString` of its own must not find this one. */
+#define KILN_C99_METHOD_ERROR_TO_STRING 249
+
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
 /* The error constructors, contiguous so the kind is the offset: `new TypeError(m)` and
@@ -1042,6 +1048,9 @@ static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
 static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
+static uint64_t kiln_c99_error_kind(kiln_value value);
+static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
+                                    int depth, kiln_value *thrown);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
@@ -1516,6 +1525,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_STRING_MATCH: return "match";
     case KILN_C99_METHOD_STRING_MATCH_ALL: return "matchAll";
     case KILN_C99_METHOD_STRING_SEARCH: return "search";
+    case KILN_C99_METHOD_ERROR_TO_STRING: return "toString";
     case KILN_C99_METHOD_STRING_CODE_POINT_AT: return "codePointAt";
     case KILN_C99_METHOD_STRING_SUBSTR: return "substr";
     case KILN_C99_METHOD_STRING_LOCALE_COMPARE: return "localeCompare";
@@ -2799,6 +2809,21 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
  * frame is entered rather than discovered by crashing. */
 /* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`
  * is in a module: modules are strict, and strict mode does not substitute the global object. */
+/* Establish `new.target` for a body that is about to run, and hand back what to restore.
+ *
+ * An arrow has no `new.target` of its own: it sees the one from where it was written. An ordinary
+ * function gets `undefined`, because reaching a body through a call is exactly the case where no
+ * constructor was named. `kiln_c99_call` does this inline and correctly, but a generator body is
+ * not entered by that path -- calling a generator only *builds* it, and the body runs once per
+ * resumption, arbitrarily later. So an async arrow read whatever the global happened to hold and
+ * answered `new.target === undefined` where the interpreter and node both say the captured one.
+ * Re-establishing it per entry rather than per call is what makes the two engines agree. */
+static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
+    kiln_value saved = kiln_c99_new_target;
+    kiln_c99_new_target = closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
+    return saved;
+}
+
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
@@ -3583,7 +3608,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
          * that asks for. */
         if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
-            uint64_t inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+            uint64_t inherited;
+            /* An error inherits `toString` from `Error.prototype`, not from `Object.prototype`:
+             * it is the one object that converts to something other than "[object Object]". The
+             * range lookup below would hand out the generic method and `String(err)` would lose
+             * the message, so the error's own is answered first. */
+            if (kiln_c99_same_name(key, key_len, "toString") &&
+                kiln_c99_error_kind(target) != 0) {
+                *out = kiln_c99_method(KILN_C99_METHOD_ERROR_TO_STRING);
+                return KILN_C99_OK;
+            }
+            inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
                                      ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
@@ -3598,16 +3633,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 /* An error already records its kind, and `error.constructor.name` is the ordinary
                  * way a program asks which one it caught -- so the answer comes from the kind
                  * rather than from the fact that an error is an object. */
-                kiln_object *own = kiln_c99_object_of(target);
-                size_t slot;
-                *out = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT);
-                for (slot = 0; slot < own->count; ++slot) {
-                    if (kiln_c99_same_key(&own->properties[slot], "@@error", 7)) {
-                        *out = kiln_c99_builtin(
-                            (uint64_t)kiln_c99_as_number(own->properties[slot].value));
-                        break;
-                    }
-                }
+                uint64_t kind = kiln_c99_error_kind(target);
+                *out = kiln_c99_builtin(kind != 0 ? kind : KILN_C99_BUILTIN_OBJECT);
                 return KILN_C99_OK;
             }
         }
@@ -5399,6 +5426,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
           kiln_c99_is_callable(args[1])))) {
         return kiln_c99_string_pattern(host, result, code, receiver, args, argc, depth, thrown);
     }
+    if (code == KILN_C99_METHOD_ERROR_TO_STRING) {
+        return kiln_c99_error_to_string(host, result, receiver, depth, thrown);
+    }
     if (code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
@@ -7043,8 +7073,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
-                status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL,
-                                       0, depth + 1, thrown, frame);
+                {
+                    kiln_value saved_target = kiln_c99_enter_new_target(closure);
+                    status = closure->body(host, &produced, closure->upvalues, frame->receiver,
+                                           NULL, 0, depth + 1, thrown, frame);
+                    kiln_c99_new_target = saved_target;
+                }
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
                     finished = 0;
@@ -9328,6 +9362,72 @@ static const char *kiln_c99_error_name(uint64_t builtin) {
     }
 }
 
+/* The kind an error records, or 0 for every other value. This is the question "is this an error,
+ * and which one" asked once, instead of the reserved-key scan it replaces being written out at
+ * each place that wanted the answer.
+ *
+ * Own-only, and by the reserved key rather than by `name`: a program that assigns `err.name`
+ * renames the error without changing what it *is*, and an ordinary object that happens to carry a
+ * `name` is not one. Own-only also keeps it cheap enough for a property read to ask -- there is no
+ * chain to walk and no host to thread through. */
+static uint64_t kiln_c99_error_kind(kiln_value value) {
+    kiln_object *object;
+    size_t slot;
+    if (value.tag != KILN_VALUE_OBJECT) {
+        return 0;
+    }
+    object = kiln_c99_object_of(value);
+    for (slot = 0; slot < object->count; ++slot) {
+        if (kiln_c99_same_key(&object->properties[slot], "@@error", 7)) {
+            return (uint64_t)kiln_c99_as_number(object->properties[slot].value);
+        }
+    }
+    return 0;
+}
+
+/* `Error.prototype.toString`: "name: message", and the one text form an object has that is not
+ * "[object Object]".
+ *
+ * It reads the two properties *now* rather than reusing the text built when the error was
+ * constructed, because assigning `err.name` changes what the error calls itself: `String(err)`
+ * after `err.name = "Custom"` is "Custom: x", which a remembered string cannot say. Either half
+ * being empty drops the separator with it, so a message-less error is "Error", not "Error: ". */
+static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
+                                    int depth, kiln_value *thrown) {
+    kiln_value name;
+    kiln_value message;
+    kiln_text built = {NULL, 0, 0};
+    int found = kiln_c99_get(host, receiver, "name", 4, &name, depth, thrown);
+    if (found == KILN_C99_THROWN) {
+        return found;
+    }
+    name = found != KILN_C99_OK || name.tag == KILN_VALUE_UNDEFINED
+               ? kiln_c99_copy_text("Error", 5)
+               : kiln_c99_text(name);
+    found = kiln_c99_get(host, receiver, "message", 7, &message, depth, thrown);
+    if (found == KILN_C99_THROWN) {
+        return found;
+    }
+    message = found != KILN_C99_OK || message.tag == KILN_VALUE_UNDEFINED
+                  ? kiln_c99_from_units(NULL, 0)
+                  : kiln_c99_text(message);
+    if (name.tag != KILN_VALUE_STRING || message.tag != KILN_VALUE_STRING) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (name.len == 0 || message.len == 0) {
+        *result = name.len == 0 ? message : name;
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_text_append(&built, name.ptr, name.len) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&built, ": ") != KILN_C99_OK ||
+        kiln_c99_text_append(&built, message.ptr, message.len) != KILN_C99_OK) {
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+    return KILN_C99_OK;
+}
+
 /* An error is an ordinary object carrying `message`, `name` and `stack`, none of them
  * enumerated: `err.message` reads and `Object.keys(err)` is empty, which is why
  * `JSON.stringify(err)` is `{}`. The kind is remembered in a reserved property rather than
@@ -9743,8 +9843,12 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
-                           thrown, frame);
+    {
+        kiln_value saved_target = kiln_c99_enter_new_target(closure);
+        status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0,
+                               depth + 1, thrown, frame);
+        kiln_c99_new_target = saved_target;
+    }
     if (status == KILN_C99_YIELDED) {
         frame->started = 1;
         if (frame->awaiting) {
@@ -9806,8 +9910,12 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
-                           thrown, frame);
+    {
+        kiln_value saved_target = kiln_c99_enter_new_target(closure);
+        status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0,
+                               depth + 1, thrown, frame);
+        kiln_c99_new_target = saved_target;
+    }
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -10378,6 +10486,20 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
         }
         if (!kiln_c99_is_reference(produced)) {
             *out = produced;
+            return KILN_C99_OK;
+        }
+    }
+    /* A callable's text form is not held in a property store, so the walk above cannot reach it:
+     * this backend models `Function.prototype.toString` -- and, for a namespace, the tagged
+     * `Object.prototype.toString` -- as `kiln_c99_text` rather than as a method a lookup finds.
+     * Failing here would report a missing conversion for values that plainly have one, which is
+     * how `String(Math)` came to throw where the language says "[object Math]". Scoped to
+     * callables on purpose: it is the fallback for the values whose conversion this file already
+     * defines, not the blanket one below it used to be. */
+    if (kiln_c99_is_callable(value)) {
+        kiln_value shown = kiln_c99_text(value);
+        if (shown.tag == KILN_VALUE_STRING) {
+            *out = shown;
             return KILN_C99_OK;
         }
     }
