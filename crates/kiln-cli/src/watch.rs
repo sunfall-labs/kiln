@@ -32,14 +32,14 @@ use std::time::{Duration, Instant};
 use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
-use crate::backend::Backend;
 use crate::backend::NativeBuildAtRevision;
+use crate::backend::{Backend, SourceUpdate};
 use crate::commands;
 use crate::error::{Error, Result};
 use crate::sources;
 use kiln_host_abi::HostValue;
 use kiln_native_runtime::{NATIVE_RESULT_PATH_ENV, decode_native_result};
-use kiln_proto::{NativeProfile, ScalarValueSummary};
+use kiln_proto::{NativeProfile, ScalarValueSummary, SourceView};
 
 pub fn run(
     backend: &mut dyn Backend,
@@ -84,6 +84,7 @@ pub fn run(
     let mut project_synced = false;
     let mut project_truncated = false;
     let mut source_manifest = commands::SourceManifest::new();
+    let mut source_view = SourceView(0);
     let peer = match backend.peer() {
         Ok(peer) => Some(peer),
         Err(error) => {
@@ -108,7 +109,9 @@ pub fn run(
                 },
                 out,
                 notes,
-            )?;
+                &mut source_view,
+            )
+            .map_err(view_error_to_error)?;
             project_synced = true;
             refresher.submit(
                 expectation,
@@ -201,8 +204,16 @@ pub fn run(
                 }
                 if !authoritative_sync {
                     for (canonical, source, hash) in dependency_updates {
-                        backend.set_source(canonical.clone(), source)?;
-                        source_manifest.insert(canonical, hash);
+                        match backend.set_source_at_view(canonical.clone(), source, source_view)? {
+                            SourceUpdate::Updated(view) => {
+                                source_view = view;
+                                source_manifest.insert(canonical, hash);
+                            }
+                            SourceUpdate::Stale(_) => {
+                                authoritative_sync = true;
+                                break;
+                            }
+                        }
                     }
                 }
                 match commands::read_source(path) {
@@ -225,7 +236,7 @@ pub fn run(
                             } else {
                                 SourceSync::Incremental
                             };
-                            let expectation = run_once(
+                            let expectation = match run_once(
                                 backend,
                                 path,
                                 project_root,
@@ -236,7 +247,33 @@ pub fn run(
                                 sync,
                                 out,
                                 notes,
-                            )?;
+                                &mut source_view,
+                            ) {
+                                Ok(expectation) => expectation,
+                                Err(commands::ViewError::Stale(_)) => {
+                                    // A direct CAS update raced another writer. Reconcile the
+                                    // complete filesystem snapshot exactly once, then execute
+                                    // the same bytes observed for this event.
+                                    run_once(
+                                        backend,
+                                        path,
+                                        project_root,
+                                        SourceSnapshot {
+                                            canonical: &target.canonical,
+                                            text: current.clone(),
+                                        },
+                                        SourceSync::Authoritative {
+                                            manifest: &mut source_manifest,
+                                            truncated: &mut project_truncated,
+                                        },
+                                        out,
+                                        notes,
+                                        &mut source_view,
+                                    )
+                                    .map_err(view_error_to_error)?
+                                }
+                                Err(error) => return Err(view_error_to_error(error)),
+                            };
                             project_synced = true;
                             refresher.submit(
                                 expectation,
@@ -358,7 +395,8 @@ fn run_once(
     sync: SourceSync<'_>,
     out: &mut dyn Write,
     notes: &mut dyn Write,
-) -> Result<Option<RefreshExpectation>> {
+    source_view: &mut SourceView,
+) -> std::result::Result<Option<RefreshExpectation>, commands::ViewError> {
     // Seed the daemon with one authoritative project view. Once seeded, recursive events upload
     // changed dependencies and this sends the already-read target directly; repeating the whole
     // filesystem walk on every edit would put O(project) work ahead of the incremental compiler.
@@ -367,24 +405,31 @@ fn run_once(
             manifest,
             truncated,
         } => {
-            let (output, current_manifest, current_truncated) = commands::run_source_with_manifest(
+            let (output, current_manifest, current_truncated, view) =
+                commands::run_source_with_manifest(
+                    backend,
+                    path,
+                    project_root,
+                    source.canonical,
+                    source.text,
+                )?;
+            *manifest = current_manifest;
+            *truncated = current_truncated;
+            *source_view = view;
+            output
+        }
+        SourceSync::Incremental => {
+            let (output, view) = commands::run_watched_source_at_view(
                 backend,
                 path,
                 project_root,
                 source.canonical,
                 source.text,
+                *source_view,
             )?;
-            *manifest = current_manifest;
-            *truncated = current_truncated;
+            *source_view = view;
             output
         }
-        SourceSync::Incremental => commands::run_watched_source(
-            backend,
-            path,
-            project_root,
-            source.canonical,
-            source.text,
-        )?,
     };
     let expectation = if output.exit_code == 0 {
         output
@@ -392,6 +437,7 @@ fn run_once(
             .zip(output.value.clone())
             .map(|(revision, value)| RefreshExpectation {
                 revision,
+                source_view: output.source_view.unwrap_or(*source_view),
                 stdout: output.text.clone(),
                 value,
             })
@@ -411,6 +457,7 @@ fn run_once(
 
 struct RefreshExpectation {
     revision: u64,
+    source_view: SourceView,
     stdout: String,
     value: ScalarValueSummary,
 }
@@ -418,6 +465,7 @@ struct RefreshExpectation {
 struct RefreshJob {
     generation: u64,
     revision: u64,
+    source_view: SourceView,
     path: String,
     project_root: String,
     expected_stdout: String,
@@ -657,11 +705,12 @@ impl Refresher {
                     let private_output = watch_native_output(&job.project_root, job.generation);
                     let private_result = watch_native_result(&private_output);
                     let result = backend
-                        .native_build_at_revision(
+                        .native_build_at_revision_at_view(
                             job.path.clone(),
                             job.project_root.clone(),
                             Some(private_output.to_string_lossy().into_owned()),
                             NativeProfile::Dev,
+                            job.source_view,
                             job.revision,
                         )
                         .and_then(|build| match build {
@@ -711,6 +760,11 @@ impl Refresher {
                             NativeBuildAtRevision::Stale { current_revision } => {
                                 Ok(NativeRefresh::Stale { current_revision })
                             }
+                            NativeBuildAtRevision::StaleSourceView { current } => {
+                                Ok(NativeRefresh::Stale {
+                                    current_revision: current.0,
+                                })
+                            }
                         });
                     if result_tx
                         .send(RefreshResult {
@@ -751,6 +805,7 @@ impl Refresher {
                 Some(expectation) => jobs.replace(RefreshJob {
                     generation: self.generation,
                     revision: expectation.revision,
+                    source_view: expectation.source_view,
                     path,
                     project_root,
                     expected_stdout: expectation.stdout,
@@ -1077,6 +1132,15 @@ fn note(notes: &mut dyn Write, message: Arguments<'_>) -> Result<()> {
     writeln!(notes, "{message}").map_err(|source| Error::io("cannot write to stderr", source))
 }
 
+fn view_error_to_error(error: commands::ViewError) -> Error {
+    match error {
+        commands::ViewError::Stale(current) => {
+            Error::Protocol(format!("stale source view {}", current.0))
+        }
+        commands::ViewError::Other(error) => error,
+    }
+}
+
 /// The watcher's failures get no [`Error`] variant of their own: to a user they are all "the
 /// thing that was meant to be watching your file is not".
 fn watcher_failed(
@@ -1099,7 +1163,7 @@ mod tests {
     use std::sync::mpsc::Sender;
 
     use kiln_proto::{
-        Diagnostic, FileId, NativeBuildSummary, Request, Response, RunSummary, Stats,
+        Diagnostic, FileId, NativeBuildSummary, Request, Response, RunSummary, SourceView, Stats,
     };
 
     /// Answers like the daemon would, echoing the source as program output so tests can tell a
@@ -1107,6 +1171,7 @@ mod tests {
     struct Fake {
         stats: Stats,
         sources: HashMap<String, String>,
+        staged: HashMap<kiln_proto::SyncId, Vec<(String, String)>>,
         requests: Option<Sender<Request>>,
     }
 
@@ -1122,12 +1187,32 @@ mod tests {
             Ok(match request {
                 Request::Stats => Response::Stats(self.stats.clone()),
                 Request::Sync { files } => Response::Needed {
+                    sync_id: kiln_proto::SyncId(1),
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
-                Request::SetSource { path, text } => {
+                Request::SetSource { path, text, .. } => {
                     self.sources.insert(path, text);
                     self.stats.revision += 1;
+                    Response::SourceUpdated {
+                        source_view: SourceView(self.stats.revision),
+                    }
+                }
+                Request::StageSource {
+                    sync_id,
+                    path,
+                    text,
+                } => {
+                    self.staged.entry(sync_id).or_default().push((path, text));
                     Response::Ok
+                }
+                Request::CommitSync { sync_id } => {
+                    for (path, text) in self.staged.remove(&sync_id).unwrap_or_default() {
+                        self.sources.insert(path, text);
+                    }
+                    self.stats.revision += 1;
+                    Response::Synced {
+                        source_view: SourceView(self.stats.revision),
+                    }
                 }
                 Request::Run { path, .. } => {
                     let source = self.sources.get(&path).cloned().unwrap_or_default();
@@ -1283,6 +1368,7 @@ mod tests {
             let mut backend = Fake {
                 stats: Stats::default(),
                 sources: HashMap::new(),
+                staged: HashMap::new(),
                 requests: Some(request_tx),
             };
             let _ = run(
@@ -1409,6 +1495,7 @@ mod tests {
         let Request::SetSource {
             path: uploaded_path,
             text,
+            ..
         } = &dependency_edit[0]
         else {
             panic!("the changed dependency must be uploaded first");
@@ -1583,6 +1670,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 1,
+                source_view: SourceView(1),
                 stdout: "revision 1\n".to_owned(),
                 value: ScalarValueSummary::Undefined,
             }),
@@ -1610,6 +1698,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 2,
+                source_view: SourceView(2),
                 stdout: "revision 2\n".to_owned(),
                 value: ScalarValueSummary::Undefined,
             }),
@@ -1619,6 +1708,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 3,
+                source_view: SourceView(3),
                 stdout: "revision 3\n".to_owned(),
                 value: ScalarValueSummary::Undefined,
             }),
@@ -1674,6 +1764,7 @@ mod tests {
         queue.replace(RefreshJob {
             generation: 1,
             revision: 1,
+            source_view: SourceView(1),
             path: "/project/main.js".into(),
             project_root: "/project".into(),
             expected_stdout: "revision 1\n".into(),
@@ -1683,6 +1774,7 @@ mod tests {
         queue.replace(RefreshJob {
             generation: 2,
             revision: 2,
+            source_view: SourceView(2),
             path: "/project/main.js".into(),
             project_root: "/project".into(),
             expected_stdout: "revision 2\n".into(),
@@ -1760,6 +1852,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 1,
+                source_view: SourceView(1),
                 stdout: "revision 1\n".into(),
                 value: ScalarValueSummary::Undefined,
             }),
@@ -1785,6 +1878,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 2,
+                source_view: SourceView(2),
                 stdout: "revision 2\n".into(),
                 value: ScalarValueSummary::Undefined,
             }),
@@ -1847,6 +1941,7 @@ mod tests {
         refresher.submit(
             Some(RefreshExpectation {
                 revision: 1,
+                source_view: SourceView(1),
                 stdout: "old success\n".to_owned(),
                 value: ScalarValueSummary::Undefined,
             }),

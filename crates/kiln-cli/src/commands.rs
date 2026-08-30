@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, SourceResponse, SourceUpdate, SyncCommit};
 use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, SourceDigest, SourceHash, TestMode, TestOutcome, TestSummary, source_digest,
+    NativeProfile, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome, TestSummary,
+    source_digest,
 };
 use serde_json::json;
 
@@ -29,6 +30,7 @@ pub struct Output {
     /// Exact final interpreter scalar retained for watch's private native equivalence check.
     /// Commands still render only program stdout on the public stdout stream.
     pub value: Option<kiln_proto::ScalarValueSummary>,
+    pub source_view: Option<SourceView>,
 }
 
 impl Output {
@@ -39,6 +41,7 @@ impl Output {
             exit_code: 0,
             revision: None,
             value: None,
+            source_view: None,
         }
     }
 }
@@ -62,7 +65,7 @@ pub(crate) fn run_source(
     text: String,
 ) -> Result<Output> {
     run_source_with_manifest(backend, path, project_root, canonical, text)
-        .map(|(output, _, _)| output)
+        .map(|(output, _, _, _)| output)
 }
 
 pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
@@ -76,17 +79,48 @@ pub(crate) fn run_source_with_manifest(
     project_root: &Path,
     canonical: &str,
     text: String,
-) -> Result<(Output, SourceManifest, bool)> {
-    let (project_notes, synced_paths, manifest, truncated) =
+) -> Result<(Output, SourceManifest, bool, SourceView)> {
+    let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
     // were already uploaded by the sync handshake when the daemon requested them.
     if !synced_paths.contains(canonical) {
-        backend.set_source(canonical.to_owned(), text)?;
+        source_view = set_external_source_with_one_resync(
+            backend,
+            project_root,
+            canonical,
+            &text,
+            source_view,
+        )?;
     }
-    let output = finish_run(backend, path, project_root, canonical, project_notes)?;
-    Ok((output, manifest, truncated))
+    let mut output = match backend.run_at_view(
+        canonical.to_owned(),
+        project_root_string(project_root)?,
+        source_view,
+    )? {
+        SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
+        SourceResponse::Stale(_) => {
+            let snapshot = establish_snapshot(backend, project_root, canonical, &text)?;
+            project_notes.extend(snapshot.notes);
+            let _ = snapshot.synced_paths;
+            manifest = snapshot.manifest;
+            truncated = snapshot.truncated;
+            source_view = snapshot.source_view;
+            match backend.run_at_view(
+                canonical.to_owned(),
+                project_root_string(project_root)?,
+                source_view,
+            )? {
+                SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
+    output.source_view = Some(source_view);
+    Ok((output, manifest, truncated, source_view))
 }
 
 /// Execute a new snapshot of the single file owned by an already-initialized watch.
@@ -95,26 +129,110 @@ pub(crate) fn run_source_with_manifest(
 /// Later iterations upload changed dependencies directly from the recursive event stream, then
 /// use this path for the target. Uploading the bytes already read by the watcher keeps comparison,
 /// compilation, and execution on the same save.
-pub(crate) fn run_watched_source(
+pub(crate) fn run_watched_source_at_view(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
     canonical: &str,
     text: String,
-) -> Result<Output> {
-    backend.set_source(canonical.to_owned(), text)?;
-    finish_run(backend, path, project_root, canonical, Vec::new())
+    source_view: SourceView,
+) -> std::result::Result<(Output, SourceView), ViewError> {
+    let source_view = match backend
+        .set_source_at_view(canonical.to_owned(), text, source_view)
+        .map_err(ViewError::Other)?
+    {
+        SourceUpdate::Updated(view) => view,
+        SourceUpdate::Stale(current) => return Err(ViewError::Stale(current)),
+    };
+    let summary = match backend
+        .run_at_view(
+            canonical.to_owned(),
+            project_root_string(project_root)?,
+            source_view,
+        )
+        .map_err(ViewError::Other)?
+    {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(current) => return Err(ViewError::Stale(current)),
+    };
+    let mut output = finish_run_summary(path, summary, Vec::new());
+    output.source_view = Some(source_view);
+    Ok((output, source_view))
 }
 
-fn finish_run(
+#[derive(Debug)]
+pub(crate) enum ViewError {
+    Stale(SourceView),
+    Other(Error),
+}
+
+impl From<Error> for ViewError {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+/// CAS an out-of-discovery source, recovering one concurrent writer by rebuilding the complete
+/// authoritative view and retrying the same already-read bytes exactly once.
+fn set_external_source_with_one_resync(
     backend: &mut dyn Backend,
-    path: &Path,
     project_root: &Path,
     canonical: &str,
+    text: &str,
+    source_view: SourceView,
+) -> Result<SourceView> {
+    match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), source_view)? {
+        SourceUpdate::Updated(view) => Ok(view),
+        SourceUpdate::Stale(_) => {
+            let (_, _, _, _, view) =
+                sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
+            match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), view)? {
+                SourceUpdate::Updated(view) => Ok(view),
+                SourceUpdate::Stale(current) => Err(Error::Protocol(format!(
+                    "stale source view {} after external source retry",
+                    current.0
+                ))),
+            }
+        }
+    }
+}
+
+struct Snapshot {
+    notes: Vec<String>,
+    synced_paths: HashSet<String>,
+    manifest: SourceManifest,
+    truncated: bool,
+    source_view: SourceView,
+}
+
+fn establish_snapshot(
+    backend: &mut dyn Backend,
+    project_root: &Path,
+    canonical: &str,
+    text: &str,
+) -> Result<Snapshot> {
+    let (notes, paths, manifest, truncated, view) =
+        sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
+    let source_view = if paths.contains(canonical) {
+        view
+    } else {
+        set_external_source_with_one_resync(backend, project_root, canonical, text, view)?
+    };
+    Ok(Snapshot {
+        notes,
+        synced_paths: paths,
+        manifest,
+        truncated,
+        source_view,
+    })
+}
+
+fn finish_run_summary(
+    path: &Path,
+    summary: kiln_proto::RunSummary,
     project_notes: Vec<String>,
-) -> Result<Output> {
+) -> Output {
     let display = path.display().to_string();
-    let summary = backend.run(canonical.to_owned(), project_root_string(project_root)?)?;
     let notes = summary
         .diagnostics
         .iter()
@@ -126,13 +244,14 @@ fn finish_run(
         })
         .chain(project_notes)
         .collect();
-    Ok(Output {
+    Output {
         text: summary.stdout,
         notes,
         exit_code: if summary.succeeded { 0 } else { 1 },
         revision: Some(summary.revision),
         value: summary.scalar_value,
-    })
+        source_view: None,
+    }
 }
 
 /// Build one source file into a native executable. The entry is read before project
@@ -149,10 +268,16 @@ pub fn build(
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (project_notes, synced_paths, _, _) =
+    let (mut project_notes, synced_paths, _, _, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
-        backend.set_source(canonical.clone(), text)?;
+        source_view = set_external_source_with_one_resync(
+            backend,
+            project_root,
+            &canonical,
+            &text,
+            source_view,
+        )?;
     }
     let output = native_output_path(
         Path::new(&canonical),
@@ -167,25 +292,77 @@ pub fn build(
             "native output would overwrite source file {canonical}"
         )));
     }
-    let project_root = project_root_string(project_root)?;
+    let project_root_path = project_root;
+    let project_root = project_root_string(project_root_path)?;
     if shared {
-        let summary =
-            backend.native_shared_build(canonical, project_root, Some(output), profile)?;
+        let summary = match backend.native_shared_build_at_view(
+            canonical.clone(),
+            project_root.clone(),
+            Some(output.clone()),
+            profile,
+            source_view,
+        )? {
+            SourceResponse::Ready(summary) => summary,
+            SourceResponse::Stale(_) => {
+                let snapshot = establish_snapshot(backend, project_root_path, &canonical, &text)?;
+                project_notes.extend(snapshot.notes);
+                source_view = snapshot.source_view;
+                match backend.native_shared_build_at_view(
+                    canonical.clone(),
+                    project_root.clone(),
+                    Some(output),
+                    profile,
+                    source_view,
+                )? {
+                    SourceResponse::Ready(summary) => summary,
+                    SourceResponse::Stale(current) => {
+                        return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                    }
+                }
+            }
+        };
         return Ok(Output {
             text: render::native_shared_build(&display, &summary),
             notes: project_notes,
             exit_code: 0,
             revision: None,
             value: None,
+            source_view: Some(source_view),
         });
     }
-    let summary = backend.native_build(canonical, project_root, Some(output), profile)?;
+    let summary = match backend.native_build_at_view(
+        canonical.clone(),
+        project_root.clone(),
+        Some(output.clone()),
+        profile,
+        source_view,
+    )? {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(_) => {
+            let snapshot = establish_snapshot(backend, project_root_path, &canonical, &text)?;
+            project_notes.extend(snapshot.notes);
+            source_view = snapshot.source_view;
+            match backend.native_build_at_view(
+                canonical.clone(),
+                project_root,
+                Some(output),
+                profile,
+                source_view,
+            )? {
+                SourceResponse::Ready(summary) => summary,
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
     Ok(Output {
         text: render::native_build(&display, &summary),
         notes: project_notes,
         exit_code: 0,
         revision: None,
         value: None,
+        source_view: Some(source_view),
     })
 }
 
@@ -198,12 +375,37 @@ pub fn native_run(
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (project_notes, synced_paths, _, _) =
+    let (mut project_notes, synced_paths, _, _, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
-        backend.set_source(canonical.clone(), text)?;
+        source_view = set_external_source_with_one_resync(
+            backend,
+            project_root,
+            &canonical,
+            &text,
+            source_view,
+        )?;
     }
-    let summary = backend.native_run(canonical, project_root_string(project_root)?, profile)?;
+    let project_root_text = project_root_string(project_root)?;
+    let summary = match backend.native_run_at_view(
+        canonical.clone(),
+        project_root_text.clone(),
+        profile,
+        source_view,
+    )? {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(_) => {
+            let snapshot = establish_snapshot(backend, project_root, &canonical, &text)?;
+            project_notes.extend(snapshot.notes);
+            source_view = snapshot.source_view;
+            match backend.native_run_at_view(canonical, project_root_text, profile, source_view)? {
+                SourceResponse::Ready(summary) => summary,
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
     let mut notes = project_notes;
     if !summary.stderr.is_empty() {
         notes.push(summary.stderr.clone());
@@ -214,6 +416,7 @@ pub fn native_run(
         exit_code: summary.exit_code.unwrap_or(1),
         revision: None,
         value: summary.scalar_value,
+        source_view: Some(source_view),
     })
 }
 
@@ -253,12 +456,37 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let text = read_source(path)?;
     let before = backend.stats()?;
     let started = Instant::now();
-    let (mut notes, synced_paths, _, _) =
+    let (mut notes, synced_paths, _, _, mut source_view) =
         sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
-        backend.set_source(canonical.clone(), text)?;
+        source_view =
+            set_external_source_with_one_resync(backend, root, &canonical, &text, source_view)?;
     }
-    let summary = backend.check(canonical, project_root_string(root)?)?;
+    let root_text = project_root_string(root)?;
+    let summary = match backend.check_at_view(canonical.clone(), root_text.clone(), source_view)? {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(_) => {
+            let (retry_notes, retry_paths, _, _, view) =
+                sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
+            notes.extend(retry_notes);
+            source_view = view;
+            if !retry_paths.contains(&canonical) {
+                source_view = set_external_source_with_one_resync(
+                    backend,
+                    root,
+                    &canonical,
+                    &text,
+                    source_view,
+                )?;
+            }
+            match backend.check_at_view(canonical, root_text, source_view)? {
+                SourceResponse::Ready(summary) => summary,
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
     let elapsed = started.elapsed();
     let after = backend.stats()?;
 
@@ -278,6 +506,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
         exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
         value: None,
+        source_view: Some(source_view),
     })
 }
 
@@ -293,8 +522,18 @@ pub fn check_source(
 ) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    backend.set_source(canonical.clone(), text)?;
-    let summary = backend.check(canonical, project_root)?;
+    let source_view = match backend.set_source_at_view(canonical.clone(), text, SourceView(0))? {
+        SourceUpdate::Updated(view) => view,
+        SourceUpdate::Stale(current) => {
+            return Err(Error::Protocol(format!("stale source view {}", current.0)));
+        }
+    };
+    let summary = match backend.check_at_view(canonical, project_root, source_view)? {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(current) => {
+            return Err(Error::Protocol(format!("stale source view {}", current.0)));
+        }
+    };
     let elapsed = started.elapsed();
     let after = backend.stats()?;
 
@@ -318,6 +557,7 @@ pub fn check_source(
         exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
         value: None,
+        source_view: None,
     })
 }
 
@@ -334,8 +574,22 @@ pub fn check_source(
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    let (notes, _, _, _) = sync_project_sources(backend, root)?;
-    let summary = backend.project()?;
+    let (mut notes, _, _, _, mut source_view) = sync_project_sources(backend, root)?;
+    let summary = match backend.project_at_view(source_view)? {
+        SourceResponse::Ready(summary) => summary,
+        SourceResponse::Stale(_) => {
+            let (retry_notes, _, _, _, view) = sync_project_sources(backend, root)?;
+            source_view = view;
+            // Preserve diagnostics from both walks; the second is normally empty.
+            notes.extend(retry_notes);
+            match backend.project_at_view(source_view)? {
+                SourceResponse::Ready(summary) => summary,
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
     let elapsed = started.elapsed();
     let after = backend.stats()?;
 
@@ -346,6 +600,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
         exit_code: 0,
         revision: None,
         value: None,
+        source_view: Some(source_view),
     })
 }
 
@@ -354,7 +609,13 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 fn sync_project_sources(
     backend: &mut dyn Backend,
     root: &Path,
-) -> Result<(Vec<String>, HashSet<String>, SourceManifest, bool)> {
+) -> Result<(
+    Vec<String>,
+    HashSet<String>,
+    SourceManifest,
+    bool,
+    SourceView,
+)> {
     sync_project_sources_with_override(backend, root, None)
 }
 
@@ -366,7 +627,13 @@ fn sync_project_sources_with_override(
     backend: &mut dyn Backend,
     root: &Path,
     source_override: Option<(&str, &str)>,
-) -> Result<(Vec<String>, HashSet<String>, SourceManifest, bool)> {
+) -> Result<(
+    Vec<String>,
+    HashSet<String>,
+    SourceManifest,
+    bool,
+    SourceView,
+)> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -397,28 +664,42 @@ fn sync_project_sources_with_override(
         .iter()
         .map(|(path, text)| (path.clone(), source_digest(text)))
         .collect::<SourceManifest>();
-    let needed: HashSet<String> = backend
-        .sync(
-            texts
-                .iter()
-                .map(|(path, text)| SourceHash {
-                    path: path.clone(),
-                    hash: source_digest(text),
-                })
-                .collect(),
-        )?
-        .into_iter()
-        .collect();
     let synced_paths = texts
         .iter()
         .map(|(path, _)| path.clone())
         .collect::<HashSet<_>>();
-    for (path, text) in texts {
-        if needed.contains(&path) {
-            backend.set_source(path, text)?;
+    let files = texts
+        .iter()
+        .map(|(path, text)| SourceHash {
+            path: path.clone(),
+            hash: source_digest(text),
+        })
+        .collect::<Vec<_>>();
+    // A stale commit means another writer published while this transaction was uploading.
+    // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
+    // never re-walk the filesystem or mix snapshots.
+    for attempt in 0..=1 {
+        let plan = backend.begin_sync(files.clone())?;
+        let needed = plan.paths.into_iter().collect::<HashSet<_>>();
+        for (path, text) in &texts {
+            if needed.contains(path) {
+                backend.stage_source(plan.sync_id, path.clone(), text.clone())?;
+            }
+        }
+        match backend.commit_sync(plan.sync_id)? {
+            SyncCommit::Synced(source_view) => {
+                return Ok((notes, synced_paths, manifest, walk.truncated, source_view));
+            }
+            SyncCommit::Stale(_) if attempt == 0 => continue,
+            SyncCommit::Stale(current) => {
+                return Err(Error::Protocol(format!(
+                    "stale source view {} after sync retry",
+                    current.0
+                )));
+            }
         }
     }
-    Ok((notes, synced_paths, manifest, walk.truncated))
+    unreachable!()
 }
 
 pub fn stats(backend: &mut dyn Backend) -> Result<Output> {
@@ -482,6 +763,7 @@ pub fn test(
         exit_code: test_exit_code(&summary),
         revision: None,
         value: None,
+        source_view: None,
     })
 }
 
@@ -806,6 +1088,7 @@ mod tests {
         stats: Stats,
         diagnostics: Vec<Diagnostic>,
         test_summary: TestSummary,
+        source_view: SourceView,
         /// Added to the counters after each `Check`, standing in for engine work.
         per_check: Stats,
     }
@@ -822,6 +1105,7 @@ mod tests {
                     interface_computed: 1,
                     ..Stats::default()
                 },
+                source_view: SourceView(0),
             }
         }
 
@@ -832,6 +1116,8 @@ mod tests {
                     Request::Ping { .. } => "Ping",
                     Request::SetSource { .. } => "SetSource",
                     Request::Sync { .. } => "Sync",
+                    Request::StageSource { .. } => "StageSource",
+                    Request::CommitSync { .. } => "CommitSync",
                     Request::Check { .. } => "Check",
                     Request::Run { .. } => "Run",
                     Request::NativeBuild { .. } => "NativeBuild",
@@ -839,7 +1125,7 @@ mod tests {
                     Request::NativeSharedBuild { .. } => "NativeSharedBuild",
                     Request::NativeRun { .. } => "NativeRun",
                     Request::Test { .. } => "Test",
-                    Request::Project => "Project",
+                    Request::Project { .. } => "Project",
                     Request::Stats => "Stats",
                     Request::ResetStats => "ResetStats",
                     Request::Shutdown => "Shutdown",
@@ -855,14 +1141,26 @@ mod tests {
                 Request::Stats => Response::Stats(self.stats.clone()),
                 Request::SetSource { .. } => {
                     self.stats.revision += 1;
-                    Response::Ok
+                    self.source_view.0 += 1;
+                    Response::SourceUpdated {
+                        source_view: self.source_view,
+                    }
                 }
                 // A cold daemon: it holds nothing, so everything named is needed. That keeps
                 // these tests asserting the push path rather than the skip path; the skip path
                 // is covered end to end in the daemon's own tests.
                 Request::Sync { files } => Response::Needed {
+                    sync_id: kiln_proto::SyncId(1),
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
+                Request::StageSource { .. } => Response::Ok,
+                Request::CommitSync { .. } => {
+                    self.source_view.0 += 1;
+                    self.stats.revision += 1;
+                    Response::Synced {
+                        source_view: self.source_view,
+                    }
+                }
                 Request::Check { path, .. } => {
                     self.stats.parse_computed += self.per_check.parse_computed;
                     self.stats.interface_computed += self.per_check.interface_computed;
@@ -970,7 +1268,7 @@ mod tests {
                     },
                 }),
                 Request::Test { .. } => Response::Tested(self.test_summary.clone()),
-                Request::Project => Response::Project(ProjectSummary {
+                Request::Project { .. } => Response::Project(ProjectSummary {
                     modules: 2,
                     exports: 3,
                     interface_hash: 11,
@@ -1020,7 +1318,10 @@ mod tests {
         .expect("check succeeds");
 
         assert_eq!(fake.names(), ["Stats", "SetSource", "Check", "Stats"]);
-        let Request::Check { path, project_root } = &fake.seen[2] else {
+        let Request::Check {
+            path, project_root, ..
+        } = &fake.seen[2]
+        else {
             panic!("expected rooted check request");
         };
         assert_eq!(path, "/tmp/a.js");
@@ -1052,9 +1353,17 @@ mod tests {
         check(&mut backend, &entry, &root).expect("check graph");
         assert_eq!(
             backend.names(),
-            ["Stats", "Sync", "SetSource", "SetSource", "Check", "Stats"]
+            [
+                "Stats",
+                "Sync",
+                "StageSource",
+                "StageSource",
+                "CommitSync",
+                "Check",
+                "Stats"
+            ]
         );
-        let Request::Check { project_root, .. } = &backend.seen[4] else {
+        let Request::Check { project_root, .. } = &backend.seen[5] else {
             panic!("expected rooted Check request");
         };
         assert_eq!(project_root, &root.to_string_lossy());
@@ -1065,14 +1374,23 @@ mod tests {
     #[test]
     fn run_preserves_program_stdout_and_reports_failures_with_a_nonzero_status() {
         let mut fake = Fake::new();
-        fake.set_source(
-            "/tmp/main.ts".to_string(),
-            "console.log('hello from kiln')".to_string(),
-        )
-        .expect("set source");
+        let source_view = match fake
+            .set_source_at_view(
+                "/tmp/main.ts".to_string(),
+                "console.log('hello from kiln')".to_string(),
+                SourceView(0),
+            )
+            .expect("set source")
+        {
+            SourceUpdate::Updated(view) => view,
+            SourceUpdate::Stale(_) => panic!("unexpected stale source"),
+        };
         let summary = fake
-            .run("/tmp/main.ts".to_string(), "/tmp".to_string())
+            .run_at_view("/tmp/main.ts".to_string(), "/tmp".to_string(), source_view)
             .expect("run succeeds");
+        let SourceResponse::Ready(summary) = summary else {
+            panic!("unexpected stale run")
+        };
 
         assert_eq!(fake.names(), ["SetSource", "Run"]);
         assert_eq!(summary.stdout, "hello from kiln\n");
@@ -1097,7 +1415,10 @@ mod tests {
         let output = run(&mut backend, &entry, &root).expect("run graph");
         assert_eq!(output.text, "hello from kiln\n");
         assert_eq!(output.exit_code, 0);
-        assert_eq!(backend.names(), ["Sync", "SetSource", "SetSource", "Run"]);
+        assert_eq!(
+            backend.names(),
+            ["Sync", "StageSource", "StageSource", "CommitSync", "Run"]
+        );
         let Request::Run { project_root, .. } = backend.seen.last().expect("run request") else {
             panic!("last request must be Run");
         };
@@ -1191,7 +1512,10 @@ mod tests {
         assert!(output.text.contains("shared library"), "{}", output.text);
         assert!(output.text.contains("loader"), "{}", output.text);
         assert!(output.text.contains("header"), "{}", output.text);
-        assert_eq!(backend.names(), ["Sync", "SetSource", "NativeSharedBuild"]);
+        assert_eq!(
+            backend.names(),
+            ["Sync", "StageSource", "CommitSync", "NativeSharedBuild"]
+        );
         let Request::NativeSharedBuild { output, .. } = backend.seen.last().expect("request")
         else {
             panic!("last request must be NativeSharedBuild");
@@ -1223,19 +1547,22 @@ mod tests {
         build(&mut backend, &entry, &root, None, NativeProfile::Dev, false)
             .expect("native build keeps its captured entry snapshot");
 
-        assert_eq!(backend.inner.names(), ["Sync", "SetSource", "NativeBuild"]);
+        assert_eq!(
+            backend.inner.names(),
+            ["Sync", "StageSource", "CommitSync", "NativeBuild"]
+        );
         let Request::Sync { files } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
         assert_eq!(files[0].hash, source_digest(captured));
-        let Request::SetSource { path, text } = &backend.inner.seen[1] else {
+        let Request::StageSource { path, text, .. } = &backend.inner.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };
         assert_eq!(path, &canonical);
         assert_eq!(text, captured);
-        let Request::NativeBuild { path, .. } = &backend.inner.seen[2] else {
+        let Request::NativeBuild { path, .. } = &backend.inner.seen[3] else {
             panic!("third request must build the captured snapshot");
         };
         assert_eq!(path, &canonical);
@@ -1261,19 +1588,22 @@ mod tests {
             .expect("native run keeps its captured entry snapshot");
 
         assert_eq!(output.text, "native hello\n");
-        assert_eq!(backend.inner.names(), ["Sync", "SetSource", "NativeRun"]);
+        assert_eq!(
+            backend.inner.names(),
+            ["Sync", "StageSource", "CommitSync", "NativeRun"]
+        );
         let Request::Sync { files } = &backend.inner.seen[0] else {
             panic!("first request must advertise the captured snapshot");
         };
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
         assert_eq!(files[0].hash, source_digest(captured));
-        let Request::SetSource { path, text } = &backend.inner.seen[1] else {
+        let Request::StageSource { path, text, .. } = &backend.inner.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };
         assert_eq!(path, &canonical);
         assert_eq!(text, captured);
-        let Request::NativeRun { path, .. } = &backend.inner.seen[2] else {
+        let Request::NativeRun { path, .. } = &backend.inner.seen[3] else {
             panic!("third request must execute the captured snapshot");
         };
         assert_eq!(path, &canonical);
@@ -1585,8 +1915,9 @@ mod tests {
             [
                 "Stats",
                 "Sync",
-                "SetSource",
-                "SetSource",
+                "StageSource",
+                "StageSource",
+                "CommitSync",
                 "Project",
                 "Stats"
             ],
@@ -1600,7 +1931,7 @@ mod tests {
             2,
             "notes.md is not a source and must not be named"
         );
-        assert!(out.text.starts_with("project  r2  "), "{}", out.text);
+        assert!(out.text.starts_with("project  r1  "), "{}", out.text);
         assert!(out.text.contains("modules         2"), "{}", out.text);
         assert!(out.notes.is_empty());
 
@@ -1642,7 +1973,7 @@ mod tests {
             second_requests
                 .iter()
                 .filter_map(|request| match request {
-                    Request::SetSource { path, .. } => Some(path),
+                    Request::StageSource { path, .. } => Some(path),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
@@ -1675,12 +2006,15 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
         assert_eq!(files[0].hash, source_digest(captured));
-        let Request::SetSource { path, text } = &fake.seen[1] else {
+        let Request::StageSource { path, text, .. } = &fake.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };
         assert_eq!(path, &canonical);
         assert_eq!(text, captured);
-        let Request::Run { path, project_root } = &fake.seen[2] else {
+        let Request::Run {
+            path, project_root, ..
+        } = &fake.seen[3]
+        else {
             panic!("third request must execute the captured snapshot");
         };
         assert_eq!(path, &canonical);
@@ -1695,17 +2029,18 @@ mod tests {
         let canonical = "/tmp/project/entry.js";
         let mut fake = Fake::new();
 
-        run_watched_source(
+        run_watched_source_at_view(
             &mut fake,
             path,
             Path::new("/tmp/project"),
             canonical,
             "export const answer = 43;\n".to_owned(),
+            SourceView(0),
         )
         .expect("warm watch snapshot runs");
 
         assert_eq!(fake.names(), ["SetSource", "Run"]);
-        let Request::SetSource { path, text } = &fake.seen[0] else {
+        let Request::SetSource { path, text, .. } = &fake.seen[0] else {
             panic!("warm watch must upload its target first");
         };
         assert_eq!(path, canonical);
