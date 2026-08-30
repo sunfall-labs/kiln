@@ -22,7 +22,9 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError};
-use kiln_native_number::{NUMBER_FORMAT_VERSION, source as native_number_source};
+use kiln_native_number::{
+    NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION, runtime_source as native_number_source,
+};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RUNTIME_VERSION,
     RuntimeSourceError, launcher_source, runtime_source,
@@ -40,6 +42,8 @@ static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceL
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
+    assert!(NUMBER_FORMAT_VERSION == 1);
+    assert!(NUMBER_PARSE_VERSION == 1);
 };
 
 /// Native optimization and checking policy.
@@ -662,7 +666,7 @@ impl NativeBuilder {
             });
             (
                 join_worker(object.join(), "shared module compile"),
-                join_worker(number.join(), "number formatter compile"),
+                join_worker(number.join(), "number runtime compile"),
             )
         });
         let (object, object_digest, object_hit, object_elapsed) = object_result??;
@@ -991,7 +995,7 @@ impl NativeBuilder {
             })();
             let module_objects = modules?;
             let wrapper_object = join_worker(wrapper.join(), "shared graph wrapper compile")??;
-            let number_object = join_worker(number.join(), "number formatter compile")??;
+            let number_object = join_worker(number.join(), "number runtime compile")??;
             Ok::<_, NativeError>((module_objects, wrapper_object, number_object))
         })?;
         let compile_elapsed =
@@ -1555,14 +1559,14 @@ fn runtime_abi_identity() -> String {
 }
 
 fn native_number_abi_identity() -> String {
-    format!("kiln-native-number-{NUMBER_FORMAT_VERSION}")
+    format!("kiln-native-number-{NUMBER_FORMAT_VERSION}-{NUMBER_PARSE_VERSION}")
 }
 
 fn native_number_source_key(target: &str) -> ArtifactKey {
     let abi = native_number_abi_identity();
     key(
         ArtifactKind::GeneratedC,
-        format!("kiln-native-number-{NUMBER_FORMAT_VERSION}"),
+        format!("kiln-native-number-{NUMBER_FORMAT_VERSION}-{NUMBER_PARSE_VERSION}"),
         Backend::Custom("native-number-source".to_owned()),
         &abi,
         target,
@@ -3574,7 +3578,11 @@ int main(int argc, char **argv) {{
     if (second == NULL) return 3;
     if (dlsym(first, "{internal}") != NULL || dlsym(second, "{internal}") != NULL ||
         dlsym(first, "kiln_number_to_js_string") != NULL ||
-        dlsym(second, "kiln_number_to_js_string") != NULL)
+        dlsym(second, "kiln_number_to_js_string") != NULL ||
+        dlsym(first, "kiln_string_to_number") != NULL ||
+        dlsym(second, "kiln_string_to_number") != NULL ||
+        dlsym(first, "ffc_parse_double") != NULL ||
+        dlsym(second, "ffc_parse_double") != NULL)
         return 4;
     first_entry = load_entry(first, "{first_symbol}");
     second_entry = load_entry(second, "{second_symbol}");
@@ -3647,6 +3655,49 @@ int main(int argc, char **argv) {{
     }
 
     fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
+        let string_numeric_inputs = [
+            "",
+            "\u{00a0}\u{1680}\u{2000}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}1\u{feff}",
+            "\u{0085}1\u{0085}",
+            "-0",
+            "Infinity",
+            "+Infinity",
+            "-Infinity",
+            "inf",
+            "1e309",
+            "-1e-9999",
+            "5e-324",
+            "0x10",
+            "0b11",
+            "0o10",
+            "0x20000000000001",
+            "0x20000000000003",
+            "+0x10",
+            "0x1p2",
+            "1e+",
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        ];
+        let mut string_numeric_code = Vec::with_capacity(string_numeric_inputs.len() * 2 + 2);
+        for index in 0..string_numeric_inputs.len() {
+            string_numeric_code.push(Instruction::Const(index as u32));
+            string_numeric_code.push(Instruction::Unary(kiln_ir::UnaryOp::Plus));
+        }
+        string_numeric_code.push(Instruction::HostCall {
+            op: HostOp::WriteStdout,
+            argc: string_numeric_inputs.len() as u16,
+        });
+        string_numeric_code.push(Instruction::Return);
+        let string_numeric_program = Program {
+            version: BYTECODE_VERSION,
+            constants: string_numeric_inputs
+                .into_iter()
+                .map(|value| Constant::String(value.to_owned()))
+                .collect(),
+            code: string_numeric_code,
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
         vec![
             (
                 "loop",
@@ -3793,6 +3844,7 @@ int main(int argc, char **argv) {{
                     functions: Vec::new(),
                 },
             ),
+            ("string-numeric-literals", string_numeric_program),
             (
                 "utf16-order",
                 Program {

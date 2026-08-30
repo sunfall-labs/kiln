@@ -30,7 +30,7 @@ What exists today:
 | `crates/kiln-module-resolver` / `crates/kiln-module-graph` | Project-confined exact-path resolution, deterministic graph construction, link validation, and acyclic execution order. |
 | `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
-| `crates/kiln-native-number` | Versioned, locale-free Ryu runtime for ECMAScript-exact native number formatting. |
+| `crates/kiln-native-number` | Versioned, locale-free Ryu/fast_float runtime for ECMAScript-exact native number conversion. |
 | `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
 | `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
 | `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
@@ -159,6 +159,12 @@ is visible next to the reasoning for it.
 - [0011](docs/adr/0011-explicit-module-graph-and-acyclic-scalar-linking.md) — module resolution and
   graph traversal are explicit, deterministic layers; the first linkage slice copies acyclic
   scalar exports while reserving live cells and strongly connected components for the next step.
+- [0012](docs/adr/0012-virtual-time-event-loop.md) — the interpreter drains a deterministic
+  virtual-time event loop to quiescence for timers, microtasks, and async work.
+- [0013](docs/adr/0013-native-number-formatting-uses-a-vendored-c-runtime.md) — emitted artifacts
+  use a hidden, cached C Ryu runtime for ECMAScript-exact binary64 formatting.
+- [0014](docs/adr/0014-string-numeric-literals-use-a-bounded-runtime-parser.md) — string numeric
+  coercion uses a bounded decimal core plus explicit ECMAScript grammar and radix rounding.
 
 ## License
 
