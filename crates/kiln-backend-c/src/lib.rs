@@ -241,6 +241,31 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_FOR_EACH 10
 #define KILN_C99_METHOD_REDUCE 11
 
+/* String methods.  `slice` and `indexOf` are shared with the array table by name and told apart
+ * by the receiver, exactly as the language does. */
+#define KILN_C99_METHOD_STRING_SLICE 12
+#define KILN_C99_METHOD_SUBSTRING 13
+#define KILN_C99_METHOD_STRING_INDEX_OF 14
+#define KILN_C99_METHOD_LAST_INDEX_OF 15
+#define KILN_C99_METHOD_STRING_INCLUDES 16
+#define KILN_C99_METHOD_STARTS_WITH 17
+#define KILN_C99_METHOD_ENDS_WITH 18
+#define KILN_C99_METHOD_CHAR_AT 19
+#define KILN_C99_METHOD_CHAR_CODE_AT 20
+#define KILN_C99_METHOD_STRING_AT 21
+#define KILN_C99_METHOD_TRIM 22
+#define KILN_C99_METHOD_TRIM_START 23
+#define KILN_C99_METHOD_TRIM_END 24
+#define KILN_C99_METHOD_SPLIT 25
+#define KILN_C99_METHOD_REPEAT 26
+#define KILN_C99_METHOD_PAD_START 27
+#define KILN_C99_METHOD_PAD_END 28
+#define KILN_C99_METHOD_TO_UPPER_CASE 29
+#define KILN_C99_METHOD_TO_LOWER_CASE 30
+#define KILN_C99_METHOD_REPLACE 31
+#define KILN_C99_METHOD_REPLACE_ALL 32
+#define KILN_C99_METHOD_STRING_CONCAT 33
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -480,22 +505,59 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_FILTER: return "filter";
     case KILN_C99_METHOD_FOR_EACH: return "forEach";
     case KILN_C99_METHOD_REDUCE: return "reduce";
+    case KILN_C99_METHOD_STRING_SLICE: return "slice";
+    case KILN_C99_METHOD_SUBSTRING: return "substring";
+    case KILN_C99_METHOD_STRING_INDEX_OF: return "indexOf";
+    case KILN_C99_METHOD_LAST_INDEX_OF: return "lastIndexOf";
+    case KILN_C99_METHOD_STRING_INCLUDES: return "includes";
+    case KILN_C99_METHOD_STARTS_WITH: return "startsWith";
+    case KILN_C99_METHOD_ENDS_WITH: return "endsWith";
+    case KILN_C99_METHOD_CHAR_AT: return "charAt";
+    case KILN_C99_METHOD_CHAR_CODE_AT: return "charCodeAt";
+    case KILN_C99_METHOD_STRING_AT: return "at";
+    case KILN_C99_METHOD_TRIM: return "trim";
+    case KILN_C99_METHOD_TRIM_START: return "trimStart";
+    case KILN_C99_METHOD_TRIM_END: return "trimEnd";
+    case KILN_C99_METHOD_SPLIT: return "split";
+    case KILN_C99_METHOD_REPEAT: return "repeat";
+    case KILN_C99_METHOD_PAD_START: return "padStart";
+    case KILN_C99_METHOD_PAD_END: return "padEnd";
+    case KILN_C99_METHOD_TO_UPPER_CASE: return "toUpperCase";
+    case KILN_C99_METHOD_TO_LOWER_CASE: return "toLowerCase";
+    case KILN_C99_METHOD_REPLACE: return "replace";
+    case KILN_C99_METHOD_REPLACE_ALL: return "replaceAll";
+    case KILN_C99_METHOD_STRING_CONCAT: return "concat";
     default: return NULL;
     }
 }
 
-/* The array method a name resolves to, or 0.  One table, so a read and a call cannot disagree
- * about which names exist. */
-static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
+/* The method a name resolves to on a given receiver, or 0.  One table, so a read and a call
+ * cannot disagree about which names exist -- and the range searched is what tells `slice` on an
+ * array from `slice` on a string. */
+static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
+                                       uint64_t last) {
     uint64_t code;
-    for (code = 1; kiln_c99_method_name(code) != NULL; ++code) {
+    for (code = first; code <= last; ++code) {
         const char *name = kiln_c99_method_name(code);
-        size_t len = strlen(name);
+        size_t len;
+        if (name == NULL) {
+            continue;
+        }
+        len = strlen(name);
         if (len == key_len && memcmp(name, key, len) == 0) {
             return code;
         }
     }
     return 0;
+}
+
+static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
+    return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_PUSH, KILN_C99_METHOD_REDUCE);
+}
+
+static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
+    return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_STRING_SLICE,
+                                  KILN_C99_METHOD_STRING_CONCAT);
 }
 
 static kiln_value kiln_c99_builtin(uint64_t code) {
@@ -1061,12 +1123,19 @@ static int kiln_c99_get(kiln_value target, const char *key, size_t key_len, kiln
          * "undefined is not a function" three frames from the cause, so it says so here. */
         return KILN_C99_CONTROL_ERROR;
     }
-    case KILN_VALUE_STRING:
+    case KILN_VALUE_STRING: {
+        uint64_t code;
         if (is_length) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
             return KILN_C99_OK;
         }
+        code = kiln_c99_string_method(key, key_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
         return KILN_C99_CONTROL_ERROR;
+    }
     case KILN_VALUE_UNDEFINED:
     case KILN_VALUE_NULL:
         return KILN_C99_CONTROL_ERROR;
@@ -1387,6 +1456,104 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
 }
 
+/* Every position-taking string method counts UTF-16 code units (ADR 0022), so each of them
+ * converts once, works on units, and re-encodes.  One conversion pair rather than a dozen
+ * ad-hoc walks is what keeps them agreeing with each other and with the interpreter.
+ *
+ * The caller owns the returned array and frees it. */
+static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
+    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
+    uint16_t *units = NULL;
+    size_t capacity = 0;
+    size_t length = 0;
+    uint16_t unit;
+    while (kiln_c99_utf16_next(&iterator, &unit)) {
+        if (kiln_c99_reserve((void **)&units, &capacity, length + 1, sizeof *units) !=
+            KILN_C99_OK) {
+            free(units);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        units[length] = unit;
+        length += 1;
+    }
+    *out = units;
+    *count = length;
+    return KILN_C99_OK;
+}
+
+/* Re-encode, pairing surrogates back up.  An *unpaired* surrogate has no scalar value, so it
+ * becomes U+FFFD -- a kiln string cannot hold one, which is the divergence ADR 0022 records and
+ * the interpreter's `String::from_utf16_lossy` makes the same substitution. */
+static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
+    kiln_text text = {NULL, 0, 0};
+    size_t index;
+    for (index = 0; index < count; ++index) {
+        uint32_t point = units[index];
+        char bytes[4];
+        size_t width;
+        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < count && units[index + 1] >= 0xDC00 &&
+            units[index + 1] <= 0xDFFF) {
+            point = 0x10000 + ((point - 0xD800) << 10) + (units[index + 1] - 0xDC00);
+            index += 1;
+        } else if (point >= 0xD800 && point <= 0xDFFF) {
+            point = 0xFFFD;
+        }
+        if (point < 0x80) {
+            bytes[0] = (char)point;
+            width = 1;
+        } else if (point < 0x800) {
+            bytes[0] = (char)(0xC0 | (point >> 6));
+            bytes[1] = (char)(0x80 | (point & 0x3F));
+            width = 2;
+        } else if (point < 0x10000) {
+            bytes[0] = (char)(0xE0 | (point >> 12));
+            bytes[1] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[2] = (char)(0x80 | (point & 0x3F));
+            width = 3;
+        } else {
+            bytes[0] = (char)(0xF0 | (point >> 18));
+            bytes[1] = (char)(0x80 | ((point >> 12) & 0x3F));
+            bytes[2] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[3] = (char)(0x80 | (point & 0x3F));
+            width = 4;
+        }
+        if (kiln_c99_text_append(&text, bytes, width) != KILN_C99_OK) {
+            free(text.bytes);
+            return kiln_c99_undefined();
+        }
+    }
+    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+}
+
+/* The first position at or after `from` where `needle` occurs, or -1. */
+static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
+                                  const uint16_t *needle, size_t needle_len, size_t from) {
+    size_t at;
+    if (needle_len > haystack_len) {
+        return -1.0;
+    }
+    for (at = from; at + needle_len <= haystack_len; ++at) {
+        if (memcmp(haystack + at, needle, needle_len * sizeof *needle) == 0) {
+            return (double)at;
+        }
+    }
+    return -1.0;
+}
+
+/* A code unit that `trim` removes: the specification's WhiteSpace plus LineTerminator. */
+static int kiln_c99_is_trimmed(uint16_t unit) {
+    switch (unit) {
+    case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x20:
+    case 0xA0: case 0x1680: case 0x2000: case 0x2001: case 0x2002: case 0x2003:
+    case 0x2004: case 0x2005: case 0x2006: case 0x2007: case 0x2008: case 0x2009:
+    case 0x200A: case 0x2028: case 0x2029: case 0x202F: case 0x205F: case 0x3000:
+    case 0xFEFF:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* `includes` uses SameValueZero, which differs from `===` in exactly one place: NaN matches
  * itself.  `indexOf` uses `===` and so never finds one. */
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
@@ -1418,12 +1585,329 @@ static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fa
     return index > (double)length ? length : (size_t)index;
 }
 
+/* A position argument in code units: negative counts from the end for `slice` and `at`, and
+ * `substring` clamps instead -- which is `relative` false. */
+static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fallback,
+                                     int relative) {
+    double index;
+    if (value.tag == KILN_VALUE_UNDEFINED) {
+        return fallback;
+    }
+    index = kiln_c99_as_number(value);
+    if (isnan(index) || index < 0.0) {
+        if (!relative || isnan(index)) {
+            return 0;
+        }
+        index += (double)length;
+        return index < 0.0 ? 0 : (size_t)index;
+    }
+    return index > (double)length ? length : (size_t)index;
+}
+
+/* The string methods.  Split out from the array ones because they share nothing but the dispatch
+ * -- every one of these works on code units and every one of those works on elements. */
+static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
+                                         const kiln_value *args, size_t argc) {
+    uint16_t *units = NULL;
+    uint16_t *needle = NULL;
+    size_t count = 0;
+    size_t needle_count = 0;
+    int status = kiln_c99_to_units(receiver, &units, &count);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    /* Most of these take a string argument, and converting it once here keeps each case short.
+     * A case that does not want one simply ignores it. */
+    if (argc > 0) {
+        kiln_value shown = kiln_c99_text(args[0]);
+        if (shown.tag == KILN_VALUE_STRING) {
+            status = kiln_c99_to_units(shown, &needle, &needle_count);
+            if (status != KILN_C99_OK) {
+                free(units);
+                return status;
+            }
+        }
+    }
+    status = KILN_C99_OK;
+    switch (code) {
+    case KILN_C99_METHOD_STRING_SLICE:
+    case KILN_C99_METHOD_SUBSTRING: {
+        int relative = code == KILN_C99_METHOD_STRING_SLICE;
+        size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), count, 0,
+                                              relative);
+        size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), count,
+                                            count, relative);
+        /* `substring` swaps its ends when they are the wrong way round; `slice` yields nothing.
+         * The two look alike and agree on almost no edge case. */
+        if (!relative && start > end) {
+            size_t swap = start;
+            start = end;
+            end = swap;
+        }
+        *result = start >= end ? kiln_c99_from_units(NULL, 0)
+                               : kiln_c99_from_units(units + start, end - start);
+        break;
+    }
+    case KILN_C99_METHOD_STRING_INDEX_OF:
+        *result = kiln_c99_number(kiln_c99_units_find(units, count, needle, needle_count, 0));
+        break;
+    case KILN_C99_METHOD_LAST_INDEX_OF: {
+        double found = -1.0;
+        double at;
+        size_t from = 0;
+        while ((at = kiln_c99_units_find(units, count, needle, needle_count, from)) >= 0.0) {
+            found = at;
+            from = (size_t)at + 1;
+        }
+        *result = kiln_c99_number(found);
+        break;
+    }
+    case KILN_C99_METHOD_STRING_INCLUDES:
+        *result = kiln_c99_boolean(
+            kiln_c99_units_find(units, count, needle, needle_count, 0) >= 0.0);
+        break;
+    case KILN_C99_METHOD_STARTS_WITH:
+        *result = kiln_c99_boolean(needle_count <= count &&
+                                   memcmp(units, needle, needle_count * sizeof *units) == 0);
+        break;
+    case KILN_C99_METHOD_ENDS_WITH:
+        *result = kiln_c99_boolean(needle_count <= count &&
+                                   memcmp(units + count - needle_count, needle,
+                                          needle_count * sizeof *units) == 0);
+        break;
+    case KILN_C99_METHOD_CHAR_AT:
+    case KILN_C99_METHOD_CHAR_CODE_AT:
+    case KILN_C99_METHOD_STRING_AT: {
+        double index = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        if (isnan(index)) {
+            index = 0.0;
+        }
+        /* `at` accepts a negative index, where `charAt` clamps and `charCodeAt` answers NaN --
+         * three spellings of "the character there" that differ only at the edges. */
+        if (code == KILN_C99_METHOD_STRING_AT && index < 0.0) {
+            index += (double)count;
+        }
+        if (index < 0.0 || index >= (double)count) {
+            *result = code == KILN_C99_METHOD_CHAR_AT      ? kiln_c99_from_units(NULL, 0)
+                      : code == KILN_C99_METHOD_STRING_AT  ? kiln_c99_undefined()
+                                                           : kiln_c99_number(0.0 / 0.0);
+        } else if (code == KILN_C99_METHOD_CHAR_CODE_AT) {
+            *result = kiln_c99_number((double)units[(size_t)index]);
+        } else {
+            *result = kiln_c99_from_units(units + (size_t)index, 1);
+        }
+        break;
+    }
+    case KILN_C99_METHOD_TRIM:
+    case KILN_C99_METHOD_TRIM_START:
+    case KILN_C99_METHOD_TRIM_END: {
+        size_t start = 0;
+        size_t end = count;
+        if (code != KILN_C99_METHOD_TRIM_END) {
+            while (start < end && kiln_c99_is_trimmed(units[start])) {
+                start += 1;
+            }
+        }
+        if (code != KILN_C99_METHOD_TRIM_START) {
+            while (end > start && kiln_c99_is_trimmed(units[end - 1])) {
+                end -= 1;
+            }
+        }
+        *result = kiln_c99_from_units(units + start, end - start);
+        break;
+    }
+    case KILN_C99_METHOD_SPLIT: {
+        kiln_value built;
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK) {
+            size_t from = 0;
+            if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED) {
+                /* No separator at all yields the whole string as one part. */
+                status = kiln_c99_array_push(built, kiln_c99_from_units(units, count));
+            } else if (needle_count == 0) {
+                /* An empty separator splits into code units, not into nothing. */
+                size_t index;
+                for (index = 0; index < count && status == KILN_C99_OK; ++index) {
+                    status = kiln_c99_array_push(built, kiln_c99_from_units(units + index, 1));
+                }
+            } else {
+                double at;
+                while (status == KILN_C99_OK &&
+                       (at = kiln_c99_units_find(units, count, needle, needle_count, from)) >=
+                           0.0) {
+                    status = kiln_c99_array_push(
+                        built, kiln_c99_from_units(units + from, (size_t)at - from));
+                    from = (size_t)at + needle_count;
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_array_push(built,
+                                                 kiln_c99_from_units(units + from, count - from));
+                }
+            }
+            *result = built;
+        }
+        break;
+    }
+    case KILN_C99_METHOD_REPEAT: {
+        double times = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        kiln_text repeated = {NULL, 0, 0};
+        if (!(times >= 0.0) || !isfinite(times)) {
+            status = KILN_C99_CONTROL_ERROR;
+        } else {
+            size_t remaining = (size_t)times;
+            while (remaining-- > 0 && status == KILN_C99_OK) {
+                status = kiln_c99_text_append(&repeated, receiver.ptr, receiver.len);
+            }
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, repeated.bytes, repeated.len);
+        }
+        break;
+    }
+    case KILN_C99_METHOD_PAD_START:
+    case KILN_C99_METHOD_PAD_END: {
+        double target = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        static const uint16_t space[] = {0x20};
+        const uint16_t *filler = space;
+        size_t filler_count = 1;
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            kiln_value shown = kiln_c99_text(args[1]);
+            free(needle);
+            needle = NULL;
+            needle_count = 0;
+            if (shown.tag != KILN_VALUE_STRING ||
+                kiln_c99_to_units(shown, &needle, &needle_count) != KILN_C99_OK) {
+                status = KILN_C99_CONTROL_ERROR;
+                break;
+            }
+            filler = needle;
+            filler_count = needle_count;
+        }
+        if (!(target > (double)count) || filler_count == 0) {
+            *result = kiln_c99_from_units(units, count);
+        } else {
+            size_t wanted = (size_t)target;
+            uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
+            size_t fill = wanted - count;
+            size_t index;
+            if (padded == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            for (index = 0; index < fill; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? index : count + index] =
+                    filler[index % filler_count];
+            }
+            for (index = 0; index < count; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? fill + index : index] = units[index];
+            }
+            *result = kiln_c99_from_units(padded, wanted);
+            free(padded);
+        }
+        break;
+    }
+    case KILN_C99_METHOD_TO_UPPER_CASE:
+    case KILN_C99_METHOD_TO_LOWER_CASE: {
+        size_t index;
+        uint16_t *cased = (uint16_t *)malloc((count == 0 ? 1 : count) * sizeof *cased);
+        if (cased == NULL) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            break;
+        }
+        for (index = 0; index < count; ++index) {
+            uint16_t unit = units[index];
+            /* Case mapping outside ASCII needs Unicode tables this unit does not carry, and
+             * guessing would disagree with the interpreter silently. */
+            if (unit >= 0x80) {
+                free(cased);
+                free(units);
+                free(needle);
+                return KILN_C99_CONTROL_ERROR;
+            }
+            cased[index] = code == KILN_C99_METHOD_TO_UPPER_CASE
+                               ? (uint16_t)toupper((int)unit)
+                               : (uint16_t)tolower((int)unit);
+        }
+        *result = kiln_c99_from_units(cased, count);
+        free(cased);
+        break;
+    }
+    case KILN_C99_METHOD_REPLACE:
+    case KILN_C99_METHOD_REPLACE_ALL: {
+        kiln_value with = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
+        uint16_t *replacement = NULL;
+        size_t replacement_count = 0;
+        kiln_text built = {NULL, 0, 0};
+        size_t from = 0;
+        double at;
+        if (with.tag == KILN_VALUE_STRING &&
+            kiln_c99_to_units(with, &replacement, &replacement_count) != KILN_C99_OK) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            break;
+        }
+        while ((at = kiln_c99_units_find(units, count, needle, needle_count, from)) >= 0.0) {
+            kiln_value head = kiln_c99_from_units(units + from, (size_t)at - from);
+            kiln_value tail = kiln_c99_from_units(replacement, replacement_count);
+            if (kiln_c99_text_append(&built, head.ptr, head.len) != KILN_C99_OK ||
+                kiln_c99_text_append(&built, tail.ptr, tail.len) != KILN_C99_OK) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            from = (size_t)at + needle_count;
+            /* `replace` takes the first occurrence; `replaceAll` takes every one. An empty
+             * needle would otherwise never advance. */
+            if (code == KILN_C99_METHOD_REPLACE || needle_count == 0) {
+                break;
+            }
+        }
+        if (status == KILN_C99_OK) {
+            kiln_value rest = kiln_c99_from_units(units + from, count - from);
+            if (kiln_c99_text_append(&built, rest.ptr, rest.len) != KILN_C99_OK) {
+                status = KILN_C99_OUT_OF_MEMORY;
+            } else {
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            }
+        }
+        free(replacement);
+        break;
+    }
+    case KILN_C99_METHOD_STRING_CONCAT: {
+        kiln_text built = {NULL, 0, 0};
+        size_t index;
+        if (kiln_c99_text_append(&built, receiver.ptr, receiver.len) != KILN_C99_OK) {
+            status = KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
+            kiln_value shown = kiln_c99_text(args[index]);
+            if (shown.tag != KILN_VALUE_STRING ||
+                kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                status = KILN_C99_CONTROL_ERROR;
+            }
+        }
+        if (status == KILN_C99_OK) {
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        }
+        break;
+    }
+    default:
+        status = KILN_C99_CONTROL_ERROR;
+        break;
+    }
+    free(units);
+    free(needle);
+    return status;
+}
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth) {
     kiln_array *array;
     size_t index;
     int status;
+    if (code >= KILN_C99_METHOD_STRING_SLICE) {
+        if (receiver.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_invoke_string_method(result, code, receiver, args, argc);
+    }
     if (receiver.tag != KILN_VALUE_ARRAY) {
         /* A method detached from its array has no receiver to work on, which is a TypeError in
          * the language for the same reason. */
