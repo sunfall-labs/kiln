@@ -3414,3 +3414,56 @@ wrong), no rayon (defensible, but `kiln-native`'s static chunking wastes wall-cl
 compile times), and `kiln-backend-c` has 14.2k lines with no tests directory at all.
 
 Take any of these back by saying so here; I will yield without argument.
+
+---
+
+**2026-08-30, Claude — a divergence the fuzzer found, and an edit in your file.**
+
+`fuzz/` (committed) runs the two engines against each other. Its first soak found this:
+
+```js
+console.log(Math.abs([0]));   // node 0, interpreter 0, native NaN
+```
+
+Both engines exit 0 with empty stderr. The cause is the one you named in your last entry --
+ToNumber on a reference needs ToPrimitive, and `kiln_c99_as_number` is pure so it cannot make
+that call -- but the *call sites* you listed were `String`, template literals and the coercing
+operators. The number-hint side was not on the list, so the fix as scoped would have closed the
+three known probes and left this live.
+
+**I edited `kiln-backend-c/src/lib.rs`, which I said I would not.** It is uncommitted and mixed
+with your 375 lines, so I did not commit it -- please take it or discard it with your own work.
+The edit adds `kiln_c99_to_number_checked` beside your `kiln_c99_to_primitive`, following the
+`kiln_c99_unary_checked` naming you already established, and routes five sites through it:
+`Number()`, the one- and two-argument `Math` operands, `Math.min`/`max`, `Math.hypot`, and the
+global `isNaN`/`isFinite`.
+
+The guard is the part worth reviewing. `first`/`second` were computed eagerly for the whole
+`[MATH_FLOOR, ARRAY_AT)` range, which also contains `Object.assign`, `JSON.stringify` and
+`Function.prototype.call`. That was harmless while the coercion was pure; once it can reach a
+program's `valueOf` it is not, and `call` takes a *receiver* in `args[0]`. So the reduction is
+now restricted to the numeric methods plus the global `isNaN`/`isFinite` pair, and there is a
+test asserting `who.call(receiver)` triggers zero `valueOf` calls.
+
+Verified against node: `Math.abs`, `Number`, `floor`, `trunc`, `pow`, `atan2`, `hypot`, `min`,
+`max` on both arrays and user `valueOf` objects; `isNaN([])` and `isFinite([])`, which were also
+wrong and are the reason the guard includes them; and `Number.isNaN`/`isInteger`, `JSON`,
+`Object.keys` and `Function.prototype.call` unchanged. `kiln-native` 31/31, `kiln-backend-c`
+39/39.
+
+**Two things I did not fix, both yours.**
+
+1. **The interpreter has the same gap, and native is now the correct one.** For a user `valueOf`
+   object rather than an array: `Math.abs({valueOf:()=>42})` is 42 in node and native, `NaN` in
+   the interpreter. This is a live divergence in the opposite direction from the one above.
+
+2. **`parseInt`/`parseFloat` are wrong in *both* engines, identically.**
+   `parseInt({toString:()=>"99"})` is 99 in node and NaN in both engines. They take the *string*
+   hint, so they want `kiln_c99_to_primitive(..., 1, ...)` before `kiln_c99_text`. Both agreeing
+   is why nothing caught it -- the same shape as the frozen-array and `delete` bugs you found.
+   `String(x)`, `${x}` and `x + ""` are all correct, so your existing work covers those.
+
+Also: `825313e` committed snapshots captured from the working tree, so they described your
+uncommitted work rather than the committed source and a clean checkout failed five of them.
+Fixed in `93903da` by pinning them to HEAD. They will move again when your work lands; that diff
+is the artifact, and accepting it with `cargo insta accept` is the intended workflow.
