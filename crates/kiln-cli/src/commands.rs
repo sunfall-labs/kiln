@@ -153,7 +153,12 @@ pub fn build(
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
     }
-    let output = native_output_path(path, project_root, requested_output, shared)?;
+    let output = native_output_path(
+        Path::new(&canonical),
+        project_root,
+        requested_output,
+        shared,
+    )?;
     if Path::new(&output) == Path::new(&canonical)
         || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&canonical))
     {
@@ -223,32 +228,16 @@ fn native_output_path(
     requested: Option<&Path>,
     shared: bool,
 ) -> Result<String> {
-    let output = requested.map(PathBuf::from).unwrap_or_else(|| {
-        let stem = source
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("module");
-        let mut output = root
-            .join(".kiln")
-            .join(if shared { "lib" } else { "bin" })
-            .join(stem);
-        if shared {
-            output.set_extension(if cfg!(target_os = "macos") {
-                "dylib"
-            } else if cfg!(windows) {
-                "dll"
-            } else {
-                "so"
-            });
-        } else if cfg!(windows) {
-            output.set_extension("exe");
+    let output = if let Some(requested) = requested {
+        if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
         }
-        output
-    });
-    let output = if output.is_absolute() {
-        output
+    } else if shared {
+        kiln_daemon::default_native_shared_output(root, source)
     } else {
-        root.join(output)
+        kiln_daemon::default_native_output(root, source)
     };
     output
         .to_str()
@@ -1045,16 +1034,33 @@ mod tests {
     }
 
     #[test]
-    fn native_output_defaults_to_project_bin_and_resolves_relative_paths() {
+    fn native_output_defaults_preserve_project_relative_directories_and_explicit_paths() {
         let root = Path::new("/tmp/project");
+        let executable = if cfg!(windows) { "main.exe" } else { "main" };
         assert_eq!(
             native_output_path(Path::new("src/main.ts"), root, None, false)
                 .expect("default output"),
             root.join(".kiln")
                 .join("bin")
-                .join(if cfg!(windows) { "main.exe" } else { "main" })
+                .join("src")
+                .join(executable)
                 .to_str()
                 .expect("utf-8")
+        );
+        assert_eq!(
+            native_output_path(Path::new("main.ts"), root, None, false)
+                .expect("root default output"),
+            root.join(".kiln")
+                .join("bin")
+                .join(executable)
+                .to_str()
+                .expect("utf-8")
+        );
+        assert_ne!(
+            native_output_path(Path::new("src/main.ts"), root, None, false)
+                .expect("source default output"),
+            native_output_path(Path::new("tests/main.ts"), root, None, false)
+                .expect("test default output")
         );
         assert_eq!(
             native_output_path(
@@ -1081,6 +1087,7 @@ mod tests {
         let expected = root
             .join(".kiln")
             .join("lib")
+            .join("src")
             .join(format!("main.{expected_extension}"));
         assert_eq!(
             native_output_path(Path::new("src/main.ts"), root, None, true).expect("shared output"),

@@ -37,6 +37,7 @@
 mod client;
 mod dispatch;
 mod framing;
+mod output;
 mod server;
 mod socket;
 mod testing;
@@ -46,5 +47,6 @@ mod tests;
 
 pub use client::Client;
 pub use framing::MAX_MESSAGE_BYTES;
+pub use output::{default_native_output, default_native_shared_output};
 pub use server::{Daemon, DaemonError, ShutdownHandle};
 pub use socket::socket_path;
