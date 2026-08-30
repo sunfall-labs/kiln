@@ -456,6 +456,9 @@ impl Builtin {
             "Reflect" => Some(Self::Reflect),
             "BigInt" => Some(Self::BigInt),
             "process" => Some(Self::Process),
+            // node's alias for the global object. `globalThis` exists to unify it with the
+            // browser's `self`, and code written before that still tests for this one.
+            "global" => Some(Self::GlobalThis),
             "Function" => Some(Self::Function),
             "Proxy" => Some(Self::Proxy),
             "escape" => Some(Self::Escape),
@@ -2425,7 +2428,7 @@ impl Compiler {
             } if matches!(
                 &argument.kind,
                 ExpressionKind::Identifier(name)
-                    if matches!(self.resolve(name), Resolution::Unresolved)
+                    if self.names_nothing(name)
                         && Builtin::from_name(name).is_none()
                         && name != "undefined"
                         && name != "this"
@@ -4177,6 +4180,27 @@ impl Compiler {
             return Resolution::Upvalue(index);
         }
         self.resolve(name)
+    }
+
+    /// Whether `name` binds nothing anywhere in scope, without creating a capture to find out.
+    ///
+    /// `resolve` alone is not this question: it looks in the current function and then jumps to
+    /// module scope, skipping every function in between. Asking it directly made
+    /// `typeof enclosingParameter` answer "undefined" -- which is the wrong answer for a name
+    /// that plainly exists, and is exactly what every CommonJS shim tests when it writes
+    /// `typeof exports == "object"` inside a nested function.
+    fn names_nothing(&self, name: &str) -> bool {
+        if self.scopes.iter().any(|scope| scope.contains_key(name)) {
+            return false;
+        }
+        if self
+            .enclosing
+            .iter()
+            .any(|level| level.scopes.iter().any(|scope| scope.contains_key(name)))
+        {
+            return false;
+        }
+        matches!(self.resolve(name), Resolution::Unresolved)
     }
 
     /// Thread a binding from the function that owns it down to the one being compiled.

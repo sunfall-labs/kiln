@@ -1790,3 +1790,48 @@ an array at all.**
   rather than done badly.
 
 differential 86/0/0, thirdparty 8/8, conformance 39/39, Effect 12/12, 48 test binaries.
+
+**2026-08-29, Claude — acorn parses JavaScript under kiln; lodash found two more wrong answers.**
+
+`conformance/thirdparty` is **10/10** now, with acorn and lodash added.
+
+**acorn passed on its first run** -- the only entry that has. It is a JavaScript parser, so it
+exercises the language against itself: heavy regexes, classes, string scanning, a hand-written
+state machine over thousands of lines. Worth having as a fixture for that reason alone.
+
+**lodash found `typeof capturedName` answering `"undefined"`** for a name belonging to an
+*enclosing function*. The check asked `resolve`, which looks in the current function and then
+jumps to module scope, skipping everything in between. Every CommonJS shim a bundler emits writes
+`typeof exports == "object"` inside a nested function -- so lodash concluded it was in a browser,
+published itself on the global object, and left `module.exports` empty. `names_nothing` answers
+the question without creating a capture to do it.
+
+It also found that **`Object.getOwnPropertyNames` ignored a function's own properties**, which is
+how those same shims copy a module whose exports *are* a function.
+
+**Then the prototype chain, which took three tries and is worth reading.** Giving arrays and
+functions their real prototypes (`Object.getPrototypeOf([]) === Array.prototype`) sent immer down
+a path it had not taken before, and it hit a chain that *looped*: a method table reported
+`Function.prototype` as its own prototype, including `Function.prototype` itself. Every walk ran
+forever. `Object.prototype` is now the end of every chain, the other tables inherit from it, and
+`prototype_of` is one function so `getPrototypeOf` and `instanceof` cannot disagree about the
+shape of the chain -- which is the sort of disagreement that makes `x instanceof C` false for an
+`x` the program just built.
+
+Falling out of that: `typeof Object.prototype` is "object" rather than "function" (with
+`Function.prototype` the specification's exception), `Object instanceof Object` is true, a
+function inherits `Object.prototype`'s methods (`Object.hasOwnProperty.call(x, k)` is how the
+plain-object check reads them), and **`Object.create(null)` now records the absence of a
+prototype** -- distinct from recording nothing, which is what an ordinary object does and why it
+inherits `Object.prototype`.
+
+**Two realm decisions.** `global` is an alias for `globalThis`, because `globalThis` exists
+precisely to unify it with the browser's `self` and older code still tests for it -- lodash's
+`Function("return this")()` fallback is only reached when it is missing. And **`Function(source)`
+now throws** where it used to return `undefined`: building a function from a string needs a
+compiler at run time, which is a different kind of realm from the one an ahead-of-time compiler
+targets. Saying so beats the `undefined` that turned up three frames later as "undefined is not a
+function". That is a deliberate divergence from node and is *not* in a differential probe for
+that reason.
+
+differential 87/0/0, thirdparty 10/10, conformance 39/39, Effect 12/12.
