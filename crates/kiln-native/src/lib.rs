@@ -24,7 +24,7 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
-use kiln_module_graph::{ModuleGraph, ModuleGraphError};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RESULT_PATH_ENV,
     NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result, launcher_source,
@@ -1786,6 +1786,88 @@ fn graph_shared_topology_digest(
     Digest::hash(&bytes)
 }
 
+/// Resolve one module import to the concrete export-array slot that owns its binding.
+///
+/// Raw provider export tables are insufficient here: `export *` deliberately has only one
+/// synthetic entry, while the graph linker resolves each forwarded name to its canonical origin.
+/// The synthetic namespace import used solely to carry a star table is skipped; user-observable
+/// namespace values need an object-capable module ABI and remain explicitly unsupported natively.
+fn graph_import_slot(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+    node: &kiln_module_graph::ModuleNode,
+    import: &kiln_ir::ImportBinding,
+) -> Result<Option<(usize, usize)>, NativeError> {
+    let dependency = node
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == import.source)
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::UnresolvedImport {
+                importer: node.path.clone(),
+                source: import.source.clone(),
+            })
+        })?;
+    if import.imported == kiln_ir::NAMESPACE_IMPORT {
+        let internal_star_table = node.program.exports.iter().any(|export| {
+            export.local_slot == import.local_slot
+                && export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+        });
+        if internal_star_table {
+            return Ok(None);
+        }
+        return Err(NativeError::Emit(EmitError::Unsupported {
+            feature: "namespace imports in native module graphs".to_owned(),
+        }));
+    }
+
+    let (origin, local_slot) = match graph.resolved_export(&dependency.target, &import.imported) {
+        Some(ResolvedExport::Local { module, local_slot }) => (module, *local_slot),
+        Some(ResolvedExport::Namespace { .. }) => {
+            return Err(NativeError::Emit(EmitError::Unsupported {
+                feature: "namespace re-exports in native module graphs".to_owned(),
+            }));
+        }
+        Some(ResolvedExport::Ambiguous) => {
+            return Err(NativeError::Graph(ModuleGraphError::AmbiguousExport {
+                importer: node.path.clone(),
+                provider: dependency.target.clone(),
+                name: import.imported.clone(),
+            }));
+        }
+        None => {
+            return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                importer: node.path.clone(),
+                provider: dependency.target.clone(),
+                name: import.imported.clone(),
+            }));
+        }
+    };
+    let provider_index = *indices.get(origin).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: origin.clone(),
+        })
+    })?;
+    let export_index = modules[provider_index]
+        .0
+        .program
+        .exports
+        .iter()
+        .position(|export| {
+            export.local_slot == local_slot
+                && !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+        })
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::MissingExport {
+                importer: node.path.clone(),
+                provider: origin.clone(),
+                name: import.imported.clone(),
+            })
+        })?;
+    Ok(Some((provider_index, export_index)))
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -1873,34 +1955,11 @@ int main(void) {
     );
     for (index, (node, module)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
-            let dependency = node
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == import.source)
-                .ok_or_else(|| {
-                    NativeError::Graph(ModuleGraphError::UnresolvedImport {
-                        importer: node.path.clone(),
-                        source: import.source.clone(),
-                    })
-                })?;
-            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
-                NativeError::Graph(ModuleGraphError::InternalMissingModule {
-                    path: dependency.target.clone(),
-                })
-            })?;
-            let export_index = modules[provider_index]
-                .0
-                .program
-                .exports
-                .iter()
-                .position(|export| export.exported == import.imported)
-                .ok_or_else(|| {
-                    NativeError::Graph(ModuleGraphError::MissingExport {
-                        importer: node.path.clone(),
-                        provider: dependency.target.clone(),
-                        name: import.imported.clone(),
-                    })
-                })?;
+            let Some((provider_index, export_index)) =
+                graph_import_slot(graph, modules, &indices, node, import)?
+            else {
+                continue;
+            };
             writeln!(
                 output,
                 "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
@@ -2064,7 +2123,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         if !node.program.imports.is_empty() {
             writeln!(
                 output,
-                "    if ((size_t){} > (size_t)-1 / sizeof(**import_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    import_arrays[{index}] = (kiln_value *)malloc((size_t){} * sizeof(**import_arrays));\n    if (import_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+                "    if ((size_t){} > (size_t)-1 / sizeof(**import_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    import_arrays[{index}] = (kiln_value *)calloc((size_t){}, sizeof(**import_arrays));\n    if (import_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
                 node.program.imports.len(),
                 node.program.imports.len()
             )
@@ -2080,34 +2139,11 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             .unwrap();
         }
         for (import_index, import) in node.program.imports.iter().enumerate() {
-            let dependency = node
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == import.source)
-                .ok_or_else(|| {
-                    NativeError::Graph(ModuleGraphError::UnresolvedImport {
-                        importer: node.path.clone(),
-                        source: import.source.clone(),
-                    })
-                })?;
-            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
-                NativeError::Graph(ModuleGraphError::InternalMissingModule {
-                    path: dependency.target.clone(),
-                })
-            })?;
-            let export_index = modules[provider_index]
-                .0
-                .program
-                .exports
-                .iter()
-                .position(|export| export.exported == import.imported)
-                .ok_or_else(|| {
-                    NativeError::Graph(ModuleGraphError::MissingExport {
-                        importer: node.path.clone(),
-                        provider: dependency.target.clone(),
-                        name: import.imported.clone(),
-                    })
-                })?;
+            let Some((provider_index, export_index)) =
+                graph_import_slot(graph, modules, &indices, node, import)?
+            else {
+                continue;
+            };
             writeln!(
                 output,
                 "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];"
@@ -2948,6 +2984,219 @@ mod tests {
         };
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
             .expect("construct one-module graph")
+    }
+
+    fn star_reexport_graph(project: &Path) -> ModuleGraph {
+        fs::create_dir_all(project).expect("create star graph project");
+        for name in ["origin.js", "barrel.js", "main.js"] {
+            fs::write(project.join(name), "").expect("write star graph module");
+        }
+        let origin = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(42.0_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "answer".into(),
+                local_slot: 0,
+            }],
+        };
+        let barrel = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Undefined],
+                code: vec![Instruction::Const(0), Instruction::Return],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./origin.js".into()],
+            imports: vec![ImportBinding {
+                source: "./origin.js".into(),
+                imported: kiln_ir::NAMESPACE_IMPORT.into(),
+                local: "*reexport0*".into(),
+                local_slot: 0,
+            }],
+            exports: vec![ExportBinding {
+                exported: format!("{}./origin.js", kiln_ir::STAR_REEXPORT_PREFIX),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Undefined],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Pop,
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./barrel.js".into()],
+            imports: vec![ImportBinding {
+                source: "./barrel.js".into(),
+                imported: "answer".into(),
+                local: "answer".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
+        let barrel_path = fs::canonicalize(project.join("barrel.js")).expect("canonical barrel");
+        ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
+            if path == origin_path {
+                origin.clone()
+            } else if path == barrel_path {
+                barrel.clone()
+            } else {
+                entry.clone()
+            }
+        })
+        .expect("construct star re-export graph")
+    }
+
+    fn namespace_import_graph(project: &Path) -> ModuleGraph {
+        fs::create_dir_all(project).expect("create namespace graph project");
+        for name in ["origin.js", "main.js"] {
+            fs::write(project.join(name), "").expect("write namespace graph module");
+        }
+        let origin = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(42.0_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "answer".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Undefined],
+                code: vec![Instruction::Const(0), Instruction::Return],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./origin.js".into()],
+            imports: vec![ImportBinding {
+                source: "./origin.js".into(),
+                imported: kiln_ir::NAMESPACE_IMPORT.into(),
+                local: "namespace".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
+        ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
+            if path == origin_path {
+                origin.clone()
+            } else {
+                entry.clone()
+            }
+        })
+        .expect("construct namespace import graph")
+    }
+
+    #[test]
+    fn native_graph_wiring_uses_resolved_star_export_origins() {
+        let root = TestDirectory::new("kiln-native-star-graph");
+        let graph = star_reexport_graph(&root.path.join("project"));
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    kiln_backend_c::emit_module(&node.program).expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        assert!(launcher.contains("kiln_imports_2[0] = kiln_exports_0[0];"));
+        assert!(!launcher.contains("kiln_imports_1[0] ="));
+        let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
+            .expect("shared wrapper emits");
+        assert!(wrapper.contains("import_arrays[2][0] = export_arrays[0][0];"));
+        assert!(!wrapper.contains("import_arrays[1][0] ="));
+        assert!(wrapper.contains("import_arrays[1] = (kiln_value *)calloc"));
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native star integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let run = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native star graph runs");
+        assert_eq!(run.stdout, b"42\n");
+        builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native shared star graph links");
+    }
+
+    #[test]
+    fn native_graphs_reject_user_visible_namespace_values_explicitly() {
+        let root = TestDirectory::new("kiln-native-namespace-graph");
+        let graph = namespace_import_graph(&root.path.join("project"));
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    kiln_backend_c::emit_module(&node.program).expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            graph_launcher_source(&graph, &modules),
+            Err(NativeError::Emit(EmitError::Unsupported { feature }))
+                if feature.contains("namespace imports")
+        ));
+        assert!(matches!(
+            graph_shared_wrapper_source(&graph, &modules, "kiln_namespace_graph"),
+            Err(NativeError::Emit(EmitError::Unsupported { feature }))
+                if feature.contains("namespace imports")
+        ));
     }
 
     #[test]
