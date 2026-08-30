@@ -333,6 +333,10 @@ impl PartialEq for GeneratorState {
 #[derive(Debug)]
 pub struct Closure {
     pub function: u32,
+    /// The declared name, for a console to show. Shared with every other closure over the same
+    /// proto rather than copied, because a function expression in a loop makes one closure per
+    /// pass and the name is the same every time.
+    pub name: Option<Rc<str>>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
     /// The enclosing function's `arguments`, captured for an arrow.
@@ -566,17 +570,11 @@ impl From<Value> for HostValue {
             Value::Number(value) => Self::Number(value.to_bits()),
             Value::String(value) => Self::String(value),
             // The ABI is scalars only, deliberately: a host operation that received a callable
-            // would need the VM to call back into itself, which is a different contract from
-            // the one HostOps has. Passing the display form keeps `console.log(fn)` printing
-            // something truthful rather than failing.
-            Value::Function(closure) => Self::String(format!("[Function {}]", closure.function)),
-            Value::Object(_) => Self::String("[object Object]".to_owned()),
-            Value::Native(native) => Self::String(format!("[Function {native:?}]")),
-            Value::Callback(method) => Self::String(format!("[Function {method:?}]")),
-            Value::Generator(_) => Self::String("[object Generator]".to_owned()),
-            Value::Symbol(symbol) => Self::String(symbol.property_key().to_owned()),
-            Value::Array(items) => Self::String(join(&items.borrow(), ",")),
-            Value::Cell(_) => unreachable!("a cell is never passed to a host operation"),
+            // would need the VM to call back into itself, which is a different contract from the
+            // one `HostOps` has. Everything else is inspected on the way out, so `console.log`
+            // shows an object's contents rather than the useless `[object Object]` that
+            // `String(value)` produces -- the two really are different questions.
+            other => Self::String(inspect(&other)),
         }
     }
 }
@@ -680,6 +678,11 @@ pub enum ExecutionError {
         instruction: usize,
         value: &'static str,
     },
+    /// `reduce` on an empty array with no initial value.
+    ///
+    /// A catchable `TypeError` in the specification; fatal here for the same reason
+    /// [`Self::CyclicJson`] is.
+    EmptyReduce,
     /// `JSON.parse` was given text that is not JSON.
     ///
     /// A catchable `SyntaxError` in the specification, and fatal here for the same reason
@@ -762,6 +765,7 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "instruction {instruction} used `new` on a {value}, which is not a constructor"
             ),
+            Self::EmptyReduce => write!(formatter, "reduce of empty array with no initial value"),
             Self::InvalidJson => write!(formatter, "unexpected token in JSON"),
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
             Self::GeneratorReturned => write!(formatter, "generator returned"),
@@ -823,6 +827,11 @@ pub fn execute<H: HostOps + ?Sized>(
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
+        function_names: program
+            .functions
+            .iter()
+            .map(|proto| proto.name.as_deref().map(Rc::from))
+            .collect(),
         steps: 0,
         symbol_serial: 0,
         limits,
@@ -870,6 +879,12 @@ pub fn execute_module<H: HostOps + ?Sized>(
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
+        function_names: module
+            .program
+            .functions
+            .iter()
+            .map(|proto| proto.name.as_deref().map(Rc::from))
+            .collect(),
         steps: 0,
         symbol_serial: 0,
         limits,
@@ -948,6 +963,8 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     this_value: Value,
     frames: Vec<Frame>,
     instruction: usize,
+    /// One shared name per proto, so making a closure copies a pointer rather than a string.
+    function_names: Vec<Option<Rc<str>>>,
     steps: u64,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
     /// symbol needs: it never leaves the run that made it.
@@ -1893,6 +1910,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
                     unreachable!("generator methods are handled by `invoke`")
                 }
+                CallbackMethod::Reduce => {
+                    unreachable!("`reduce` is handled by `array_reduce`")
+                }
                 CallbackMethod::Map => collected.push(result),
                 CallbackMethod::ForEach => {}
                 CallbackMethod::Filter => {
@@ -1923,6 +1943,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
                 unreachable!("generator methods are handled by `invoke`")
             }
+            CallbackMethod::Reduce => unreachable!("`reduce` is handled by `array_reduce`"),
             CallbackMethod::Map | CallbackMethod::Filter => {
                 Value::Array(Rc::new(RefCell::new(collected)))
             }
@@ -1930,6 +1951,53 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             CallbackMethod::Some => Value::Boolean(false),
             CallbackMethod::Every => Value::Boolean(true),
         })
+    }
+
+    /// `reduce(callback, initial?)`.
+    ///
+    /// With no initial value the first element seeds the accumulator and the walk starts at the
+    /// second, which is why this cannot share `array_callback`'s loop: the starting index depends
+    /// on an argument, and the callback takes four parameters rather than three.
+    fn array_reduce(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Array(items) = receiver else {
+            return Ok(Value::Undefined);
+        };
+        let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let (mut accumulator, mut index) = match arguments.get(1) {
+            Some(initial) => (initial.clone(), 0usize),
+            None => {
+                // Reducing an empty array with no initial value has no answer to give, which is
+                // a TypeError in the specification and fatal here for want of a way to throw one.
+                let Some(first) = items.borrow().first().cloned() else {
+                    return Err(ExecutionError::EmptyReduce);
+                };
+                (first, 1usize)
+            }
+        };
+        loop {
+            // The length is re-read each step, so a callback that shortens the array stops the
+            // walk rather than reading past the end -- the same rule `array_callback` follows.
+            let Some(item) = items.borrow().get(index).cloned() else {
+                return Ok(accumulator);
+            };
+            accumulator = self.call_value(
+                &callback,
+                Value::Undefined,
+                vec![
+                    accumulator,
+                    item,
+                    Value::Number(index as f64),
+                    receiver.clone(),
+                ],
+                instruction,
+            )?;
+            index += 1;
+        }
     }
 
     /// Call `callee` and run it to completion, returning its value.
@@ -2141,6 +2209,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
         Ok(Rc::new(Closure {
             function,
+            name: self.function_names[function as usize].clone(),
             upvalues,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
             // how it is called, so it captures nothing here.
@@ -2281,6 +2350,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 };
                 Ok(Some(iteration_result(value, done)))
             }
+            // `reduce` threads an accumulator, so it is not the same walk as the others.
+            Value::Callback(CallbackMethod::Reduce) => self
+                .array_reduce(&receiver, &arguments, instruction)
+                .map(Some),
             Value::Callback(method) => Ok(Some(self.array_callback(
                 method,
                 &receiver,
@@ -3386,6 +3459,7 @@ fn array_callback_method(name: &str) -> Option<CallbackMethod> {
         "map" => Some(CallbackMethod::Map),
         "forEach" => Some(CallbackMethod::ForEach),
         "filter" => Some(CallbackMethod::Filter),
+        "reduce" => Some(CallbackMethod::Reduce),
         "find" => Some(CallbackMethod::Find),
         "some" => Some(CallbackMethod::Some),
         "every" => Some(CallbackMethod::Every),
@@ -3406,6 +3480,9 @@ pub enum CallbackMethod {
     Map,
     ForEach,
     Filter,
+    /// `reduce`: the only one whose callback takes the accumulator, so it does not fit the
+    /// `(item, index, array)` walk the rest share.
+    Reduce,
     Find,
     Some,
     Every,
@@ -3675,6 +3752,210 @@ impl JsonReader<'_> {
     }
 }
 
+/// Render a value the way a console does.
+///
+/// Deliberately not `to_display_string`, which is `String(value)` and answers a different
+/// question: `String({ a: 1 })` is "[object Object]" and always will be, while a console showing
+/// that instead of the contents is close to useless. Nested strings are quoted and top-level ones
+/// are not, for the same reason -- `console.log("hi")` prints hi, but `{ a: "hi" }` has to show
+/// that `a` holds a string rather than a bare word.
+///
+/// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it,
+/// with two documented limits: output is always one line, where node wraps past about 72
+/// characters, and a cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
+fn inspect(value: &Value) -> String {
+    match value {
+        // A top-level string prints as itself; only a nested one is quoted.
+        Value::String(text) => text.clone(),
+        other => inspect_nested(other, 0, &mut Vec::new()),
+    }
+}
+
+/// How deep node descends before printing a placeholder instead of the contents.
+const INSPECT_DEPTH: usize = 2;
+
+fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String {
+    match value {
+        Value::String(text) => quote_for_console(text),
+        Value::Undefined | Value::Null | Value::Boolean(_) | Value::Number(_) => {
+            // `-0` prints as itself here, where `String(-0)` is "0": the console is showing the
+            // value, not converting it.
+            match value {
+                Value::Number(number) if *number == 0.0 && number.is_sign_negative() => {
+                    "-0".to_owned()
+                }
+                other => other.to_display_string(),
+            }
+        }
+        Value::Symbol(symbol) => format!("Symbol({})", symbol.description()),
+        Value::Function(closure) => match &closure.name {
+            Some(name) => format!("[Function: {name}]"),
+            None => "[Function (anonymous)]".to_owned(),
+        },
+        Value::Native(native) => format!("[Function: {native:?}]"),
+        Value::Callback(method) => format!("[Function: {method:?}]"),
+        Value::Generator(_) => "Object [Generator] {}".to_owned(),
+        Value::Array(items) => {
+            let Some(guard) = InspectGuard::enter(seen, Rc::as_ptr(items).cast::<()>()) else {
+                return "[Circular *1]".to_owned();
+            };
+            if depth > INSPECT_DEPTH {
+                return "[Array]".to_owned();
+            }
+            let items = items.borrow();
+            if items.is_empty() {
+                return "[]".to_owned();
+            }
+            let parts = items
+                .iter()
+                .map(|item| inspect_nested(item, depth + 1, guard.seen))
+                .collect::<Vec<_>>();
+            format!("[ {} ]", parts.join(", "))
+        }
+        Value::Object(object) => {
+            let Some(guard) = InspectGuard::enter(seen, Rc::as_ptr(object).cast::<()>()) else {
+                return "[Circular *1]".to_owned();
+            };
+            if depth > INSPECT_DEPTH {
+                return "[Object]".to_owned();
+            }
+            inspect_object(&object.borrow(), depth, guard.seen)
+        }
+        Value::Cell(_) => unreachable!("a cell is never inspected"),
+    }
+}
+
+fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> String {
+    // A Set or Map is an object carrying reserved state, and a console shows what it holds
+    // rather than the bookkeeping that makes it work.
+    if let Some(Value::Array(entries)) = object.get_own("@@entries") {
+        let is_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+        let live: Vec<_> = entries
+            .borrow()
+            .iter()
+            .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone)))
+            .cloned()
+            .collect();
+        let label = if is_map { "Map" } else { "Set" };
+        if live.is_empty() {
+            return format!("{label}(0) {{}}");
+        }
+        let parts = live
+            .iter()
+            .map(|entry| match (is_map, entry) {
+                (true, Value::Array(pair)) => {
+                    let pair = pair.borrow();
+                    let key = pair.first().cloned().unwrap_or(Value::Undefined);
+                    let value = pair.get(1).cloned().unwrap_or(Value::Undefined);
+                    format!(
+                        "{} => {}",
+                        inspect_nested(&key, depth + 1, seen),
+                        inspect_nested(&value, depth + 1, seen)
+                    )
+                }
+                (_, entry) => inspect_nested(entry, depth + 1, seen),
+            })
+            .collect::<Vec<_>>();
+        return format!("{label}({}) {{ {} }}", live.len(), parts.join(", "));
+    }
+
+    let parts = object
+        .entries()
+        // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
+        // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
+        .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+        .map(|(key, value)| {
+            format!(
+                "{}: {}",
+                inspect_key(key),
+                inspect_nested(value, depth + 1, seen)
+            )
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return "{}".to_owned();
+    }
+    format!("{{ {} }}", parts.join(", "))
+}
+
+/// A property name as a console writes it: bare when it is a plain identifier, quoted otherwise.
+///
+/// `$` is not in the set, which looks like an oversight and is not: node's own rule is
+/// `/^[a-zA-Z_][a-zA-Z_0-9]*$/`, so `{ a$b: 1 }` prints with its key quoted and so does `{ 3: 1 }`.
+/// Matching node exactly is what lets `scripts/differential.sh` diff console output at all.
+fn inspect_key(key: &str) -> String {
+    let mut characters = key.chars();
+    let identifier = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_');
+    if identifier {
+        key.to_owned()
+    } else {
+        quote_for_console(key)
+    }
+}
+
+/// A string as a console shows it.
+///
+/// The quote character is whichever one the string does not already contain, so the common case
+/// needs no escaping at all: `"it's"` rather than `'it\'s'`. Single, then double, then backtick,
+/// which is node's order of preference.
+fn quote_for_console(text: &str) -> String {
+    let quote = if !text.contains('\'') {
+        '\''
+    } else if !text.contains('"') {
+        '"'
+    } else if !text.contains('`') && !text.contains("${") {
+        '`'
+    } else {
+        '\''
+    };
+
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push(quote);
+    for character in text.chars() {
+        match character {
+            other if other == quote => {
+                quoted.push('\\');
+                quoted.push(other);
+            }
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\u{c}' => quoted.push_str("\\f"),
+            control if control < ' ' => quoted.push_str(&format!("\\x{:02X}", control as u32)),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push(quote);
+    quoted
+}
+
+/// Marks the containers on the path from the root, so a cycle prints once instead of forever.
+struct InspectGuard<'a> {
+    seen: &'a mut Vec<usize>,
+}
+
+impl<'a> InspectGuard<'a> {
+    fn enter(seen: &'a mut Vec<usize>, container: *const ()) -> Option<Self> {
+        let identity = container as usize;
+        if seen.contains(&identity) {
+            return None;
+        }
+        seen.push(identity);
+        Some(Self { seen })
+    }
+}
+
+impl Drop for InspectGuard<'_> {
+    fn drop(&mut self) {
+        self.seen.pop();
+    }
+}
+
 /// The numeric value of a property key that is an array index.
 ///
 /// An index is a canonical decimal in `0 ..= 2^32 - 2`; `"01"`, `"1.0"`, `"-1"` and `"4294967295"`
@@ -3741,18 +4022,12 @@ fn parse_number(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(f64::NAN)
 }
 
+/// A number as `String(value)` renders it.
+///
+/// Delegates to the ABI crate rather than repeating the rules: both halves must agree about what
+/// `String(1e21)` is, and the surest way for two copies to agree is for there to be one.
 fn number_string(value: f64) -> String {
-    if value.is_nan() {
-        "NaN".to_owned()
-    } else if value == f64::INFINITY {
-        "Infinity".to_owned()
-    } else if value == f64::NEG_INFINITY {
-        "-Infinity".to_owned()
-    } else if value == 0.0 {
-        "0".to_owned()
-    } else {
-        value.to_string()
-    }
+    kiln_host_abi::number_to_js_string(value)
 }
 
 #[cfg(test)]
@@ -3990,6 +4265,7 @@ mod tests {
     fn instanceof_walks_the_chain_by_identity() {
         let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
         let parent = Rc::new(Closure {
+            name: None,
             function: 0,
             upvalues: Vec::new(),
             captured_this: None,
@@ -4002,6 +4278,7 @@ mod tests {
         child_prototype_data.set_prototype(parent_prototype);
         let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
         let child = Rc::new(Closure {
+            name: None,
             function: 1,
             upvalues: Vec::new(),
             captured_this: None,
@@ -4026,6 +4303,7 @@ mod tests {
 
         // A separate constructor with its own prototype must not match, however alike.
         let unrelated = Rc::new(Closure {
+            name: None,
             function: 2,
             upvalues: Vec::new(),
             captured_this: None,
@@ -5065,5 +5343,84 @@ mod tests {
         };
         assert_eq!(object.borrow().keys().count(), 1);
         assert!(matches!(object.borrow().get_own("a"), Some(Value::Number(n)) if *n == 2.0));
+    }
+
+    #[test]
+    fn a_console_shows_contents_where_string_shows_a_tag() {
+        // The whole point of `inspect`: `String({a: 1})` is "[object Object]" and always will be.
+        let value = object(&[
+            ("a", Value::Number(1.0)),
+            ("b", Value::String("x".to_owned())),
+            ("c", Value::Null),
+        ]);
+        assert_eq!(inspect(&value), "{ a: 1, b: 'x', c: null }");
+        assert_eq!(value.to_display_string(), "[object Object]");
+    }
+
+    #[test]
+    fn a_top_level_string_is_bare_and_a_nested_one_is_quoted() {
+        // `console.log("hi")` prints hi; `{ a: "hi" }` has to show that `a` holds a string.
+        assert_eq!(inspect(&Value::String("hi".to_owned())), "hi");
+        assert_eq!(
+            inspect(&array(&[Value::String("hi".to_owned())])),
+            "[ 'hi' ]"
+        );
+    }
+
+    #[test]
+    fn the_quote_character_is_whichever_the_string_lacks() {
+        assert_eq!(quote_for_console("plain"), "'plain'");
+        assert_eq!(quote_for_console("it's"), "\"it's\"");
+        // Both quotes present but no backtick: node reaches for the backtick rather than escape.
+        assert_eq!(quote_for_console("both ' and \""), "`both ' and \"`");
+        // All three present, so something must be escaped and the preferred quote wins.
+        assert_eq!(
+            quote_for_console("all ' \" ` three"),
+            "'all \\' \" ` three'"
+        );
+        assert_eq!(quote_for_console("a\tb\nc"), "'a\\tb\\nc'");
+    }
+
+    #[test]
+    fn a_key_is_bare_only_when_it_is_a_plain_identifier() {
+        // node's rule excludes `$` and anything starting with a digit, however odd that looks.
+        assert_eq!(inspect_key("valid_1"), "valid_1");
+        assert_eq!(inspect_key("_x"), "_x");
+        assert_eq!(inspect_key("has $"), "'has $'");
+        assert_eq!(inspect_key("with$"), "'with$'");
+        assert_eq!(inspect_key("3"), "'3'");
+        assert_eq!(inspect_key(""), "''");
+    }
+
+    #[test]
+    fn empty_containers_and_nesting_read_the_way_node_writes_them() {
+        assert_eq!(inspect(&object(&[])), "{}");
+        assert_eq!(inspect(&array(&[])), "[]");
+        assert_eq!(
+            inspect(&array(&[array(&[Value::Number(1.0)])])),
+            "[ [ 1 ] ]"
+        );
+    }
+
+    #[test]
+    fn a_cycle_prints_once_rather_than_forever() {
+        let items = Rc::new(RefCell::new(Vec::new()));
+        items.borrow_mut().push(Value::Array(Rc::clone(&items)));
+        assert_eq!(inspect(&Value::Array(items)), "[ [Circular *1] ]");
+    }
+
+    #[test]
+    fn nesting_past_the_depth_limit_becomes_a_placeholder() {
+        // node stops descending at depth 2 and prints the kind instead.
+        let deep = array(&[array(&[array(&[array(&[Value::Number(1.0)])])])]);
+        assert_eq!(inspect(&deep), "[ [ [ [Array] ] ] ]");
+    }
+
+    #[test]
+    fn a_symbol_shows_its_description_rather_than_its_reserved_key() {
+        // The key is `@@iterator`, which is an implementation detail and not what a console says.
+        let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
+        assert_eq!(inspect(&symbol), "Symbol(Symbol.iterator)");
+        assert_eq!(symbol.property_key(), "@@iterator");
     }
 }

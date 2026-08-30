@@ -697,7 +697,13 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 [regress]
 tests = 7
 authored = "2026-08-29"
-expected_output_method = "Ran `node <probe>.js` and recorded the bytes it printed."
+expected_output_method = """
+Ran `node <probe>.js` and recorded the bytes it printed. One trap, which r07 fell into and which \
+is invisible until the runner disagrees with a hand diff: `expected_stdout` is a TOML basic \
+multi-line string, so it *processes escapes*. A backslash in the program's own output -- and \
+`JSON.stringify` emits plenty -- has to be written as two, or TOML decodes `\\"` back to `"` and \
+the recorded expectation stops being what node printed.\
+"""
 
 [[test]]
 id = "regress/r01-handler-outlives-frame"
@@ -854,6 +860,6 @@ expected_stdout = """
 0 0 1,2,3,4
 2
 true s -150 0
-{"n":"a\"b\\cé\n"}
+{"n":"a\\"b\\\\cé\\n"}
 true
 """

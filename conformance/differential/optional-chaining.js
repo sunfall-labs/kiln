@@ -1,0 +1,1 @@
+const o={a:{b:1}}; console.log(o?.a?.b, o?.z?.b, o.z?.b ?? "dflt", null ?? "d", 0 ?? "d", 0 || "d");

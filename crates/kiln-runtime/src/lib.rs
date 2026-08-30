@@ -38,7 +38,7 @@ impl HostOps for CaptureHost {
                         if index > 0 {
                             self.stdout.push(' ');
                         }
-                        self.stdout.push_str(&argument.to_js_string());
+                        self.stdout.push_str(&argument.to_console_string());
                     }
                 }
                 self.stdout.push('\n');
