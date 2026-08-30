@@ -26,7 +26,9 @@ use oxc_ast::ast::{
 use oxc_ast::ast::{
     ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
 };
-use oxc_parser::Parser;
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_parser::{ParseOptions, Parser};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
@@ -62,7 +64,18 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
 
 fn parse_source(source: &str, source_type: SourceType) -> Module {
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type).parse();
+    // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
+    // asked: without this the tokenizer checks the flags, hands back the pattern as opaque text,
+    // and `/(/` or `/\\p{ASCII=F}/u` parse clean.  Those are `SyntaxError`s at parse time, before
+    // any code runs, so they have to be decided here rather than when the regexp is first
+    // constructed.  Pattern errors are raised through the parser's own error channel, so they
+    // arrive in `parsed.diagnostics` and need no separate fold.
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
 
     let mut requested_modules = parsed
         .module_record
@@ -125,22 +138,12 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
     }
     exports.sort_by_key(|export| export.span.start);
 
-    let diagnostics = parsed
+    let mut diagnostics = parsed
         .diagnostics
         .iter()
-        .map(|diagnostic| {
-            let diagnostic_span = diagnostic
-                .labels
-                .iter()
-                .find(|label| label.primary())
-                .or_else(|| diagnostic.labels.first())
-                .map(|label| span(label.span()));
-            Diagnostic {
-                message: diagnostic.to_string(),
-                span: diagnostic_span,
-            }
-        })
+        .map(lower_diagnostic)
         .collect::<Vec<_>>();
+    diagnostics.extend(early_errors(&parsed));
     let mut lowerer = Lowerer;
     let body = parsed
         .program
@@ -172,6 +175,52 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         diagnostics,
         panicked: parsed.panicked,
     }
+}
+
+/// Lower one Oxc diagnostic into HIR, preferring the span Oxc marked primary.
+///
+/// Parser and semantic diagnostics carry the same label shape, so both go through here and a
+/// reported early error points at source the same way a syntax error does.
+fn lower_diagnostic(diagnostic: &OxcDiagnostic) -> Diagnostic {
+    let diagnostic_span = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.primary())
+        .or_else(|| diagnostic.labels.first())
+        .map(|label| span(label.span()));
+    Diagnostic {
+        message: diagnostic.to_string(),
+        span: diagnostic_span,
+    }
+}
+
+/// Early errors, which the ECMAScript grammar defers to static semantics rather than the parser.
+///
+/// `(eval) = 20` under a strict directive, `let x; const x = 0;` in a module, and `arguments`
+/// inside a class field initializer are all well-formed to a recursive-descent parser and all
+/// required to be `SyntaxError`s before evaluation begins.  Oxc raises them from
+/// [`SemanticBuilder`] rather than the parser, so a frontend that stops after `Parser::parse`
+/// accepts thousands of programs the specification requires it to reject.
+///
+/// The goal and strict mode ride along in the [`SourceType`] the parser was given and in the
+/// program's own directive prologue, which is why this runs on the parsed program rather than
+/// re-deriving either: the same source is legal as a sloppy script and illegal as a module.
+///
+/// Nothing is checked once the parser itself has failed.  Semantic analysis of an error-recovered
+/// AST reports errors about a program the author never wrote, and the source is already rejected,
+/// so the cascade would only bury the diagnostic that matters.
+fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Vec::new();
+    }
+    // `new_compiler` is the cheap configuration: syntax checks on, the random-access node store
+    // off.  Only the diagnostics are wanted; scope and symbol tables are discarded.
+    SemanticBuilder::new_compiler()
+        .build(&parsed.program)
+        .diagnostics
+        .errors()
+        .map(lower_diagnostic)
+        .collect()
 }
 
 /// A BigInt literal's value as plain decimal digits.
@@ -224,7 +273,8 @@ impl Lowerer {
                                 .name
                                 .get_or_insert_with(|| kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
                             HirStatementKind::Function(Box::new(function))
-                        });
+                        })
+                        .ok_or_else(|| "default function export".to_string());
                     self.default_declaration(lowered, statement_span)
                 } else if let ExportDefaultDeclarationKind::ClassDeclaration(declaration) =
                     &declaration.declaration
@@ -283,10 +333,8 @@ impl Lowerer {
             }
             Statement::ClassDeclaration(declaration) => {
                 match self.class(declaration, statement_span) {
-                    Some(class) => HirStatementKind::Class(Box::new(class)),
-                    None => HirStatementKind::Unsupported {
-                        feature: "class declaration".to_string(),
-                    },
+                    Ok(class) => HirStatementKind::Class(Box::new(class)),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
                 }
             }
             Statement::DoWhileStatement(statement) => HirStatementKind::DoWhile {
@@ -308,11 +356,44 @@ impl Lowerer {
             },
             Statement::ForOfStatement(statement) => {
                 let ForStatementLeft::VariableDeclaration(declaration) = &statement.left else {
+                    // `for (x of xs)` assigns to something that already exists instead of
+                    // binding a name. Rather than give the loop a second head shape, bind a
+                    // hidden name and let the body assign it across -- which is also the order
+                    // the specification uses, taking the target's reference only once the step's
+                    // value is in hand, so `for (o[i()] of xs)` calls `i` once per iteration.
+                    //
+                    // The hidden name is `let` so it is fresh each iteration: a closure the body
+                    // makes over the target still sees whatever the target holds, but a
+                    // destructuring default that captures the step's value must not see the last
+                    // one.
+                    let Some(target) = statement.left.as_assignment_target() else {
+                        return Some(HirStatement {
+                            kind: self.unsupported_statement("for-of head", statement_span),
+                            span: statement_span,
+                        });
+                    };
+                    // Derived from the span rather than a counter, because two heads in one
+                    // source cannot start at the same offset, and `%` is not in the identifier
+                    // grammar so no source can name -- or shadow -- this binding.
+                    let hidden = format!("%forof{}", statement_span.start);
+                    let step = HirExpression {
+                        kind: HirExpressionKind::Identifier(hidden.clone()),
+                        span: statement_span,
+                    };
+                    let assignment =
+                        self.assign_to(target, HirAssignmentOperator::Assign, step, statement_span);
                     return Some(HirStatement {
-                        kind: self.unsupported_statement(
-                            "for-of over an existing binding",
-                            statement_span,
-                        ),
+                        kind: HirStatementKind::ForOf {
+                            kind: HirVariableKind::Let,
+                            pattern: kiln_hir::Pattern::Identifier(hidden),
+                            iterable: self.expression(&statement.right),
+                            body: self.assigning_loop_body(
+                                assignment,
+                                &statement.body,
+                                statement_span,
+                            ),
+                            awaiting: statement.r#await,
+                        },
                         span: statement_span,
                     });
                 };
@@ -338,9 +419,39 @@ impl Lowerer {
             Statement::ForInStatement(statement) => {
                 let (kind, name) = match self.for_binding(&statement.left) {
                     Some(binding) => binding,
+                    // `for (x in o)` is the same desugaring as the `for-of` above, for the same
+                    // reason; a declaration `for_binding` rejected for some other cause -- a
+                    // destructuring pattern, say -- is not an assignment target and still gets
+                    // the diagnostic it had.
                     None => {
+                        let Some(target) = statement.left.as_assignment_target() else {
+                            return Some(HirStatement {
+                                kind: self.unsupported_statement("for-in binding", statement_span),
+                                span: statement_span,
+                            });
+                        };
+                        let hidden = format!("%forin{}", statement_span.start);
+                        let step = HirExpression {
+                            kind: HirExpressionKind::Identifier(hidden.clone()),
+                            span: statement_span,
+                        };
+                        let assignment = self.assign_to(
+                            target,
+                            HirAssignmentOperator::Assign,
+                            step,
+                            statement_span,
+                        );
                         return Some(HirStatement {
-                            kind: self.unsupported_statement("for-in binding", statement_span),
+                            kind: HirStatementKind::ForIn {
+                                kind: HirVariableKind::Let,
+                                name: hidden,
+                                object: self.expression(&statement.right),
+                                body: self.assigning_loop_body(
+                                    assignment,
+                                    &statement.body,
+                                    statement_span,
+                                ),
+                            },
                             span: statement_span,
                         });
                     }
@@ -385,32 +496,51 @@ impl Lowerer {
             Statement::TryStatement(statement) => {
                 let handler = match &statement.handler {
                     Some(clause) => {
+                        let mut body: Vec<kiln_hir::Statement> = Vec::new();
+                        // A catch parameter is an ordinary binding pattern, but `CatchClause`
+                        // carries a single name because that is all the machine needs to put the
+                        // thrown value somewhere. `catch ({ message })` therefore binds a hidden
+                        // name and takes the pattern apart from it at the top of the block --
+                        // the same shape an assigning `for-of` head uses, and for the same
+                        // reason: one lowering of destructuring rather than two.
                         let binding = match &clause.param {
                             None => None,
                             Some(param) => match &param.pattern {
                                 BindingPattern::BindingIdentifier(identifier) => {
                                     Some(identifier.name.to_string())
                                 }
-                                _ => {
-                                    return Some(HirStatement {
-                                        kind: self.unsupported_statement(
-                                            "destructuring catch binding",
-                                            statement_span,
-                                        ),
+                                pattern => {
+                                    let thrown = format!("%catch{}", statement_span.start);
+                                    body.push(HirStatement {
+                                        kind: HirStatementKind::Variable {
+                                            // `let`, because a catch parameter is scoped to the
+                                            // block and is not hoisted out of it.
+                                            kind: kiln_hir::VariableKind::Let,
+                                            declarations: vec![kiln_hir::VariableDeclarator {
+                                                pattern: self.pattern(pattern, statement_span),
+                                                initializer: Some(HirExpression {
+                                                    kind: HirExpressionKind::Identifier(
+                                                        thrown.clone(),
+                                                    ),
+                                                    span: statement_span,
+                                                }),
+                                                span: statement_span,
+                                            }],
+                                        },
                                         span: statement_span,
                                     });
+                                    Some(thrown)
                                 }
                             },
                         };
-                        Some(kiln_hir::CatchClause {
-                            binding,
-                            body: clause
+                        body.extend(
+                            clause
                                 .body
                                 .body
                                 .iter()
-                                .filter_map(|statement| self.statement(statement))
-                                .collect(),
-                        })
+                                .filter_map(|statement| self.statement(statement)),
+                        );
+                        Some(kiln_hir::CatchClause { binding, body })
                     }
                     None => None,
                 };
@@ -435,6 +565,11 @@ impl Lowerer {
                         .unwrap_or_default(),
                 }
             }
+            // `debugger` evaluates to empty in an implementation with no debugger attached,
+            // which is exactly what the specification says it does. Refusing it made every test
+            // that merely *contains* one unrunnable, which is a far larger claim than "no
+            // debugger".
+            Statement::DebuggerStatement(_) => HirStatementKind::Empty,
             _ => self.unsupported_statement("statement", statement_span),
         };
         Some(HirStatement {
@@ -461,10 +596,8 @@ impl Lowerer {
             }
             Declaration::ClassDeclaration(declaration) => {
                 match self.class(declaration, statement_span) {
-                    Some(class) => HirStatementKind::Class(Box::new(class)),
-                    None => HirStatementKind::Unsupported {
-                        feature: "class declaration".to_string(),
-                    },
+                    Ok(class) => HirStatementKind::Class(Box::new(class)),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
                 }
             }
             _ => self.unsupported_statement("TypeScript runtime declaration", statement_span),
@@ -629,81 +762,8 @@ impl Lowerer {
                         expression_span,
                     );
                 };
-                match &expression.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                        HirExpressionKind::Assignment {
-                            operator,
-                            target: identifier.name.to_string(),
-                            value: Box::new(self.expression(&expression.right)),
-                        }
-                    }
-                    AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
-                        HirExpressionKind::ComputedAssignment {
-                            operator,
-                            object: Box::new(self.expression(&member.object)),
-                            property: Box::new(self.expression(&member.expression)),
-                            value: Box::new(self.expression(&expression.right)),
-                        }
-                    }
-                    // `super.x = v` assigns to `this`, not to the parent's prototype: the
-                    // prototype is only consulted for a setter, and a write with none creates an
-                    // own property on the instance. The one case this gets wrong is a class that
-                    // defines `set x` *and* writes `super.x` inside it -- the idiom for avoiding
-                    // recursion -- where the specification starts the search above the home
-                    // object and this starts at it.
-                    AssignmentTarget::StaticMemberExpression(member)
-                        if !member.optional && matches!(member.object, Expression::Super(_)) =>
-                    {
-                        HirExpressionKind::MemberAssignment {
-                            operator,
-                            object: Box::new(HirExpression {
-                                kind: HirExpressionKind::This,
-                                span: expression_span,
-                            }),
-                            property: member.property.name.to_string(),
-                            value: Box::new(self.expression(&expression.right)),
-                        }
-                    }
-                    AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
-                        HirExpressionKind::MemberAssignment {
-                            operator,
-                            object: Box::new(self.expression(&member.object)),
-                            property: member.property.name.to_string(),
-                            value: Box::new(self.expression(&expression.right)),
-                        }
-                    }
-                    AssignmentTarget::PrivateFieldExpression(member) => {
-                        HirExpressionKind::PrivateAssignment {
-                            operator,
-                            object: Box::new(self.expression(&member.object)),
-                            name: member.field.name.to_string(),
-                            value: Box::new(self.expression(&expression.right)),
-                        }
-                    }
-                    // `[a, b] = pair` and `({ a } = record)`. Only `=` takes a pattern, so a
-                    // compound operator here is a different error than an unsupported shape.
-                    AssignmentTarget::ArrayAssignmentTarget(_)
-                    | AssignmentTarget::ObjectAssignmentTarget(_)
-                        if expression.operator.as_str() == "=" =>
-                    {
-                        match self.assignment_pattern(&expression.left) {
-                            Some(pattern) => HirExpressionKind::PatternAssignment {
-                                pattern,
-                                value: Box::new(self.expression(&expression.right)),
-                            },
-                            None => {
-                                return self.unsupported_expression(
-                                    "destructuring assignment target",
-                                    expression_span,
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        return self
-                            .unsupported_expression("non-identifier assignment", expression_span);
-                    }
-                }
+                let value = self.expression(&expression.right);
+                return self.assign_to(&expression.left, operator, value, expression_span);
             }
             Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
                 test: Box::new(self.expression(&expression.test)),
@@ -713,14 +773,9 @@ impl Lowerer {
             Expression::CallExpression(expression)
                 if !expression.optional && matches!(&expression.callee, Expression::Super(_)) =>
             {
-                let mut arguments = Vec::with_capacity(expression.arguments.len());
-                for argument in &expression.arguments {
-                    let Some(argument) = argument.as_expression() else {
-                        return self.unsupported_expression("spread argument", expression_span);
-                    };
-                    arguments.push(self.expression(argument));
+                HirExpressionKind::SuperCall {
+                    arguments: self.arguments(&expression.arguments),
                 }
-                HirExpressionKind::SuperCall { arguments }
             }
             Expression::CallExpression(expression) => HirExpressionKind::Call {
                 callee: Box::new(self.expression(&expression.callee)),
@@ -790,9 +845,9 @@ impl Lowerer {
                 HirExpressionKind::Function(Box::new(function))
             }
             Expression::ClassExpression(class) => match self.class(class, expression_span) {
-                Some(class) => HirExpressionKind::Class(Box::new(class)),
-                None => {
-                    return self.unsupported_expression("class expression", expression_span);
+                Ok(class) => HirExpressionKind::Class(Box::new(class)),
+                Err(feature) => {
+                    return self.unsupported_expression(&feature, expression_span);
                 }
             },
             Expression::NewExpression(expression) => HirExpressionKind::New {
@@ -1014,21 +1069,111 @@ impl Lowerer {
     /// A `export default function`/`class` whose lowering may have been refused.
     fn default_declaration(
         &mut self,
-        lowered: Option<HirStatementKind>,
+        lowered: Result<HirStatementKind, String>,
         statement_span: HirSpan,
     ) -> HirStatementKind {
         match lowered {
-            Some(kind) => kind,
-            None => self.unsupported_statement("default function or class export", statement_span),
+            Ok(kind) => kind,
+            Err(feature) => self.unsupported_statement(&feature, statement_span),
         }
     }
 
     /// An assignment target read as a binding pattern.
     ///
-    /// `None` when the target holds something a [`kiln_hir::Pattern`] cannot say -- a member
-    /// expression, `[o.a] = xs`, is legal JavaScript and is refused here rather than lowered to
-    /// something else. Patterns bind names; teaching them to store through a member would make
-    /// them a second assignment language.
+    /// `None` when the target holds something a [`kiln_hir::Pattern`] cannot say. What remains
+    /// in that bucket is narrow -- an optional chain in target position, which is not a valid
+    /// assignment target anyway -- because a pattern leaf may now be a reference as well as a
+    /// name.
+    /// Store `value` into whatever `target` names.
+    ///
+    /// The left-hand side of an assignment and the head of an assigning `for-of` or `for-in` are
+    /// the same grammar, so both reach the rules here. A second copy for the loops would drift:
+    /// every target shape below took its own reasoning to get right, and a shape added to one
+    /// copy would quietly go missing from the other.
+    ///
+    /// `value` arrives already lowered because the loops' value is a binding rather than an
+    /// expression the source contains.
+    fn assign_to(
+        &mut self,
+        target: &AssignmentTarget<'_>,
+        operator: HirAssignmentOperator,
+        value: HirExpression,
+        span: HirSpan,
+    ) -> HirExpression {
+        let kind = match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                HirExpressionKind::Assignment {
+                    operator,
+                    target: identifier.name.to_string(),
+                    value: Box::new(value),
+                }
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                HirExpressionKind::ComputedAssignment {
+                    operator,
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(self.expression(&member.expression)),
+                    value: Box::new(value),
+                }
+            }
+            // `super.x = v` assigns to `this`, not to the parent's prototype: the prototype is
+            // only consulted for a setter, and a write with none creates an own property on the
+            // instance. The one case this gets wrong is a class that defines `set x` *and*
+            // writes `super.x` inside it -- the idiom for avoiding recursion -- where the
+            // specification starts the search above the home object and this starts at it.
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(member.object, Expression::Super(_)) =>
+            {
+                HirExpressionKind::MemberAssignment {
+                    operator,
+                    object: Box::new(HirExpression {
+                        kind: HirExpressionKind::This,
+                        span,
+                    }),
+                    property: member.property.name.to_string(),
+                    value: Box::new(value),
+                }
+            }
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                HirExpressionKind::MemberAssignment {
+                    operator,
+                    object: Box::new(self.expression(&member.object)),
+                    property: member.property.name.to_string(),
+                    value: Box::new(value),
+                }
+            }
+            AssignmentTarget::PrivateFieldExpression(member) => {
+                HirExpressionKind::PrivateAssignment {
+                    operator,
+                    object: Box::new(self.expression(&member.object)),
+                    name: member.field.name.to_string(),
+                    value: Box::new(value),
+                }
+            }
+            // `[a, b] = pair` and `({ a } = record)`. Only `=` takes a pattern, so a compound
+            // operator here is a different error than an unsupported shape.
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_)
+                if operator == HirAssignmentOperator::Assign =>
+            {
+                match self.assignment_pattern(target) {
+                    Some(pattern) => HirExpressionKind::PatternAssignment {
+                        pattern,
+                        value: Box::new(value),
+                    },
+                    None => {
+                        return self
+                            .unsupported_expression("destructuring assignment target", span);
+                    }
+                }
+            }
+            _ => {
+                return self.unsupported_expression("non-identifier assignment", span);
+            }
+        };
+        HirExpression { kind, span }
+    }
+
     fn assignment_pattern(&mut self, target: &AssignmentTarget<'_>) -> Option<kiln_hir::Pattern> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
@@ -1059,7 +1204,7 @@ impl Lowerer {
                             let name = shorthand.binding.name.to_string();
                             let value = kiln_hir::Pattern::Identifier(name.clone());
                             properties.push(kiln_hir::PatternProperty {
-                                key: name,
+                                key: kiln_hir::PatternKey::Static(name),
                                 // `({ a = 1 } = o)`: the default belongs to the value, exactly
                                 // as it does in a declaration.
                                 value: match &shorthand.init {
@@ -1074,23 +1219,67 @@ impl Lowerer {
                         oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
                             named,
                         ) => {
+                            let key = if named.computed {
+                                kiln_hir::PatternKey::Computed(
+                                    self.expression(named.name.as_expression()?),
+                                )
+                            } else {
+                                kiln_hir::PatternKey::Static(named.name.static_name()?.to_string())
+                            };
                             properties.push(kiln_hir::PatternProperty {
-                                key: named.name.static_name()?.to_string(),
+                                key,
                                 value: self.assignment_maybe_default(&named.binding)?,
                             });
                         }
                     }
                 }
                 let rest = match &object.rest {
-                    Some(rest) => match &rest.target {
-                        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                            Some(identifier.name.to_string())
-                        }
-                        _ => return None,
-                    },
+                    Some(rest) => Some(Box::new(self.assignment_pattern(&rest.target)?)),
                     None => None,
                 };
                 Some(kiln_hir::Pattern::Object { properties, rest })
+            }
+            other => self.reference_pattern(other),
+        }
+    }
+
+    /// A target that stores through a property reference rather than binding a name.
+    ///
+    /// The three shapes are the ones [`Lowerer::assign_to`] already distinguishes for a plain
+    /// `=`, and for the same reason: a computed key is an expression to evaluate, a private name
+    /// has to already exist on the object, and a static name is neither.
+    fn reference_pattern(&mut self, target: &AssignmentTarget<'_>) -> Option<kiln_hir::Pattern> {
+        match target {
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                Some(kiln_hir::Pattern::Computed {
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(self.expression(&member.expression)),
+                })
+            }
+            // `[super.x] = xs` takes the same shortcut as `super.x = v`, and inherits the same
+            // single wrong case; the reasoning is written out in `assign_to`.
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(member.object, Expression::Super(_)) =>
+            {
+                Some(kiln_hir::Pattern::Member {
+                    object: Box::new(HirExpression {
+                        kind: HirExpressionKind::This,
+                        span: span(member.span),
+                    }),
+                    property: member.property.name.to_string(),
+                })
+            }
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                Some(kiln_hir::Pattern::Member {
+                    object: Box::new(self.expression(&member.object)),
+                    property: member.property.name.to_string(),
+                })
+            }
+            AssignmentTarget::PrivateFieldExpression(member) => {
+                Some(kiln_hir::Pattern::PrivateMember {
+                    object: Box::new(self.expression(&member.object)),
+                    name: member.field.name.to_string(),
+                })
             }
             _ => None,
         }
@@ -1163,27 +1352,32 @@ impl Lowerer {
             BindingPattern::ObjectPattern(object) => {
                 let mut properties = Vec::with_capacity(object.properties.len());
                 for property in &object.properties {
-                    if property.computed {
-                        self.unsupported("computed key in a destructuring pattern", span);
-                        return kiln_hir::Pattern::Identifier(String::new());
-                    }
-                    let Some(key) = property.key.static_name() else {
-                        self.unsupported("destructuring key", span);
-                        return kiln_hir::Pattern::Identifier(String::new());
+                    let key = if property.computed {
+                        let Some(key) = property.key.as_expression() else {
+                            self.unsupported("computed key in a destructuring pattern", span);
+                            return kiln_hir::Pattern::Identifier(String::new());
+                        };
+                        kiln_hir::PatternKey::Computed(self.expression(key))
+                    } else {
+                        let Some(key) = property.key.static_name() else {
+                            self.unsupported("destructuring key", span);
+                            return kiln_hir::Pattern::Identifier(String::new());
+                        };
+                        kiln_hir::PatternKey::Static(key.to_string())
                     };
                     properties.push(kiln_hir::PatternProperty {
-                        key: key.to_string(),
+                        key,
                         value: self.pattern(&property.value, span),
                     });
                 }
                 let rest = match &object.rest {
                     None => None,
                     Some(rest) => match &rest.argument {
-                        BindingPattern::BindingIdentifier(identifier) => {
-                            Some(identifier.name.to_string())
-                        }
-                        // `{ ...{ a } }` is not valid as a binding rest, and anything else here
-                        // would need a nested pattern the rest object does not have.
+                        BindingPattern::BindingIdentifier(identifier) => Some(Box::new(
+                            kiln_hir::Pattern::Identifier(identifier.name.to_string()),
+                        )),
+                        // `{ ...{ a } }` is not valid as a binding rest, and a declaration can
+                        // never store through a reference the way an assignment can.
                         _ => {
                             self.unsupported("destructuring rest pattern", span);
                             return kiln_hir::Pattern::Identifier(String::new());
@@ -1206,10 +1400,16 @@ impl Lowerer {
         }
     }
 
-    /// Lower a class, or refuse it whole.
+    /// Lower a class, or refuse it whole, naming the member that stopped it.
     ///
     /// Refusing wholesale for the same reason a partial function is refused: a class missing a
     /// method it declared would construct successfully and fail somewhere else entirely.
+    ///
+    /// The refusal carries the specific feature rather than a bare `None`, because the callers
+    /// used to substitute "class expression" for every cause: a static block, an async method
+    /// and a computed key all arrived at the guard corpus as one indistinguishable bucket, and
+    /// the backlog could not be read out of it. The name that reaches the diagnostic has to be
+    /// the one that describes the member, not the one that describes the syntactic position.
     /// The key a class member declares, including the private form.
     ///
     /// A private name is not a string key: `#x` and `"#x"` name different properties, and only
@@ -1230,36 +1430,48 @@ impl Lowerer {
         Some(kiln_hir::ObjectKey::Static(key.static_name()?.to_string()))
     }
 
-    fn class(&mut self, class: &Class<'_>, statement_span: HirSpan) -> Option<kiln_hir::Class> {
+    fn class(
+        &mut self,
+        class: &Class<'_>,
+        statement_span: HirSpan,
+    ) -> Result<kiln_hir::Class, String> {
         let mut constructor = None;
         let mut methods = Vec::new();
         let mut fields = Vec::new();
 
         for element in &class.body.body {
-            if let ClassElement::PropertyDefinition(property) = element {
-                let key = self.member_key(&property.key, property.computed)?;
-                fields.push(kiln_hir::ClassField {
-                    key,
-                    value: property.value.as_ref().map(|value| self.expression(value)),
-                    is_static: property.r#static,
-                });
-                continue;
-            }
-            let ClassElement::MethodDefinition(method) = element else {
-                self.unsupported("class static block", statement_span);
-                return None;
+            let method = match element {
+                ClassElement::PropertyDefinition(property) => {
+                    let key = self
+                        .member_key(&property.key, property.computed)
+                        .ok_or("class field name")?;
+                    fields.push(kiln_hir::ClassField {
+                        key,
+                        value: property.value.as_ref().map(|value| self.expression(value)),
+                        is_static: property.r#static,
+                    });
+                    continue;
+                }
+                ClassElement::MethodDefinition(method) => method,
+                ClassElement::StaticBlock(_) => return Err("class static block".into()),
+                ClassElement::AccessorProperty(_) => {
+                    return Err("class accessor property".into());
+                }
+                ClassElement::TSIndexSignature(_) => {
+                    return Err("TypeScript index signature".into());
+                }
             };
-            if method.value.r#async {
-                self.unsupported("async method", statement_span);
-                return None;
-            }
-            let lowered = self.function(&method.value, span(method.span))?;
+            let lowered = self
+                .function(&method.value, span(method.span))
+                .ok_or("class method without a body")?;
             match method.kind {
                 MethodDefinitionKind::Constructor => constructor = Some(lowered),
                 kind @ (MethodDefinitionKind::Method
                 | MethodDefinitionKind::Get
                 | MethodDefinitionKind::Set) => {
-                    let key = self.member_key(&method.key, method.computed)?;
+                    let key = self
+                        .member_key(&method.key, method.computed)
+                        .ok_or("class method name")?;
                     methods.push(kiln_hir::ClassMethod {
                         key,
                         function: lowered,
@@ -1274,7 +1486,7 @@ impl Lowerer {
             }
         }
 
-        Some(kiln_hir::Class {
+        Ok(kiln_hir::Class {
             name: class.id.as_ref().map(|id| id.name.to_string()),
             superclass: class
                 .heritage
@@ -1393,6 +1605,30 @@ impl Lowerer {
             rest,
             body: statements,
             span: statement_span,
+        })
+    }
+
+    /// The body of a `for-of` or `for-in` whose head assigns rather than binds: assign the
+    /// step's value across, then run what the source wrote.
+    ///
+    /// The source's body stays one statement rather than being spliced in, so a `let` it
+    /// declares that shadows the target does not put the assignment in that binding's temporal
+    /// dead zone -- `for (x of xs) { let x; }` assigns the outer `x`, as it does with no
+    /// desugaring at all.
+    fn assigning_loop_body(
+        &mut self,
+        assignment: HirExpression,
+        body: &Statement<'_>,
+        span: HirSpan,
+    ) -> Box<HirStatement> {
+        let assignment = HirStatement {
+            span: assignment.span,
+            kind: HirStatementKind::Expression(assignment),
+        };
+        let body = self.statement_or_unsupported(body);
+        Box::new(HirStatement {
+            kind: HirStatementKind::Block(vec![assignment, body]),
+            span,
         })
     }
 
@@ -1896,6 +2132,57 @@ mod tests {
     }
 
     #[test]
+    fn an_assigning_loop_head_binds_a_hidden_name_and_assigns_it_in_the_body() {
+        // The shape is the correctness argument: the hidden binding must be `let` so it is fresh
+        // each iteration, the assignment must be the body's first statement so the target's
+        // reference is taken once and only after the step's value exists, and the source's body
+        // must stay a statement of its own so a `let` in it cannot shadow the target out from
+        // under the assignment above.
+        for (source, prefix) in [
+            ("for (target of values) { body(); }", "%forof"),
+            ("for (target in values) { body(); }", "%forin"),
+        ] {
+            let module = parse("module.js", source);
+            assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+
+            let (kind, hidden, body) = match &module.body[0].kind {
+                HirStatementKind::ForOf {
+                    kind,
+                    pattern,
+                    body,
+                    ..
+                } => match pattern {
+                    kiln_hir::Pattern::Identifier(name) => (kind, name, body),
+                    other => panic!("expected an identifier pattern, got {other:?}"),
+                },
+                HirStatementKind::ForIn {
+                    kind, name, body, ..
+                } => (kind, name, body),
+                other => panic!("expected a loop for {source:?}, got {other:?}"),
+            };
+            assert_eq!(*kind, HirVariableKind::Let);
+            assert!(
+                hidden.starts_with(prefix),
+                "{hidden} should start with {prefix}"
+            );
+
+            let HirStatementKind::Block(statements) = &body.kind else {
+                panic!("expected a block body, got {:?}", body.kind);
+            };
+            assert_eq!(statements.len(), 2, "assignment then the source's own body");
+            assert!(matches!(
+                &statements[0].kind,
+                HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Assignment { target, value, .. },
+                    ..
+                }) if target == "target"
+                    && matches!(&value.kind, HirExpressionKind::Identifier(name) if name == hidden)
+            ));
+            assert!(matches!(statements[1].kind, HirStatementKind::Block(_)));
+        }
+    }
+
+    #[test]
     fn unsupported_expression_diagnostics_name_the_oxc_variant() {
         // This list shrinks as constructs get lowered -- object and `new` expressions were both
         // here and both left. That churn is the point rather than a nuisance: what the test
@@ -1924,6 +2211,36 @@ mod tests {
                 HirExpressionKind::Unsupported { feature } if feature == expected
             ));
         }
+    }
+
+    #[test]
+    fn a_refused_class_names_the_member_that_refused_it() {
+        // A class is refused whole, so every cause used to arrive as the wrapper "class
+        // expression" -- one bucket covering a static block, an async method and a computed key
+        // alike, and 2,294 guard-corpus cases behind it with nothing to rank them by. What is
+        // protected here is that the reported name describes the *member*, not the syntactic
+        // position the class sat in. If a case here starts failing, the member was lowered:
+        // delete the line.
+        let module = parse("module.js", "const value = class { static {} };");
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected a variable declaration");
+        };
+        let initializer = declarations[0]
+            .initializer
+            .as_ref()
+            .expect("fixture has an initializer");
+        assert!(matches!(
+            &initializer.kind,
+            HirExpressionKind::Unsupported { feature } if feature == "class static block"
+        ));
+
+        // The declaration form reports the same name: the two callers differ only in what they
+        // wrap it in, which is what made them report two different useless ones.
+        let module = parse("module.js", "class Holder { static {} }");
+        assert!(matches!(
+            &module.body[0].kind,
+            HirStatementKind::Unsupported { feature } if feature == "class static block"
+        ));
     }
 
     #[test]
@@ -1983,6 +2300,116 @@ mod tests {
             !module.diagnostics.is_empty(),
             "module goal must reject an await binding"
         );
+    }
+
+    #[test]
+    fn early_errors_are_reported_even_though_the_grammar_accepts_them() {
+        // Each of these parses as a well-formed production and is still a `SyntaxError` before
+        // evaluation begins, so the parser alone cannot decide them.
+        for source in [
+            "\"use strict\"; (eval) = 20;",
+            "class C { x = () => arguments; }",
+            "let x; const x = 0;",
+            "function f() { \"use strict\"; delete x; }",
+        ] {
+            let module = parse_with_goal("case.js", source, SourceGoal::Script);
+            assert!(
+                !module.diagnostics.is_empty(),
+                "early error accepted: {source}"
+            );
+            assert!(
+                module
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.span.is_some()),
+                "an early error must point at source: {:?}",
+                module.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_regular_expression_patterns_are_syntax_errors() {
+        // The flags are checked by the tokenizer either way; these fail only because the pattern
+        // itself is parsed.  `\\p{ASCII=F}` is well-formed as a *flagless* pattern and invalid
+        // under `u`, so the flags have to reach the pattern parser too.
+        for source in [
+            "/(/;",
+            "/(?<a>x)(?<a>y)/;",
+            "/\\p{ASCII=F}/u;",
+            "/[b-a]/;",
+            "/x{2,1}/;",
+            "/\\2/u;",
+        ] {
+            let module = parse_with_goal("case.js", source, SourceGoal::Script);
+            assert!(
+                !module.diagnostics.is_empty(),
+                "invalid pattern accepted: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn permissive_regular_expression_patterns_still_parse() {
+        // Over-rejection is the whole risk of parsing patterns, and Annex B is where it hides:
+        // a bare `{`, an unmatched `]`, an empty class, and an octal escape are all legal in a
+        // pattern without `u`/`v` and illegal with it.  The named-group forms guard the other
+        // direction, where a valid construct looks malformed.
+        for source in [
+            "/{/;",
+            "/]/;",
+            "/[]/;",
+            "/[^]/;",
+            "/\\101/;",
+            "/(?<a>x)\\k<a>/;",
+            "/a{,2}/;",
+            "/[\\w-a]/;",
+            "/\\p{ASCII}/u;",
+            "/[\\p{ASCII}--[a]]/v;",
+            "/(?<\\u0061>x)/;",
+        ] {
+            let script = parse_with_goal("case.js", source, SourceGoal::Script);
+            assert!(
+                script.diagnostics.is_empty(),
+                "valid pattern rejected: {source}: {:?}",
+                script.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn an_early_error_follows_the_goal_it_was_parsed_under() {
+        // `delete` of a bare reference is legal sloppy script and a `SyntaxError` in a module,
+        // because a module is strict.  Test262 runs the same file both ways, so a check that
+        // ignored the goal would answer one of the two variants wrongly.
+        let script = parse_with_goal("case.js", "var x; delete x;", SourceGoal::Script);
+        let module = parse_with_goal("case.js", "var x; delete x;", SourceGoal::Module);
+
+        assert!(script.diagnostics.is_empty(), "{:?}", script.diagnostics);
+        assert!(
+            !module.diagnostics.is_empty(),
+            "a module is strict, so deleting a binding is an early error"
+        );
+    }
+
+    #[test]
+    fn ordinary_programs_keep_parsing_clean() {
+        // The whole risk of a semantic pass is over-rejection, so pin the forms that look like
+        // redeclarations and are not: repeated `var`, a function shadowing its own name, and a
+        // block-scoped binding that merely shadows an outer one.
+        for source in [
+            "var a = 1; var a = 2; function f(a) { return a; }",
+            "(function n(n) { return n; });",
+            "let a = 1; { let a = 2; } for (let a of []) a;",
+            "try { null; } catch (e) { let f = 1; }",
+        ] {
+            let script = parse_with_goal("case.js", source, SourceGoal::Script);
+            assert!(
+                script.diagnostics.is_empty(),
+                "{source}: {:?}",
+                script.diagnostics
+            );
+        }
     }
 
     #[test]

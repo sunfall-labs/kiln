@@ -26,6 +26,7 @@
 
 mod case;
 mod discovery;
+mod harness;
 mod manifest;
 mod program;
 mod reasons;
@@ -37,6 +38,13 @@ pub use case::{
     VariantResult,
 };
 pub use discovery::{ConformanceTest, DiscoveryError, Provenance, discover};
+pub use harness::{
+    ASYNC_COMPLETE, ASYNC_FAILURE, ASYNC_INCLUDE, DEFAULT_INCLUDES, HOST_CAPABILITY_MARKER,
+    HOST_OBJECT_PRELUDE, Harness,
+};
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, ManifestError, ManifestTest};
 pub use reasons::{ReasonGroup, ReasonReport};
-pub use test262::{run_case, run_case_variants, run_variant};
+pub use test262::{
+    run_case, run_case_variants, run_case_variants_with_harness, run_case_with_harness,
+    run_variant, run_variant_with_harness,
+};

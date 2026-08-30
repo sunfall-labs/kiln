@@ -12,11 +12,16 @@ use std::path::{Path, PathBuf};
 
 use kiln_hir::Module;
 use kiln_host_abi::HostOps;
-use kiln_interpreter::{ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module};
-use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
-use kiln_module_resolver::{
-    ModuleResolver, PathRole, ResolutionPolicy, ResolveError, SUPPORTED_EXTENSIONS,
+use kiln_interpreter::{
+    ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module_in_runtime,
 };
+use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
+use kiln_module_resolver::{ModuleResolver, PathRole, ResolutionPolicy, SUPPORTED_EXTENSIONS};
+use kiln_runtime::RealmRuntime;
+
+/// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
+/// missing module from an unresolvable specifier should not need a second dependency to read it.
+pub use kiln_module_resolver::ResolveError;
 
 /// A callback that supplies source text for one canonical module path.
 pub trait SourceLoader {
@@ -543,6 +548,13 @@ impl ModuleGraph {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
+        let mut runtime = RealmRuntime::new().map_err(|error| ModuleGraphError::Execution {
+            module: self.entry.clone(),
+            error: ExecutionError::Host {
+                instruction: 0,
+                message: error.to_string(),
+            },
+        })?;
 
         for path in &self.order {
             let node = self
@@ -599,8 +611,14 @@ impl ModuleGraph {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let result = execute_module(&node.program, &imports, host, remaining_limits).map_err(
-                |error| {
+            let result = execute_module_in_runtime(
+                &node.program,
+                &imports,
+                host,
+                remaining_limits,
+                &mut runtime,
+            )
+            .map_err(|error| {
                     let error = match error {
                         ExecutionError::StepLimitExceeded { steps, .. } => {
                             ExecutionError::StepLimitExceeded {
@@ -614,8 +632,7 @@ impl ModuleGraph {
                         module: path.clone(),
                         error,
                     }
-                },
-            )?;
+                })?;
             total_steps = total_steps
                 .checked_add(result.execution.steps)
                 .ok_or(ModuleGraphError::StepOverflow)?;
