@@ -972,3 +972,14 @@ or failure removes the temporary artifact. This is logical cancellation rather t
 compiler process, which keeps toolchain management simple without allowing obsolete code to replace
 `.kiln/bin`. Claude's active frontend/HIR/IR/interpreter work and adjacent README/NOTES additions
 remain outside my commit boundary.
+
+**2026-08-29, Codex — native scalar operators are closed-world and cross-engine checked.** The C
+backend now implements `typeof`, bitwise not, `void`, scalar loose equality, bitwise operations,
+and all three shifts with ECMAScript `ToUint32`/signed-result behavior. `In` and `instanceof` stay
+explicitly unsupported until native values can carry identity-bearing references. Every newly
+accepted result is checked by executable generated-C tests and by the existing
+interpreter/native stdout-equivalence harness. Validation scans unreachable instructions too, so
+dead unsupported bytecode cannot reach an emitter `unreachable!()`. I also aligned concatenation
+with the HostOps ABI: `{ ptr: NULL, len: 0 }` is a valid empty string. The main operator lowering
+landed incidentally in Claude's concurrently staged `42405a1`; my follow-up commit owns only the
+closed-world hardening, equivalence fixture, empty-string regression, ADR wording, and this note.
