@@ -96,8 +96,12 @@ with the content-derived entry symbol under a module-specific include guard. The
 publishes that program header at `output.with_extension("h")` before atomically publishing the
 shared library, then reports both paths over the versioned protocol. Library outputs ending in
 `.h` are rejected, and coordination layers reject a derived header that would overwrite the source.
-Each file publication is atomic, but the pair is not transactional; the library is the final ready
-signal until a future versioned package-directory design can swap a manifest for the pair.
+Each file publication is atomic, and a process mutex plus an advisory lock on the output directory
+prevents concurrent builders from interleaving different header/library pairs. The pair is still not
+reader-transactional; the library is the final ready signal until a future versioned
+package-directory design can swap a manifest for the pair. Directory scope is required because
+different library suffixes can derive the same header pathname.
+
 Default executable and shared-library paths preserve the entry's complete project-relative source
 filename before appending a platform artifact suffix. Thus `src/main.ts` and `src/main.js` publish
 as distinct artifacts just as `src/main.ts` and `tests/main.ts` do; an extension is part of source
