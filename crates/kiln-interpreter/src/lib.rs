@@ -1527,15 +1527,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                     self.stack.push(target);
                 }
+                Instruction::DeleteComputed => {
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let removed = delete_property(&target, &key);
+                    self.stack.push(Value::Boolean(removed));
+                }
                 Instruction::DeleteProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
-                    if let Value::Object(object) = &target {
-                        object.borrow_mut().remove(&name);
-                    }
-                    // `delete` reports whether the property is gone afterwards, and on anything
-                    // without own properties it trivially is.
-                    self.stack.push(Value::Boolean(true));
+                    let removed = delete_property(&target, &Value::String(name));
+                    self.stack.push(Value::Boolean(removed));
                 }
                 Instruction::GetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
@@ -3827,6 +3829,38 @@ fn join(items: &[Value], separator: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+/// Remove an own property, reporting whether it is gone afterwards.
+///
+/// Which is why deleting something that was never there is still true, and why deleting a
+/// string's `length` is false: the property is real and cannot be configured away. Nothing else
+/// in this VM has a non-configurable property yet, so a string is the only case that says no.
+fn delete_property(target: &Value, key: &Value) -> bool {
+    match target {
+        Value::Object(object) => {
+            object.borrow_mut().remove(&key.property_key());
+            true
+        }
+        // Removing an element leaves a hole rather than shortening the array: the slot reads as
+        // undefined and `length` is unchanged.
+        Value::Array(items) => {
+            if let Some(index) = array_index(key)
+                && let Some(slot) = items.borrow_mut().get_mut(index)
+            {
+                *slot = Value::Undefined;
+            }
+            true
+        }
+        Value::String(text) => {
+            let key = key.property_key();
+            let indexed =
+                index_key(&key).is_some_and(|index| (index as usize) < text.encode_utf16().count());
+            !(key == "length" || indexed)
+        }
+        // Nothing else carries own properties, so there is nothing to fail to remove.
+        _ => true,
+    }
 }
 
 /// Every own property of a value, in enumeration order, symbol-keyed ones included.

@@ -241,9 +241,10 @@ impl Lowerer {
                     },
                 }
             }
-            Statement::DoWhileStatement(_) => {
-                self.unsupported_statement("do-while statement", statement_span)
-            }
+            Statement::DoWhileStatement(statement) => HirStatementKind::DoWhile {
+                body: Box::new(self.statement_or_unsupported(&statement.body)),
+                test: self.expression(&statement.test),
+            },
             Statement::ForStatement(statement) => HirStatementKind::For {
                 init: statement
                     .init
@@ -305,9 +306,21 @@ impl Lowerer {
                     .as_ref()
                     .map(|value| self.expression(value)),
             ),
-            Statement::SwitchStatement(_) => {
-                self.unsupported_statement("switch statement", statement_span)
-            }
+            Statement::SwitchStatement(statement) => HirStatementKind::Switch {
+                discriminant: self.expression(&statement.discriminant),
+                cases: statement
+                    .cases
+                    .iter()
+                    .map(|case| kiln_hir::SwitchCase {
+                        test: case.test.as_ref().map(|test| self.expression(test)),
+                        body: case
+                            .consequent
+                            .iter()
+                            .filter_map(|statement| self.statement(statement))
+                            .collect(),
+                    })
+                    .collect(),
+            },
             Statement::ThrowStatement(statement) => {
                 HirStatementKind::Throw(self.expression(&statement.argument))
             }
@@ -467,6 +480,37 @@ impl Lowerer {
             }
             Expression::TSNonNullExpression(expression) => {
                 return self.expression(&expression.expression);
+            }
+            // `delete o.x` must not evaluate `o.x`, so it is not a unary operator over a member
+            // read even though the syntax says it is.
+            Expression::UnaryExpression(expression)
+                if matches!(expression.operator, UnaryOperator::Delete) =>
+            {
+                let Expression::StaticMemberExpression(member) = &expression.argument else {
+                    if let Expression::ComputedMemberExpression(member) = &expression.argument {
+                        return HirExpression {
+                            kind: HirExpressionKind::Delete {
+                                object: Box::new(self.expression(&member.object)),
+                                property: Box::new(kiln_hir::ObjectKey::Computed(
+                                    self.expression(&member.expression),
+                                )),
+                            },
+                            span: expression_span,
+                        };
+                    }
+                    // `delete x` on a plain binding is a no-op that returns false in strict mode
+                    // and cannot be spelled at all in a module; refusing beats guessing.
+                    return self.unsupported_expression(
+                        "delete of something other than a property",
+                        expression_span,
+                    );
+                };
+                HirExpressionKind::Delete {
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(kiln_hir::ObjectKey::Static(
+                        member.property.name.to_string(),
+                    )),
+                }
             }
             Expression::UnaryExpression(expression) => {
                 let Some(operator) = lower_unary_operator(expression.operator) else {
@@ -657,8 +701,31 @@ impl Lowerer {
                     arguments,
                 }
             }
-            Expression::TemplateLiteral(_) | Expression::TaggedTemplateExpression(_) => {
-                return self.unsupported_expression("template literal", expression_span);
+            Expression::TemplateLiteral(literal) => HirExpressionKind::Template {
+                quasis: literal
+                    .quasis
+                    .iter()
+                    .map(|quasi| {
+                        // `cooked` is None only when the raw text has an invalid escape, which
+                        // is a syntax error in an untagged template -- so oxc has already
+                        // reported it and the empty string keeps lowering going.
+                        quasi
+                            .value
+                            .cooked
+                            .as_ref()
+                            .map_or_else(String::new, |text| text.to_string())
+                    })
+                    .collect(),
+                expressions: literal
+                    .expressions
+                    .iter()
+                    .map(|expression| self.expression(expression))
+                    .collect(),
+            },
+            // A tag receives the raw strings alongside the cooked ones and decides what to build
+            // from them, which is a different node and not a template that happens to be called.
+            Expression::TaggedTemplateExpression(_) => {
+                return self.unsupported_expression("tagged template literal", expression_span);
             }
             Expression::AwaitExpression(_) => {
                 return self.unsupported_expression("await expression", expression_span);
@@ -1390,7 +1457,11 @@ mod tests {
         // falling into a catch-all reporting the bare word "expression". A third of the guard
         // corpus was once hidden behind exactly that, which is why it is worth a test at all.
         // If a case here starts failing, the construct was implemented: delete the line.
-        let cases = [("const value = `x`;", "template literal")];
+        let cases = [
+            ("const value = tag`x`;", "tagged template literal"),
+            ("const value = /x/;", "regular expression literal"),
+            ("const value = a?.b;", "chain expression"),
+        ];
         for (source, expected) in cases {
             let module = parse("module.js", source);
             let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
