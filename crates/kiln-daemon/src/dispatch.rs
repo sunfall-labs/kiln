@@ -124,7 +124,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             path,
             project_root,
             source_view: _,
-        } => (check(engine, path, project_root), Next::Continue),
+        } => (check(engine, path, project_root, None), Next::Continue),
         Request::Run {
             path,
             project_root,
@@ -137,7 +137,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, &path, &project_root, None) {
                 Ok(Some(graph)) => native_build_graph(graph, path, project_root, output, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
@@ -162,7 +162,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, &path, &project_root, None) {
                 Ok(Some(graph)) if graph.module_count() > 1 => {
                     native_build_shared_graph(graph, path, project_root, output, profile)
                 }
@@ -182,7 +182,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, &path, &project_root) {
+            match native_graph(engine, &path, &project_root, None) {
                 Ok(Some(graph)) => native_run_graph(graph, path, project_root, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => native_run_program(program, path, project_root, profile),
@@ -233,7 +233,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
 /// Reading from disk only when the file has no source yet is what makes an editor-driven
 /// `SetSource` authoritative: once a client has pushed unsaved buffer contents, later `Check`s
 /// must see the buffer, not the stale bytes on disk.
-fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
+pub(crate) fn check<E: QueryEngine>(
+    engine: &mut E,
+    path: String,
+    project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+) -> Response {
     let entry = resolve_source_path(&path, &project_root);
     let source = match entry.as_deref() {
         Some(entry) => ensure_canonical_source(engine, &path, entry, &project_root),
@@ -261,13 +266,15 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
         })
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
-        entry.and_then(|entry| match build_graph(engine, &entry, &project_root) {
-            Ok(graph) => graph.resolved_export_names(&entry),
-            Err(error) => {
-                diagnostics.extend(module_graph_diagnostics(error));
-                None
-            }
-        })
+        entry.and_then(
+            |entry| match build_graph(engine, &entry, &project_root, resolutions) {
+                Ok(graph) => graph.resolved_export_names(&entry),
+                Err(error) => {
+                    diagnostics.extend(module_graph_diagnostics(error));
+                    None
+                }
+            },
+        )
     } else {
         None
     };
@@ -288,12 +295,13 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     engine: &mut E,
     path: String,
     project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
 ) -> Result<PreparedRun, String> {
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
-            graph: build_graph(engine, &entry, &project_root),
+            graph: build_graph(engine, &entry, &project_root, resolutions),
             path,
             file,
             revision: engine.revision().0,
@@ -442,7 +450,7 @@ fn wait_for_execution_gate(key: &str) {
 }
 
 fn run<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
-    match prepare_run(engine, path, project_root) {
+    match prepare_run(engine, path, project_root, None) {
         Ok(prepared) => execute_prepared_run(prepared),
         Err(message) => Response::Error { message },
     }
@@ -492,14 +500,41 @@ fn build_graph<E: QueryEngine>(
     engine: &mut E,
     entry: &Path,
     project_root: &str,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
-    let resolver =
-        kiln_module_resolver::NodePackageResolver::new(project_root).map_err(|error| {
-            kiln_module_graph::ModuleGraphError::Resolve {
-                importer: PathBuf::new(),
-                specifier: String::new(),
-                error,
+    if let Some(resolutions) = resolutions {
+        let requested_root = std::fs::canonicalize(project_root).map_err(|error| {
+            kiln_module_graph::ModuleGraphError::Source {
+                path: PathBuf::from(project_root),
+                message: format!("cannot canonicalize request project root: {error}"),
             }
+        })?;
+        if requested_root != Path::new(&resolutions.project_root) {
+            return Err(kiln_module_graph::ModuleGraphError::Source {
+                path: entry.to_path_buf(),
+                message: format!(
+                    "request project root {} does not match pinned resolution root {}",
+                    requested_root.display(),
+                    resolutions.project_root
+                ),
+            });
+        }
+    }
+    let entries = resolutions
+        .into_iter()
+        .flat_map(|map| &map.entries)
+        .map(|entry| {
+            (
+                PathBuf::from(&entry.importer),
+                entry.specifier.clone(),
+                PathBuf::from(&entry.target),
+            )
+        });
+    let resolver = kiln_module_resolver::PinnedResolutionPolicy::new(project_root, entries)
+        .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
+            importer: PathBuf::new(),
+            specifier: String::new(),
+            error,
         })?;
     ModuleGraph::build_with_policy(entry, resolver, |module_path| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
@@ -569,13 +604,14 @@ pub(crate) fn native_graph<E: QueryEngine>(
     engine: &mut E,
     path: &str,
     project_root: &str,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
 ) -> Result<Option<ModuleGraph>, String> {
     let Some(entry) = resolve_source_path(path, project_root) else {
         ensure_source(engine, path)?;
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    build_graph(engine, &entry, project_root)
+    build_graph(engine, &entry, project_root, resolutions)
         .map(Some)
         .map_err(|error| error.to_string())
 }

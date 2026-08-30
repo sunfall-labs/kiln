@@ -9,8 +9,8 @@ use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 use kiln_proto::{
-    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, SyncId, TestMode,
-    TestOutcome,
+    NativeProfile, PROTOCOL_VERSION, PackageResolution, Request, ResolutionMap, Response,
+    SourceHash, SourceView, SyncId, TestMode, TestOutcome,
 };
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -57,7 +57,7 @@ fn exports_of(text: &str) -> Vec<String> {
 }
 
 /// Test clients keep the current protocol source view automatically. This lets the older daemon
-/// tests focus on query behavior while still exercising the v16 CAS contract.
+/// tests focus on query behavior while still exercising the v17 CAS contract.
 struct Client {
     raw: RawClient,
     source_view: SourceView,
@@ -334,6 +334,18 @@ fn within<T: Send + 'static>(limit: Duration, body: impl FnOnce() -> T + Send + 
 }
 
 fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<String>) {
+    begin_sync_with_resolutions(
+        client,
+        files,
+        ResolutionMap::new("/", Vec::new()).expect("empty resolution map"),
+    )
+}
+
+fn begin_sync_with_resolutions(
+    client: &mut Client,
+    files: &[(&str, &str)],
+    resolutions: ResolutionMap,
+) -> (SyncId, Vec<String>) {
     let response = client
         .raw_request(&Request::Sync {
             files: files
@@ -343,12 +355,153 @@ fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<Strin
                     hash: kiln_proto::source_digest(text),
                 })
                 .collect(),
+            resolutions,
         })
         .expect("begin sync");
     let Response::Needed { sync_id, paths } = response else {
         panic!("expected Needed response, got {response:?}");
     };
     (sync_id, paths)
+}
+
+#[test]
+fn package_resolution_is_pinned_to_the_committed_source_view() {
+    let fixture = Fixture::empty();
+    let package_dir = fixture.dir.join("node_modules/pkg");
+    std::fs::create_dir_all(&package_dir).expect("create package directory");
+    let entry = fixture.dir.join("entry.js");
+    let first = package_dir.join("first.js");
+    let second = package_dir.join("second.js");
+    let package_json = package_dir.join("package.json");
+    let entry_source = "import { value } from 'pkg'; console.log(value);\n";
+    let first_source = "export const value = 'first';\n";
+    let second_source = "export const value = 'second';\n";
+    let first_manifest = r#"{"exports":"./first.js"}"#;
+    let second_manifest = r#"{"exports":"./second.js"}"#;
+    for (path, source) in [
+        (&entry, entry_source),
+        (&first, first_source),
+        (&second, second_source),
+        (&package_json, first_manifest),
+    ] {
+        std::fs::write(path, source).expect("write package fixture");
+    }
+
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    let first = std::fs::canonicalize(first).expect("canonical first target");
+    let second = std::fs::canonicalize(second).expect("canonical second target");
+    let package_json = std::fs::canonicalize(package_json).expect("canonical manifest");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let entry_path = entry.to_string_lossy().into_owned();
+    let first_path = first.to_string_lossy().into_owned();
+    let second_path = second.to_string_lossy().into_owned();
+    let manifest_path = package_json.to_string_lossy().into_owned();
+    let root_path = root.to_string_lossy().into_owned();
+    let files = [
+        (entry_path.as_str(), entry_source),
+        (first_path.as_str(), first_source),
+        (second_path.as_str(), second_source),
+    ];
+    let resolution = |target: &str, manifest: &str| {
+        ResolutionMap::new(
+            root_path.clone(),
+            vec![PackageResolution {
+                importer: entry_path.clone(),
+                specifier: "pkg".to_owned(),
+                target: target.to_owned(),
+                package_json: manifest_path.clone(),
+                package_json_hash: kiln_proto::source_digest(manifest),
+            }],
+        )
+        .expect("valid resolution map")
+    };
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut stale = Client::connect(&fixture.socket).expect("connect stale client");
+    let mut writer = Client::connect(&fixture.socket).expect("connect writer");
+    stale.handshake().expect("stale handshake");
+    writer.handshake().expect("writer handshake");
+
+    let (stale_sync, stale_needed) =
+        begin_sync_with_resolutions(&mut stale, &files, resolution(&first_path, first_manifest));
+    for (path, source) in &files {
+        if stale_needed.iter().any(|needed| needed == path) {
+            assert!(matches!(
+                stage_sync(&mut stale, stale_sync, path, source),
+                Response::Ok
+            ));
+        }
+    }
+    std::fs::write(&package_json, second_manifest).expect("select second package target");
+    let (writer_sync, writer_needed) = begin_sync_with_resolutions(
+        &mut writer,
+        &files,
+        resolution(&second_path, second_manifest),
+    );
+    for (path, source) in &files {
+        if writer_needed.iter().any(|needed| needed == path) {
+            assert!(matches!(
+                stage_sync(&mut writer, writer_sync, path, source),
+                Response::Ok
+            ));
+        }
+    }
+    assert!(matches!(
+        commit_sync(&mut writer, writer_sync),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+    assert!(matches!(
+        commit_sync(&mut stale, stale_sync),
+        Response::StaleSourceView {
+            current: SourceView(1)
+        }
+    ));
+
+    // The filesystem now claims the other target, but the committed source view must continue
+    // using the exact resolution table uploaded by the winning transaction.
+    std::fs::write(&package_json, first_manifest).expect("mutate live package manifest");
+    std::fs::remove_file(&second).expect("remove pinned target after staging its bytes");
+    let Response::Ran(pinned) = writer
+        .request(&Request::Run {
+            path: entry_path.clone(),
+            project_root: root_path.clone(),
+            source_view: SourceView(0),
+        })
+        .expect("run pinned package graph")
+    else {
+        panic!("expected run response");
+    };
+    assert!(pinned.succeeded, "{:?}", pinned.diagnostics);
+    assert_eq!(pinned.stdout, "second\n");
+
+    let (next_sync, needed) =
+        begin_sync_with_resolutions(&mut writer, &files, resolution(&first_path, first_manifest));
+    assert!(needed.is_empty(), "source bytes should remain warm");
+    assert!(matches!(
+        commit_sync(&mut writer, next_sync),
+        Response::Synced {
+            source_view: SourceView(2)
+        }
+    ));
+    let Response::Ran(re_resolved) = writer
+        .request(&Request::Run {
+            path: entry_path,
+            project_root: root_path,
+            source_view: SourceView(0),
+        })
+        .expect("run re-resolved package graph")
+    else {
+        panic!("expected run response");
+    };
+    assert!(re_resolved.succeeded, "{:?}", re_resolved.diagnostics);
+    assert_eq!(re_resolved.stdout, "first\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 fn stage_sync(client: &mut Client, sync_id: SyncId, path: &str, text: &str) -> Response {
@@ -522,6 +675,51 @@ fn warm_noop_sync_still_advances_the_source_view() {
             source_view: SourceView(2)
         }
     ));
+}
+
+#[test]
+fn sync_rejects_noncanonical_resolution_paths() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let importer = root.join("entry.js").to_string_lossy().into_owned();
+    let target = root
+        .join("node_modules/pkg/../pkg/index.js")
+        .to_string_lossy()
+        .into_owned();
+    let response = client
+        .raw_request(&Request::Sync {
+            files: vec![
+                SourceHash {
+                    path: importer.clone(),
+                    hash: kiln_proto::source_digest("import 'pkg';"),
+                },
+                SourceHash {
+                    path: target.clone(),
+                    hash: kiln_proto::source_digest("export const value = 1;"),
+                },
+            ],
+            resolutions: ResolutionMap::new(
+                root.to_string_lossy(),
+                vec![PackageResolution {
+                    importer,
+                    specifier: "pkg".into(),
+                    target,
+                    package_json: root
+                        .join("node_modules/pkg/package.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                    package_json_hash: kiln_proto::source_digest("{}"),
+                }],
+            )
+            .expect("wire-canonical resolution map"),
+        })
+        .expect("sync response");
+    let Response::Error { message } = response else {
+        panic!("expected invalid resolution error, got {response:?}");
+    };
+    assert!(message.contains("canonical path"), "{message}");
 }
 
 #[test]
@@ -739,6 +937,7 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
         &mut engine,
         path,
         fixture.dir.to_string_lossy().into_owned(),
+        None,
     )
     .expect("prepare unsaved buffer");
 
@@ -2072,7 +2271,10 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         ));
     }
 
-    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let project_root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical project root")
+        .to_string_lossy()
+        .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
             source_view: SourceView(0),
@@ -2092,6 +2294,8 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
                 path: entry_path.clone(),
                 hash: kiln_proto::source_digest(&entry_source),
             }],
+            resolutions: ResolutionMap::new(&project_root, Vec::new())
+                .expect("empty resolution map"),
         })
         .expect("sync authoritative view");
     let Response::Needed { sync_id, paths } = sync else {

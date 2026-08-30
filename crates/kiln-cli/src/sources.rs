@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use kiln_module_resolver::{NodePackageResolver, ResolutionPolicy};
+use kiln_module_resolver::NodePackageResolver;
+use kiln_proto::{PackageResolution, ResolutionMap, source_digest};
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
 
@@ -43,12 +44,16 @@ pub(crate) fn include_reachable_dependencies(
     root: &Path,
     entry: &str,
     texts: &mut Vec<(String, String)>,
-) -> Result<()> {
+) -> Result<ResolutionMap> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok(());
+        return ResolutionMap::new(
+            resolver.project_root().to_string_lossy().into_owned(),
+            Vec::new(),
+        )
+        .map_err(|error| Error::Protocol(error.to_string()));
     }
 
     let mut indexes = texts
@@ -58,6 +63,7 @@ pub(crate) fn include_reachable_dependencies(
         .collect::<HashMap<_, _>>();
     let mut pending = vec![entry];
     let mut visited = HashSet::new();
+    let mut resolutions = Vec::new();
 
     while let Some(importer) = pending.pop() {
         if !visited.insert(importer.clone()) {
@@ -76,9 +82,19 @@ pub(crate) fn include_reachable_dependencies(
         let module = frontend_oxc::parse(importer_path, importer_text);
 
         for request in module.runtime_requested_modules() {
-            let resolved = ResolutionPolicy::resolve(&resolver, &request.specifier, &importer)
+            let snapshot = resolver
+                .resolve_with_metadata(&request.specifier, &importer)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
-            let target = resolved.path;
+            let target = snapshot.module.path;
+            if let Some(manifest) = snapshot.package_manifest {
+                resolutions.push(PackageResolution {
+                    importer: importer_path.to_owned(),
+                    specifier: request.specifier.clone(),
+                    target: target.to_string_lossy().into_owned(),
+                    package_json: manifest.path.to_string_lossy().into_owned(),
+                    package_json_hash: source_digest(&manifest.source),
+                });
+            }
             if !indexes.contains_key(&target) {
                 let target_text = std::fs::read_to_string(&target).map_err(|source| {
                     Error::io(format!("cannot read {}", target.display()), source)
@@ -94,7 +110,11 @@ pub(crate) fn include_reachable_dependencies(
     }
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(())
+    ResolutionMap::new(
+        resolver.project_root().to_string_lossy().into_owned(),
+        resolutions,
+    )
+    .map_err(|error| Error::Protocol(error.to_string()))
 }
 
 fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
@@ -321,8 +341,12 @@ mod tests {
             .canonicalize()
             .expect("canonical entry");
 
-        include_reachable_dependencies(&tree.0, entry.to_str().expect("UTF-8 entry"), &mut texts)
-            .expect("include reachable package closure");
+        let resolutions = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+        )
+        .expect("include reachable package closure");
 
         let canonical_root = tree.0.canonicalize().expect("canonical root");
         let paths = texts
@@ -343,6 +367,23 @@ mod tests {
                 "src/main.ts",
                 "src/unrelated.ts",
             ]
+        );
+        assert_eq!(resolutions.project_root, canonical_root.to_string_lossy());
+        assert_eq!(resolutions.entries.len(), 1);
+        let pinned = &resolutions.entries[0];
+        assert_eq!(pinned.importer, entry.to_string_lossy());
+        assert_eq!(pinned.specifier, "pkg");
+        assert_eq!(
+            Path::new(&pinned.target)
+                .strip_prefix(&canonical_root)
+                .expect("target under root"),
+            Path::new("node_modules/pkg/index.js")
+        );
+        let package_json = canonical_root.join("node_modules/pkg/package.json");
+        assert_eq!(pinned.package_json, package_json.to_string_lossy());
+        assert_eq!(
+            pinned.package_json_hash,
+            source_digest(&std::fs::read_to_string(package_json).expect("read package manifest"))
         );
     }
 

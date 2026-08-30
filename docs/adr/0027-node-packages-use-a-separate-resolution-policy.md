@@ -2,10 +2,7 @@
 
 ## Status
 
-Proposed.
-
-The policy and entry-rooted source-discovery tracer bullet are implemented. Acceptance remains
-blocked on pinning the package metadata used for resolution into the authoritative source view.
+Accepted.
 
 ## Context
 
@@ -48,17 +45,23 @@ package sources are read once, added to the same staged Sync manifest, and sorte
 paths. `node_modules` remains excluded from the broad project walk.
 
 An active package source remains a watch dependency because it is present in the source manifest,
-even though an unrelated file under `node_modules` is not discoverable. Package-source changes use
-the same compare-and-swap update path as project dependencies.
+even though an unrelated file under `node_modules` is not discoverable. Body and explicit-import
+edits keep using the compare-and-swap fast path. A package-manifest edit, or a source edit that
+changes its set of bare requests, performs a new authoritative resolution before execution.
 
-### Package metadata must become part of source authority
+### Package metadata is pinned as part of source authority
 
 The selected `package.json` files influence graph identity even though they are not JavaScript
-sources. Before this proposal becomes Accepted, the client and daemon must pin the exact package
-metadata or an equivalent canonical resolution map into the staged source view. Both graph
-construction and cache identity must consume that pinned value. Merely reading the manifest twice
-from the filesystem leaves a race in which client discovery and daemon linking can choose different
-targets.
+sources. Protocol 17 makes every staged Sync carry a canonical resolution map: project root plus
+sorted `(importer, specifier, target, package.json, manifest digest)` entries. The map is validated,
+strongly identified with length-framed SHA-256, and published atomically with the source bytes and
+`SourceView`. A stale competing Sync publishes neither its sources nor its map.
+
+Graph construction consumes only the committed map for bare imports; it never reopens live package
+metadata. Native cache topology consumes the resolved canonical targets produced from that map.
+Two maps that select the same complete graph may therefore reuse the same native artifact, while a
+target change necessarily changes graph topology and link identity. This is content-cache reuse,
+not a second resolution decision.
 
 Conditional exports, wildcard exports, package self-references, workspace protocols, Plug'n'Play,
 and packages outside the canonical project root require later explicit policy additions; they are
@@ -71,8 +74,8 @@ not guessed by the first Adapter.
   Interface instead of spreading through graph, daemon, and native consumers.
 - Synchronization cost follows reachable package sources, not installed package count.
 - The same graph result continues to feed interpreter and native execution.
-- Until metadata pinning lands, the tracer bullet is useful for simple packages but is not yet a
-  complete authoritative package-resolution contract.
+- Package resolution has the same source-view authority boundary as JavaScript bytes; live
+  manifest changes take effect only through another committed Sync.
 
 ## Acceptance checks
 

@@ -7,7 +7,7 @@
 
 use kiln_db::{MemoEngine, QueryEngine};
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{Request, Response, SourceDigest, SourceView, SyncId};
+use kiln_proto::{Request, ResolutionMap, Response, SourceDigest, SourceView, SyncId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{self, BufReader, ErrorKind};
@@ -21,9 +21,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
-    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
-    native_program, native_run_graph, native_run_program, prepare_run,
+    Next, check, dispatch, dispatch_source, execute_prepared_run, native_build_graph,
+    native_build_output, native_build_program, native_build_shared_graph,
+    native_build_shared_program, native_graph, native_program, native_run_graph,
+    native_run_program, prepare_run,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
@@ -43,6 +44,7 @@ pub enum DaemonError {
 pub(crate) struct DaemonState<E> {
     pub(crate) engine: E,
     pub(crate) source_view: SourceView,
+    pub(crate) resolutions: Option<ResolutionMap>,
 }
 
 /// Connection-local synchronization state. Staged text is private until CommitSync obtains the
@@ -53,6 +55,7 @@ struct PendingSync {
     manifest: BTreeMap<String, SourceDigest>,
     needed: BTreeSet<String>,
     staged: BTreeMap<String, String>,
+    resolutions: ResolutionMap,
 }
 
 impl fmt::Display for DaemonError {
@@ -205,6 +208,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
             state: Arc::new(Mutex::new(DaemonState {
                 engine,
                 source_view: SourceView(0),
+                resolutions: None,
             })),
             _socket: SocketGuard(socket.to_path_buf()),
         })
@@ -400,6 +404,7 @@ fn begin_sync<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     id: SyncId,
     files: Vec<kiln_proto::SourceHash>,
+    resolutions: ResolutionMap,
 ) -> (Response, Option<PendingSync>) {
     let mut manifest = BTreeMap::new();
     let mut duplicates = BTreeSet::new();
@@ -418,6 +423,9 @@ fn begin_sync<E: QueryEngine>(
             },
             None,
         );
+    }
+    if let Err(message) = validate_resolutions(&resolutions, &manifest) {
+        return (Response::Error { message }, None);
     }
 
     let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -451,8 +459,64 @@ fn begin_sync<E: QueryEngine>(
             manifest,
             needed,
             staged: BTreeMap::new(),
+            resolutions,
         }),
     )
+}
+
+fn validate_resolutions(
+    resolutions: &ResolutionMap,
+    manifest: &BTreeMap<String, SourceDigest>,
+) -> Result<(), String> {
+    let root = Path::new(&resolutions.project_root);
+    if !root.is_absolute() {
+        return Err("resolution project root must be absolute".to_owned());
+    }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("cannot canonicalize resolution project root: {error}"))?;
+    if canonical_root != root {
+        return Err(format!(
+            "resolution project root must be canonical: {}",
+            root.display()
+        ));
+    }
+    for entry in &resolutions.entries {
+        for (role, path) in [
+            ("importer", entry.importer.as_str()),
+            ("target", entry.target.as_str()),
+            ("package manifest", entry.package_json.as_str()),
+        ] {
+            let path = Path::new(path);
+            if !path.is_absolute() || !path.starts_with(root) {
+                return Err(format!(
+                    "resolution {role} must be absolute and inside project root: {}",
+                    path.display()
+                ));
+            }
+            let components = path.components().collect::<Vec<_>>();
+            let normalized = components.iter().copied().collect::<PathBuf>();
+            if normalized.as_os_str() != path.as_os_str()
+                || components.iter().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "resolution {role} must use a canonical path: {}",
+                    path.display()
+                ));
+            }
+        }
+        if !manifest.contains_key(&entry.importer) || !manifest.contains_key(&entry.target) {
+            return Err(format!(
+                "resolution sources are absent from Sync manifest: {} -> {}",
+                entry.importer, entry.target
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn stage_source(
@@ -537,6 +601,7 @@ fn commit_sync<E: QueryEngine>(
             }
             return internal_error(&*payload);
         }
+        guard.resolutions = Some(transaction.resolutions);
         guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
@@ -582,7 +647,7 @@ fn set_source<E: QueryEngine>(
 fn handle_source_request<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     source_view: SourceView,
-    operation: impl FnOnce(&mut E) -> Response,
+    operation: impl FnOnce(&mut E, Option<&ResolutionMap>) -> Response,
 ) -> (Response, Next) {
     let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
     if guard.source_view != source_view {
@@ -594,7 +659,10 @@ fn handle_source_request<E: QueryEngine>(
         );
     }
     let revision = guard.engine.revision().0;
-    match panic::catch_unwind(AssertUnwindSafe(|| operation(&mut guard.engine))) {
+    let resolutions = guard.resolutions.clone();
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        operation(&mut guard.engine, resolutions.as_ref())
+    })) {
         Ok(_response) if guard.engine.revision().0 != revision => {
             match next_source_view(guard.source_view) {
                 Ok(view) => {
@@ -646,10 +714,10 @@ fn handle<E: QueryEngine>(
     request: Request,
 ) -> (Response, Next) {
     match request {
-        Request::Sync { files } => {
+        Request::Sync { files, resolutions } => {
             let id = SyncId(*next_sync_id);
             *next_sync_id = next_sync_id.wrapping_add(1);
-            let (response, transaction) = begin_sync(state, id, files);
+            let (response, transaction) = begin_sync(state, id, files, resolutions);
             if let Some(transaction) = transaction {
                 *pending = Some(transaction);
             }
@@ -673,20 +741,14 @@ fn handle<E: QueryEngine>(
             path,
             project_root,
             source_view,
-        } => handle_source_request(state, source_view, |engine| {
-            dispatch_source(
-                engine,
-                Request::Check {
-                    path,
-                    project_root,
-                    source_view,
-                },
-            )
-            .0
+        } => handle_source_request(state, source_view, |engine, resolutions| {
+            check(engine, path, project_root, resolutions)
         }),
-        Request::Project { source_view } => handle_source_request(state, source_view, |engine| {
-            dispatch_source(engine, Request::Project { source_view }).0
-        }),
+        Request::Project { source_view } => {
+            handle_source_request(state, source_view, |engine, _| {
+                dispatch_source(engine, Request::Project { source_view }).0
+            })
+        }
         Request::Run {
             path,
             project_root,
@@ -804,8 +866,9 @@ fn handle_run<E: QueryEngine>(
             );
         }
         let revision = guard.engine.revision().0;
+        let resolutions = guard.resolutions.clone();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_run(&mut guard.engine, path, project_root)
+            prepare_run(&mut guard.engine, path, project_root, resolutions.as_ref())
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
                 match next_source_view(guard.source_view) {
@@ -857,8 +920,14 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         if current_revision != expected_revision {
             return (Response::Stale { current_revision }, Next::Continue);
         }
+        let resolutions = guard.resolutions.clone();
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
-            let graph = native_graph(&mut guard.engine, &path, &project_root)?;
+            let graph = native_graph(
+                &mut guard.engine,
+                &path,
+                &project_root,
+                resolutions.as_ref(),
+            )?;
             match graph {
                 Some(graph) => Ok(PreparedNative::Graph(graph)),
                 None => native_program(&mut guard.engine, &path).map(PreparedNative::Program),
@@ -996,8 +1065,9 @@ fn prepare_native_snapshot<E: QueryEngine>(
         });
     }
     let revision = guard.engine.revision().0;
+    let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        let graph = native_graph(&mut guard.engine, path, project_root)?;
+        let graph = native_graph(&mut guard.engine, path, project_root, resolutions.as_ref())?;
         match graph {
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph))
