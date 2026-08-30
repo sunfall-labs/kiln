@@ -73,15 +73,6 @@ pub enum BinaryOp {
     GreaterThanOrEqual,
 }
 
-/// Well-known symbols that can be named directly by protocol bytecode.
-///
-/// Keeping these in the IR avoids lowering a symbol lookup to the ordinary string namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WellKnownSymbol {
-    Iterator,
-    AsyncIterator,
-}
-
 /// Stack bytecode instructions.
 ///
 /// Conditional jumps consume their condition.  The compiler uses [`Instruction::Dup`] before a
@@ -141,11 +132,6 @@ pub enum Instruction {
     SpreadInto,
     /// Read `object[key]`. Stack is object, then key.
     GetComputed,
-    /// Push one of the specification's canonical well-known symbols.
-    ///
-    /// This is deliberately not a string constant: a user property named `"@@iterator"` must
-    /// never satisfy a protocol lookup for `Symbol.iterator`.
-    LoadWellKnown(WellKnownSymbol),
     /// Call `object.name(...)` with the object as receiver. Stack is object, then arguments.
     ///
     /// A method call cannot be a `GetProperty` followed by a `Call`: that discards the receiver,
@@ -264,8 +250,6 @@ pub enum Instruction {
     PushHole,
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
-    /// Test whether `object` carries this class's private brand. Stack: `[object] -> [bool]`.
-    PrivateIn(u32),
     /// Read `object.#name`, where the name is a constant. Stack: `[object] -> [value]`.
     ///
     /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
@@ -273,17 +257,6 @@ pub enum Instruction {
     GetPrivate(u32),
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
-    /// Initialize `object.#name` during class construction. Stack: `[object, value] -> [value]`.
-    ///
-    /// Unlike [`Instruction::SetPrivate`], initialization creates the slot and never performs a
-    /// prior-brand check; the interpreter owns the private namespace and does not infer it from a
-    /// printable string.
-    InitPrivate(u32),
-    /// Define one accessor half for a private name. Stack: `[target, function] -> [target]`.
-    DefinePrivateAccessor {
-        name: u32,
-        setter: bool,
-    },
     /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
@@ -1037,73 +1010,6 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         imports,
         exports,
     })
-}
-
-/// Give a compiled module a deterministic private-name namespace.
-///
-/// The compiler's class counter intentionally starts at zero for each module. Graph execution
-/// evaluates those independent programs in one realm, however, so their textual private keys
-/// must be separated before closures and instances cross a module boundary. Only operands of
-/// explicit private instructions are rewritten; an ordinary string that happens to begin with
-/// the reserved spelling remains an ordinary JavaScript property. The namespace is hex encoded
-/// into the existing scope segment, keeping the key's two-colon shape (and diagnostic display)
-/// while making every namespace byte unambiguous.
-pub fn remap_private_namespace(module: &mut ModuleProgram, namespace: &str) {
-    let namespace = namespace
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-
-    fn remap(
-        code: &mut [Instruction],
-        constants: &mut Vec<Constant>,
-        namespace: &str,
-        remapped: &mut HashMap<u32, u32>,
-    ) {
-        for instruction in code {
-            let index = match instruction {
-                Instruction::PrivateIn(index)
-                | Instruction::GetPrivate(index)
-                | Instruction::SetPrivate(index)
-                | Instruction::InitPrivate(index)
-                | Instruction::DefinePrivateAccessor { name: index, .. } => index,
-                _ => continue,
-            };
-            let old_index = *index;
-            let Some(Constant::String(value)) = constants.get(old_index as usize) else {
-                continue;
-            };
-            let Some(suffix) = value.strip_prefix("@@private:") else {
-                continue;
-            };
-            let new_index = if let Some(index) = remapped.get(&old_index) {
-                *index
-            } else {
-                let new_index = constants.len() as u32;
-                constants.push(Constant::String(format!("@@private:{namespace}-{suffix}")));
-                remapped.insert(old_index, new_index);
-                new_index
-            };
-            *index = new_index;
-        }
-    }
-
-    let mut remapped = HashMap::new();
-    remap(
-        &mut module.program.code,
-        &mut module.program.constants,
-        &namespace,
-        &mut remapped,
-    );
-    for function in &mut module.program.functions {
-        remap(
-            &mut function.code,
-            &mut module.program.constants,
-            &namespace,
-            &mut remapped,
-        );
-    }
 }
 
 /// Unpatched exits from one loop.
@@ -2390,7 +2296,7 @@ impl Compiler {
 
         self.scopes.push(HashMap::new());
 
-        let symbol = WellKnownSymbol::Iterator;
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
         if awaiting {
             // `for await` prefers the async iterator and falls back to the sync one, and the two
             // are awaited in different places: an async iterator's `next` returns a promise of
@@ -2401,24 +2307,27 @@ impl Compiler {
             self.expression(iterable);
             self.declare_hidden(&subject, span);
 
-            let asynchronous = WellKnownSymbol::AsyncIterator;
+            let asynchronous = self.constant_index(Constant::String("@@asyncIterator".to_owned()));
             self.load_hidden(&subject);
-            self.code.push(Instruction::LoadWellKnown(asynchronous));
-            self.code.push(Instruction::GetComputed);
+            self.code.push(Instruction::GetProperty(asynchronous));
             self.push_constant(Constant::Undefined);
             self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
             let use_async = self.emit_jump(Instruction::JumpIfFalse(0));
 
             self.load_hidden(&subject);
-            self.code.push(Instruction::LoadWellKnown(symbol));
-            self.code.push(Instruction::CallComputed { argc: 0 });
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
             self.push_constant(Constant::Boolean(false));
             let chosen = self.emit_jump(Instruction::Jump(0));
 
             self.patch_jump(use_async);
             self.load_hidden(&subject);
-            self.code.push(Instruction::LoadWellKnown(asynchronous));
-            self.code.push(Instruction::CallComputed { argc: 0 });
+            self.code.push(Instruction::CallMethod {
+                name: asynchronous,
+                argc: 0,
+            });
             self.push_constant(Constant::Boolean(true));
 
             self.patch_jump(chosen);
@@ -2428,8 +2337,10 @@ impl Compiler {
             // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than
             // only an array.
             self.expression(iterable);
-            self.code.push(Instruction::LoadWellKnown(symbol));
-            self.code.push(Instruction::CallComputed { argc: 0 });
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
             self.declare_hidden(&iterator_binding, span);
         }
 
@@ -2562,9 +2473,11 @@ impl Compiler {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
         }
-        self.code
-            .push(Instruction::LoadWellKnown(WellKnownSymbol::Iterator));
-        self.code.push(Instruction::CallComputed { argc: 0 });
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: symbol,
+            argc: 0,
+        });
         self.declare_hidden(&iterator_binding, span);
 
         self.push_constant(Constant::Undefined);
@@ -3139,12 +3052,12 @@ impl Compiler {
                     argc: arguments.len() as u16,
                 });
             }
-            // `#x in o` uses an explicit private-brand instruction. The printable private key is
-            // only an IR constant naming the class's hidden slot; it is never an ordinary key.
+            // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
+            // program can write, so asking whether the key is there *is* the brand check.
             ExpressionKind::PrivateIn { name, object } => {
-                let name = self.constant_index(Constant::String(self.private_key(name)));
+                self.push_constant(Constant::String(self.private_key(name)));
                 self.expression(object);
-                self.code.push(Instruction::PrivateIn(name));
+                self.code.push(Instruction::Binary(BinaryOp::In));
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the parent's prototype, not on `this`.
@@ -3744,33 +3657,33 @@ impl Compiler {
                 span: class.span,
             },
         };
-        // Compile every method while the class's private scope and lexical bindings are active,
-        // but before entering the constructor. In particular, compiling a private method as a
-        // constructor field expression would let it capture constructor parameters -- a method
-        // body is created in class lexical context, never in one particular constructor call.
-        let mut compiled_methods = Vec::with_capacity(class.methods.len());
-        for method in &class.methods {
-            let Some(body) = self.compile_function(&method.function, class.span) else {
-                return;
-            };
-            compiled_methods.push(body);
-        }
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
-        // A private instance member is installed on each *instance*, not on the prototype: that
+        // A private instance method is installed on each *instance*, not on the prototype: that
         // is what carries the brand, and what makes `D.f()` on a sibling class a TypeError rather
-        // than a call. Accessor halves are included here too; defining them on the prototype
-        // would make `#x` reads fail the own-only brand check.
-        let private_methods: Vec<(ObjectKey, kiln_hir::MethodKind, u32)> = class
+        // than a call. Modelled as a field whose value is the function, so the constructor
+        // prologue that already installs fields installs these too.
+        let private_methods: Vec<ClassField> = class
             .methods
             .iter()
-            .zip(compiled_methods.iter().copied())
-            .filter(|(method, _)| !method.is_static && matches!(method.key, ObjectKey::Private(_)))
-            .map(|(method, body)| (method.key.clone(), method.kind, body))
+            .filter(|method| {
+                !method.is_static
+                    && matches!(method.key, ObjectKey::Private(_))
+                    && matches!(method.kind, kiln_hir::MethodKind::Normal)
+            })
+            .map(|method| ClassField {
+                key: method.key.clone(),
+                value: Some(Expression {
+                    kind: ExpressionKind::Function(Box::new(method.function.clone())),
+                    span: method.function.span,
+                }),
+                is_static: false,
+            })
             .collect();
         let instance_fields: Vec<&ClassField> = class
             .fields
             .iter()
             .filter(|field| !field.is_static)
+            .chain(private_methods.iter())
             .collect();
         let Some(index) = self.compile_constructor(
             &constructor,
@@ -3780,7 +3693,6 @@ impl Compiler {
             // no message.
             synthesized_derived,
             &instance_fields,
-            &private_methods,
         ) else {
             return;
         };
@@ -3821,7 +3733,7 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::InitPrivate(name));
+                    self.code.push(Instruction::SetProperty(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
@@ -3837,7 +3749,11 @@ impl Compiler {
             self.code.push(Instruction::Pop);
         }
 
-        for (method, body) in class.methods.iter().zip(compiled_methods) {
+        for method in &class.methods {
+            let Some(body) = self.compile_function(&method.function, class.span) else {
+                return;
+            };
+
             // Static methods hang off the constructor; instance methods off its prototype.
             self.load_local_or_cell(local);
             if !method.is_static {
@@ -3846,9 +3762,8 @@ impl Compiler {
 
             let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
-                // Installed on each instance by the constructor prologue instead. This includes
-                // both ordinary private methods and accessor halves.
-                ObjectKey::Private(_) if !method.is_static => {
+                // Installed on each instance by the constructor prologue instead.
+                ObjectKey::Private(_) if !method.is_static && !accessor => {
                     self.code.push(Instruction::Pop);
                     continue;
                 }
@@ -3991,7 +3906,7 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
     ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[], &[])
+        self.compile_constructor(function, span, forwards_to_super, &[])
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -4005,7 +3920,6 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
         fields: &[&ClassField],
-        private_methods: &[(ObjectKey, kiln_hir::MethodKind, u32)],
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
@@ -4112,35 +4026,13 @@ impl Compiler {
             self.code.push(Instruction::SuperForward);
             self.code.push(Instruction::Pop);
         }
-        // Private methods and accessor halves are per-instance slots. Their function prototypes
-        // were compiled in the enclosing class context, so making the closure here captures
-        // only that context and cannot accidentally capture this constructor's parameters.
-        for (key, kind, body) in private_methods {
-            let ObjectKey::Private(member_name) = key else {
-                continue;
-            };
-            self.code.push(Instruction::LoadThis);
-            let name = self.constant_index(Constant::String(self.private_key(member_name)));
-            self.code.push(Instruction::MakeFunction(*body));
-            match kind {
-                kiln_hir::MethodKind::Get => self.code.push(Instruction::DefinePrivateAccessor {
-                    name,
-                    setter: false,
-                }),
-                kiln_hir::MethodKind::Set => self
-                    .code
-                    .push(Instruction::DefinePrivateAccessor { name, setter: true }),
-                kiln_hir::MethodKind::Normal => self.code.push(Instruction::InitPrivate(name)),
-            }
-            self.code.push(Instruction::Pop);
-        }
         for field in fields {
             self.code.push(Instruction::LoadThis);
             match &field.key {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::InitPrivate(name));
+                    self.code.push(Instruction::SetProperty(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
@@ -6799,54 +6691,6 @@ mod tests {
         assert!(
             messages.iter().any(|m| m.contains("duplicate parameter")),
             "got: {messages:?}"
-        );
-    }
-
-    #[test]
-    fn private_namespace_remapping_only_touches_explicit_private_operands() {
-        let mut module = ModuleProgram {
-            program: Program {
-                version: BYTECODE_VERSION,
-                constants: vec![
-                    Constant::String("@@private:0:x".into()),
-                    Constant::String("@@private:0:forged".into()),
-                ],
-                code: vec![Instruction::GetPrivate(0), Instruction::GetProperty(1)],
-                local_count: 0,
-                functions: vec![FunctionProto {
-                    asynchronous: false,
-                    name: None,
-                    arrow: false,
-                    generator: false,
-                    async_generator: false,
-                    parameter_count: 0,
-                    declared_length: 0,
-                    local_count: 0,
-                    code: vec![Instruction::PrivateIn(0)],
-                    upvalues: Vec::new(),
-                }],
-            },
-            dependencies: Vec::new(),
-            imports: Vec::new(),
-            exports: Vec::new(),
-        };
-        remap_private_namespace(&mut module, "/project/dep.js");
-        assert_eq!(
-            module.program.constants[0],
-            Constant::String("@@private:0:x".into())
-        );
-        assert_eq!(
-            module.program.constants[1],
-            Constant::String("@@private:0:forged".into())
-        );
-        assert_eq!(module.program.code[0], Instruction::GetPrivate(2));
-        assert_eq!(
-            module.program.functions[0].code[0],
-            Instruction::PrivateIn(2)
-        );
-        assert_eq!(
-            module.program.constants[2],
-            Constant::String("@@private:2f70726f6a6563742f6465702e6a73-0:x".into())
         );
     }
 

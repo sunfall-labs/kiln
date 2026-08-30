@@ -672,29 +672,6 @@ impl ModuleGraph {
             }
         }
 
-        let scheduler_limits = ExecutionLimits {
-            max_steps: limits.max_steps.saturating_sub(total_steps),
-            ..limits
-        };
-        let scheduler_steps = drain_realm(&realm, host, scheduler_limits).map_err(|error| {
-            let error = match error {
-                ExecutionError::StepLimitExceeded { steps, .. } => {
-                    ExecutionError::StepLimitExceeded {
-                        steps: total_steps.saturating_add(steps),
-                        limit: limits.max_steps,
-                    }
-                }
-                error => error,
-            };
-            ModuleGraphError::Execution {
-                module: self.entry.clone(),
-                error,
-            }
-        })?;
-        total_steps = total_steps
-            .checked_add(scheduler_steps)
-            .ok_or(ModuleGraphError::StepOverflow)?;
-
         let mut result = entry_result.ok_or_else(|| ModuleGraphError::InternalMissingModule {
             path: self.entry.clone(),
         })?;
@@ -752,15 +729,7 @@ where
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
 
-                        let mut program = (self.provider)(&path)?;
-                        // Each compiler instance starts its class-private counter at zero. The
-                        // canonical graph path supplies a deterministic namespace so classes in
-                        // separate module programs cannot accidentally share a private slot in
-                        // the realm they execute in.
-                        let namespace = path
-                            .to_str()
-                            .ok_or_else(|| ModuleGraphError::FrontendPath { path: path.clone() })?;
-                        remap_private_namespace(&mut program, namespace);
+                        let program = (self.provider)(&path)?;
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
                         for specifier in &program.dependencies {
@@ -1413,159 +1382,6 @@ mod tests {
         assert_eq!(host.output, ["0 10", "2 10"]);
     }
 
-    #[test]
-    fn modules_share_one_global_object() {
-        let project = TempProject::new();
-        project.write("dependency.js", "globalThis.answer = 42;");
-        let entry = project.write(
-            "main.js",
-            "import './dependency.js'; console.log(globalThis.answer);",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect("execute graph");
-        assert_eq!(host.output, ["42"]);
-    }
-
-    #[test]
-    fn graph_drains_microtasks_after_all_module_bodies() {
-        let project = TempProject::new();
-        project.write(
-            "dependency.js",
-            "console.log('dependency body');\n\
-             queueMicrotask(() => console.log('dependency microtask'));",
-        );
-        let entry = project.write(
-            "main.js",
-            "import './dependency.js';\n\
-             console.log('entry body');\n\
-             queueMicrotask(() => console.log('entry microtask'));",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect("execute graph");
-        assert_eq!(
-            host.output,
-            [
-                "dependency body",
-                "entry body",
-                "dependency microtask",
-                "entry microtask"
-            ]
-        );
-    }
-
-    #[test]
-    fn modules_share_symbol_for_identity() {
-        let project = TempProject::new();
-        project.write("dependency.js", "export const key = Symbol.for('shared');");
-        let entry = project.write(
-            "main.js",
-            "import { key } from './dependency.js';\n\
-             console.log(key === Symbol.for('shared'));",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect("execute graph");
-        assert_eq!(host.output, ["true"]);
-    }
-
-    #[test]
-    fn private_names_are_distinct_between_module_programs() {
-        let project = TempProject::new();
-        project.write(
-            "dependency.js",
-            "class Provider { #x = 1; }\nexport const value = new Provider();",
-        );
-        let entry = project.write(
-            "main.js",
-            "import { value } from './dependency.js';\n\
-             class Consumer { #x = 2; hasBrand(object) { return #x in object; } }\n\
-             console.log(new Consumer().hasBrand(value));",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect("execute graph");
-        assert_eq!(host.output, ["false"]);
-    }
-
-    #[test]
-    fn graph_drains_timers_after_all_module_bodies() {
-        let project = TempProject::new();
-        project.write(
-            "dependency.js",
-            "console.log('dependency body');\n\
-             setTimeout(() => console.log('dependency timer'), 0);",
-        );
-        let entry = project.write(
-            "main.js",
-            "import './dependency.js'; console.log('entry body');",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect("execute graph");
-        assert_eq!(
-            host.output,
-            ["dependency body", "entry body", "dependency timer"]
-        );
-    }
-
-    #[test]
-    fn an_entry_handler_does_not_clear_a_dependency_unhandled_rejection() {
-        let project = TempProject::new();
-        project.write("dependency.js", "Promise.reject('dependency');");
-        let entry = project.write(
-            "main.js",
-            "import './dependency.js';
-             Promise.reject('entry').catch(() => console.log('entry handled'));",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        let error = graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect_err("dependency rejection remains unhandled");
-        assert!(matches!(
-            error,
-            ModuleGraphError::Execution {
-                error: ExecutionError::Uncaught { ref message, .. },
-                ..
-            } if message.contains("dependency")
-        ));
-        assert_eq!(host.output, ["entry handled"]);
-    }
-
-    #[test]
-    fn unrelated_unhandled_rejections_are_reported_in_creation_order() {
-        let project = TempProject::new();
-        project.write("dependency.js", "Promise.reject('first');");
-        let entry = project.write(
-            "main.js",
-            "import './dependency.js'; Promise.reject('second');",
-        );
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        let error = graph
-            .execute(&mut host, ExecutionLimits::default())
-            .expect_err("an unhandled rejection should fail the graph");
-        assert!(matches!(
-            error,
-            ModuleGraphError::Execution {
-                error: ExecutionError::Uncaught { ref message, .. },
-                ..
-            } if message.contains("first")
-        ));
-    }
-
     /// A namespace object is a snapshot, and says so.
     ///
     /// Node's namespace objects are live; this one reads the exported cells once, when the
@@ -1753,30 +1569,6 @@ mod tests {
             ),
             Err(ModuleGraphError::Execution {
                 error: ExecutionError::StepLimitExceeded { steps: 1, limit: 1 },
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn step_limit_includes_shared_scheduler_steps() {
-        let project = TempProject::new();
-        let entry = project.write("main.js", "queueMicrotask(() => { while (true) {} });");
-        let graph = project.graph(&entry).expect("build graph");
-        let mut host = TestHost::default();
-        assert!(matches!(
-            graph.execute(
-                &mut host,
-                ExecutionLimits {
-                    max_steps: 10,
-                    ..ExecutionLimits::default()
-                }
-            ),
-            Err(ModuleGraphError::Execution {
-                error: ExecutionError::StepLimitExceeded {
-                    steps: 10,
-                    limit: 10
-                },
                 ..
             })
         ));

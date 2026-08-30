@@ -121,15 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_one_shot_sessions_have_private_socket_directories() {
-        let first = OneShot::start().expect("start first engine");
-        let second = OneShot::start().expect("start second engine");
-        assert_ne!(first.dir, second.dir);
-        assert!(first.socket.exists());
-        assert!(second.socket.exists());
-    }
-
-    #[test]
     fn a_one_shot_run_answers_and_then_leaves_nothing_behind() {
         let fixture =
             std::env::temp_dir().join(format!("kiln-cli-1s-fixture-{}", std::process::id()));

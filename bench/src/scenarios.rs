@@ -307,9 +307,8 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             version: BYTECODE_VERSION,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
-                Instruction::NewCell(0),
                 Instruction::Const(0),
-                Instruction::StoreCell(0),
+                Instruction::StoreLocal(0),
                 Instruction::Return,
             ],
             local_count: 1,

@@ -167,9 +167,6 @@ pub fn encode_native_result(value: &kiln_host_abi::HostValue) -> Vec<u8> {
 /// C entry-point ABI version declared by [`embedding_header`].
 pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 
-/// Version of the generated module API declared by [`embedding_module_header`].
-pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
-
 /// Host callback ABI version declared by [`embedding_header`].
 pub const EMBEDDING_HOST_ABI_VERSION: u32 = 1;
 
@@ -192,7 +189,6 @@ pub fn embedding_header() -> &'static str {
 /// entry point, matching the C object emitted by `kiln-backend-c`.
 pub fn embedding_module_header(symbol: &str) -> Result<String, RuntimeSourceError> {
     validate_symbol(symbol)?;
-    let api_symbol = embedding_module_api_symbol(symbol)?;
     let guard = format!("KILN_NATIVE_MODULE_{symbol}_H");
     let mut header = String::with_capacity(
         embedding_header().len()
@@ -201,7 +197,6 @@ pub fn embedding_module_header(symbol: &str) -> Result<String, RuntimeSourceErro
             + MODULE_HEADER_DEFINE.len()
             + MODULE_HEADER_DECL_PREFIX.len()
             + symbol.len()
-            + api_symbol.len()
             + MODULE_HEADER_DECL_SUFFIX.len()
             + " */\n".len(),
     );
@@ -212,18 +207,10 @@ pub fn embedding_module_header(symbol: &str) -> Result<String, RuntimeSourceErro
     header.push_str(&guard);
     header.push_str(MODULE_HEADER_DECL_PREFIX);
     header.push_str(symbol);
-    header.push_str(MODULE_HEADER_DECL_API_SEPARATOR);
-    header.push_str(&api_symbol);
     header.push_str(MODULE_HEADER_DECL_SUFFIX);
     header.push_str(&guard);
     header.push_str(" */\n");
     Ok(header)
-}
-
-/// Return the v2 owned-result API symbol for a generated module base symbol.
-pub fn embedding_module_api_symbol(base: &str) -> Result<String, RuntimeSourceError> {
-    validate_symbol(base)?;
-    Ok(format!("{base}_api_v2"))
 }
 
 /// Why a native runtime source request was rejected.
@@ -321,15 +308,11 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #define KILN_NATIVE_RUNTIME_VERSION 8
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
-#define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
-#define KILN_C99_OUT_OF_MEMORY (-4)
-#define KILN_C99_CALL_DEPTH_ERROR (-5)
-#define KILN_C99_UNINITIALIZED_ERROR (-6)
 /* A throw the program did not catch. The entry point converts the thrown value to text before
  * returning this, because a reference cannot cross the boundary and the launcher's whole job with
  * it is to print it. */
@@ -381,53 +364,6 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
-/* An invocation-scoped owned result.  The v2 run function initializes *result to NULL before
- * doing any work.  On successful allocation it returns a handle even when its nonzero status
- * reports a JavaScript throw, so the thrown scalar can still be read.  read writes a borrowed
- * scalar to *value; a string remains valid until dispose.  dispose takes a pointer-to-pointer,
- * clears it, and is idempotent when passed NULL.  Handles belong to one invocation: callers must
- * not copy or share ownership, and every handle must be disposed before unloading its module DSO. */
-typedef struct kiln_result_v2 kiln_result_v2;
-typedef struct kiln_module_api_v2 {
-    uint32_t abi_version;
-    uint32_t struct_size;
-    int (*run)(kiln_host *host, kiln_result_v2 **result);
-    int (*read)(const kiln_result_v2 *result, kiln_value *value);
-    void (*dispose)(kiln_result_v2 **result);
-} kiln_module_api_v2;
-
-#if defined(__cplusplus)
-static_assert(offsetof(kiln_module_api_v2, abi_version) == 0,
-              "kiln_module_api_v2.abi_version ABI offset");
-static_assert(offsetof(kiln_module_api_v2, struct_size) == sizeof(uint32_t),
-              "kiln_module_api_v2.struct_size ABI offset");
-static_assert(offsetof(kiln_module_api_v2, run) == 2 * sizeof(uint32_t),
-              "kiln_module_api_v2.run ABI offset");
-static_assert(offsetof(kiln_module_api_v2, read)
-                  == offsetof(kiln_module_api_v2, run)
-                      + sizeof(((kiln_module_api_v2 *)0)->run),
-              "kiln_module_api_v2.read ABI offset");
-static_assert(offsetof(kiln_module_api_v2, dispose)
-                  == offsetof(kiln_module_api_v2, read)
-                      + sizeof(((kiln_module_api_v2 *)0)->read),
-              "kiln_module_api_v2.dispose ABI offset");
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(offsetof(kiln_module_api_v2, abi_version) == 0,
-               "kiln_module_api_v2.abi_version ABI offset");
-_Static_assert(offsetof(kiln_module_api_v2, struct_size) == sizeof(uint32_t),
-               "kiln_module_api_v2.struct_size ABI offset");
-_Static_assert(offsetof(kiln_module_api_v2, run) == 2 * sizeof(uint32_t),
-               "kiln_module_api_v2.run ABI offset");
-_Static_assert(offsetof(kiln_module_api_v2, read)
-                   == offsetof(kiln_module_api_v2, run)
-                       + sizeof(((kiln_module_api_v2 *)0)->run),
-               "kiln_module_api_v2.read ABI offset");
-_Static_assert(offsetof(kiln_module_api_v2, dispose)
-                   == offsetof(kiln_module_api_v2, read)
-                       + sizeof(((kiln_module_api_v2 *)0)->read),
-               "kiln_module_api_v2.dispose ABI offset");
-#endif
-
 #endif /* KILN_NATIVE_EMBEDDING_H */
 "#;
 
@@ -445,10 +381,7 @@ extern "C" {
 #endif
 extern int "#;
 
-const MODULE_HEADER_DECL_API_SEPARATOR: &str = r#"(kiln_host *host, kiln_value *result);
-extern const kiln_module_api_v2 *"#;
-
-const MODULE_HEADER_DECL_SUFFIX: &str = r#"(void);
+const MODULE_HEADER_DECL_SUFFIX: &str = r#"(kiln_host *host, kiln_value *result);
 #if defined(__cplusplus)
 } /* extern "C" */
 #endif
@@ -761,7 +694,7 @@ mod tests {
         assert!(runtime_source().contains("Private number-provider ABI"));
         assert!(!runtime_source().contains("Copyright 2024 Tiago Carvalho"));
         assert!(!runtime_source().contains("%.17g"));
-        assert!(!runtime_source().contains("kiln_module_deadbeef"));
+        assert!(!runtime_source().contains("kiln_module_"));
     }
 
     #[test]
@@ -871,12 +804,6 @@ mod tests {
         assert!(embedding_header().contains(&format!(
             "#define KILN_HOST_ABI_VERSION {EMBEDDING_HOST_ABI_VERSION}"
         )));
-        assert!(embedding_header().contains(&format!(
-            "#define KILN_MODULE_API_VERSION {EMBEDDING_MODULE_API_VERSION}"
-        )));
-        assert!(embedding_header().contains("#define KILN_C99_OUT_OF_MEMORY (-4)"));
-        assert!(embedding_header().contains("#define KILN_C99_CALL_DEPTH_ERROR (-5)"));
-        assert!(embedding_header().contains("#define KILN_C99_UNINITIALIZED_ERROR (-6)"));
         assert!(embedding_header().contains("#define KILN_HOST_OP_WRITE_STDOUT 1"));
         assert!(embedding_header().contains("uint32_t tag;"));
         assert!(embedding_header().contains("uint32_t reserved;"));
@@ -885,16 +812,6 @@ mod tests {
         assert!(embedding_header().contains("size_t len;"));
         assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
         assert!(embedding_header().contains("typedef struct kiln_host"));
-        assert!(embedding_header().contains("typedef struct kiln_result_v2 kiln_result_v2;"));
-        assert!(embedding_header().contains("typedef struct kiln_module_api_v2"));
-        assert!(
-            embedding_header().contains("int (*run)(kiln_host *host, kiln_result_v2 **result);")
-        );
-        assert!(
-            embedding_header()
-                .contains("int (*read)(const kiln_result_v2 *result, kiln_value *value);")
-        );
-        assert!(embedding_header().contains("void (*dispose)(kiln_result_v2 **result);"));
         assert!(embedding_header().contains("sizeof(kiln_value) == 16 + 2 * sizeof(void *)"));
         assert!(embedding_header().contains("#endif /* KILN_NATIVE_EMBEDDING_H */"));
     }
@@ -973,24 +890,7 @@ int main(void) {
         assert!(
             one.contains("extern int kiln_module_deadbeef(kiln_host *host, kiln_value *result);")
         );
-        assert!(
-            one.contains("extern const kiln_module_api_v2 *kiln_module_deadbeef_api_v2(void);")
-        );
         assert!(one.contains("#endif /* KILN_NATIVE_MODULE_kiln_module_deadbeef_H */"));
-    }
-
-    #[test]
-    fn embedding_module_api_symbol_is_deterministic_and_validated() {
-        assert_eq!(
-            embedding_module_api_symbol("kiln_module_deadbeef").unwrap(),
-            "kiln_module_deadbeef_api_v2"
-        );
-        for symbol in ["", "9module", "module-name", "module name", "méthode"] {
-            assert!(matches!(
-                embedding_module_api_symbol(symbol),
-                Err(RuntimeSourceError::InvalidSymbol { .. })
-            ));
-        }
     }
 
     #[test]
@@ -1025,8 +925,6 @@ int main(void) {
 int main(void) {
     kiln_host host = {0, 0};
     kiln_value result = {0, 0, 0, 0, 0};
-    const kiln_module_api_v2 *(*api)(void) = kiln_module_probe_api_v2;
-    (void)api;
     return kiln_module_probe(&host, &result);
 }
 "#;

@@ -43,17 +43,8 @@ const list = new Uint8Array([1, 2, 3, 4]);
 console.log(list.indexOf(3), list.includes(9), list.filter((x) => x > 2).join(","));
 console.log(list.reduce((a, b) => a + b, 0), list.some((x) => x === 2), list.every((x) => x > 0));
 console.log(typeof list.push, typeof list.pop, Array.isArray(list), typeof list);
-console.log(Symbol.iterator in list, typeof list[Symbol.iterator]);
 console.log(Array.from(list).join(","), [...list].join("-"));
 for (const value of new Uint8Array([7, 8])) console.log("v", value);
-const liveValues = list.values();
-list[0] = 9;
-console.log(liveValues.next().value);
-list[0] = 1;
-const liveEntries = list.entries();
-list[0] = 8;
-console.log(liveEntries.next().value.join(","));
-list[0] = 1;
 
 // `set` and `fill` write in place.
 const target = new Uint8Array(4);
