@@ -19,8 +19,9 @@ database memoizes that compile result as `ir(file)`. VM launches are deliberatel
 the bytecode is pure compiler output, but executing it has observable HostOps effects which must
 happen on every `run` request.
 
-`kiln-interpreter` depends on bytecode and the dependency-free `kiln-host-abi`; it does not depend
-on HIR or Oxc. Native operations cross `HostOps` using append-only numeric operation identifiers
+`kiln-interpreter` depends on bytecode and the compiler-independent `kiln-host-abi`; it does not
+depend on HIR or Oxc. The ABI crate may use allocation-free runtime semantic cores, but no compiler
+crate. Native operations cross `HostOps` using append-only numeric operation identifiers
 and owned scalar values. `kiln-runtime` is one provider and the CLI currently uses its deterministic
 capturing host.
 

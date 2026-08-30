@@ -226,6 +226,96 @@ int main(void) {
     }
 
     #[test]
+    fn c_parser_matches_the_rust_core_across_decimal_and_radix_corpora() {
+        let mut harness = String::from(
+            r#"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+double kiln_string_to_number(const char *, size_t);
+
+struct case_value { const char *text; size_t len; uint64_t expected; };
+static const struct case_value cases[] = {
+"#,
+        );
+        for text in [
+            "",
+            "-0",
+            "+1",
+            "1.",
+            ".5",
+            "01.25e+2",
+            "Infinity",
+            "+Infinity",
+            "-Infinity",
+            "1e309",
+            "-1e-324",
+            "9007199254740993",
+            "0x20000000000001",
+            "0x20000000000003",
+            "0b11",
+            "0o10",
+        ] {
+            write_parser_case(&mut harness, text);
+        }
+
+        let mut state = UINT64_C_SEED;
+        for index in 0..2048 {
+            state = splitmix64(state);
+            let value = f64::from_bits(state);
+            if !value.is_nan() {
+                let mut output = [0_u8; kiln_number_core::MAX_FORMATTED_LEN];
+                let length = kiln_number_core::format_number(value, &mut output)
+                    .expect("the semantic core's advertised maximum holds");
+                let text = std::str::from_utf8(
+                    output
+                        .get(..length)
+                        .expect("the formatter returned a length inside its buffer"),
+                )
+                .expect("the semantic core emits ASCII");
+                write_parser_case(&mut harness, text);
+            }
+            let radix = match index % 3 {
+                0 => format!("0x{state:x}"),
+                1 => format!("0o{state:o}"),
+                _ => format!("0b{state:b}"),
+            };
+            write_parser_case(&mut harness, &radix);
+        }
+
+        harness.push_str(
+            r#"};
+
+int main(void) {
+    size_t index;
+    for (index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        double actual = kiln_string_to_number(cases[index].text, cases[index].len);
+        uint64_t bits;
+        memcpy(&bits, &actual, sizeof(bits));
+        if (bits != cases[index].expected) {
+            fprintf(stderr, "case %zu (%s): expected %llu, got %llu\n", index,
+                    cases[index].text, (unsigned long long)cases[index].expected,
+                    (unsigned long long)bits);
+            return 1;
+        }
+    }
+    return 0;
+}
+"#,
+        );
+        let run = compile_source_and_run(parser_source(), &harness, "number-parser-corpus")
+            .expect("a C compiler is available");
+        assert!(
+            run.status.success(),
+            "C parser disagreed with the Rust semantic core: {}\n{}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
     fn source_is_c11_and_matches_ecmascript_boundaries() {
         let harness = r#"
 #include <stdint.h>
@@ -247,6 +337,7 @@ int main(void) {
         && check(1e-7, "1e-7")
         && check(0.1 + 0.2, "0.30000000000000004")
         && check(1.0 / 3.0, "0.3333333333333333")
+        && check(157651540651918.12, "157651540651918.12")
         && check(2.0, "2")
         && check(9007199254740992.0, "9007199254740992")
         && check(123456789012345678901.0, "123456789012345680000")
@@ -326,7 +417,6 @@ static const struct case_value cases[] = {
 "#,
         );
         let mut state = UINT64_C_SEED;
-        let mut oracle = dragonbox_ecma::Buffer::new();
         for _ in 0..4096 {
             // SplitMix64 gives a deterministic, well-distributed sample over all bit patterns.
             state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -334,7 +424,15 @@ static const struct case_value cases[] = {
             bits = (bits ^ (bits >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             bits = (bits ^ (bits >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             bits ^= bits >> 31;
-            let expected = oracle.format(f64::from_bits(bits));
+            let mut output = [0_u8; kiln_number_core::MAX_FORMATTED_LEN];
+            let length = kiln_number_core::format_number(f64::from_bits(bits), &mut output)
+                .expect("the semantic core's advertised maximum holds");
+            let expected = std::str::from_utf8(
+                output
+                    .get(..length)
+                    .expect("the formatter returned a length inside its output buffer"),
+            )
+            .expect("the semantic core emits ASCII");
             writeln!(harness, "    {{ UINT64_C({bits}), \"{expected}\" }},")
                 .expect("write oracle case");
         }
@@ -369,4 +467,21 @@ int main(void) {
     }
 
     const UINT64_C_SEED: u64 = 0x6b69_6c6e_2d72_7975;
+
+    fn splitmix64(mut state: u64) -> u64 {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        state ^ (state >> 31)
+    }
+
+    fn write_parser_case(harness: &mut String, text: &str) {
+        let expected = kiln_number_core::string_to_number(text.as_bytes()).to_bits();
+        writeln!(
+            harness,
+            "    {{ \"{text}\", {}, UINT64_C({expected}) }},",
+            text.len()
+        )
+        .expect("write parser oracle case");
+    }
 }
