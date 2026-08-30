@@ -5,7 +5,9 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use kiln_host_abi::{AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId};
+use kiln_host_abi::{
+    AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
+};
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
