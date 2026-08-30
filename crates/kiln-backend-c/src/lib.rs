@@ -13328,6 +13328,7 @@ int kiln_realm_clear_timer(uint64_t id) {
             generator: false,
             async_generator: false,
             parameter_count: 0,
+            declared_length: 0,
             local_count: 0,
             code,
             upvalues: Vec::new(),

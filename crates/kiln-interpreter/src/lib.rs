@@ -9799,7 +9799,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let mut properties = closure.properties.borrow_mut();
             properties.define_value(
                 "length",
-                Value::Number(f64::from(proto.parameter_count)),
+                Value::Number(f64::from(proto.declared_length)),
                 FUNCTION_IDENTITY,
             );
             properties.define_value(
@@ -17689,6 +17689,7 @@ mod tests {
                 generator: false,
                 async_generator: false,
                 parameter_count: 2,
+                declared_length: 2,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
                 upvalues: Vec::new(),
@@ -18386,6 +18387,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 1,
                     code: vec![
                         Instruction::NewCell(0),
@@ -18403,6 +18405,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 0,
                     code: vec![
                         Instruction::LoadUpvalue(0),
@@ -18442,6 +18445,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 1,
                     code: vec![
                         Instruction::NewCell(0),
@@ -18459,6 +18463,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
                     upvalues: vec![Upvalue::ParentLocal(0)],
@@ -18482,6 +18487,7 @@ mod tests {
                 generator: false,
                 async_generator: false,
                 parameter_count: 0,
+                declared_length: 0,
                 local_count: 0,
                 code: vec![Instruction::Return],
                 upvalues: vec![Upvalue::ParentLocal(0)],
@@ -18574,6 +18580,7 @@ mod tests {
                 generator: false,
                 async_generator: false,
                 parameter_count: 0,
+                declared_length: 0,
                 local_count: 0,
                 code: vec![
                     Instruction::MakeFunction(0),
@@ -18623,6 +18630,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(0),
@@ -18639,6 +18647,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],
                     upvalues: Vec::new(),
@@ -19453,6 +19462,7 @@ mod tests {
                 generator: false,
                 async_generator: false,
                 parameter_count: 0,
+                declared_length: 0,
                 local_count: 0,
                 code: vec![
                     Instruction::Const(tag_index),
@@ -19511,6 +19521,7 @@ mod tests {
                 generator: true,
                 async_generator: false,
                 parameter_count: 0,
+                declared_length: 0,
                 local_count: 0,
                 code: vec![
                     Instruction::LoadThis,

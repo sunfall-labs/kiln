@@ -3445,6 +3445,7 @@ mod tests {
                     generator: false,
                     async_generator: false,
                     parameter_count: 0,
+                    declared_length: 0,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(0),
