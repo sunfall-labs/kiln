@@ -9,9 +9,9 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 8;
+pub const NATIVE_RUNTIME_VERSION: u32 = 9;
 /// Version of the private invocation-scoped graph scheduler contract.
-pub const GRAPH_SCHEDULER_ABI_VERSION: u32 = 1;
+pub const GRAPH_SCHEDULER_ABI_VERSION: u32 = 2;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -330,8 +330,8 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 8
-#define KILN_GRAPH_SCHEDULER_ABI_VERSION 1
+#define KILN_NATIVE_RUNTIME_VERSION 9
+#define KILN_GRAPH_SCHEDULER_ABI_VERSION 2
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 #define KILN_MODULE_API_VERSION 2
@@ -496,7 +496,12 @@ typedef struct kiln_timer {
 typedef struct kiln_native_scheduler kiln_native_scheduler;
 typedef int (*kiln_scheduler_runner_fn)(kiln_native_scheduler *scheduler, kiln_host *host,
                                         int depth, kiln_value *thrown);
+/* Invocation-owned language state shared by every translation unit in one graph. */
+typedef struct kiln_native_realm_state {
+    uint64_t random_state;
+} kiln_native_realm_state;
 struct kiln_native_scheduler {
+    kiln_native_realm_state realm;
     kiln_microtask *queue;
     size_t queue_head;
     size_t queue_count;
@@ -513,7 +518,10 @@ struct kiln_native_scheduler {
 
 KILN_NATIVE_PRIVATE kiln_native_scheduler *kiln_native_scheduler_create(void) {
     kiln_native_scheduler *scheduler = (kiln_native_scheduler *)calloc(1, sizeof(*scheduler));
-    if (scheduler != NULL) scheduler->next_timer_id = 1.0;
+    if (scheduler != NULL) {
+        scheduler->realm.random_state = UINT64_C(0x9E3779B97F4A7C15);
+        scheduler->next_timer_id = 1.0;
+    }
     return scheduler;
 }
 
@@ -530,6 +538,7 @@ static void kiln_native_scheduler_clear(kiln_native_scheduler *scheduler) {
     scheduler->queue_head = 0;
     scheduler->queue_count = 0;
     scheduler->queue_capacity = 0;
+    scheduler->realm.random_state = UINT64_C(0x9E3779B97F4A7C15);
     scheduler->now = 0.0;
     scheduler->next_timer_id = 1.0;
     scheduler->next_sequence = 0;
@@ -845,10 +854,19 @@ mod tests {
 
     #[test]
     fn runtime_identity_is_separate_from_the_private_number_provider() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 8);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 9);
+        assert_eq!(GRAPH_SCHEDULER_ABI_VERSION, 2);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
+        assert!(embedding_header().contains(&format!(
+            "#define KILN_GRAPH_SCHEDULER_ABI_VERSION {GRAPH_SCHEDULER_ABI_VERSION}"
+        )));
+        assert!(runtime_source().contains("kiln_native_realm_state realm;"));
+        assert!(
+            runtime_source()
+                .contains("scheduler->realm.random_state = UINT64_C(0x9E3779B97F4A7C15);")
+        );
     }
 
     #[test]
