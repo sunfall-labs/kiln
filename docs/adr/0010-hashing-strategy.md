@@ -2,10 +2,11 @@
 
 ## Status
 
-Accepted. Amended 2026-08-30 when protocol `Sync` was found to use FNV as its whole coherence
-decision and the implemented artifact cache had already chosen SHA-256 rather than the proposed
-blake3 dependency. The rule survives unchanged; the concrete strong digest is now the workspace's
-dependency-free, full-width SHA-256, shared by those two consumers through `kiln-digest`.
+Accepted. Amended 2026-08-30 when protocol `Sync` and daemon socket discovery were found to use
+FNV as their whole coherence or identity decision, while the implemented artifact cache had already
+chosen SHA-256 rather than the proposed blake3 dependency. The rule survives unchanged; the
+concrete strong digest is now the workspace's dependency-free, full-width SHA-256, shared by all
+three consumers through `kiln-digest`.
 
 ## Context
 
@@ -37,6 +38,13 @@ only its held bytes and the client's digest; matching digests are the entire rea
 held bytes. A chosen FNV collision therefore retained stale source. Protocol 13 replaces that
 field with a full SHA-256 digest encoded as 64 lowercase hexadecimal characters. The readable FNV
 module summaries remain unchanged.
+
+Daemon discovery had the same defect. A canonical project root was reduced to 64-bit FNV and that
+value alone selected the Unix socket. A chosen collision could therefore connect a client to another
+project's live daemon; there is no full root behind the socket name for the client to compare. The
+socket identity is now the full SHA-256 digest of the canonical root, encoded as 43 unpadded
+Base64URL characters. The compact spelling and one-character socket filename keep the derived path
+inside macOS's short `sockaddr_un.sun_path` limit without truncating the identity.
 
 Design.md §7 is the trigger the comment describes. A content-addressed artifact cache reuses an
 artifact "whenever its inputs have identical hashes" — key equality is the entire decision, and
@@ -86,10 +94,11 @@ time. The rule that comes with it is the one the workspace manifest already stat
 hash that is persisted or sent on the wire. Fx is fast because it is weak, it has no stability
 guarantee across `rustc-hash` releases, and its per-byte behaviour is architecture-dependent.
 
-**Where a digest is the whole decision, use full-width SHA-256.** `Request::Sync` source coherence
-and every content-addressed artifact key use the concrete `kiln-digest::Digest`. Cache keys hash
-their inputs directly. They do not reuse FNV summaries, and no FNV value is ever fed into a strong
-key; a strong hash over a weak summary would still have the weak summary's collision boundary.
+**Where a digest is the whole decision, use full-width SHA-256.** `Request::Sync` source coherence,
+daemon socket discovery, and every content-addressed artifact key use the concrete
+`kiln-digest::Digest`. They hash their inputs directly. They do not reuse FNV summaries, and no FNV
+value is ever fed into a strong key; a strong hash over a weak summary would still have the weak
+summary's collision boundary.
 
 `kiln-digest` owns the pinned FIPS 180-4 implementation and reference vectors. It is deliberately
 small and dependency-free. `kiln-proto` owns the source-specific newtype and its strict wire form;
@@ -120,3 +129,9 @@ Changing the strong algorithm later is a format change, not a refactor: artifact
 their format and `SourceDigest` pins protocol 13's JSON representation. Likewise,
 `ModuleSummary` still carries `u64` FNV values on the wire. Widening those summaries would need its
 own protocol revision only if they ever stop being backed by whole-value equality.
+
+The daemon socket spelling is likewise a discovery-format change. Kiln is still version `0.0.0`, so
+this one pre-release upgrade requires stopping existing daemons before replacing the binary. The FNV
+path is not a compatibility fallback: probing it would restore the collision boundary this amendment
+removes and could connect to the wrong project. Once the strong path ships, it remains independent
+of protocol version so ordinary client/server skew reaches `Ping` instead of starting another daemon.

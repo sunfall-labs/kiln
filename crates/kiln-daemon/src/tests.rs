@@ -1219,10 +1219,7 @@ fn socket_path_is_derived_from_the_project_root_alone() {
         direct, indirect,
         "two spellings of one root must find one daemon"
     );
-    assert_eq!(
-        direct.file_name(),
-        Some(Path::new("daemon.sock").as_os_str())
-    );
+    assert_eq!(direct.file_name(), Some(Path::new("s").as_os_str()));
 }
 
 #[test]

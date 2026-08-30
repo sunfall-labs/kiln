@@ -1,6 +1,7 @@
 //! Kiln's stable, dependency-free SHA-256 value.
 //!
-//! Strong digests are used only where digest equality is the whole reuse/coherence decision.
+//! Strong digests are used only where digest equality is the whole reuse, coherence, or identity
+//! decision.
 //! Keeping the concrete implementation in this small crate lets foundational protocol code and
 //! leaf artifact-cache code share one pinned algorithm without pulling generic hashing frameworks
 //! or build scripts onto the compiler's rebuild path.
@@ -11,7 +12,7 @@ use std::fmt::{self, Display, Formatter};
 /// Width of a SHA-256 digest in bytes.
 pub const DIGEST_BYTES: usize = 32;
 
-/// A stable SHA-256 digest used for source coherence and content-addressed artifacts.
+/// A stable SHA-256 digest used for source coherence, identity, and content-addressed artifacts.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Digest([u8; DIGEST_BYTES]);
 
@@ -38,6 +39,31 @@ impl Digest {
             output.push(HEX[(byte >> 4) as usize] as char);
             output.push(HEX[(byte & 0x0f) as usize] as char);
         }
+        output
+    }
+
+    /// Render every digest bit as unpadded URL-safe Base64.
+    ///
+    /// This is the compact filesystem-safe spelling: a SHA-256 value is always 43 characters,
+    /// versus 64 in hexadecimal. It remains a representation of the full digest rather than a
+    /// truncation, so it is suitable where path length is constrained and equality is the whole
+    /// identity decision.
+    pub fn to_base64_url(self) -> String {
+        let mut output = String::with_capacity(43);
+        let mut chunks = self.0.chunks_exact(3);
+        for chunk in &mut chunks {
+            output.push(BASE64_URL[(chunk[0] >> 2) as usize] as char);
+            output.push(BASE64_URL[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
+            output.push(BASE64_URL[(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6)) as usize] as char);
+            output.push(BASE64_URL[(chunk[2] & 0x3f) as usize] as char);
+        }
+        let remainder = chunks.remainder();
+        if let [first, second] = remainder {
+            output.push(BASE64_URL[(first >> 2) as usize] as char);
+            output.push(BASE64_URL[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+            output.push(BASE64_URL[((second & 0x0f) << 2) as usize] as char);
+        }
+        debug_assert_eq!(output.len(), 43);
         output
     }
 
@@ -96,6 +122,7 @@ impl Display for DigestParseError {
 impl Error for DigestParseError {}
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
+const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn hex_value(value: u8) -> Option<u8> {
     match value {
@@ -275,5 +302,21 @@ mod tests {
             digest
         );
         assert!(Digest::from_hex("nope").is_err());
+    }
+
+    #[test]
+    fn compact_spelling_is_full_width_url_safe_base64() {
+        let digest = Digest::hash(b"abc");
+        assert_eq!(
+            digest.to_base64_url(),
+            "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
+        );
+        assert_eq!(digest.to_base64_url().len(), 43);
+        assert!(
+            digest
+                .to_base64_url()
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
     }
 }
