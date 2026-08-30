@@ -60,12 +60,11 @@ requests cannot replace the program another request is about to execute. The CLI
 C numeric locale before module initialization as an additional defence against locale-dependent
 parsing.
 
-Generated modules cannot assume that policy when embedded in a host process. On the supported
-macOS and Linux shared-library targets, string-to-number conversion therefore uses an explicit C
-`locale_t` with `strtod_l`. Generated code never calls process-global `setlocale`, and locale
-creation failure is an ordinary conversion failure rather than permission to fall back to ambient
-host semantics. Number formatting no longer uses libc locale or `printf`: ADR 0013 delegates it
-to the separately versioned, Ryu-derived native number runtime.
+Generated modules cannot assume that policy when embedded in a host process. ADR 0014 therefore
+replaces the interim `strtod_l` path with a bounded, locale-free decimal parser and an explicit
+ECMAScript grammar/radix adapter. Number formatting likewise does not use libc locale or `printf`:
+ADR 0013 delegates it to the separately versioned, Ryu-derived native number runtime. Both now
+compose into one cached hidden number-conversion object.
 
 Embedding uses the same module entry ABI without linking the command-line runtime or launcher.
 `kiln-native-runtime` publishes a deterministic, self-contained C header for the versioned value
@@ -130,9 +129,9 @@ caller ownership require a future versioned ownership/dispose or caller-buffer d
   symbol change cannot silently leave a hand-written declaration stale.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
-- Number-to-string conversion is shortest and ECMAScript-spelled through the versioned native
-  number runtime. Temporary concatenation allocations are still retained for a process lifetime;
-  that ownership gap remains before claiming leak-free long-lived native embedding.
+- Number formatting and string parsing are ECMAScript-spelled through the versioned native number
+  runtime. Temporary concatenation allocations are still retained for a process lifetime; that
+  ownership gap remains before claiming leak-free long-lived native embedding.
 - A 128-bit deterministic module symbol is not the artifact integrity boundary. SHA-256 cache keys
   protect artifact reuse, and multi-module linking rejects any symbol collision before invoking
   the linker.

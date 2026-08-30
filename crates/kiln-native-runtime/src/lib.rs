@@ -8,13 +8,16 @@
 
 use std::sync::OnceLock;
 
-use kiln_native_number::{NUMBER_FORMAT_VERSION, source as native_number_source};
+use kiln_native_number::{
+    NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION, runtime_source as native_number_runtime_source,
+};
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 2;
+pub const NATIVE_RUNTIME_VERSION: u32 = 3;
 
-// Changing the formatter changes the runtime source and requires an intentional identity bump.
+// Changing either number conversion changes the runtime source and requires an identity bump.
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
+const _: () = assert!(NUMBER_PARSE_VERSION == 1);
 
 /// C entry-point ABI version declared by [`embedding_header`].
 pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
@@ -91,15 +94,16 @@ pub type RuntimeError = RuntimeSourceError;
 pub fn runtime_source() -> &'static str {
     RUNTIME_SOURCE
         .get_or_init(|| {
+            let number_source = native_number_runtime_source();
             let mut source = String::with_capacity(
                 RUNTIME_PREFIX.len()
                     + embedding_header().len()
-                    + native_number_source().len()
+                    + number_source.len()
                     + RUNTIME_BODY.len(),
             );
             source.push_str(RUNTIME_PREFIX);
             source.push_str(embedding_header());
-            source.push_str(native_number_source());
+            source.push_str(number_source);
             source.push_str(RUNTIME_BODY);
             source
         })
@@ -161,7 +165,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 2
+#define KILN_NATIVE_RUNTIME_VERSION 3
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -391,18 +395,20 @@ mod tests {
         assert_eq!(runtime_source(), runtime_source());
         assert!(runtime_source().contains("int kiln_cli_host_call"));
         assert!(runtime_source().contains("kiln_number_to_js_string"));
+        assert!(runtime_source().contains("kiln_string_to_number"));
         assert!(
             runtime_source().contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
         );
-        assert!(runtime_source().contains(native_number_source()));
+        assert!(runtime_source().contains(kiln_native_number::source()));
         assert!(!runtime_source().contains("%.17g"));
         assert!(!runtime_source().contains("kiln_module_"));
     }
 
     #[test]
-    fn runtime_identity_includes_native_number_formatter_version() {
+    fn runtime_identity_includes_native_number_conversion_versions() {
         assert_eq!(NUMBER_FORMAT_VERSION, 1);
-        assert_eq!(NATIVE_RUNTIME_VERSION, 2);
+        assert_eq!(NUMBER_PARSE_VERSION, 1);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 3);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));

@@ -43,16 +43,15 @@ retain upstream notices, update the pinned commit, run the strict C tests, and i
 `NUMBER_FORMAT_VERSION`. Runtime identities assert the formatter version they compose, preventing
 a source refresh from silently masquerading as the old internal contract.
 
-This decision covers formatting only. String-to-number conversion remains a separate language
-grammar problem: supported embedded targets use locale-explicit `strtod_l`, but future work must
-still implement all ECMAScript whitespace, radix-prefix, `Infinity`, and rejection rules rather
-than treating libc parsing as the specification.
+This decision covers formatting only. ADR 0014 subsequently replaces the interim libc
+string-to-number path with a bounded fast_float C port plus an ECMAScript grammar adapter.
 
 ## Consequences
 
 - Native console output and number-to-string coercion match the interpreter on shortest decimals,
   threshold boundaries, subnormals, infinities, and negative zero.
-- Formatter behavior is independent of process and thread locale; only parsing needs locale APIs.
+- Formatter behavior is independent of process and thread locale. ADR 0014 later makes parsing
+  locale-free as well.
 - One roughly 74 KB reviewed source component replaces a small libc call, but it compiles as a durable
   cache layer rather than being duplicated into every graph module object.
 - Shared artifacts stay self-contained and keep their existing public ABI while gaining one hidden
