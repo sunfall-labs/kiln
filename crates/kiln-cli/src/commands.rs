@@ -722,6 +722,7 @@ pub fn test(
     project_root: &Path,
     changed: bool,
     parse_only: bool,
+    node: bool,
     output: Option<&Path>,
 ) -> Result<Output> {
     let corpus = canonical_path(corpus)?;
@@ -751,6 +752,8 @@ pub fn test(
         .transpose()?;
     let mode = if parse_only {
         TestMode::Parse
+    } else if node {
+        TestMode::Node
     } else {
         TestMode::Interpreter
     };
@@ -1807,6 +1810,7 @@ mod tests {
             &root,
             false,
             false,
+            false,
             Some(Path::new(".kiln/test-failures.json")),
         )
         .expect_err("results and failure state need distinct paths");
@@ -1840,6 +1844,7 @@ mod tests {
             &mut fake,
             &corpus,
             &root,
+            false,
             false,
             false,
             Some(Path::new("target/results.json")),

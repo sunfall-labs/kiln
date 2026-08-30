@@ -450,6 +450,7 @@ pub enum Response {
 pub enum TestMode {
     Parse,
     Interpreter,
+    Node,
 }
 
 /// Optimization and diagnostics profile for native compilation.
