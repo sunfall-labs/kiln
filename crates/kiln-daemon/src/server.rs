@@ -7,7 +7,7 @@
 
 use kiln_db::{MemoEngine, QueryEngine};
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{Request, ResolutionMap, Response, SourceDigest, SourceView, SyncId};
+use kiln_proto::{Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, SyncId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{self, BufReader, ErrorKind};
@@ -21,12 +21,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, check, dispatch, dispatch_source, execute_prepared_run, native_build_graph,
+    Next, check_with_cache, dispatch, dispatch_source, execute_prepared_run, native_build_graph,
     native_build_output, native_build_program, native_build_shared_graph,
-    native_build_shared_program, native_graph, native_program, native_run_graph,
-    native_run_program, prepare_run,
+    native_build_shared_program, native_graph_with_cache, native_program, native_run_graph,
+    native_run_program, prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
+use crate::graph_cache::GraphCache;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -45,6 +46,7 @@ pub(crate) struct DaemonState<E> {
     pub(crate) engine: E,
     pub(crate) source_view: SourceView,
     pub(crate) resolutions: Option<ResolutionMap>,
+    pub(crate) graph_cache: GraphCache,
 }
 
 /// Connection-local synchronization state. Staged text is private until CommitSync obtains the
@@ -209,6 +211,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 engine,
                 source_view: SourceView(0),
                 resolutions: None,
+                graph_cache: GraphCache::default(),
             })),
             _socket: SocketGuard(socket.to_path_buf()),
         })
@@ -602,6 +605,7 @@ fn commit_sync<E: QueryEngine>(
             return internal_error(&*payload);
         }
         guard.resolutions = Some(transaction.resolutions);
+        guard.graph_cache.invalidate();
         guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
@@ -633,11 +637,13 @@ fn set_source<E: QueryEngine>(
         guard.engine.set_source(file, text);
     }));
     if let Err(payload) = mutation {
+        guard.graph_cache.invalidate();
         guard.source_view = next_view;
         return internal_error(&*payload);
     }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
     // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
+    guard.graph_cache.invalidate();
     guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
@@ -647,7 +653,7 @@ fn set_source<E: QueryEngine>(
 fn handle_source_request<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     source_view: SourceView,
-    operation: impl FnOnce(&mut E, Option<&ResolutionMap>) -> Response,
+    operation: impl FnOnce(&mut E, &mut GraphCache, Option<&ResolutionMap>) -> Response,
 ) -> (Response, Next) {
     let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
     if guard.source_view != source_view {
@@ -661,9 +667,15 @@ fn handle_source_request<E: QueryEngine>(
     let revision = guard.engine.revision().0;
     let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        operation(&mut guard.engine, resolutions.as_ref())
+        let DaemonState {
+            engine,
+            graph_cache,
+            ..
+        } = &mut *guard;
+        operation(engine, graph_cache, resolutions.as_ref())
     })) {
         Ok(_response) if guard.engine.revision().0 != revision => {
+            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => {
                     guard.source_view = view;
@@ -675,6 +687,7 @@ fn handle_source_request<E: QueryEngine>(
         Ok(response) => (response, Next::Continue),
         Err(payload) => {
             if guard.engine.revision().0 != revision {
+                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => guard.source_view = view,
                     Err(message) => return (Response::Error { message }, Next::Continue),
@@ -741,11 +754,18 @@ fn handle<E: QueryEngine>(
             path,
             project_root,
             source_view,
-        } => handle_source_request(state, source_view, |engine, resolutions| {
-            check(engine, path, project_root, resolutions)
+        } => handle_source_request(state, source_view, |engine, cache, resolutions| {
+            check_with_cache(
+                engine,
+                Some(cache),
+                source_view,
+                path,
+                project_root,
+                resolutions,
+            )
         }),
         Request::Project { source_view } => {
-            handle_source_request(state, source_view, |engine, _| {
+            handle_source_request(state, source_view, |engine, _cache, _| {
                 dispatch_source(engine, Request::Project { source_view }).0
             })
         }
@@ -797,7 +817,7 @@ fn handle<E: QueryEngine>(
                 };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_graph(graph, path, project_root, output, profile)
+                    native_build_graph(&graph, path, project_root, output, profile)
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_build_program(program, path, project_root, output, profile)
@@ -818,7 +838,7 @@ fn handle<E: QueryEngine>(
                 };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_shared_graph(graph, path, project_root, output, profile)
+                    native_build_shared_graph(&graph, path, project_root, output, profile)
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_build_shared_program(program, path, project_root, output, profile)
@@ -837,13 +857,23 @@ fn handle<E: QueryEngine>(
                     Err(response) => return (response, Next::Continue),
                 };
             match prepared {
-                PreparedNative::Graph(graph) => {
-                    run_without_engine_lock(|| native_run_graph(graph, path, project_root, profile))
-                }
+                PreparedNative::Graph(graph) => run_without_engine_lock(|| {
+                    native_run_graph(&graph, path, project_root, profile)
+                }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
                     native_run_program(program, path, project_root, profile)
                 }),
             }
+        }
+        Request::Stats => {
+            let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+            (Response::Stats(daemon_stats(&guard)), Next::Continue)
+        }
+        Request::ResetStats => {
+            let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.engine.reset_stats();
+            guard.graph_cache.reset_stats();
+            (Response::Ok, Next::Continue)
         }
         request => handle_engine_request(state, request),
     }
@@ -868,9 +898,22 @@ fn handle_run<E: QueryEngine>(
         let revision = guard.engine.revision().0;
         let resolutions = guard.resolutions.clone();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            prepare_run(&mut guard.engine, path, project_root, resolutions.as_ref())
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            prepare_run_with_cache(
+                engine,
+                Some(graph_cache),
+                source_view,
+                path,
+                project_root,
+                resolutions.as_ref(),
+            )
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
+                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => {
                         guard.source_view = view;
@@ -883,6 +926,7 @@ fn handle_run<E: QueryEngine>(
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
                 if guard.engine.revision().0 != revision {
+                    guard.graph_cache.invalidate();
                     match next_source_view(guard.source_view) {
                         Ok(view) => guard.source_view = view,
                         Err(message) => return (Response::Error { message }, Next::Continue),
@@ -922,8 +966,15 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         }
         let resolutions = guard.resolutions.clone();
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
-            let graph = native_graph(
-                &mut guard.engine,
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            let graph = native_graph_with_cache(
+                engine,
+                graph_cache,
+                source_view,
                 &path,
                 &project_root,
                 resolutions.as_ref(),
@@ -937,6 +988,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
                 if guard.engine.revision().0 != current_revision {
+                    guard.graph_cache.invalidate();
                     match next_source_view(guard.source_view) {
                         Ok(view) => guard.source_view = view,
                         Err(message) => return (Response::Error { message }, Next::Continue),
@@ -946,6 +998,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             }
         };
         if guard.engine.revision().0 != current_revision {
+            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => guard.source_view = view,
                 Err(message) => return (Response::Error { message }, Next::Continue),
@@ -988,7 +1041,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
     let temp_output = snapshot_temp_output(&final_output);
     let response = run_without_engine_lock(|| match prepared {
         PreparedNative::Graph(graph) => native_build_graph(
-            graph,
+            &graph,
             path.clone(),
             project_root.clone(),
             Some(temp_output.to_string_lossy().into_owned()),
@@ -1036,7 +1089,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
 }
 
 enum PreparedNative {
-    Graph(ModuleGraph),
+    Graph(Arc<ModuleGraph>),
     Program(kiln_ir::Program),
 }
 
@@ -1067,7 +1120,19 @@ fn prepare_native_snapshot<E: QueryEngine>(
     let revision = guard.engine.revision().0;
     let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        let graph = native_graph(&mut guard.engine, path, project_root, resolutions.as_ref())?;
+        let DaemonState {
+            engine,
+            graph_cache,
+            ..
+        } = &mut *guard;
+        let graph = native_graph_with_cache(
+            engine,
+            graph_cache,
+            source_view,
+            path,
+            project_root,
+            resolutions.as_ref(),
+        )?;
         match graph {
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph))
@@ -1076,6 +1141,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
         }
     })) {
         Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
+            guard.graph_cache.invalidate();
             match next_source_view(guard.source_view) {
                 Ok(view) => guard.source_view = view,
                 Err(message) => return Err(Response::Error { message }),
@@ -1088,6 +1154,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
         Ok(Err(message)) => Err(Response::Error { message }),
         Err(payload) => {
             if guard.engine.revision().0 != revision {
+                guard.graph_cache.invalidate();
                 match next_source_view(guard.source_view) {
                     Ok(view) => guard.source_view = view,
                     Err(message) => return Err(Response::Error { message }),
@@ -1114,6 +1181,18 @@ fn handle_engine_request<E: QueryEngine>(
         Ok(outcome) => outcome,
         Err(payload) => (internal_error(&*payload), Next::Continue),
     }
+}
+
+fn daemon_stats<E: QueryEngine>(state: &DaemonState<E>) -> Stats {
+    let mut stats = crate::dispatch::stats(&state.engine);
+    let cache = state.graph_cache.stats();
+    stats.graph_cache_hits = cache.hits;
+    stats.graph_cache_misses = cache.misses;
+    stats.graph_cache_evictions = cache.evictions;
+    stats.graph_cache_invalidations = cache.invalidations;
+    stats.graph_cache_entries = state.graph_cache.entries();
+    stats.graph_cache_modules = state.graph_cache.cached_modules();
+    stats
 }
 
 fn internal_error(payload: &(dyn std::any::Any + Send)) -> Response {
