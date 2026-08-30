@@ -22,10 +22,11 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Arguments;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
@@ -89,7 +90,7 @@ pub fn run(
     let mut refresher = Refresher::new(peer);
     match commands::read_source(path) {
         Ok(current) => {
-            let revision = run_once(
+            let expectation = run_once(
                 backend,
                 path,
                 project_root,
@@ -103,7 +104,7 @@ pub fn run(
             )?;
             project_synced = true;
             refresher.submit(
-                revision,
+                expectation,
                 target.canonical.clone(),
                 project_root.to_string_lossy().into_owned(),
             );
@@ -207,7 +208,7 @@ pub fn run(
                             } else {
                                 SourceSync::Incremental
                             };
-                            let revision = run_once(
+                            let expectation = run_once(
                                 backend,
                                 path,
                                 project_root,
@@ -221,7 +222,7 @@ pub fn run(
                             )?;
                             project_synced = true;
                             refresher.submit(
-                                revision,
+                                expectation,
                                 target.canonical.clone(),
                                 project_root.to_string_lossy().into_owned(),
                             );
@@ -326,7 +327,7 @@ fn run_once(
     sync: SourceSync<'_>,
     out: &mut dyn Write,
     notes: &mut dyn Write,
-) -> Result<Option<u64>> {
+) -> Result<Option<RefreshExpectation>> {
     // Seed the daemon with one authoritative project view. Once seeded, recursive events upload
     // changed dependencies and this sends the already-read target directly; repeating the whole
     // filesystem walk on every edit would put O(project) work ahead of the incremental compiler.
@@ -350,6 +351,14 @@ fn run_once(
             source.text,
         )?,
     };
+    let expectation = if output.exit_code == 0 {
+        output.revision.map(|revision| RefreshExpectation {
+            revision,
+            stdout: output.text.clone(),
+        })
+    } else {
+        None
+    };
     out.write_all(output.text.as_bytes())
         .and_then(|()| out.flush())
         .map_err(|source| Error::io("cannot write to stdout", source))?;
@@ -358,7 +367,12 @@ fn run_once(
     }
     // A failed compile/runtime execution is a normal watch iteration. Its diagnostics have
     // already been emitted above; keep the watcher alive so the next save can recover.
-    Ok(output.revision)
+    Ok(expectation)
+}
+
+struct RefreshExpectation {
+    revision: u64,
+    stdout: String,
 }
 
 struct RefreshJob {
@@ -366,16 +380,38 @@ struct RefreshJob {
     revision: u64,
     path: String,
     project_root: String,
+    expected_stdout: String,
 }
 
 struct RefreshResult {
     generation: u64,
-    result: Result<NativeBuildAtRevision>,
+    result: Result<NativeRefresh>,
 }
+
+struct NativeExecution {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+enum NativeRefresh {
+    Executed {
+        output_path: String,
+        expected_stdout: String,
+        execution: NativeExecution,
+    },
+    Stale {
+        current_revision: u64,
+    },
+}
+
+type NativeExecutor = Box<dyn Fn(&Path) -> Result<NativeExecution> + Send + 'static>;
 
 #[derive(Default)]
 struct RefreshQueueState {
     latest: Option<RefreshJob>,
+    generation: u64,
     closed: bool,
 }
 
@@ -392,8 +428,20 @@ impl RefreshQueue {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if !state.closed {
+            state.generation = job.generation;
             state.latest = Some(job);
             self.ready.notify_one();
+        }
+    }
+
+    fn invalidate(&self, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.closed {
+            state.generation = generation;
+            state.latest = None;
         }
     }
 
@@ -414,6 +462,14 @@ impl RefreshQueue {
                 .wait(state)
                 .unwrap_or_else(|poison| poison.into_inner());
         }
+    }
+
+    fn superseded(&self, generation: u64) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.closed || state.generation > generation
     }
 
     fn close(&self) {
@@ -438,19 +494,44 @@ struct Refresher {
 
 impl Refresher {
     fn new(peer: Option<Box<dyn Backend>>) -> Refresher {
+        Self::new_with_executor(peer, Box::new(execute_native))
+    }
+
+    fn new_with_executor(peer: Option<Box<dyn Backend>>, executor: NativeExecutor) -> Refresher {
         let (result_tx, result_rx) = mpsc::channel::<RefreshResult>();
         if let Some(mut backend) = peer {
             let jobs = Arc::new(RefreshQueue::default());
             let worker_jobs = Arc::clone(&jobs);
             let worker = std::thread::spawn(move || {
                 while let Some(job) = worker_jobs.next() {
-                    let result = backend.native_build_at_revision(
-                        job.path,
-                        job.project_root,
-                        None,
-                        NativeProfile::Dev,
-                        job.revision,
-                    );
+                    let result = backend
+                        .native_build_at_revision(
+                            job.path,
+                            job.project_root,
+                            None,
+                            NativeProfile::Dev,
+                            job.revision,
+                        )
+                        .and_then(|build| match build {
+                            NativeBuildAtRevision::Built(_)
+                                if worker_jobs.superseded(job.generation) =>
+                            {
+                                Ok(NativeRefresh::Stale {
+                                    current_revision: job.revision,
+                                })
+                            }
+                            NativeBuildAtRevision::Built(summary) => {
+                                let execution = executor(Path::new(&summary.output_path))?;
+                                Ok(NativeRefresh::Executed {
+                                    output_path: summary.output_path,
+                                    expected_stdout: job.expected_stdout,
+                                    execution,
+                                })
+                            }
+                            NativeBuildAtRevision::Stale { current_revision } => {
+                                Ok(NativeRefresh::Stale { current_revision })
+                            }
+                        });
                     if result_tx
                         .send(RefreshResult {
                             generation: job.generation,
@@ -478,16 +559,24 @@ impl Refresher {
         }
     }
 
-    fn submit(&mut self, revision: Option<u64>, path: String, project_root: String) {
-        let Some(revision) = revision else { return };
+    fn submit(
+        &mut self,
+        expectation: Option<RefreshExpectation>,
+        path: String,
+        project_root: String,
+    ) {
         self.generation += 1;
         if let Some(jobs) = &self.jobs {
-            jobs.replace(RefreshJob {
-                generation: self.generation,
-                revision,
-                path,
-                project_root,
-            });
+            match expectation {
+                Some(expectation) => jobs.replace(RefreshJob {
+                    generation: self.generation,
+                    revision: expectation.revision,
+                    path,
+                    project_root,
+                    expected_stdout: expectation.stdout,
+                }),
+                None => jobs.invalidate(self.generation),
+            }
         }
     }
 
@@ -497,11 +586,12 @@ impl Refresher {
                 continue;
             }
             match done.result {
-                Ok(NativeBuildAtRevision::Built(summary)) => note(
-                    notes,
-                    format_args!("native refresh built {}", summary.output_path),
-                )?,
-                Ok(NativeBuildAtRevision::Stale { current_revision }) => {
+                Ok(NativeRefresh::Executed {
+                    output_path,
+                    expected_stdout,
+                    execution,
+                }) => report_native_execution(notes, &output_path, &expected_stdout, &execution)?,
+                Ok(NativeRefresh::Stale { current_revision }) => {
                     let _ = current_revision;
                 }
                 Err(error) => note(notes, format_args!("native refresh unavailable: {error}"))?,
@@ -509,6 +599,117 @@ impl Refresher {
         }
         Ok(())
     }
+}
+
+fn execute_native(path: &Path) -> Result<NativeExecution> {
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    let mut child = Command::new(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| {
+            Error::io(
+                format!("cannot execute native refresh {}", path.display()),
+                source,
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Protocol("native refresh stdout pipe is unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::Protocol("native refresh stderr pipe is unavailable".into()))?;
+    let stdout_reader = std::thread::spawn(move || read_native_pipe(stdout));
+    let stderr_reader = std::thread::spawn(move || read_native_pipe(stderr));
+    let deadline = Instant::now() + TIMEOUT;
+    let (status, timed_out) = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|source| Error::io("cannot wait for native refresh", source))?
+        {
+            break (status, false);
+        }
+        if Instant::now() >= deadline {
+            if let Err(source) = child.kill() {
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|wait| Error::io("cannot wait for native refresh", wait))?
+                {
+                    break (status, false);
+                }
+                return Err(Error::io("cannot stop timed-out native refresh", source));
+            }
+            let status = child
+                .wait()
+                .map_err(|source| Error::io("cannot reap timed-out native refresh", source))?;
+            break (status, true);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = join_native_pipe(stdout_reader, "stdout")?;
+    let stderr = join_native_pipe(stderr_reader, "stderr")?;
+    Ok(NativeExecution {
+        exit_code: status.code(),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        timed_out,
+    })
+}
+
+fn read_native_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_native_pipe(
+    reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    label: &str,
+) -> Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| Error::Protocol(format!("native refresh {label} reader panicked")))?
+        .map_err(|source| Error::io(format!("cannot read native refresh {label}"), source))
+}
+
+fn report_native_execution(
+    notes: &mut dyn Write,
+    output_path: &str,
+    expected_stdout: &str,
+    execution: &NativeExecution,
+) -> Result<()> {
+    if !execution.timed_out && execution.exit_code == Some(0) && execution.stdout == expected_stdout
+    {
+        return note(
+            notes,
+            format_args!("native refresh stdout matched {output_path}"),
+        );
+    }
+    let expected_stdout = debug_excerpt(expected_stdout);
+    let native_stdout = debug_excerpt(&execution.stdout);
+    let native_stderr = debug_excerpt(&execution.stderr);
+    note(
+        notes,
+        format_args!(
+            "native refresh mismatch {output_path}: interpreter stdout {expected_stdout}, native stdout {native_stdout}, native exit {:?}, native timeout {}, native stderr {native_stderr}",
+            execution.exit_code, execution.timed_out
+        ),
+    )
+}
+
+fn debug_excerpt(text: &str) -> String {
+    const LIMIT: usize = 512;
+    if text.len() <= LIMIT {
+        return format!("{text:?}");
+    }
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{:?}… ({} bytes)", &text[..end], text.len())
 }
 
 impl Drop for Refresher {
@@ -544,6 +745,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Sender;
 
     use kiln_proto::{
@@ -984,9 +1186,29 @@ mod tests {
             requests: request_tx,
             responses: response_rx,
         };
-        let mut refresher = Refresher::new(Some(Box::new(backend)));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let execution_count = Arc::clone(&executions);
+        let mut refresher = Refresher::new_with_executor(
+            Some(Box::new(backend)),
+            Box::new(move |_| {
+                execution_count.fetch_add(1, Ordering::SeqCst);
+                Ok(NativeExecution {
+                    exit_code: Some(0),
+                    stdout: "revision 3\n".to_owned(),
+                    stderr: String::new(),
+                    timed_out: false,
+                })
+            }),
+        );
 
-        refresher.submit(Some(1), "/project/main.js".into(), "/project".into());
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 1,
+                stdout: "revision 1\n".to_owned(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
         let first = request_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first native build starts");
@@ -1000,13 +1222,27 @@ mod tests {
 
         // These arrive while revision 1 is blocked in the native toolchain. Revision 2 must
         // never start: finishing revision 1 should collapse the queue directly to revision 3.
-        refresher.submit(Some(2), "/project/main.js".into(), "/project".into());
-        refresher.submit(Some(3), "/project/main.js".into(), "/project".into());
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 2,
+                stdout: "revision 2\n".to_owned(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 3,
+                stdout: "revision 3\n".to_owned(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
         response_tx
-            .send(Response::Stale {
-                current_revision: 3,
-            })
-            .expect("finish stale build");
+            .send(Response::NativeBuilt(native_summary(
+                "/project/.kiln/bin/obsolete",
+            )))
+            .expect("finish superseded build");
 
         let latest = request_rx
             .recv_timeout(Duration::from_secs(1))
@@ -1038,8 +1274,116 @@ mod tests {
         }
         let notes = String::from_utf8(notes).expect("utf-8 notes");
         assert_eq!(
-            notes, "native refresh built /project/.kiln/bin/main\n",
+            notes, "native refresh stdout matched /project/.kiln/bin/main\n",
             "the stale generation stays silent and only the latest result is reported"
         );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "only the latest revision's artifact may execute"
+        );
+    }
+
+    #[test]
+    fn a_failed_foreground_run_invalidates_an_older_native_artifact() {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        let backend = ScriptedNativeBackend {
+            requests: request_tx,
+            responses: response_rx,
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+        let execution_count = Arc::clone(&executions);
+        let mut refresher = Refresher::new_with_executor(
+            Some(Box::new(backend)),
+            Box::new(move |_| {
+                execution_count.fetch_add(1, Ordering::SeqCst);
+                Ok(NativeExecution {
+                    exit_code: Some(0),
+                    stdout: "obsolete\n".to_owned(),
+                    stderr: String::new(),
+                    timed_out: false,
+                })
+            }),
+        );
+
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 1,
+                stdout: "old success\n".to_owned(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
+        request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("native build starts");
+        refresher.submit(None, "/project/main.js".into(), "/project".into());
+        response_tx
+            .send(Response::NativeBuilt(native_summary(
+                "/project/.kiln/bin/obsolete",
+            )))
+            .expect("finish obsolete build");
+
+        let done = refresher
+            .results
+            .recv_timeout(Duration::from_secs(1))
+            .expect("obsolete result is retired");
+        assert!(matches!(done.result, Ok(NativeRefresh::Stale { .. })));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn native_refresh_reports_output_or_exit_mismatches_on_the_notes_stream() {
+        let execution = NativeExecution {
+            exit_code: Some(7),
+            stdout: "native output\n".to_owned(),
+            stderr: "native error\n".to_owned(),
+            timed_out: false,
+        };
+        let mut notes = Vec::new();
+
+        report_native_execution(
+            &mut notes,
+            "/project/.kiln/bin/main",
+            "interpreter output\n",
+            &execution,
+        )
+        .expect("mismatch is reported");
+
+        let notes = String::from_utf8(notes).expect("utf-8 notes");
+        assert!(notes.starts_with("native refresh mismatch /project/.kiln/bin/main:"));
+        assert!(notes.contains("interpreter output\\n"), "{notes}");
+        assert!(notes.contains("native output\\n"), "{notes}");
+        assert!(notes.contains("native exit Some(7)"), "{notes}");
+        assert!(notes.contains("native timeout false"), "{notes}");
+        assert!(notes.contains("native error\\n"), "{notes}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_refresh_executor_captures_the_artifacts_real_process_result() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("native-executor");
+        let executable = dir.join("program");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'native stdout\\n'\nprintf 'native stderr\\n' >&2\nexit 4\n",
+        )
+        .expect("write executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make executable");
+
+        let execution = execute_native(&executable).expect("execute fixture");
+        assert_eq!(execution.exit_code, Some(4));
+        assert_eq!(execution.stdout, "native stdout\n");
+        assert_eq!(execution.stderr, "native stderr\n");
+        assert!(!execution.timed_out);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
