@@ -153,6 +153,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "kiln-artifact-cache"
 version = "0.0.0"
+dependencies = [
+ "kiln-digest",
+]
 
 [[package]]
 name = "kiln-backend-c"
@@ -189,7 +192,6 @@ name = "kiln-cli"
 version = "0.0.0"
 dependencies = [
  "kiln-daemon",
- "kiln-db",
  "kiln-host-abi",
  "kiln-native-runtime",
  "kiln-proto",
@@ -237,6 +239,10 @@ dependencies = [
  "kiln-ir",
  "proptest",
 ]
+
+[[package]]
+name = "kiln-digest"
+version = "0.0.0"
 
 [[package]]
 name = "kiln-hir"
@@ -339,6 +345,7 @@ dependencies = [
 name = "kiln-proto"
 version = "0.0.0"
 dependencies = [
+ "kiln-digest",
  "serde",
  "serde_json",
 ]

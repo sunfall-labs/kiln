@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# This crate deliberately has no dependencies.  It sits below the compiler and native
-# backends, so a cache implementation must not pull either of those (or a crypto runtime)
-# into every incremental build.
+# Only Kiln's concrete, dependency-free digest primitive sits below this crate. A cache
+# implementation must not pull compiler crates or a generic crypto framework into every build.
 [dependencies]
+kiln-digest = { workspace = true }

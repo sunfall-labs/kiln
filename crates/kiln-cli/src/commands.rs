@@ -14,7 +14,9 @@ use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
-use kiln_proto::{NativeProfile, SourceHash, TestMode, TestOutcome, TestSummary};
+use kiln_proto::{
+    NativeProfile, SourceDigest, SourceHash, TestMode, TestOutcome, TestSummary, source_digest,
+};
 use serde_json::json;
 
 /// What a command produced: `text` is the answer, `notes` are diagnostics for stderr.
@@ -62,7 +64,7 @@ pub(crate) fn run_source(
     run_source_with_manifest(backend, path, project_root, canonical, text).map(|(output, _)| output)
 }
 
-pub(crate) type SourceManifest = HashMap<String, u64>;
+pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
 
 /// Establish the authoritative source view for a watch and return the hashes derived from that
 /// same single read. Subsequent filesystem events use the manifest to ignore duplicate notify
@@ -372,7 +374,7 @@ fn sync_project_sources_with_override(
     }
     let manifest = texts
         .iter()
-        .map(|(path, text)| (path.clone(), kiln_db::content_hash(text)))
+        .map(|(path, text)| (path.clone(), source_digest(text)))
         .collect::<SourceManifest>();
     let needed: HashSet<String> = backend
         .sync(
@@ -380,7 +382,7 @@ fn sync_project_sources_with_override(
                 .iter()
                 .map(|(path, text)| SourceHash {
                     path: path.clone(),
-                    hash: kiln_db::content_hash(text),
+                    hash: source_digest(text),
                 })
                 .collect(),
         )?
@@ -1142,7 +1144,7 @@ mod tests {
         };
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
-        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        assert_eq!(files[0].hash, source_digest(captured));
         let Request::SetSource { path, text } = &backend.inner.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };
@@ -1180,7 +1182,7 @@ mod tests {
         };
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
-        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        assert_eq!(files[0].hash, source_digest(captured));
         let Request::SetSource { path, text } = &backend.inner.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };
@@ -1552,7 +1554,7 @@ mod tests {
         };
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, canonical);
-        assert_eq!(files[0].hash, kiln_db::content_hash(captured));
+        assert_eq!(files[0].hash, source_digest(captured));
         let Request::SetSource { path, text } = &fake.seen[1] else {
             panic!("second request must upload the captured snapshot");
         };

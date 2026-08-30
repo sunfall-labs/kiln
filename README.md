@@ -32,12 +32,13 @@ What exists today:
 | `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
 | `crates/kiln-native-number` | Versioned, locale-free Ryu/fast_float runtime for ECMAScript-exact native number conversion. |
 | `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime plus a tiny per-module launcher. |
+| `crates/kiln-digest` | Dependency-free, pinned SHA-256 shared by source coherence and artifact keys. |
 | `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
 | `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
 | `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
 | `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
 | `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 12, including structured interpreter, native-build, native-run, shared-library, and test results. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 13, including collision-resistant source synchronization and structured interpreter, native-build, native-run, shared-library, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
@@ -154,8 +155,8 @@ is visible next to the reasoning for it.
 - [0009](docs/adr/0009-native-c-units-have-layered-content-addressed-artifacts.md) — deterministic
   per-module C, the HostOps runtime, launcher, objects, and executable are separately keyed native
   artifacts behind a portable compiler boundary.
-- [0010](docs/adr/0010-hashing-strategy.md) — stable protocol-visible hashes use a specified
-  SHA-256 truncation, while cache keys retain the full digest and explicitly encode their inputs.
+- [0010](docs/adr/0010-hashing-strategy.md) — sole-decision source and artifact identities use
+  full-width SHA-256 digests, while compact FNV summaries remain hints rather than authorities.
 - [0011](docs/adr/0011-explicit-module-graph-and-acyclic-scalar-linking.md) — module resolution and
   graph traversal are explicit, deterministic layers; the first linkage slice copies acyclic
   scalar exports while reserving live cells and strongly connected components for the next step.
