@@ -302,6 +302,10 @@ pub enum Builtin {
     ParseFloat,
     IsNaN,
     IsFinite,
+    TypeError,
+    RangeError,
+    ReferenceError,
+    SyntaxError,
 }
 
 impl Builtin {
@@ -326,6 +330,10 @@ impl Builtin {
             "parseFloat" => Some(Self::ParseFloat),
             "isNaN" => Some(Self::IsNaN),
             "isFinite" => Some(Self::IsFinite),
+            "TypeError" => Some(Self::TypeError),
+            "RangeError" => Some(Self::RangeError),
+            "ReferenceError" => Some(Self::ReferenceError),
+            "SyntaxError" => Some(Self::SyntaxError),
             _ => None,
         }
     }
@@ -350,6 +358,10 @@ impl Builtin {
             Self::ParseFloat => "parseFloat",
             Self::IsNaN => "isNaN",
             Self::IsFinite => "isFinite",
+            Self::TypeError => "TypeError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
         }
     }
 }

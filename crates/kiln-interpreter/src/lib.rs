@@ -97,9 +97,52 @@ impl PartialEq for Symbol {
 /// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 const RESERVED_KEY_PREFIX: &str = "@@";
 
+/// The error constructors a realm provides.
+///
+/// One enum rather than one `Native` each, because everything about them is the same shape: a
+/// name, a prototype that chains to `Error.prototype`, and a constructor reachable from an
+/// instance through that prototype. The VM also raises them itself, and having the kinds in one
+/// type is what lets it say *which* without a second table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Error,
+    Type,
+    Range,
+    Reference,
+    Syntax,
+}
+
+impl ErrorKind {
+    /// Every kind, in declaration order, so the realm can build all their prototypes.
+    const ALL: [Self; 5] = [
+        Self::Error,
+        Self::Type,
+        Self::Range,
+        Self::Reference,
+        Self::Syntax,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::Type => "TypeError",
+            Self::Range => "RangeError",
+            Self::Reference => "ReferenceError",
+            Self::Syntax => "SyntaxError",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|kind| *kind == self)
+            .expect("every kind is in ALL")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
-    Error,
+    Error(ErrorKind),
     SymbolConstructor,
     ArrayConstructor,
     ObjectConstructor,
@@ -226,8 +269,12 @@ pub enum Native {
 impl Native {
     fn property(self, name: &str) -> Option<Value> {
         match (self, name) {
-            (Self::Error, "captureStackTrace") => Some(Value::Native(Self::ErrorCaptureStackTrace)),
-            (Self::Error, "name") => Some(Value::String("Error".to_owned())),
+            (Self::Error(_), "captureStackTrace") => {
+                Some(Value::Native(Self::ErrorCaptureStackTrace))
+            }
+            // `e.constructor.name` reaches this: the instance finds its constructor through the
+            // prototype, and the constructor knows which kind it is.
+            (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
             (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
             (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
             (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
@@ -915,6 +962,42 @@ impl fmt::Display for ExecutionError {
     }
 }
 
+impl ExecutionError {
+    /// The JavaScript error this corresponds to, when it is one a program could catch.
+    ///
+    /// Everything else is a compiler defect or a resource limit -- a program cannot meaningfully
+    /// catch "bytecode jumped out of range", and letting it try would turn a bug in kiln into an
+    /// exception the program silently swallows. So the list is short on purpose.
+    fn as_javascript_error(&self) -> Option<(ErrorKind, String)> {
+        Some(match self {
+            Self::NotCallable { value, .. } => {
+                (ErrorKind::Type, format!("a {value} is not a function"))
+            }
+            Self::NotConstructable { value, .. } => {
+                (ErrorKind::Type, format!("a {value} is not a constructor"))
+            }
+            Self::NotAnObject { value, .. } => (
+                ErrorKind::Type,
+                format!("cannot set a property on a {value}"),
+            ),
+            Self::CyclicJson => (
+                ErrorKind::Type,
+                "Converting circular structure to JSON".to_owned(),
+            ),
+            Self::InvalidJson => (ErrorKind::Syntax, "Unexpected token in JSON".to_owned()),
+            Self::RadixOutOfRange => (
+                ErrorKind::Range,
+                "toString() radix must be between 2 and 36".to_owned(),
+            ),
+            Self::EmptyReduce => (
+                ErrorKind::Type,
+                "Reduce of empty array with no initial value".to_owned(),
+            ),
+            _ => return None,
+        })
+    }
+}
+
 impl std::error::Error for ExecutionError {}
 
 /// Execute one IR program against a host implementation.
@@ -932,7 +1015,7 @@ pub fn execute<H: HostOps + ?Sized>(
         suspended: false,
         handlers: Vec::new(),
         arguments: Vec::new(),
-        error_prototype: None,
+        error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
@@ -984,7 +1067,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         suspended: false,
         handlers: Vec::new(),
         arguments: Vec::new(),
-        error_prototype: None,
+        error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
         frames: Vec::new(),
         instruction: 0,
@@ -1061,12 +1144,14 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     handlers: Vec<Handler>,
     /// The arguments the running frame received.
     arguments: Vec<Value>,
-    /// `Error.prototype` for this execution, created on first use.
+    /// One prototype per error kind for this execution, created on first use.
     ///
-    /// One object per run, because `e instanceof Error` compares it by identity: two error
-    /// prototypes would make errors from the same program fail to recognise each other. This is
-    /// the smallest thing a realm is, and it is where a real realm object will start.
-    error_prototype: Option<Value>,
+    /// One object per run per kind, because `e instanceof TypeError` compares it by identity:
+    /// two prototypes would make errors from the same program fail to recognise each other. Each
+    /// subclass's prototype chains to `Error.prototype`, which is what makes a `TypeError` an
+    /// `Error` too. This is the smallest thing a realm is, and it is where a real realm object
+    /// will start.
+    error_prototypes: [Option<Value>; ErrorKind::ALL.len()],
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
@@ -1156,8 +1241,13 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::Binary(BinaryOp::InstanceOf) => {
                     let right = self.pop(current)?;
                     let left = self.pop(current)?;
-                    // Threaded rather than global: `Error.prototype` belongs to this run.
-                    let prototype = self.error_prototype.clone();
+                    // Threaded rather than global: the error prototypes belong to this run, and
+                    // creating the one being tested against is what makes the comparison
+                    // meaningful for a kind nothing has constructed yet.
+                    let prototype = match &right {
+                        Value::Native(Native::Error(kind)) => Some(self.error_prototype(*kind)),
+                        _ => None,
+                    };
                     self.stack.push(Value::Boolean(instance_of(
                         &left,
                         &right,
@@ -1216,7 +1306,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let arguments = self.take_call_arguments(*argc, current)?;
                     let receiver = self.pop(current)?;
                     let method = self.property(&receiver, &name);
-                    let result = self.invoke(method, receiver, arguments, current)?;
+                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let Some(result) = self.catchable(invoked, current)? else {
+                        continue;
+                    };
                     if let Some(result) = result {
                         self.stack.push(result);
                     }
@@ -1226,7 +1319,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let key = self.pop(current)?;
                     let receiver = self.pop(current)?;
                     let method = self.computed(&receiver, &key);
-                    let result = self.invoke(method, receiver, arguments, current)?;
+                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let Some(result) = self.catchable(invoked, current)? else {
+                        continue;
+                    };
                     if let Some(result) = result {
                         self.stack.push(result);
                     }
@@ -1296,13 +1392,28 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::GetComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
+                    if target.is_nullish() {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read properties of {} (reading '{}')",
+                                target.to_display_string(),
+                                key.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
                     self.stack.push(self.computed(&target, &key));
                 }
                 Instruction::SetComputed => {
                     let value = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    self.set_computed(&target, &key, value.clone(), current)?;
+                    let assigned = self.set_computed(&target, &key, value.clone(), current);
+                    if self.catchable(assigned, current)?.is_none() {
+                        continue;
+                    }
                     self.stack.push(value);
                 }
                 Instruction::SetPrototype => {
@@ -1374,18 +1485,24 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     self.stack.push(this_value);
                 }
                 Instruction::GetProperty(name)
-                    if matches!(self.stack.last(), Some(Value::Native(Native::Error)))
+                    if matches!(self.stack.last(), Some(Value::Native(Native::Error(_))))
                         && self.string_constant(*name, current)? == "prototype" =>
                 {
                     // `Error.prototype` has to be the same object instances inherit from, or
                     // `extends Error` would link to something no error descends from.
-                    self.stack.pop();
-                    let prototype = self.error_prototype();
+                    let Some(Value::Native(Native::Error(kind))) = self.stack.pop() else {
+                        unreachable!("checked by the guard");
+                    };
+                    let prototype = self.error_prototype(kind);
                     self.stack.push(prototype);
                 }
                 Instruction::LoadBuiltin(builtin) => {
                     self.stack.push(Value::Native(match builtin {
-                        kiln_ir::Builtin::Error => Native::Error,
+                        kiln_ir::Builtin::Error => Native::Error(ErrorKind::Error),
+                        kiln_ir::Builtin::TypeError => Native::Error(ErrorKind::Type),
+                        kiln_ir::Builtin::RangeError => Native::Error(ErrorKind::Range),
+                        kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
+                        kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
                         kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
                         kiln_ir::Builtin::String => Native::StringConstructor,
                         kiln_ir::Builtin::Set => Native::SetConstructor,
@@ -1396,7 +1513,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         // this is the first piece of.
                         kiln_ir::Builtin::GlobalThis => {
                             let mut globals = ObjectData::default();
-                            globals.set("Error", Value::Native(Native::Error));
+                            for kind in ErrorKind::ALL {
+                                globals.set(kind.name(), Value::Native(Native::Error(kind)));
+                            }
                             globals.set("Array", Value::Native(Native::ArrayConstructor));
                             globals.set("Object", Value::Native(Native::ObjectConstructor));
                             globals.set("JSON", Value::Native(Native::Json));
@@ -1442,7 +1561,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     }
                     let arguments = self.stack.split_off(self.stack.len() - argc);
                     let callee = self.pop(current)?;
-                    self.construct(callee, arguments, current)?;
+                    let constructed = self.construct(callee, arguments, current);
+                    if self.catchable(constructed, current)?.is_none() {
+                        continue;
+                    }
                 }
                 Instruction::NewObject { count } => {
                     let count = *count as usize;
@@ -1521,7 +1643,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     // `new` with a computed argument list is the same construction the
                     // fixed-arity `New` performs, so it goes through the same path rather than
                     // repeating the allocate-run-override sequence.
-                    self.construct(callee, arguments, current)?;
+                    let constructed = self.construct(callee, arguments, current);
+                    if self.catchable(constructed, current)?.is_none() {
+                        continue;
+                    }
                 }
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
@@ -1538,6 +1663,17 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 Instruction::GetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
+                    if target.is_nullish() {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read properties of {} (reading '{name}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
                     self.stack.push(self.property(&target, &name));
                 }
                 Instruction::SetProperty(name) => {
@@ -1547,7 +1683,11 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     // Assigning a property of a primitive is silently discarded in sloppy mode
                     // and a TypeError in strict mode. Modules are always strict, and there is
                     // nowhere to throw yet, so it is an execution error.
-                    self.set_computed(&target, &Value::String(name), value.clone(), current)?;
+                    let assigned =
+                        self.set_computed(&target, &Value::String(name), value.clone(), current);
+                    if self.catchable(assigned, current)?.is_none() {
+                        continue;
+                    }
                     self.stack.push(value);
                 }
                 Instruction::NewCell(slot) => {
@@ -1596,19 +1736,25 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         Value::Native(native) => {
                             let native = *native;
                             let arguments = self.take_arguments(argc, current)?;
-                            let result = self.dispatch_native(
+                            let called = self.dispatch_native(
                                 native,
                                 &Value::Undefined,
                                 &arguments,
                                 current,
-                            )?;
+                            );
+                            let Some(result) = self.catchable(called, current)? else {
+                                continue;
+                            };
                             self.stack.push(result);
                         }
                         other => {
-                            return Err(ExecutionError::NotCallable {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
+                            let value = other.type_name();
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!("a {value} is not a function"),
+                                current,
+                            )?;
+                            continue;
                         }
                     }
                 }
@@ -2322,14 +2468,14 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 self.call_with_this(closure, argc as u16, current, this_value, None)?;
             }
-            Value::Native(Native::Error) => {
+            Value::Native(Native::Error(kind)) => {
                 // A native parent leaves no frame, so the expression's value has to
                 // be pushed here to match what a compiled parent's `Return` does.
                 self.stack.push(Value::Undefined);
                 // A native constructor builds its own object, so its own properties
                 // are copied onto the instance. That is what `class E extends Error`
                 // needs: message, name, stack and cause end up on `this`.
-                let built = self.construct_error(&arguments);
+                let built = self.construct_error(kind, &arguments);
                 if let (Value::Object(instance), Value::Object(built)) = (&this_value, &built) {
                     let built = built.borrow();
                     let mut instance = instance.borrow_mut();
@@ -2350,21 +2496,71 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(())
     }
 
-    /// `Error.prototype`, created on first use.
-    fn error_prototype(&mut self) -> Value {
-        if let Some(prototype) = &self.error_prototype {
+    /// The prototype for one error kind, created on first use.
+    ///
+    /// A subclass's prototype chains to `Error.prototype`, so `e instanceof Error` holds for
+    /// every kind and `toString` is inherited rather than copied.
+    fn error_prototype(&mut self, kind: ErrorKind) -> Value {
+        if let Some(prototype) = &self.error_prototypes[kind.index()] {
             return prototype.clone();
         }
         let mut data = ObjectData::default();
-        data.set("name", Value::String("Error".to_owned()));
+        data.set("name", Value::String(kind.name().to_owned()));
         data.set("message", Value::String(String::new()));
-        // Marks the chain for `String(e)`. A real `toString` would be invoked through the normal
-        // method path; this is the placeholder that keeps the observable behaviour right until
-        // built-ins can be written in JavaScript (design.md §5).
-        data.set("toString", Value::Native(Native::ErrorToString));
+        // `e.constructor.name` is how a program asks which kind it caught, and this is the link
+        // that answers it.
+        data.set("constructor", Value::Native(Native::Error(kind)));
+        if matches!(kind, ErrorKind::Error) {
+            // Marks the chain for `String(e)`. A real `toString` would be invoked through the
+            // normal method path; this is the placeholder that keeps the observable behaviour
+            // right until built-ins can be written in JavaScript (design.md §5).
+            data.set("toString", Value::Native(Native::ErrorToString));
+        }
         let prototype = Value::Object(Rc::new(RefCell::new(data)));
-        self.error_prototype = Some(prototype.clone());
+        if !matches!(kind, ErrorKind::Error) {
+            let base = self.error_prototype(ErrorKind::Error);
+            if let Value::Object(object) = &prototype {
+                object.borrow_mut().set_prototype(base);
+            }
+        }
+        self.error_prototypes[kind.index()] = Some(prototype.clone());
         prototype
+    }
+
+    /// Take the result of a step, turning an error a program could catch into a thrown value.
+    ///
+    /// `Ok(None)` means control has already moved to a handler and the caller should go round the
+    /// loop again rather than using a result that does not exist.
+    fn catchable<T>(
+        &mut self,
+        result: Result<T, ExecutionError>,
+        instruction: usize,
+    ) -> Result<Option<T>, ExecutionError> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => match error.as_javascript_error() {
+                Some((kind, message)) => {
+                    self.throw_error(kind, message, instruction)?;
+                    Ok(None)
+                }
+                None => Err(error),
+            },
+        }
+    }
+
+    /// Raise a JavaScript error of `kind` from the VM itself.
+    ///
+    /// The point of building a real error object rather than failing outright is that a program
+    /// can catch it: `try { null.x } catch (e) { e instanceof TypeError }` is ordinary code, and
+    /// a fatal execution error would make it unwritable.
+    fn throw_error(
+        &mut self,
+        kind: ErrorKind,
+        message: String,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let error = self.construct_error(kind, &[Value::String(message)]);
+        self.unwind(error, instruction)
     }
 
     /// `new callee(...arguments)`.
@@ -2379,8 +2575,8 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         current: usize,
     ) -> Result<(), ExecutionError> {
         match callee {
-            Value::Native(Native::Error) => {
-                let error = self.construct_error(&arguments);
+            Value::Native(Native::Error(kind)) => {
+                let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
             }
             Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
@@ -2448,10 +2644,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(())
     }
 
-    /// Build an `Error` instance whose prototype is this run's `Error.prototype`.
-    fn construct_error(&mut self, arguments: &[Value]) -> Value {
-        let prototype = self.error_prototype();
-        let error = build_error(arguments);
+    /// Build an error instance whose prototype is this run's prototype for that kind.
+    fn construct_error(&mut self, kind: ErrorKind, arguments: &[Value]) -> Value {
+        let prototype = self.error_prototype(kind);
+        let error = build_error(kind, arguments);
         if let Value::Object(object) = &error {
             object.borrow_mut().set_prototype(prototype);
         }
@@ -2984,21 +3180,22 @@ fn binary(operator: BinaryOp, left: Value, right: Value) -> Value {
 /// `cause` follows InstallErrorCause: the property exists when the options object *has* a
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
 /// the whole point of that step in the specification.
-fn build_error(arguments: &[Value]) -> Value {
+fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     let message = match arguments.first() {
         None | Some(Value::Undefined) => String::new(),
         Some(value) => value.to_display_string(),
     };
 
+    let name = kind.name();
     let mut data = ObjectData::default();
     data.set("message", Value::String(message.clone()));
-    data.set("name", Value::String("Error".to_owned()));
+    data.set("name", Value::String(name.to_owned()));
     data.set(
         "stack",
         Value::String(if message.is_empty() {
-            "Error".to_owned()
+            name.to_owned()
         } else {
-            format!("Error: {message}")
+            format!("{name}: {message}")
         }),
     );
     if let Some(Value::Object(options)) = arguments.get(1)
@@ -3911,7 +4108,7 @@ fn call_native(
             }
         }
         Native::SetConstructor | Native::MapConstructor => Value::Undefined,
-        Native::Error
+        Native::Error(_)
         | Native::SymbolConstructor
         | Native::ArrayConstructor
         | Native::ObjectConstructor
@@ -3989,7 +4186,7 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             None => return false,
         },
         // A native constructor's prototype is the realm's, not one per closure.
-        Value::Native(Native::Error) => match error_prototype {
+        Value::Native(Native::Error(_)) => match error_prototype {
             Some(prototype) => prototype.clone(),
             None => return false,
         },
@@ -5084,16 +5281,19 @@ mod tests {
 
     #[test]
     fn error_cause_is_installed_by_presence_not_by_value() {
-        let with_cause = build_error(&[
-            Value::String("m".to_owned()),
-            object(&[("cause", Value::Undefined)]),
-        ]);
+        let with_cause = build_error(
+            ErrorKind::Error,
+            &[
+                Value::String("m".to_owned()),
+                object(&[("cause", Value::Undefined)]),
+            ],
+        );
         let Value::Object(data) = &with_cause else {
             panic!("construct_error returns an object");
         };
         assert_eq!(data.borrow().get("cause"), Some(Value::Undefined));
 
-        let without = build_error(&[Value::String("m".to_owned())]);
+        let without = build_error(ErrorKind::Error, &[Value::String("m".to_owned())]);
         let Value::Object(data) = &without else {
             panic!("construct_error returns an object");
         };
@@ -5104,10 +5304,13 @@ mod tests {
     #[test]
     fn error_cause_keeps_the_identity_of_the_value_given() {
         let inner = object(&[("marker", Value::Number(1.0))]);
-        let outer = build_error(&[
-            Value::String("outer".to_owned()),
-            object(&[("cause", inner.clone())]),
-        ]);
+        let outer = build_error(
+            ErrorKind::Error,
+            &[
+                Value::String("outer".to_owned()),
+                object(&[("cause", inner.clone())]),
+            ],
+        );
         let Value::Object(data) = &outer else {
             panic!("construct_error returns an object");
         };
@@ -5119,7 +5322,7 @@ mod tests {
     #[test]
     fn an_empty_message_produces_a_bare_stack_header() {
         for arguments in [Vec::new(), vec![Value::Undefined]] {
-            let Value::Object(data) = build_error(&arguments) else {
+            let Value::Object(data) = build_error(ErrorKind::Error, &arguments) else {
                 panic!("construct_error returns an object");
             };
             assert_eq!(
@@ -5141,7 +5344,10 @@ mod tests {
         assert_eq!(Value::Null.type_name(), "null");
         assert_eq!(Value::Undefined.type_of(), "undefined");
         assert_eq!(Value::Number(1.0).type_of(), "number");
-        assert_eq!(Value::Native(Native::Error).type_of(), "function");
+        assert_eq!(
+            Value::Native(Native::Error(ErrorKind::Error)).type_of(),
+            "function"
+        );
         assert_eq!(object(&[]).type_of(), "object");
     }
 
@@ -5160,10 +5366,8 @@ mod tests {
         };
         assert!(matches!(
             run(&program),
-            Err(ExecutionError::NotConstructable {
-                value: "number",
-                ..
-            })
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "TypeError: a number is not a constructor"
         ));
     }
 
@@ -5463,10 +5667,8 @@ mod tests {
         };
         assert!(matches!(
             run(&program),
-            Err(ExecutionError::NotAnObject {
-                value: "number",
-                ..
-            })
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "TypeError: cannot set a property on a number"
         ));
     }
 
@@ -5643,12 +5845,12 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
+        // A TypeError the program could have caught, not a fatal stop: reaching the top with
+        // no handler is what makes it an `Uncaught`, and the message names the kind.
         assert!(matches!(
             run(&program),
-            Err(ExecutionError::NotCallable {
-                value: "number",
-                ..
-            })
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "TypeError: a number is not a function"
         ));
     }
 
