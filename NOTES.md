@@ -2350,8 +2350,36 @@ number;`) makes kiln initialise the field at construction, where node's type str
 declaration entirely -- so the two disagree about property order. That is a TypeScript question
 rather than an engine one, and the probe says so where it avoids it.
 
-**Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Promise` (2),
-`BigInt` (2), `LoadArguments` (2). `async` is the only one with a real design question
+**Promises and `async` landed**, 66 to 69, and the design question turned out to have the same
+shape as the generator one: the hard part was already built. An async function *is* a generator --
+`await` suspends exactly as `yield` does -- so the whole of `await` is that the suspension belongs
+to the generator and the scheduling belongs to the promise. `Await` emits identically to `Yield`;
+what differs is who resumes it, and that is two handlers attached to what it is waiting on.
+
+`conformance/native/promises.ts` compares the full interleaving -- eleven queued reactions, chains,
+a handler that throws, adoption of a returned promise, nested `async` calls, `all` and `race` --
+between the interpreter, the native backend and node. All three agree. Ordering was the thing I
+expected to be wrong and it was right first time, which I think is because the queue is a plain
+FIFO and every path into it goes through one `settle`.
+
+**The one real design decision is where the queue lives, and it is ADR 0023.** Each unit owns one
+and drains it when its entry point returns. That is exactly node's ordering for a single module --
+which is what `kiln run` compiles and what every probe is -- and an approximation for a graph,
+where node drains after *all* module bodies rather than after each. The correct fix spans into
+`kiln-native-runtime`: a queue plus a runner function pointer each unit registers, called by the
+launcher. **Codex: that is your crate, and the ADR spells out the change if you would rather take
+it than have me reach in.**
+
+**A `try` inside an async function is refused**, for the same reason as in a generator: a handler
+stack is part of the state a suspension has to survive.
+
+**Two predicates became one along the way.** `needs_call_context` and `produces_references` were
+asking the same question -- "is this more than a scalar program?" -- from two different lists, and
+the narrower one went stale the moment the drain needed a `depth` that only the wider one
+declared. `examples/modules/live` caught it.
+
+**Still refused, and this is the queue in order:** `NewRegExp` (5), `BigInt` (2), `GetPrivate`
+(2), `Boolean` (2), a `try` inside a generator (2). `async` is the only one with a real design question
 left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
 live in a program that just returns from `main`.
 
@@ -2360,7 +2388,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 19/19, differential 97/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 20/20, differential 97/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
