@@ -355,11 +355,13 @@ impl ArtifactCache {
     pub fn lookup(&self, key: &ArtifactKey) -> Result<Lookup, CacheError> {
         let key_digest = key.digest();
         for (layer_index, layer) in self.layers.iter().enumerate() {
+            if !cache_parent_exists(layer.root(), key)? {
+                continue;
+            }
             let path = path_for_root(layer.root(), key);
-            let bytes = match fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(io_error("read cache artifact", &path, source)),
+            let bytes = match read_regular_file(&path, "read cache artifact")? {
+                Some(bytes) => bytes,
+                None => continue,
             };
             let (payload_digest, payload) = decode_record(&path, key_digest, &bytes)?;
             return Ok(Lookup::Hit(Artifact {
@@ -411,11 +413,7 @@ impl ArtifactCache {
         let key_digest = key.digest();
         let payload_digest = Digest::hash(payload);
         let path = path_for_root(layer.root(), key);
-        let parent = path
-            .parent()
-            .expect("cache artifact path always has a parent");
-        fs::create_dir_all(parent)
-            .map_err(|source| io_error("create cache directory", parent, source))?;
+        let parent = ensure_cache_parent(layer.root(), key)?;
 
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()
@@ -467,6 +465,16 @@ impl ArtifactCache {
             return Err(CacheError::ReadOnlyLayer { index: layer_index });
         }
         let path = path_for_root(layer.root(), key);
+        if !cache_parent_exists(layer.root(), key)? {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(non_regular_path(&path, "cache record")),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(io_error("inspect cache artifact", &path, source)),
+        }
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -478,6 +486,82 @@ impl ArtifactCache {
 fn path_for_root(root: &Path, key: &ArtifactKey) -> PathBuf {
     let digest = key.digest().to_hex();
     root.join(key.kind.as_str()).join(&digest[..2]).join(digest)
+}
+
+fn cache_parent_paths(root: &Path, key: &ArtifactKey) -> (PathBuf, PathBuf) {
+    let digest = key.digest().to_hex();
+    let kind = root.join(key.kind.as_str());
+    let shard = kind.join(&digest[..2]);
+    (kind, shard)
+}
+
+/// Return whether the complete cache parent exists without traversing a symlink below the
+/// caller-selected root. The root itself may intentionally be a symlink to a cache location.
+fn cache_parent_exists(root: &Path, key: &ArtifactKey) -> Result<bool, CacheError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(non_regular_path(root, "cache root directory")),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io_error("inspect cache root", root, source)),
+    }
+    let (kind, shard) = cache_parent_paths(root, key);
+    for path in [&kind, &shard] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Err(non_regular_path(path, "cache shard directory")),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(io_error("inspect cache directory", path, source)),
+        }
+    }
+    Ok(true)
+}
+
+fn ensure_cache_parent(root: &Path, key: &ArtifactKey) -> Result<PathBuf, CacheError> {
+    fs::create_dir_all(root).map_err(|source| io_error("create cache root", root, source))?;
+    let root_metadata =
+        fs::metadata(root).map_err(|source| io_error("inspect cache root", root, source))?;
+    if !root_metadata.is_dir() {
+        return Err(non_regular_path(root, "cache root directory"));
+    }
+    let (kind, shard) = cache_parent_paths(root, key);
+    ensure_real_directory(&kind)?;
+    ensure_real_directory(&shard)?;
+    Ok(shard)
+}
+
+fn ensure_real_directory(path: &Path) -> Result<(), CacheError> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|source| io_error("inspect cache directory", path, source))?;
+            if metadata.file_type().is_dir() {
+                Ok(())
+            } else {
+                Err(non_regular_path(path, "cache shard directory"))
+            }
+        }
+        Err(source) => Err(io_error("create cache directory", path, source)),
+    }
+}
+
+fn read_regular_file(path: &Path, operation: &'static str) -> Result<Option<Vec<u8>>, CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(non_regular_path(path, "cache record")),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io_error("inspect cache artifact", path, source)),
+    }
+    fs::read(path)
+        .map(Some)
+        .map_err(|source| io_error(operation, path, source))
+}
+
+fn non_regular_path(path: &Path, expected: &str) -> CacheError {
+    CacheError::Corrupt {
+        path: path.to_path_buf(),
+        reason: format!("expected a regular {expected}"),
+    }
 }
 
 fn write_atomic(
@@ -518,9 +602,9 @@ fn write_atomic(
         Err(install_error) if install_error.kind() == io::ErrorKind::AlreadyExists => {
             // A concurrent writer of the same key may already have won. Accept that record only
             // after fully validating that it is byte-identical to our intended payload.
-            let existing = match fs::read(destination) {
-                Ok(existing) => existing,
-                Err(_) => {
+            let existing = match read_regular_file(destination, "read cache artifact")? {
+                Some(existing) => existing,
+                None => {
                     return Err(io_error(
                         "install cache artifact",
                         destination,
@@ -866,6 +950,128 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_at_a_record_path_is_corruption() {
+        let root = scratch("directory-record");
+        let cache = ArtifactCache::new(&root);
+        let artifact_key = key("directory-record");
+        let path = cache.path_for(&artifact_key).expect("path succeeds");
+        fs::create_dir_all(&path).expect("create directory in place of record");
+
+        assert!(matches!(
+            cache.lookup(&artifact_key),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cache.put(&artifact_key, b"payload"),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cache.remove(&artifact_key),
+            Err(CacheError::Corrupt { .. })
+        ));
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cache_root_remains_usable() {
+        use std::os::unix::fs::symlink;
+
+        let actual = scratch("root-target");
+        let alias = scratch("root-alias");
+        fs::create_dir_all(&actual).expect("create cache target");
+        symlink(&actual, &alias).expect("create cache root symlink");
+        let cache = ArtifactCache::new(&alias);
+        let artifact_key = key("root-symlink");
+
+        cache
+            .put(&artifact_key, b"payload")
+            .expect("store through symlinked root");
+        let Lookup::Hit(hit) = cache.lookup(&artifact_key).expect("lookup through root") else {
+            panic!("stored artifact should hit");
+        };
+        assert_eq!(hit.bytes, b"payload");
+
+        fs::remove_file(&alias).expect("remove root symlink");
+        cleanup(&actual);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_record_is_never_read_or_accepted_as_a_winner() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("record-symlink");
+        let outside = scratch("record-symlink-target");
+        let cache = ArtifactCache::new(&root);
+        let artifact_key = key("record-symlink");
+        cache
+            .put(&artifact_key, b"payload")
+            .expect("seed valid record");
+        let path = cache.path_for(&artifact_key).expect("path succeeds");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        let target = outside.join("record");
+        fs::rename(&path, &target).expect("move valid record outside cache");
+        symlink(&target, &path).expect("replace record with symlink");
+
+        assert!(matches!(
+            cache.lookup(&artifact_key),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cache.put(&artifact_key, b"payload"),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(cache.remove(&artifact_key).expect("remove symlink leaf"));
+        assert_eq!(
+            fs::read(&target).expect("outside record remains"),
+            encode_record_for_test(&artifact_key, b"payload")
+        );
+
+        cleanup(&root);
+        cleanup(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_cache_directories_cannot_escape_the_layer() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("directory-symlink");
+        let outside = scratch("directory-symlink-target");
+        let cache = ArtifactCache::new(&root);
+        let artifact_key = key("directory-symlink");
+        let path = cache.path_for(&artifact_key).expect("path succeeds");
+        let kind = root.join(artifact_key.kind.as_str());
+        let shard = path.parent().expect("record has shard parent");
+        fs::create_dir_all(&kind).expect("create kind directory");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        symlink(&outside, shard).expect("replace shard with symlink");
+        let outside_record = outside.join(path.file_name().expect("record has name"));
+        fs::write(&outside_record, b"must remain").expect("seed outside file");
+
+        assert!(matches!(
+            cache.lookup(&artifact_key),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cache.put(&artifact_key, b"payload"),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cache.remove(&artifact_key),
+            Err(CacheError::Corrupt { .. })
+        ));
+        assert_eq!(
+            fs::read(&outside_record).expect("outside record remains"),
+            b"must remain"
+        );
+
+        cleanup(&root);
+        cleanup(&outside);
+    }
+
+    #[test]
     fn layers_read_shared_then_write_local() {
         let local = scratch("local");
         let shared = scratch("shared");
@@ -907,5 +1113,12 @@ mod tests {
             Err(CacheError::NoWritableLayer)
         ));
         cleanup(&root);
+    }
+
+    fn encode_record_for_test(key: &ArtifactKey, payload: &[u8]) -> Vec<u8> {
+        let mut record =
+            encode_header(key.digest(), Digest::hash(payload), payload.len() as u64).to_vec();
+        record.extend_from_slice(payload);
+        record
     }
 }
