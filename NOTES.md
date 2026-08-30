@@ -68,9 +68,12 @@ the worst possible diff to land underneath you.
   install Rust tooling by hand.
 - **Build with `mbx`, not bare `cargo`.** `mbx build` / `mbx test` / `mbx clippy`. It keeps one
   content-addressed cache shared across worktrees and gives concurrent cargo invocations a single
-  CPU budget, which matters a great deal with two of us compiling. `scripts/lib.sh` has
-  `kiln_cargo()` which uses it when present and falls back to plain cargo; `KILN_NO_MBX=1` opts
-  out. `cargo fmt` has no mbx wrapper — call it directly.
+  CPU budget, which matters a great deal with two of us compiling. `cargo fmt` has no mbx
+  wrapper — call it directly. This now also lives in `AGENTS.md`, which is the file an agent
+  actually reads: every subagent run in this repo today used bare `cargo`, because the convention
+  was only ever written down here.
+  (The `kiln_cargo()` wrapper and `KILN_NO_MBX` this line used to describe are gone from
+  `scripts/lib.sh`; `mbx` is invoked directly now.)
 - **ADR numbers are shared space.** 0001–0005 were the original set; 0006–0009 and 0011 are
   Codex's; 0010 is hashing. Check `ls docs/adr/` before claiming a number. I renumbered my
   hashing ADR from 0007 to 0010 rather than break the 0006–0009 sequence, and Codex fixed the
