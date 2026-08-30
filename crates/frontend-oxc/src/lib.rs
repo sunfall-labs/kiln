@@ -278,19 +278,14 @@ impl Lowerer {
                         span: statement_span,
                     });
                 };
-                let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-                    return Some(HirStatement {
-                        kind: self.unsupported_statement("destructuring in for-of", statement_span),
-                        span: statement_span,
-                    });
-                };
+                let pattern = self.pattern(&declarator.id, statement_span);
                 HirStatementKind::ForOf {
                     kind: match declaration.kind {
                         VariableDeclarationKind::Var => HirVariableKind::Var,
                         VariableDeclarationKind::Const => HirVariableKind::Const,
                         _ => HirVariableKind::Let,
                     },
-                    name: identifier.name.to_string(),
+                    pattern,
                     iterable: self.expression(&statement.right),
                     body: Box::new(self.statement_or_unsupported(&statement.body)),
                 }
@@ -747,14 +742,38 @@ impl Lowerer {
                     .as_ref()
                     .map(|value| Box::new(self.expression(value))),
             },
+            Expression::UpdateExpression(update)
+                if !matches!(
+                    &update.argument,
+                    SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
+                ) =>
+            {
+                let (object, property) = match &update.argument {
+                    SimpleAssignmentTarget::StaticMemberExpression(member) => (
+                        self.expression(&member.object),
+                        kiln_hir::ObjectKey::Static(member.property.name.to_string()),
+                    ),
+                    SimpleAssignmentTarget::ComputedMemberExpression(member) => (
+                        self.expression(&member.object),
+                        kiln_hir::ObjectKey::Computed(self.expression(&member.expression)),
+                    ),
+                    _ => {
+                        return self
+                            .unsupported_expression("update of that target", expression_span);
+                    }
+                };
+                HirExpressionKind::UpdateMember {
+                    increment: matches!(update.operator, UpdateOperator::Increment),
+                    prefix: update.prefix,
+                    object: Box::new(object),
+                    property: Box::new(property),
+                }
+            }
             Expression::UpdateExpression(update) => {
                 let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
                     &update.argument
                 else {
-                    // A member target needs the object evaluated once and its old value kept
-                    // below it on the stack; refused rather than evaluated twice.
-                    return self
-                        .unsupported_expression("update of a member expression", expression_span);
+                    unreachable!("the arm above covers every other target");
                 };
                 HirExpressionKind::Update {
                     increment: matches!(update.operator, UpdateOperator::Increment),
@@ -1397,6 +1416,8 @@ fn lower_binary_operator(operator: BinaryOperator) -> Option<HirBinaryOperator> 
     }
 }
 
+/// Every assignment operator oxc can produce now has an HIR counterpart, so there is no
+/// catch-all -- and losing it means the compiler reports the day oxc grows another.
 fn lower_assignment_operator(operator: AssignmentOperator) -> Option<HirAssignmentOperator> {
     match operator {
         AssignmentOperator::Assign => Some(HirAssignmentOperator::Assign),
@@ -1406,7 +1427,15 @@ fn lower_assignment_operator(operator: AssignmentOperator) -> Option<HirAssignme
         AssignmentOperator::Division => Some(HirAssignmentOperator::Divide),
         AssignmentOperator::Remainder => Some(HirAssignmentOperator::Remainder),
         AssignmentOperator::Exponential => Some(HirAssignmentOperator::Exponentiate),
-        _ => None,
+        AssignmentOperator::BitwiseAnd => Some(HirAssignmentOperator::BitwiseAnd),
+        AssignmentOperator::BitwiseOR => Some(HirAssignmentOperator::BitwiseOr),
+        AssignmentOperator::BitwiseXOR => Some(HirAssignmentOperator::BitwiseXor),
+        AssignmentOperator::ShiftLeft => Some(HirAssignmentOperator::ShiftLeft),
+        AssignmentOperator::ShiftRight => Some(HirAssignmentOperator::ShiftRight),
+        AssignmentOperator::ShiftRightZeroFill => Some(HirAssignmentOperator::UnsignedShiftRight),
+        AssignmentOperator::LogicalAnd => Some(HirAssignmentOperator::LogicalAnd),
+        AssignmentOperator::LogicalOr => Some(HirAssignmentOperator::LogicalOr),
+        AssignmentOperator::LogicalNullish => Some(HirAssignmentOperator::Nullish),
     }
 }
 

@@ -911,10 +911,10 @@ impl Compiler {
             } => self.for_in(*kind, name, object, body, statement.span),
             StatementKind::ForOf {
                 kind,
-                name,
+                pattern,
                 iterable,
                 body,
-            } => self.for_of(*kind, name, iterable, body, statement.span),
+            } => self.for_of(*kind, pattern, iterable, body, statement.span),
             StatementKind::Throw(value) => {
                 self.expression(value);
                 self.code.push(Instruction::Throw);
@@ -1550,7 +1550,7 @@ impl Compiler {
     fn for_of(
         &mut self,
         kind: VariableKind,
-        name: &str,
+        pattern: &Pattern,
         iterable: &Expression,
         body: &Statement,
         span: Span,
@@ -1595,7 +1595,9 @@ impl Compiler {
         self.load_hidden(&result_binding);
         let value = self.constant_index(Constant::String("value".to_owned()));
         self.code.push(Instruction::GetProperty(value));
-        self.declare_bound(kind, name, span);
+        // A pattern, so `for (const [key, value] of entries)` binds both -- through the same
+        // `bind_pattern` a declaration uses, defaults and nesting included.
+        self.bind_pattern(kind, pattern, span);
 
         // Leaving the loop early has to close the iterator. Registering that as a cleanup is
         // what gets `return` right for free; `break` and an exception are handled by the two
@@ -2180,6 +2182,12 @@ impl Compiler {
                 prefix,
                 target,
             } => self.update(*increment, *prefix, target, expression.span),
+            ExpressionKind::UpdateMember {
+                increment,
+                prefix,
+                object,
+                property,
+            } => self.update_member(*increment, *prefix, object, property, expression.span),
             ExpressionKind::SuperCall { arguments } => {
                 if arguments.len() > u16::MAX as usize {
                     self.error(Some(expression.span), "too many arguments to `super`");
@@ -2538,7 +2546,7 @@ impl Compiler {
                 return;
             }
         };
-        let (load, store) = match place {
+        let (load, store): (Instruction, Instruction) = match place {
             Place::Local(slot) => (Instruction::LoadLocal(slot), Instruction::StoreLocal(slot)),
             Place::Cell(slot) => (Instruction::LoadCell(slot), Instruction::StoreCell(slot)),
             Place::Upvalue(index) => (
@@ -2561,21 +2569,28 @@ impl Compiler {
                 format!("assignment to const local `{target}` is not supported"),
             );
         }
+        if operator.is_short_circuiting() {
+            // `a ??= b` reads `a`, and assigns only if it is the wrong one -- so `b` may never
+            // be evaluated and the store may never happen. The current value is left on the
+            // stack as the expression's result when the store is skipped.
+            self.code.push(load.clone());
+            let skip = self.emit_jump(short_circuit_jump(operator));
+            self.expression(value);
+            self.code.push(Instruction::Dup);
+            self.code.push(store);
+            let done = self.emit_jump(Instruction::Jump(0));
+            self.patch_jump(skip);
+            self.code.push(load);
+            self.patch_jump(done);
+            return;
+        }
         if operator == AssignmentOperator::Assign {
             self.expression(value);
         } else {
             self.code.push(load);
             self.expression(value);
-            let binary = match operator {
-                AssignmentOperator::Add => BinaryOp::Add,
-                AssignmentOperator::Subtract => BinaryOp::Subtract,
-                AssignmentOperator::Multiply => BinaryOp::Multiply,
-                AssignmentOperator::Divide => BinaryOp::Divide,
-                AssignmentOperator::Remainder => BinaryOp::Remainder,
-                AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
-                AssignmentOperator::Assign => unreachable!(),
-            };
-            self.code.push(Instruction::Binary(binary));
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
         }
         self.code.push(Instruction::Dup);
         self.code.push(store);
@@ -3122,6 +3137,9 @@ impl Compiler {
         };
 
         self.code.push(load);
+        // `ToNumber` first: `x++` where `x` is "5" is 5 then 6, not "5" then "51". Without this
+        // the `+ 1` below concatenates, which is the same trap the member form fell into.
+        self.code.push(Instruction::Unary(UnaryOp::Plus));
         if !prefix {
             // Keep the old value beneath the arithmetic; the store below consumes the new one.
             self.code.push(Instruction::Dup);
@@ -3219,6 +3237,10 @@ impl Compiler {
         property: &Expression,
         value: &Expression,
     ) {
+        if operator.is_short_circuiting() {
+            self.short_circuiting_member(operator, object, None, Some(property), value);
+            return;
+        }
         self.expression(object);
         self.expression(property);
 
@@ -3226,20 +3248,151 @@ impl Compiler {
             self.code.push(Instruction::Dup2);
             self.code.push(Instruction::GetComputed);
             self.expression(value);
-            self.code.push(Instruction::Binary(match operator {
-                AssignmentOperator::Add => BinaryOp::Add,
-                AssignmentOperator::Subtract => BinaryOp::Subtract,
-                AssignmentOperator::Multiply => BinaryOp::Multiply,
-                AssignmentOperator::Divide => BinaryOp::Divide,
-                AssignmentOperator::Remainder => BinaryOp::Remainder,
-                AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
-                AssignmentOperator::Assign => unreachable!("handled above"),
-            }));
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
         } else {
             self.expression(value);
         }
 
         self.code.push(Instruction::SetComputed);
+    }
+
+    /// `object.property ??= value`, and the `&&=`/`||=` forms, static or computed.
+    ///
+    /// These read the property and assign only if it is the wrong one, so the right-hand side may
+    /// never be evaluated and the store may never happen -- and the receiver, the key and the
+    /// current value each have to survive that decision without being computed twice. Hidden
+    /// locals hold them, for the same reason an update does.
+    fn short_circuiting_member(
+        &mut self,
+        operator: AssignmentOperator,
+        object: &Expression,
+        name: Option<u32>,
+        key: Option<&Expression>,
+        value: &Expression,
+    ) {
+        let span = object.span;
+        let receiver = format!("%sc{}", self.hidden_bindings);
+        let key_binding = format!("%sckey{}", self.hidden_bindings);
+        let current = format!("%sccur{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+
+        self.expression(object);
+        self.declare_hidden(&receiver, span);
+        if let Some(key) = key {
+            self.expression(key);
+            self.declare_hidden(&key_binding, span);
+        }
+
+        self.load_hidden(&receiver);
+        match name {
+            Some(name) => self.code.push(Instruction::GetProperty(name)),
+            None => {
+                self.load_hidden(&key_binding);
+                self.code.push(Instruction::GetComputed);
+            }
+        }
+        self.declare_hidden(&current, span);
+
+        self.load_hidden(&current);
+        let skip = self.emit_jump(short_circuit_jump(operator));
+
+        self.load_hidden(&receiver);
+        if name.is_none() {
+            self.load_hidden(&key_binding);
+        }
+        self.expression(value);
+        match name {
+            Some(name) => self.code.push(Instruction::SetProperty(name)),
+            None => self.code.push(Instruction::SetComputed),
+        }
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        // Skipped: the expression evaluates to the value that was already there.
+        self.patch_jump(skip);
+        self.load_hidden(&current);
+        self.patch_jump(done);
+        self.scopes.pop().expect("assignment scope was just pushed");
+    }
+
+    /// `object.property++`, and the other three spellings.
+    ///
+    /// The object and the key are each evaluated once and held in hidden locals: `o().x++` must
+    /// not call `o` twice, and `a[i()]++` must not call `i` twice. That is the same rule a
+    /// compound member assignment follows, and the reason neither can be lowered to
+    /// `o.x = o.x + 1`.
+    fn update_member(
+        &mut self,
+        increment: bool,
+        prefix: bool,
+        object: &Expression,
+        property: &ObjectKey,
+        span: Span,
+    ) {
+        if let ObjectKey::Private(name) = property {
+            self.error(Some(span), format!("update of the private name `#{name}`"));
+            self.push_constant(Constant::Undefined);
+            return;
+        }
+
+        let receiver = format!("%upd{}", self.hidden_bindings);
+        let key_binding = format!("%updkey{}", self.hidden_bindings);
+        let old_binding = format!("%old{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+
+        self.expression(object);
+        self.declare_hidden(&receiver, span);
+        let name = match property {
+            ObjectKey::Static(name) => Some(self.constant_index(Constant::String(name.clone()))),
+            ObjectKey::Computed(key) => {
+                self.expression(key);
+                self.declare_hidden(&key_binding, span);
+                None
+            }
+            ObjectKey::Private(_) => unreachable!("refused above"),
+        };
+
+        // Read the current value, as a number: `+ 0` is not a no-op but `ToNumber`, and the old
+        // value a postfix update yields has to be the number rather than whatever was stored.
+        self.load_hidden(&receiver);
+        match name {
+            Some(name) => self.code.push(Instruction::GetProperty(name)),
+            None => {
+                self.load_hidden(&key_binding);
+                self.code.push(Instruction::GetComputed);
+            }
+        }
+        // Unary plus, not `+ 0`: `+` on a string concatenates, so `o.s++` where `s` is "5"
+        // would produce "50". This is `ToNumber`, which is what an update actually applies.
+        self.code.push(Instruction::Unary(UnaryOp::Plus));
+        self.declare_hidden(&old_binding, span);
+
+        // Write the new value through the same reference the read used.
+        self.load_hidden(&receiver);
+        if name.is_none() {
+            self.load_hidden(&key_binding);
+        }
+        self.load_hidden(&old_binding);
+        self.push_constant(Constant::Number(1f64.to_bits()));
+        self.code.push(Instruction::Binary(if increment {
+            BinaryOp::Add
+        } else {
+            BinaryOp::Subtract
+        }));
+        match name {
+            Some(name) => self.code.push(Instruction::SetProperty(name)),
+            None => self.code.push(Instruction::SetComputed),
+        }
+
+        // The store leaves the new value, which is what a prefix update evaluates to; a postfix
+        // one discards it and hands back what was there before.
+        if !prefix {
+            self.code.push(Instruction::Pop);
+            self.load_hidden(&old_binding);
+        }
+        self.scopes.pop().expect("update scope was just pushed");
     }
 
     /// `object.#name = value`, and the compound forms.
@@ -3275,6 +3428,10 @@ impl Compiler {
         value: &Expression,
     ) {
         let name = self.constant_index(Constant::String(property.to_owned()));
+        if operator.is_short_circuiting() {
+            self.short_circuiting_member(operator, object, Some(name), None, value);
+            return;
+        }
         self.expression(object);
 
         if operator != AssignmentOperator::Assign {
@@ -3282,15 +3439,8 @@ impl Compiler {
             self.code.push(Instruction::Dup);
             self.code.push(Instruction::GetProperty(name));
             self.expression(value);
-            self.code.push(Instruction::Binary(match operator {
-                AssignmentOperator::Add => BinaryOp::Add,
-                AssignmentOperator::Subtract => BinaryOp::Subtract,
-                AssignmentOperator::Multiply => BinaryOp::Multiply,
-                AssignmentOperator::Divide => BinaryOp::Divide,
-                AssignmentOperator::Remainder => BinaryOp::Remainder,
-                AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
-                AssignmentOperator::Assign => unreachable!("handled above"),
-            }));
+            self.code
+                .push(Instruction::Binary(compound_operator(operator)));
         } else {
             self.expression(value);
         }
@@ -3817,7 +3967,31 @@ fn compound_operator(operator: AssignmentOperator) -> BinaryOp {
         AssignmentOperator::Divide => BinaryOp::Divide,
         AssignmentOperator::Remainder => BinaryOp::Remainder,
         AssignmentOperator::Exponentiate => BinaryOp::Exponentiate,
+        AssignmentOperator::BitwiseAnd => BinaryOp::BitwiseAnd,
+        AssignmentOperator::BitwiseOr => BinaryOp::BitwiseOr,
+        AssignmentOperator::BitwiseXor => BinaryOp::BitwiseXor,
+        AssignmentOperator::ShiftLeft => BinaryOp::ShiftLeft,
+        AssignmentOperator::ShiftRight => BinaryOp::ShiftRight,
+        AssignmentOperator::UnsignedShiftRight => BinaryOp::UnsignedShiftRight,
         AssignmentOperator::Assign => unreachable!("a plain assignment performs no operation"),
+        AssignmentOperator::LogicalAnd
+        | AssignmentOperator::LogicalOr
+        | AssignmentOperator::Nullish => {
+            unreachable!("a short-circuiting assignment computes nothing")
+        }
+    }
+}
+
+/// The jump that skips the store for a short-circuiting assignment.
+///
+/// `a ||= b` assigns only when `a` is falsy, so the jump taken *past* the store is the one taken
+/// when `a` is truthy -- which is why each operator maps to the opposite test.
+fn short_circuit_jump(operator: AssignmentOperator) -> Instruction {
+    match operator {
+        AssignmentOperator::LogicalAnd => Instruction::JumpIfFalse(0),
+        AssignmentOperator::LogicalOr => Instruction::JumpIfTruthy(0),
+        AssignmentOperator::Nullish => Instruction::JumpIfNotNullish(0),
+        _ => unreachable!("only a short-circuiting assignment skips its store"),
     }
 }
 
@@ -3993,6 +4167,14 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(object, names, collecting);
             collect_identifiers(value, names, collecting);
         }
+        ExpressionKind::UpdateMember {
+            object, property, ..
+        } => {
+            collect_identifiers(object, names, collecting);
+            if let ObjectKey::Computed(key) = property.as_ref() {
+                collect_identifiers(key, names, collecting);
+            }
+        }
         ExpressionKind::Template { expressions, .. } => {
             for expression in expressions {
                 collect_identifiers(expression, names, collecting);
@@ -4106,6 +4288,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::PrivateMember { object, .. } => expression_references(object, name),
         ExpressionKind::PrivateAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
+        }
+        ExpressionKind::UpdateMember {
+            object, property, ..
+        } => {
+            expression_references(object, name)
+                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_references(key, name))
         }
         ExpressionKind::Template { expressions, .. } => expressions
             .iter()
