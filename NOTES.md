@@ -3743,3 +3743,57 @@ not a reason to share a variant.
 **Still yours, unchanged:** natively `JSON.parse("{")` is status -2 and `JSON.stringify(cyclic)`
 stops the program silently. The interpreter side of both is now correct, so those two are live
 engine divergences that the differential corpus will flag.
+
+---
+
+**2026-08-30, Claude — `kiln project` stack-overflows in your working tree. Read this first.**
+
+```
+$ ./target/debug/kiln --one-shot project
+thread '<unknown>' has overflowed its stack
+fatal runtime error: stack overflow, aborting
+```
+
+**It is not committed and it is not mine.** I checked both: `git archive HEAD` into a clean tree
+builds and runs `project` fine (`recomputed parse 245, interface 245, project 1`), and reverting
+my one-line change to `sync_project_sources_with_override` does not fix it. It is somewhere in
+your ~9.5k uncommitted lines.
+
+What I narrowed it to, so you do not have to:
+
+- **Only `project`.** `check`, `run examples/hello.ts` and `test conformance/guard` are all fine.
+- **Smallest reproducer in the repo:** `cd examples/medium/linked && kiln --one-shot project`.
+- **`examples/medium/src` (320 files, no imports) is fine. `examples/medium/linked` (the same
+  files plus cross-imports) overflows.** So it needs the import graph, not just the file count.
+- **Not reproducible synthetically**, which is the useful negative: an entry importing 320
+  modules is fine, and a 300-deep import chain is fine. So it is neither flat fan-out nor chain
+  depth on its own. Something about that graph's shape.
+
+`project` is the whole-project rollup and the one command the invalidation story rests on, so I
+would not commit the current tree without fixing this.
+
+**Meanwhile, two things landed (uncommitted, in files carrying your work):**
+
+**`kiln cache gc [--dry-run]`**, protocol 17 -> 18. Sweeps the artifact cache to a 2 GiB per-layer
+budget, cheapest-to-rebuild first, never on the critical path. `live_identities` is deliberately
+**empty**, which disables the identity-stale tier: the identities are assembled by private fns
+over private constants in `kiln-native`, and re-deriving them in the daemon would be a second
+definition that can drift -- and drift in that tier evicts *live* records. `cache_gc.rs` records
+exactly what `kiln-native` would need to expose (one method returning its identity digests) to
+switch it on. Worth doing when you are next in there.
+
+**The warm no-op is ~58% faster**: 34.8 -> 14.5 ms on the 641-file workload, ABBA-interleaved,
+three reps, distributions non-overlapping. One `realpath` for the root instead of 641, and the
+reads on a private 8-thread pool (not rayon's global one, which would spend mbx's shared budget
+from inside every invocation). Output proven byte-identical, `FileId` order preserved.
+
+**Two operational notes.**
+
+`.kiln/cache` went **83 MB -> 1.6 GiB in one session** (42 -> 798 records). That is why the budget
+exists. The volume is at 23 GiB free and 98%.
+
+**`kiln daemon stop` cannot stop a protocol-skewed daemon.** `lifecycle::stop` handshakes before
+sending `Shutdown`, so a daemon speaking an older protocol refuses the handshake and survives its
+own stop command -- it needs `kill`. I hit this with the v17 daemon left from this morning and
+killed it by hand. Making `stop` skew-tolerant is a small change in `lifecycle.rs`; I did not take
+it because that file was outside the lane I had claimed.
