@@ -9,7 +9,9 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 6;
+pub const NATIVE_RUNTIME_VERSION: u32 = 7;
+/// Version of the private invocation-scoped graph scheduler contract.
+pub const GRAPH_SCHEDULER_ABI_VERSION: u32 = 1;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -240,14 +242,24 @@ pub fn runtime_source() -> &'static str {
     RUNTIME_SOURCE
         .get_or_init(|| {
             let mut source = String::with_capacity(
-                RUNTIME_PREFIX.len() + embedding_header().len() + RUNTIME_BODY.len(),
+                RUNTIME_PREFIX.len()
+                    + embedding_header().len()
+                    + SCHEDULER_SOURCE.len()
+                    + RUNTIME_BODY.len(),
             );
             source.push_str(RUNTIME_PREFIX);
             source.push_str(embedding_header());
+            source.push_str(SCHEDULER_SOURCE);
             source.push_str(RUNTIME_BODY);
             source
         })
         .as_str()
+}
+
+/// Return the invocation-scoped graph scheduler implementation. Shared-library wrappers embed
+/// this private source directly because they deliberately do not link the CLI runtime object.
+pub fn scheduler_source() -> &'static str {
+    SCHEDULER_SOURCE
 }
 
 /// Emit a deterministic C11 launcher that calls `symbol` as the process entry point.
@@ -305,7 +317,8 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 6
+#define KILN_NATIVE_RUNTIME_VERSION 7
+#define KILN_GRAPH_SCHEDULER_ABI_VERSION 1
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -389,6 +402,104 @@ const MODULE_HEADER_DECL_SUFFIX: &str = r#"(kiln_host *host, kiln_value *result)
 #endif /* "#;
 
 static RUNTIME_SOURCE: OnceLock<String> = OnceLock::new();
+
+const SCHEDULER_SOURCE: &str = r#"
+/* Private graph scheduler ABI. State belongs to one wrapper invocation. */
+#if defined(KILN_NATIVE_HIDE_SCHEDULER) && (defined(__GNUC__) || defined(__clang__))
+#define KILN_NATIVE_PRIVATE __attribute__((visibility("hidden")))
+#else
+#define KILN_NATIVE_PRIVATE
+#endif
+typedef struct kiln_microtask {
+    kiln_value handler;
+    kiln_value argument;
+    kiln_value derived;
+    int rejected;
+} kiln_microtask;
+typedef struct kiln_timer {
+    double id;
+    double due;
+    uint64_t sequence;
+    kiln_value callback;
+    kiln_value *args;
+    size_t argc;
+    double repeat;
+    int repeats;
+} kiln_timer;
+typedef struct kiln_native_scheduler kiln_native_scheduler;
+typedef int (*kiln_scheduler_runner_fn)(kiln_native_scheduler *scheduler, kiln_host *host,
+                                        int depth, kiln_value *thrown);
+struct kiln_native_scheduler {
+    kiln_microtask *queue;
+    size_t queue_head;
+    size_t queue_count;
+    size_t queue_capacity;
+    kiln_timer *timers;
+    size_t timer_count;
+    size_t timer_capacity;
+    double now;
+    double next_timer_id;
+    uint64_t next_sequence;
+    kiln_scheduler_runner_fn runner;
+    int graph;
+};
+
+KILN_NATIVE_PRIVATE kiln_native_scheduler *kiln_native_scheduler_create(void) {
+    kiln_native_scheduler *scheduler = (kiln_native_scheduler *)calloc(1, sizeof(*scheduler));
+    if (scheduler != NULL) scheduler->next_timer_id = 1.0;
+    return scheduler;
+}
+
+static void kiln_native_scheduler_clear(kiln_native_scheduler *scheduler) {
+    size_t index;
+    if (scheduler == NULL) return;
+    for (index = 0; index < scheduler->timer_count; ++index) free(scheduler->timers[index].args);
+    free(scheduler->timers);
+    free(scheduler->queue);
+    scheduler->timers = NULL;
+    scheduler->queue = NULL;
+    scheduler->timer_count = 0;
+    scheduler->timer_capacity = 0;
+    scheduler->queue_head = 0;
+    scheduler->queue_count = 0;
+    scheduler->queue_capacity = 0;
+    scheduler->now = 0.0;
+    scheduler->next_timer_id = 1.0;
+    scheduler->next_sequence = 0;
+}
+
+KILN_NATIVE_PRIVATE void kiln_native_scheduler_begin(kiln_native_scheduler *scheduler) {
+    kiln_native_scheduler_clear(scheduler);
+    if (scheduler != NULL) { scheduler->runner = NULL; scheduler->graph = 1; }
+}
+
+KILN_NATIVE_PRIVATE void kiln_native_scheduler_destroy(kiln_native_scheduler *scheduler) {
+    if (scheduler == NULL) return;
+    kiln_native_scheduler_clear(scheduler);
+    free(scheduler);
+}
+
+KILN_NATIVE_PRIVATE int kiln_native_scheduler_graph_mode(const kiln_native_scheduler *scheduler) {
+    return scheduler != NULL && scheduler->graph != 0;
+}
+
+KILN_NATIVE_PRIVATE void kiln_native_scheduler_set_runner(kiln_native_scheduler *scheduler,
+                                                         kiln_scheduler_runner_fn runner) {
+    if (scheduler != NULL) scheduler->runner = runner;
+}
+
+KILN_NATIVE_PRIVATE int kiln_native_scheduler_finish(kiln_native_scheduler *scheduler,
+                                                     kiln_host *host, int depth,
+                                                     kiln_value *thrown) {
+    int status = KILN_C99_OK;
+    if (scheduler == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (scheduler->runner != NULL) status = scheduler->runner(scheduler, host, depth, thrown);
+    scheduler->runner = NULL;
+    scheduler->graph = 0;
+    kiln_native_scheduler_clear(scheduler);
+    return status;
+}
+"#;
 
 const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOps callback. */
 #include <math.h>
@@ -667,7 +778,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_is_separate_from_the_private_number_provider() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 6);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 7);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
