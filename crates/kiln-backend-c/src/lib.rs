@@ -275,7 +275,8 @@ static int kiln_c99_snprintf_number_c(char *buffer, size_t capacity, double numb
     }
     length = snprintf(buffer, capacity, "%.17g", number);
     if (uselocale(previous) == (locale_t)0) {
-        length = -1;
+        /* The C locale may still be installed on this thread, so do not free it here. */
+        return -1;
     }
     freelocale(c_locale);
     return length;
