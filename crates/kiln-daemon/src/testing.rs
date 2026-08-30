@@ -436,18 +436,28 @@ mod tests {
         );
     }
 
+    /// The Effect corpus runs its bundles when the working tree has them and skips when it does
+    /// not, and never fails for the difference.
+    ///
+    /// The bundles are not committed -- they are 2.5 MB of near-duplicate esbuild output -- so
+    /// which of the two arms a checkout takes depends on whether `conformance/effect/build.sh`
+    /// has been run. Asserting one arm would make this test a statement about the machine it
+    /// runs on. What is actually invariant is that every case does one or the other, with a
+    /// reason when it skips.
     #[test]
-    fn typescript_programs_are_skipped_with_a_reason_rather_than_failed() {
+    fn typescript_programs_run_from_a_bundle_or_skip_with_a_reason() {
         let summary = run_corpus("conformance/effect");
 
         assert_eq!(summary.discovered, 12);
-        assert_eq!(summary.skipped, 12);
-        assert_eq!(summary.failed, 0, "kiln was never asked to run these");
+        assert_eq!(summary.skipped + summary.passed, 12);
         assert_eq!(
-            summary.passed, 0,
-            "a skip is not a pass; a corpus that did not run has not passed"
+            summary.failed, 0,
+            "either kiln ran the bundle and agreed, or it was never asked"
         );
         for case in &summary.cases {
+            if matches!(case.outcome, TestOutcome::Pass) {
+                continue;
+            }
             let reason = &case.diagnostics.first().expect("a skip says why").message;
             assert!(reason.starts_with("harness: "), "{reason}");
             assert!(reason.contains("build.sh"), "{reason}");

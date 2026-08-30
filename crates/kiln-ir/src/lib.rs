@@ -152,6 +152,13 @@ pub enum Instruction {
     /// Built on demand rather than on every call: most functions never mention it, and
     /// allocating one per call would tax every call to serve the few that do.
     LoadArguments,
+    /// The call's own arguments from index n onwards, as an array: a rest parameter.
+    ///
+    /// Distinct from `LoadArguments` because an arrow function has no `arguments` of its own --
+    /// it sees the enclosing function's -- but it does have its own rest parameter. Slicing the
+    /// `arguments` object would give an arrow the wrong list, which is exactly the bug this
+    /// exists to prevent.
+    RestArguments(u32),
     /// Set an object's prototype. Stack is object, then prototype; the object is left.
     SetPrototype,
     /// Run a parent constructor against the current `this`, forwarding the arguments this frame
@@ -208,6 +215,12 @@ pub enum Instruction {
         pattern: u32,
         flags: u32,
     },
+    /// Throw a `ReferenceError` naming an identifier that resolved to nothing.
+    ///
+    /// Emitted rather than refused at compile time, because a reference in a branch that never
+    /// runs is not an error in JavaScript, and real bundles are full of them: feature detection
+    /// mentions globals the host may not have. The name is kept so the message can say which.
+    ThrowReference(u32),
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -351,6 +364,11 @@ pub enum Builtin {
     Promise,
     RegExp,
     Date,
+    WeakMap,
+    WeakSet,
+    Performance,
+    Reflect,
+    BigInt,
 }
 
 impl Builtin {
@@ -387,6 +405,11 @@ impl Builtin {
             "Promise" => Some(Self::Promise),
             "RegExp" => Some(Self::RegExp),
             "Date" => Some(Self::Date),
+            "WeakMap" => Some(Self::WeakMap),
+            "WeakSet" => Some(Self::WeakSet),
+            "performance" => Some(Self::Performance),
+            "Reflect" => Some(Self::Reflect),
+            "BigInt" => Some(Self::BigInt),
             _ => None,
         }
     }
@@ -423,6 +446,11 @@ impl Builtin {
             Self::Promise => "Promise",
             Self::RegExp => "RegExp",
             Self::Date => "Date",
+            Self::WeakMap => "WeakMap",
+            Self::WeakSet => "WeakSet",
+            Self::Performance => "performance",
+            Self::Reflect => "Reflect",
+            Self::BigInt => "BigInt",
         }
     }
 }
@@ -2090,12 +2118,32 @@ impl Compiler {
                 // that declares its own `Error` shadows it exactly as it would any other global.
                 Resolution::Unresolved => match Builtin::from_name(name) {
                     Some(builtin) => self.code.push(Instruction::LoadBuiltin(builtin)),
-                    None => self.error(
-                        Some(expression.span),
-                        format!("unresolved identifier `{name}`"),
-                    ),
+                    // A `ReferenceError` where the read happens, which is what JavaScript does
+                    // and what lets a module compile when a branch it never takes mentions a
+                    // global this realm does not provide. See ADR 0017.
+                    None => {
+                        let name = self.constant_index(Constant::String(name.clone()));
+                        self.code.push(Instruction::ThrowReference(name));
+                    }
                 },
             },
+            // `typeof undeclaredName` is "undefined" rather than a throw -- the one place a name
+            // may be read without existing, and the whole reason feature detection works.
+            ExpressionKind::Unary {
+                operator: UnaryOperator::TypeOf,
+                argument,
+            } if matches!(
+                &argument.kind,
+                ExpressionKind::Identifier(name)
+                    if matches!(self.resolve(name), Resolution::Unresolved)
+                        && Builtin::from_name(name).is_none()
+                        && name != "undefined"
+                        && name != "this"
+                        && !(name == "arguments" && self.compiling_function())
+            ) =>
+            {
+                self.push_constant(Constant::String("undefined".to_owned()));
+            }
             ExpressionKind::Unary { operator, argument } => {
                 self.expression(argument);
                 self.code.push(Instruction::Unary(match operator {
@@ -2162,9 +2210,11 @@ impl Compiler {
                 self.expression(alternate);
                 self.patch_jump(end_jump);
             }
-            ExpressionKind::Call { callee, arguments } => {
-                self.call(callee, arguments, expression.span)
-            }
+            ExpressionKind::Call {
+                callee,
+                arguments,
+                optional,
+            } => self.call(callee, arguments, *optional, expression.span),
             ExpressionKind::This => self.code.push(Instruction::LoadThis),
             ExpressionKind::Yield { delegate, value } if !*delegate => {
                 match value {
@@ -2538,11 +2588,11 @@ impl Compiler {
                 (Place::Global(slot), local.kind, local.imported)
             }
             Resolution::Unresolved => {
-                self.error(
-                    Some(span),
-                    format!("unresolved assignment target `{target}`"),
-                );
-                self.push_constant(Constant::Undefined);
+                // Assigning to a name that does not exist is a `ReferenceError` in a module,
+                // raised where the assignment happens rather than when it is compiled.
+                let _ = span;
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                self.code.push(Instruction::ThrowReference(name));
                 return;
             }
         };
@@ -2604,10 +2654,18 @@ impl Compiler {
     /// A class expression leaves its constructor on the stack.
     fn class_expression(&mut self, class: &Class, span: Span) {
         // A class expression may be anonymous, and its name -- when it has one -- is visible only
-        // inside its own body. Compiling it through a hidden binding gives methods a way to refer
-        // to it without leaking the name into the enclosing scope.
-        let binding = format!("%class{}", self.hidden_bindings);
-        self.hidden_bindings += 1;
+        // inside its own body. The scope pushed below is what keeps it there, so a named class
+        // expression can bind under its own name: `class A extends B { m() { return A; } }` as an
+        // expression has to find `A` from inside `m`, and nowhere else. An anonymous one gets a
+        // hidden binding instead, carrying a character an identifier cannot contain.
+        let binding = match &class.name {
+            Some(name) => name.clone(),
+            None => {
+                let hidden = format!("%class{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                hidden
+            }
+        };
 
         self.scopes.push(HashMap::new());
         let mut named = class.clone();
@@ -3005,16 +3063,10 @@ impl Compiler {
             self.bind_pattern(VariableKind::Let, pattern, span);
         }
 
-        // `...rest` is the arguments beyond the declared parameters. Taken from the arguments
-        // object rather than from slots, because its length is decided by the caller.
+        // `...rest` is the arguments beyond the declared parameters. Taken from the call rather
+        // than from slots, because its length is decided by the caller.
         if let Some(rest) = &function.rest {
-            self.code.push(Instruction::LoadArguments);
-            self.push_constant(Constant::Number(f64::from(parameter_count).to_bits()));
-            let slice = self.constant_index(Constant::String("slice".to_owned()));
-            self.code.push(Instruction::CallMethod {
-                name: slice,
-                argc: 1,
-            });
+            self.code.push(Instruction::RestArguments(parameter_count));
             self.bind_pattern(VariableKind::Let, rest, function.span);
         }
 
@@ -3450,6 +3502,80 @@ impl Compiler {
         self.code.push(Instruction::SetProperty(name));
     }
 
+    /// `f?.()` and `o.m?.()`: call only when the callee is there.
+    ///
+    /// The callee is read into a hidden local so the nullish test has something to look at
+    /// without disturbing the receiver beneath it, and the receiver into another so a method call
+    /// keeps its `this` across the jump. Skipping means the arguments are never evaluated, which
+    /// is the point: `maybe?.(expensive())` does not compute the argument when `maybe` is absent.
+    fn optional_call(&mut self, callee: &Expression, arguments: &[ListElement], span: Span) {
+        if self.chains.is_empty() {
+            self.error(Some(span), "`?.()` outside of an optional chain");
+            self.push_constant(Constant::Undefined);
+            return;
+        }
+        let receiver = format!("%oc{}", self.hidden_bindings);
+        let method = format!("%ocfn{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+
+        // A method call keeps its receiver; anything else has none and gets `undefined`.
+        let has_receiver = match &callee.kind {
+            ExpressionKind::StaticMember {
+                object,
+                property,
+                optional,
+            } => {
+                self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
+                self.declare_hidden(&receiver, span);
+                self.load_hidden(&receiver);
+                let name = self.constant_index(Constant::String(property.clone()));
+                self.code.push(Instruction::GetProperty(name));
+                true
+            }
+            ExpressionKind::ComputedMember {
+                object,
+                property,
+                optional,
+            } => {
+                self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
+                self.declare_hidden(&receiver, span);
+                self.load_hidden(&receiver);
+                self.expression(property);
+                self.code.push(Instruction::GetComputed);
+                true
+            }
+            _ => {
+                self.expression(callee);
+                false
+            }
+        };
+        self.declare_hidden(&method, span);
+
+        self.load_hidden(&method);
+        let present = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        // Absent: the whole chain is undefined, and the arguments are never touched.
+        self.push_constant(Constant::Undefined);
+        let exit = self.emit_jump(Instruction::Jump(0));
+        self.chains
+            .last_mut()
+            .expect("checked just above")
+            .push(exit);
+
+        self.patch_jump(present);
+        if has_receiver {
+            self.load_hidden(&receiver);
+        } else {
+            self.push_constant(Constant::Undefined);
+        }
+        self.load_hidden(&method);
+        self.array_literal(arguments, span);
+        self.code.push(Instruction::Apply);
+        self.scopes.pop().expect("call scope was just pushed");
+    }
+
     /// Whether an argument list contains a spread, and so needs its length computed at runtime.
     fn has_spread(arguments: &[ListElement]) -> bool {
         arguments
@@ -3468,7 +3594,11 @@ impl Compiler {
         arguments.len() as u16
     }
 
-    fn call(&mut self, callee: &Expression, arguments: &[ListElement], span: Span) {
+    fn call(&mut self, callee: &Expression, arguments: &[ListElement], optional: bool, span: Span) {
+        if optional {
+            self.optional_call(callee, arguments, span);
+            return;
+        }
         let is_console_log = matches!(self.resolve("console"), Resolution::Unresolved)
             && matches!(
                 &callee.kind,
@@ -4109,7 +4239,10 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(consequent, names, collecting);
             collect_identifiers(alternate, names, collecting);
         }
-        ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
+        ExpressionKind::Call {
+            callee, arguments, ..
+        }
+        | ExpressionKind::New { callee, arguments } => {
             collect_identifiers(callee, names, collecting);
             for argument in arguments {
                 let (ListElement::Item(value) | ListElement::Spread(value)) = argument else {
@@ -4236,7 +4369,10 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
                 || expression_references(consequent, name)
                 || expression_references(alternate, name)
         }
-        ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
+        ExpressionKind::Call {
+            callee, arguments, ..
+        }
+        | ExpressionKind::New { callee, arguments } => {
             expression_references(callee, name)
                 || arguments.iter().any(|argument| match argument {
                     ListElement::Item(value) | ListElement::Spread(value) => {
@@ -4738,6 +4874,7 @@ mod tests {
                 kind: ExpressionKind::Call {
                     callee: Box::new(identifier("loop_forever")),
                     arguments: Vec::new(),
+                    optional: false,
                 },
                 span: Span::default(),
             })))],
@@ -4910,6 +5047,7 @@ mod tests {
                     span: Span::default(),
                 }),
                 arguments: vec![kiln_hir::ListElement::Item(number(1.0))],
+                optional: false,
             },
             span: Span::default(),
         };
@@ -4943,8 +5081,15 @@ mod tests {
         )));
     }
 
+    /// A redeclaration is a compile error; an unresolved identifier is not.
+    ///
+    /// The two used to be reported together. ADR 0017 separated them: a name declared twice is a
+    /// statement about the text and can only ever be wrong, while a name that resolves to
+    /// nothing may be a host global this realm does not provide, behind a `typeof` guard that
+    /// never gets to run if lowering refuses the module. The unresolved one lowers to
+    /// `ThrowReference` and raises a `ReferenceError` if control reaches it.
     #[test]
-    fn rejects_unresolved_and_redeclared_locals() {
+    fn rejects_redeclared_locals_but_defers_unresolved_ones_to_runtime() {
         let body = vec![
             Statement {
                 kind: StatementKind::Expression(identifier("missing")),
@@ -4973,16 +5118,30 @@ mod tests {
                 span: Span::default(),
             },
         ];
-        let diagnostics = compile(&module(body)).expect_err("invalid HIR is rejected");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("unresolved identifier"))
-        );
+        let diagnostics = compile(&module(body)).expect_err("a redeclaration is rejected");
         assert!(
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("redeclaration"))
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("unresolved identifier")),
+            "an unresolved identifier is a runtime ReferenceError, not a compile error"
+        );
+
+        // On its own it compiles, and what it compiles to is the throw.
+        let program = compile(&module(vec![Statement {
+            kind: StatementKind::Expression(identifier("missing")),
+            span: Span::new(2, 9),
+        }]))
+        .expect("an unresolved identifier compiles");
+        assert!(
+            program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::ThrowReference(_)))
         );
     }
 
@@ -5358,6 +5517,7 @@ mod tests {
                         span: Span::default(),
                     }),
                     arguments: vec![kiln_hir::ListElement::Item(number(1.0))],
+                    optional: false,
                 },
                 span: Span::default(),
             })),
@@ -5380,6 +5540,7 @@ mod tests {
                         span: Span::default(),
                     }),
                     arguments: vec![kiln_hir::ListElement::Spread(number(1.0))],
+                    optional: false,
                 },
                 span: Span::default(),
             })),
@@ -5403,6 +5564,7 @@ mod tests {
                 kind: ExpressionKind::Call {
                     callee: Box::new(identifier("f")),
                     arguments: Vec::new(),
+                    optional: false,
                 },
                 span: Span::default(),
             })),

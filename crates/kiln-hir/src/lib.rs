@@ -441,6 +441,9 @@ pub enum ExpressionKind {
     Call {
         callee: Box<Expression>,
         arguments: Vec<ListElement>,
+        /// `a?.()`: when the callee is nullish the whole enclosing chain is undefined and the
+        /// call does not happen -- so the arguments are not evaluated either.
+        optional: bool,
     },
     /// `super(...)` in a derived constructor: run the parent constructor against this instance
     /// rather than allocating a new one.
