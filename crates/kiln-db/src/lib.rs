@@ -67,8 +67,9 @@ pub struct Interface {
     pub exports: Vec<String>,
 }
 
-/// Whole-project rollup. Depends on every module interface and nothing else, so an edit that
-/// does not change any interface must not recompute it.
+/// Whole-project rollup. Its identity includes every active module's logical path and interface,
+/// so a body-only edit that changes neither does not recompute it. The interface hash is an opaque
+/// deterministic summary for diagnostics and transport, not an artifact-cache authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub modules: usize,
