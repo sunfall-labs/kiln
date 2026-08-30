@@ -86,3 +86,35 @@ const keys = ["a", "b"];
 const pick = (): string => { reads += 1; return keys[0]; };
 counts[pick()] += 1;
 console.log(reads, counts.a);
+
+// `new.target` names the constructor a `new` call used, and is undefined in a plain call. It
+// travels as one value with save-and-restore around every call rather than as a frame field,
+// because the body signature is fixed by the embedding ABI -- and the C stack already gives the
+// discipline that needs.
+function Shape(this: any, kind: string): string | undefined {
+  if (new.target === undefined) { return "called"; }
+  this.kind = kind;
+  return undefined;
+}
+console.log(Shape.call({}, "x"), new (Shape as any)("circle").kind);
+
+// It names the constructor that was *invoked*, which is how a base class tells which subclass is
+// being built -- so `super()` keeps what it found rather than computing a fresh one.
+class Rooted { builtBy: string; constructor() { this.builtBy = new.target.name; } }
+class Middle extends Rooted {}
+class Leaf extends Middle {}
+console.log(new Rooted().builtBy, new Middle().builtBy, new Leaf().builtBy);
+
+// An arrow has no `new.target` of its own and uses the one from where it was written.
+function Outer(this: any): string {
+  const inner = (): string => (new.target === Outer ? "outer" : String(new.target));
+  return inner();
+}
+console.log(new (Outer as any)(), (Outer as any)());
+
+// A method is an ordinary call, however it was reached, and a nested call does not inherit.
+class Holder {
+  check(): boolean { return new.target === undefined; }
+  build(): string { return new (Holder as any)().check() ? "nested undefined" : "leaked"; }
+}
+console.log(new Holder().check(), new Holder().build());

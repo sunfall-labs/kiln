@@ -6069,89 +6069,108 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(existing) = &self.global_object {
             return existing.clone();
         }
+        // Every one of these is *non-enumerable*, which is what node does and what stops
+        // `Object.keys(globalThis)` from being a list of the realm's furniture. A program's own
+        // `globalThis.x = 1` is enumerable, which is the distinction that makes the question
+        // worth asking at all.
         let mut globals = ObjectData::default();
         for kind in ErrorKind::ALL {
-            globals.set(kind.name(), Value::Native(Native::Error(kind)));
+            globals.set_non_enumerable(kind.name(), Value::Native(Native::Error(kind)));
         }
-        globals.set("Array", Value::Native(Native::ArrayConstructor));
-        globals.set("Object", Value::Native(Native::ObjectConstructor));
-        globals.set("JSON", Value::Native(Native::Json));
-        globals.set("Symbol", Value::Native(Native::SymbolConstructor));
-        globals.set("String", Value::Native(Native::StringConstructor));
-        globals.set("Math", Value::Native(Native::Math));
-        globals.set("Promise", Value::Native(Native::PromiseConstructor));
-        globals.set("RegExp", Value::Native(Native::RegExpConstructor));
-        globals.set("Date", Value::Native(Native::DateConstructor));
-        globals.set("WeakMap", Value::Native(Native::WeakMapConstructor));
-        globals.set("WeakSet", Value::Native(Native::WeakSetConstructor));
-        globals.set("Set", Value::Native(Native::SetConstructor));
-        globals.set("Map", Value::Native(Native::MapConstructor));
-        globals.set("performance", Value::Native(Native::Performance));
-        globals.set("Reflect", Value::Native(Native::Reflect));
-        globals.set("BigInt", Value::Native(Native::BigIntConstructor));
-        globals.set("Number", Value::Native(Native::NumberConstructor));
-        globals.set("Boolean", Value::Native(Native::BooleanConstructor));
-        globals.set("Function", Value::Native(Native::FunctionConstructor));
-        globals.set("escape", Value::Native(Native::Escape));
-        globals.set("unescape", Value::Native(Native::Unescape));
-        globals.set("encodeURI", Value::Native(Native::EncodeUri));
-        globals.set(
+        globals.set_non_enumerable("Array", Value::Native(Native::ArrayConstructor));
+        globals.set_non_enumerable("Object", Value::Native(Native::ObjectConstructor));
+        globals.set_non_enumerable("JSON", Value::Native(Native::Json));
+        globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor));
+        globals.set_non_enumerable("String", Value::Native(Native::StringConstructor));
+        globals.set_non_enumerable("Math", Value::Native(Native::Math));
+        globals.set_non_enumerable("Promise", Value::Native(Native::PromiseConstructor));
+        globals.set_non_enumerable("RegExp", Value::Native(Native::RegExpConstructor));
+        globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor));
+        globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor));
+        globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor));
+        globals.set_non_enumerable("Set", Value::Native(Native::SetConstructor));
+        globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor));
+        globals.set_non_enumerable("performance", Value::Native(Native::Performance));
+        globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect));
+        globals.set_non_enumerable("BigInt", Value::Native(Native::BigIntConstructor));
+        globals.set_non_enumerable("Number", Value::Native(Native::NumberConstructor));
+        globals.set_non_enumerable("Boolean", Value::Native(Native::BooleanConstructor));
+        globals.set_non_enumerable("Function", Value::Native(Native::FunctionConstructor));
+        globals.set_non_enumerable("escape", Value::Native(Native::Escape));
+        globals.set_non_enumerable("unescape", Value::Native(Native::Unescape));
+        globals.set_non_enumerable("encodeURI", Value::Native(Native::EncodeUri));
+        globals.set_non_enumerable(
             "encodeURIComponent",
             Value::Native(Native::EncodeUriComponent),
         );
-        globals.set("decodeURI", Value::Native(Native::DecodeUri));
-        globals.set(
+        globals.set_non_enumerable("decodeURI", Value::Native(Native::DecodeUri));
+        globals.set_non_enumerable(
             "decodeURIComponent",
             Value::Native(Native::DecodeUriComponent),
         );
-        globals.set("Proxy", Value::Native(Native::ProxyConstructor));
-        globals.set("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
-        globals.set(
+        globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor));
+        globals.set_non_enumerable("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
+        globals.set_non_enumerable(
             "Int8Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Int8)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Uint8Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Uint8ClampedArray",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8Clamped)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Int16Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Int16)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Uint16Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Int32Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Int32)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Uint32Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Float32Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Float32)),
         );
-        globals.set(
+        globals.set_non_enumerable(
             "Float64Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Float64)),
         );
 
-        globals.set("NaN", Value::Number(f64::NAN));
-        globals.set("Infinity", Value::Number(f64::INFINITY));
+        // The global functions, which a program can also reach by their bare names -- and has to
+        // find the *same* value both ways: `globalThis.parseInt === parseInt`.
+        globals.set_non_enumerable("parseInt", Value::Native(Native::ParseInt));
+        globals.set_non_enumerable("parseFloat", Value::Native(Native::ParseFloat));
+        globals.set_non_enumerable("isNaN", Value::Native(Native::IsNaN));
+        globals.set_non_enumerable("isFinite", Value::Native(Native::IsFinite));
+        globals.set_non_enumerable("queueMicrotask", Value::Native(Native::QueueMicrotask));
+        globals.set_non_enumerable("setTimeout", Value::Native(Native::SetTimeout));
+        globals.set_non_enumerable("setInterval", Value::Native(Native::SetInterval));
+        globals.set_non_enumerable("clearTimeout", Value::Native(Native::ClearTimeout));
+        globals.set_non_enumerable("clearInterval", Value::Native(Native::ClearInterval));
+        globals.set_non_enumerable("NaN", Value::Number(f64::NAN));
+        globals.set_non_enumerable("Infinity", Value::Number(f64::INFINITY));
         let object = Rc::new(RefCell::new(globals));
         let value = Value::Object(Rc::clone(&object));
         // The global object holds itself under both of its names, which is how a program reaches
         // it without a keyword: `global.Object === Object` is the standard test for "am I in a
         // realm that has one".
-        object.borrow_mut().set("globalThis", value.clone());
-        object.borrow_mut().set("global", value.clone());
+        object
+            .borrow_mut()
+            .set_non_enumerable("globalThis", value.clone());
+        object
+            .borrow_mut()
+            .set_non_enumerable("global", value.clone());
         self.global_object = Some(value.clone());
         value
     }
