@@ -398,6 +398,18 @@ pub enum Builtin {
     /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
     Function,
     Proxy,
+    Escape,
+    Unescape,
+    ArrayBuffer,
+    Int8Array,
+    Uint8Array,
+    Uint8ClampedArray,
+    Int16Array,
+    Uint16Array,
+    Int32Array,
+    Uint32Array,
+    Float32Array,
+    Float64Array,
 }
 
 impl Builtin {
@@ -446,6 +458,19 @@ impl Builtin {
             "process" => Some(Self::Process),
             "Function" => Some(Self::Function),
             "Proxy" => Some(Self::Proxy),
+            "escape" => Some(Self::Escape),
+            "unescape" => Some(Self::Unescape),
+            "ArrayBuffer" => Some(Self::ArrayBuffer),
+            "Int8Array" => Some(Self::Int8Array),
+            "Uint8Array" => Some(Self::Uint8Array),
+            "Uint8ClampedArray" => Some(Self::Uint8ClampedArray),
+            "Int16Array" => Some(Self::Int16Array),
+            "Uint16Array" => Some(Self::Uint16Array),
+            "Int32Array" => Some(Self::Int32Array),
+            "Uint32Array" => Some(Self::Uint32Array),
+            "Float32Array" => Some(Self::Float32Array),
+            "Float64Array" => Some(Self::Float64Array),
+
             _ => None,
         }
     }
@@ -494,6 +519,18 @@ impl Builtin {
             Self::Process => "process",
             Self::Function => "Function",
             Self::Proxy => "Proxy",
+            Self::Escape => "escape",
+            Self::Unescape => "unescape",
+            Self::ArrayBuffer => "ArrayBuffer",
+            Self::Int8Array => "Int8Array",
+            Self::Uint8Array => "Uint8Array",
+            Self::Uint8ClampedArray => "Uint8ClampedArray",
+            Self::Int16Array => "Int16Array",
+            Self::Uint16Array => "Uint16Array",
+            Self::Int32Array => "Int32Array",
+            Self::Uint32Array => "Uint32Array",
+            Self::Float32Array => "Float32Array",
+            Self::Float64Array => "Float64Array",
         }
     }
 }

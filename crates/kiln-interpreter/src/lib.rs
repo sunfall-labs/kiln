@@ -272,6 +272,8 @@ pub enum Native {
     PrototypeOf(PrototypeTable),
     StringRaw,
     RegExpToString,
+    Escape,
+    Unescape,
     EncodeUri,
     EncodeUriComponent,
     DecodeUri,
@@ -285,6 +287,14 @@ pub enum Native {
     FunctionConstructor,
     /// `Proxy`, which is only ever reached through `new`.
     ProxyConstructor,
+    /// `ArrayBuffer`, and one constructor per view kind.
+    ArrayBufferConstructor,
+    TypedArrayConstructor(TypedKind),
+    TypedArrayOf(TypedKind),
+    TypedArrayFrom(TypedKind),
+    TypedArraySet,
+    TypedArraySubarray,
+    TypedArrayFill,
     ProxyRevocable,
     /// The `revoke` half of a revocable pair. Its receiver is the proxy it turns off.
     ProxyRevoke,
@@ -513,6 +523,15 @@ impl Native {
             // `Proxy.revocable(target, handler)` hands back the proxy and the switch that turns
             // it off, as a pair.
             (Self::ProxyConstructor, "revocable") => Some(Value::Native(Self::ProxyRevocable)),
+            (Self::TypedArrayConstructor(kind), "of") => {
+                Some(Value::Native(Self::TypedArrayOf(kind)))
+            }
+            (Self::TypedArrayConstructor(kind), "from") => {
+                Some(Value::Native(Self::TypedArrayFrom(kind)))
+            }
+            (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
+                Some(Value::Number(kind.width() as f64))
+            }
             (Self::FunctionConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Function)))
             }
@@ -927,6 +946,147 @@ pub enum PrototypeTable {
     Date,
 }
 
+/// Which element type a view reads its bytes as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedKind {
+    Int8,
+    Uint8,
+    /// `Uint8ClampedArray`: out-of-range writes saturate instead of wrapping, which is what makes
+    /// it the right type for pixel data and the wrong one for anything arithmetic.
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl TypedKind {
+    /// How many bytes one element occupies.
+    fn width(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
+            Self::Int16 | Self::Uint16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::Float64 => 8,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
+        }
+    }
+}
+
+/// A typed array: a window onto a byte buffer.
+#[derive(Debug)]
+pub struct TypedArrayData {
+    kind: TypedKind,
+    /// Shared, so two views over one buffer see each other's writes.
+    buffer: Rc<RefCell<Vec<u8>>>,
+    /// Where the window starts, in bytes.
+    offset: usize,
+    /// How long the window is, in elements.
+    length: usize,
+}
+
+impl PartialEq for TypedArrayData {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl TypedArrayData {
+    /// The element at `index`, or `None` past the end.
+    fn get(&self, index: usize) -> Option<f64> {
+        if index >= self.length {
+            return None;
+        }
+        let width = self.kind.width();
+        let at = self.offset + index * width;
+        let buffer = self.buffer.borrow();
+        let bytes = buffer.get(at..at + width)?;
+        Some(match self.kind {
+            TypedKind::Int8 => f64::from(bytes[0] as i8),
+            TypedKind::Uint8 | TypedKind::Uint8Clamped => f64::from(bytes[0]),
+            TypedKind::Int16 => f64::from(i16::from_le_bytes([bytes[0], bytes[1]])),
+            TypedKind::Uint16 => f64::from(u16::from_le_bytes([bytes[0], bytes[1]])),
+            TypedKind::Int32 => {
+                f64::from(i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+            }
+            TypedKind::Uint32 => {
+                f64::from(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+            }
+            TypedKind::Float32 => {
+                f64::from(f32::from_le_bytes(bytes.try_into().expect("four bytes")))
+            }
+            TypedKind::Float64 => f64::from_le_bytes(bytes.try_into().expect("eight bytes")),
+        })
+    }
+
+    /// Write `value` at `index`, ignoring a write past the end as the specification does.
+    fn set(&self, index: usize, value: f64) {
+        if index >= self.length {
+            return;
+        }
+        let width = self.kind.width();
+        let at = self.offset + index * width;
+        let mut buffer = self.buffer.borrow_mut();
+        let Some(slot) = buffer.get_mut(at..at + width) else {
+            return;
+        };
+        match self.kind {
+            // Every integer view but the clamped one *wraps*: the value is taken modulo 2^n,
+            // which is what `ToInt32` and its siblings do and is why `u8[0] = 256` is 0.
+            TypedKind::Int8 => slot[0] = to_int32(value) as u8,
+            TypedKind::Uint8 => slot[0] = to_uint32(value) as u8,
+            TypedKind::Uint8Clamped => {
+                slot[0] = if value.is_nan() {
+                    0
+                } else {
+                    // Saturating, and rounding halves to even, which is what the specification
+                    // says and what keeps pixel arithmetic from drifting.
+                    let rounded = if (value.fract().abs() - 0.5).abs() < f64::EPSILON {
+                        let down = value.floor();
+                        if (down as i64) % 2 == 0 {
+                            down
+                        } else {
+                            down + 1.0
+                        }
+                    } else {
+                        value.round()
+                    };
+                    rounded.clamp(0.0, 255.0) as u8
+                };
+            }
+            TypedKind::Int16 => slot.copy_from_slice(&(to_int32(value) as i16).to_le_bytes()),
+            TypedKind::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
+            TypedKind::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
+            TypedKind::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
+            #[allow(clippy::cast_possible_truncation)]
+            TypedKind::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
+            TypedKind::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
+        }
+    }
+
+    /// Every element, as numbers.
+    fn items(&self) -> Vec<Value> {
+        (0..self.length)
+            .map(|index| Value::Number(self.get(index).unwrap_or(0.0)))
+            .collect()
+    }
+}
+
 /// A proxy's two halves.
 ///
 /// Both are held as ordinary values: a handler is a plain object whose properties are the traps,
@@ -1159,6 +1319,14 @@ pub enum Value {
     Array(Rc<ArrayData>),
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
     Callback(CallbackMethod),
+    /// A view over a byte buffer: `Uint8Array` and its siblings.
+    ///
+    /// Separate from `Array` because the difference is the point: the elements are bytes in a
+    /// shared buffer with a fixed width and a fixed length, two views can overlap, and writing
+    /// through one is visible through the other. An array of numbers cannot express any of that.
+    TypedArray(Rc<TypedArrayData>),
+    /// An `ArrayBuffer`: bytes with no interpretation, which only a view gives them.
+    ArrayBuffer(Rc<RefCell<Vec<u8>>>),
     /// A `new Proxy(target, handler)`.
     ///
     /// Its own value kind rather than an object carrying reserved state, because *every*
@@ -1219,6 +1387,7 @@ impl Value {
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
             Self::Proxy(proxy) => proxy.target.type_of(),
+            Self::TypedArray(_) | Self::ArrayBuffer(_) => "object",
             Self::Array(_)
             | Self::Generator(_)
             | Self::Promise(_)
@@ -1244,6 +1413,8 @@ impl Value {
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
+            Self::TypedArray(view) => view.kind.name(),
+            Self::ArrayBuffer(_) => "arraybuffer",
             Self::Array(_) => "array",
             Self::Generator(_) => "generator",
             Self::Promise(_) => "promise",
@@ -1283,6 +1454,10 @@ impl Value {
             // Coercion is defined on the target: the traps that could change it are `get` on
             // `valueOf` and `toString`, which this pure path cannot call anyway.
             Self::Proxy(proxy) => proxy.target.as_number(),
+            // `Number(new Uint8Array([5]))` is 5 and `Number(new Uint8Array([1,2]))` is NaN:
+            // ToPrimitive joins, and only a one-element join parses as a number.
+            Self::TypedArray(view) => parse_number(&join(&view.items(), ",")),
+            Self::ArrayBuffer(_) => f64::NAN,
             // A date converts to its instant, which is what makes `end - start` a duration.
             Self::Date(time) => time.get(),
             // Only where a number is explicitly asked for; arithmetic refuses the mix.
@@ -1317,6 +1492,8 @@ impl Value {
             | Self::Settler(..)
             | Self::Bound(_)
             | Self::Proxy(_)
+            | Self::TypedArray(_)
+            | Self::ArrayBuffer(_)
             | Self::Symbol(_) => true,
             Self::BigInt(value) => !num_traits::Zero::is_zero(value.as_ref()),
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
@@ -1354,6 +1531,9 @@ impl Value {
             Self::BigInt(value) => value.to_string(),
             Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
+            // Like an array: `String(new Uint8Array([1, 2]))` is "1,2".
+            Self::TypedArray(view) => join(&view.items(), ","),
+            Self::ArrayBuffer(_) => "[object ArrayBuffer]".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
             Self::Array(items) => join(&items.borrow(), ","),
@@ -2643,6 +2823,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Number => Native::NumberConstructor,
                         kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
                         kiln_ir::Builtin::ParseInt => Native::ParseInt,
+                        kiln_ir::Builtin::Escape => Native::Escape,
+                        kiln_ir::Builtin::Unescape => Native::Unescape,
                         kiln_ir::Builtin::EncodeUri => Native::EncodeUri,
                         kiln_ir::Builtin::EncodeUriComponent => Native::EncodeUriComponent,
                         kiln_ir::Builtin::DecodeUri => Native::DecodeUri,
@@ -2666,6 +2848,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
                         kiln_ir::Builtin::Function => Native::FunctionConstructor,
                         kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
+                        kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
+                        kiln_ir::Builtin::Int8Array => {
+                            Native::TypedArrayConstructor(TypedKind::Int8)
+                        }
+                        kiln_ir::Builtin::Uint8Array => {
+                            Native::TypedArrayConstructor(TypedKind::Uint8)
+                        }
+                        kiln_ir::Builtin::Uint8ClampedArray => {
+                            Native::TypedArrayConstructor(TypedKind::Uint8Clamped)
+                        }
+                        kiln_ir::Builtin::Int16Array => {
+                            Native::TypedArrayConstructor(TypedKind::Int16)
+                        }
+                        kiln_ir::Builtin::Uint16Array => {
+                            Native::TypedArrayConstructor(TypedKind::Uint16)
+                        }
+                        kiln_ir::Builtin::Int32Array => {
+                            Native::TypedArrayConstructor(TypedKind::Int32)
+                        }
+                        kiln_ir::Builtin::Uint32Array => {
+                            Native::TypedArrayConstructor(TypedKind::Uint32)
+                        }
+                        kiln_ir::Builtin::Float32Array => {
+                            Native::TypedArrayConstructor(TypedKind::Float32)
+                        }
+                        kiln_ir::Builtin::Float64Array => {
+                            Native::TypedArrayConstructor(TypedKind::Float64)
+                        }
+
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -3442,6 +3653,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ArrayFrom => self.array_from(arguments, instruction),
+            // Built on `Array.from`, so an iterable, an array-like and a mapping function all
+            // behave the same way they do there.
+            Native::TypedArrayFrom(kind) => {
+                let collected = self.array_from(arguments, instruction)?;
+                Ok(construct_typed_array(kind, &[collected]))
+            }
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
             Native::SetTimeout | Native::SetInterval => {
@@ -5366,6 +5583,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(receiver);
         }
         let items = match &receiver {
+            // A typed array already *is* the list; reading it through `length` and indices would
+            // work too, and this skips the round trip.
+            Value::TypedArray(view) => view.items(),
             Value::String(text) => text
                 .chars()
                 .map(|character| Value::String(character.to_string()))
@@ -5423,6 +5643,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set("Number", Value::Native(Native::NumberConstructor));
         globals.set("Boolean", Value::Native(Native::BooleanConstructor));
         globals.set("Function", Value::Native(Native::FunctionConstructor));
+        globals.set("escape", Value::Native(Native::Escape));
+        globals.set("unescape", Value::Native(Native::Unescape));
         globals.set("encodeURI", Value::Native(Native::EncodeUri));
         globals.set(
             "encodeURIComponent",
@@ -5434,6 +5656,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::DecodeUriComponent),
         );
         globals.set("Proxy", Value::Native(Native::ProxyConstructor));
+        globals.set("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
+        globals.set(
+            "Int8Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int8)),
+        );
+        globals.set(
+            "Uint8Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8)),
+        );
+        globals.set(
+            "Uint8ClampedArray",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8Clamped)),
+        );
+        globals.set(
+            "Int16Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int16)),
+        );
+        globals.set(
+            "Uint16Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16)),
+        );
+        globals.set(
+            "Int32Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int32)),
+        );
+        globals.set(
+            "Uint32Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32)),
+        );
+        globals.set(
+            "Float32Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Float32)),
+        );
+        globals.set(
+            "Float64Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Float64)),
+        );
+
         globals.set("NaN", Value::Number(f64::NAN));
         globals.set("Infinity", Value::Number(f64::INFINITY));
         let value = Value::Object(Rc::new(RefCell::new(globals)));
@@ -5630,6 +5890,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ArrayConstructor) => {
                 let array = construct_array(&arguments);
                 self.stack.push(array);
+            }
+            Value::Native(
+                native @ (Native::ArrayBufferConstructor | Native::TypedArrayConstructor(_)),
+            ) => {
+                let built = call_native(native, &Value::Undefined, &arguments)?;
+                self.stack.push(built);
             }
             Value::Native(Native::DateConstructor) => {
                 let date = self.dispatch_native(
@@ -6248,6 +6514,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 _ => Value::Undefined,
             },
+            Value::TypedArray(view) => match name {
+                "length" => Value::Number(view.length as f64),
+                "byteLength" => Value::Number((view.length * view.kind.width()) as f64),
+                "byteOffset" => Value::Number(view.offset as f64),
+                "BYTES_PER_ELEMENT" => Value::Number(view.kind.width() as f64),
+                "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
+                "set" => Value::Native(Native::TypedArraySet),
+                "subarray" => Value::Native(Native::TypedArraySubarray),
+                "fill" => Value::Native(Native::TypedArrayFill),
+                "constructor" => Value::Native(Native::TypedArrayConstructor(view.kind)),
+                // Everything else a typed array answers to is an ordinary array method reading
+                // `length` and indices, which the generic-method coercion provides. The ones
+                // that *change* an array are excluded: a view has a fixed length, so `push` on
+                // one is a TypeError in the specification and would silently push into a copy
+                // here.
+                other => match array_property(other) {
+                    Value::Native(native) if native.mutates_an_array() => Value::Undefined,
+                    method => method,
+                },
+            },
+            Value::ArrayBuffer(bytes) => match name {
+                "byteLength" => Value::Number(bytes.borrow().len() as f64),
+                "constructor" => Value::Native(Native::ArrayBufferConstructor),
+                _ => Value::Undefined,
+            },
             Value::RegExp(regexp) => match name {
                 "test" => Value::Native(Native::RegExpTest),
                 "exec" => Value::Native(Native::RegExpExec),
@@ -6329,9 +6620,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.mutate_through_proxy(native, &receiver, &arguments, instruction)
                     .map(Some)
             }
-            Value::Native(native) => self
-                .dispatch_native(native, &receiver, &arguments, instruction)
-                .map(Some),
+            Value::Native(native) => {
+                // A typed array reached through one of the generic array methods walks as its
+                // elements, the same coercion `call_value` applies to a redirected one.
+                let receiver = if native.walks_an_array() {
+                    self.as_array_like(&Value::Native(native), receiver, instruction)?
+                } else {
+                    receiver
+                };
+                self.dispatch_native(native, &receiver, &arguments, instruction)
+                    .map(Some)
+            }
             // `next` on an async generator answers with a promise rather than a result: the
             // body may await any number of times before it reaches the value the consumer asked
             // for, and none of that can happen inside this call.
@@ -6377,19 +6676,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Some(iteration_result(value, done)))
             }
             // `reduce` threads an accumulator and `sort` compares pairs, so neither is the walk
-            // the other callback methods share.
-            Value::Callback(CallbackMethod::Reduce) => self
-                .array_reduce(&receiver, &arguments, instruction)
-                .map(Some),
-            Value::Callback(CallbackMethod::Sort) => self
-                .array_sort(&receiver, &arguments, instruction)
-                .map(Some),
-            Value::Callback(method) => Ok(Some(self.array_callback(
-                method,
-                &receiver,
-                &arguments,
-                instruction,
-            )?)),
+            // the other callback methods share. All three coerce their receiver first, for the
+            // same reason the native array methods do.
+            Value::Callback(CallbackMethod::Reduce) => {
+                let receiver = self.as_array_like(&method, receiver, instruction)?;
+                self.array_reduce(&receiver, &arguments, instruction)
+                    .map(Some)
+            }
+            Value::Callback(CallbackMethod::Sort) => {
+                let receiver = self.as_array_like(&method, receiver, instruction)?;
+                self.array_sort(&receiver, &arguments, instruction)
+                    .map(Some)
+            }
+            Value::Callback(callback) => {
+                let receiver = self.as_array_like(&method, receiver, instruction)?;
+                Ok(Some(self.array_callback(
+                    callback,
+                    &receiver,
+                    &arguments,
+                    instruction,
+                )?))
+            }
             // A bound function ignores the receiver the call site offers, whichever way it is
             // reached, so both go through one path.
             Value::Settler(..) | Value::Bound(_) => self
@@ -6444,6 +6751,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(value) if !Self::is_hole(value) => value.clone(),
                 _ => Value::Undefined,
             };
+        }
+        if let Value::TypedArray(view) = target
+            && let Some(index) = array_index(key)
+        {
+            // Out of range is `undefined`, and never an ordinary property: a typed array's
+            // indices are its whole contents.
+            return view.get(index).map_or(Value::Undefined, Value::Number);
         }
         // `s[0]` is the character at that index, as a one-character string. Indices are UTF-16
         // code units, which is the unit `length` counts in, so the two agree on what is in range.
@@ -6591,6 +6905,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 None => self.set_computed(&inner, key, value, instruction),
             };
+        }
+        if let Value::TypedArray(view) = target {
+            if let Some(index) = array_index(key) {
+                view.set(index, value.as_number());
+                return Ok(());
+            }
+            // A named property of a typed array is silently discarded rather than stored: the
+            // view has nowhere to put one, and inventing a store would make `u8.x = 1` look like
+            // it worked.
+            return Ok(());
         }
         match target {
             Value::Array(items) => match array_index(key) {
@@ -7174,6 +7498,28 @@ fn json_stringify(
         // Serialising a proxy means reading its properties, which means running its traps, which
         // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
+        // A typed array serialises as an *object* keyed by index, not as an array, which is one
+        // of the specification's odder corners and is what node does.
+        Value::TypedArray(view) => {
+            let entries: Vec<(String, Value)> = view
+                .items()
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| (index.to_string(), item))
+                .collect();
+            let mut data = ObjectData::default();
+            for (key, item) in entries {
+                data.set(&key, item);
+            }
+            return json_stringify(
+                &Value::Object(Rc::new(RefCell::new(data))),
+                indent,
+                current,
+                seen,
+                resolve,
+            );
+        }
+        Value::ArrayBuffer(_) => Some("{}".to_owned()),
         // Neither has a BigInt: the specification makes serialising one a TypeError rather than
         // an omission, and it is fatal here for the same reason a cycle is.
         Value::BigInt(_) => return Err(ExecutionError::CyclicJson),
@@ -7338,6 +7684,8 @@ fn call_native(
                 Value::Date(_) => "Date",
                 Value::RegExp(_) => "RegExp",
                 Value::Promise(_) => "Promise",
+                Value::TypedArray(view) => view.kind.name(),
+                Value::ArrayBuffer(_) => "ArrayBuffer",
                 Value::Function(_)
                 | Value::Native(_)
                 | Value::Callback(_)
@@ -7561,6 +7909,129 @@ fn call_native(
         }
         Native::ErrorToString => Value::String(error_to_string(receiver)),
         Native::RegExpToString => Value::String(receiver.to_display_string()),
+        // `new ArrayBuffer(n)` is n zero bytes. Called without `new` it is a TypeError in the
+        // specification; there is nothing more useful to return either way.
+        Native::ArrayBufferConstructor => {
+            let length = arguments.first().map_or(0.0, Value::as_number);
+            let length = if length.is_finite() && length >= 0.0 {
+                length as usize
+            } else {
+                0
+            };
+            Value::ArrayBuffer(Rc::new(RefCell::new(vec![0; length])))
+        }
+        Native::TypedArrayConstructor(kind) => construct_typed_array(kind, arguments),
+        // `of` takes its elements as arguments where the constructor takes one list, which is
+        // the whole difference: `Uint8Array.of(3)` is one element, `new Uint8Array(3)` is three.
+        Native::TypedArrayOf(kind) => {
+            construct_typed_array(kind, &[Value::Array(ArrayData::new(arguments.to_vec()))])
+        }
+        // `view.set(source, offset?)` copies elements in, converting each as an assignment does.
+        Native::TypedArraySet => {
+            let Value::TypedArray(view) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            let offset = arguments.get(1).map_or(0.0, Value::as_number);
+            let offset = if offset.is_finite() && offset >= 0.0 {
+                offset as usize
+            } else {
+                0
+            };
+            for (index, item) in typed_source(arguments.first()).into_iter().enumerate() {
+                view.set(offset + index, item);
+            }
+            Value::Undefined
+        }
+        // `subarray` shares the buffer; `slice` copies it. That difference is the whole reason
+        // both exist, and getting it backwards would make a write visible where it should not be.
+        Native::TypedArraySubarray => {
+            let Value::TypedArray(view) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            let (start, end) = slice_bounds(arguments, view.length);
+            Value::TypedArray(Rc::new(TypedArrayData {
+                kind: view.kind,
+                buffer: Rc::clone(&view.buffer),
+                offset: view.offset + start * view.kind.width(),
+                length: end.saturating_sub(start),
+            }))
+        }
+        Native::TypedArrayFill => {
+            let Value::TypedArray(view) = receiver else {
+                return Ok(Value::Undefined);
+            };
+            let filler = arguments.first().map_or(0.0, Value::as_number);
+            let (start, end) = slice_bounds(arguments.get(1..).unwrap_or_default(), view.length);
+            for index in start..end {
+                view.set(index, filler);
+            }
+            receiver.clone()
+        }
+        // `escape` and `unescape` are the pre-Unicode pair the specification keeps in Annex B
+        // and marks as deprecated. They are here because real code still reaches for them: the
+        // `unescape(encodeURIComponent(s))` idiom is how a library gets a string's UTF-8 bytes
+        // one per code unit, and uuid does exactly that.
+        Native::Escape => {
+            let text = arguments
+                .first()
+                .map_or_else(String::new, Value::to_display_string);
+            let mut out = String::with_capacity(text.len());
+            for unit in text.encode_utf16() {
+                match char::from_u32(u32::from(unit)) {
+                    Some(character)
+                        if character.is_ascii_alphanumeric()
+                            || matches!(character, '@' | '*' | '_' | '+' | '-' | '.' | '/') =>
+                    {
+                        out.push(character);
+                    }
+                    // Two hex digits below 256, four with a `%u` prefix above it. That split is
+                    // the whole reason `escape` was replaced.
+                    _ if unit < 256 => out.push_str(&format!("%{unit:02X}")),
+                    _ => out.push_str(&format!("%u{unit:04X}")),
+                }
+            }
+            Value::String(out)
+        }
+        Native::Unescape => {
+            let text = arguments
+                .first()
+                .map_or_else(String::new, Value::to_display_string);
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let mut out: Vec<u16> = Vec::with_capacity(units.len());
+            let mut index = 0;
+            let hex = |units: &[u16], at: usize, count: usize| -> Option<u16> {
+                let digits: String = units
+                    .get(at..at + count)?
+                    .iter()
+                    .map(|unit| char::from_u32(u32::from(*unit)).unwrap_or('\0'))
+                    .collect();
+                u16::from_str_radix(&digits, 16).ok()
+            };
+            while index < units.len() {
+                if units[index] != u16::from(b'%') {
+                    out.push(units[index]);
+                    index += 1;
+                    continue;
+                }
+                if units.get(index + 1) == Some(&u16::from(b'u'))
+                    && let Some(unit) = hex(&units, index + 2, 4)
+                {
+                    out.push(unit);
+                    index += 6;
+                    continue;
+                }
+                if let Some(unit) = hex(&units, index + 1, 2) {
+                    out.push(unit);
+                    index += 3;
+                    continue;
+                }
+                // A `%` that does not introduce an escape stands for itself, unlike `decodeURI`
+                // where the same text is an error.
+                out.push(units[index]);
+                index += 1;
+            }
+            Value::String(String::from_utf16_lossy(&out))
+        }
         // The four URI functions differ only in which characters they leave alone. `encodeURI`
         // keeps the ones that structure a URI -- `:/?#[]@!$&'()*+,;=` -- because it is encoding a
         // whole one; `encodeURIComponent` encodes those too, because a component that contains a
@@ -7723,7 +8194,9 @@ fn call_native(
         // Reading a hole yields undefined, so the marker never reaches an expression either.
         Native::Hole => unreachable!("an array hole is never a value"),
         // Peeled off the same way, for the same reason.
-        Native::ArrayFrom => unreachable!("`Array.from` is dispatched by the interpreter"),
+        Native::ArrayFrom | Native::TypedArrayFrom(_) => {
+            unreachable!("`from` is dispatched by the interpreter")
+        }
         Native::ArrayPush => match receiver {
             Value::Array(items) => {
                 let mut items = items.borrow_mut();
@@ -8780,6 +9253,14 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         Value::Native(Native::DateConstructor) => return matches!(value, Value::Date(_)),
         Value::Native(Native::RegExpConstructor) => return matches!(value, Value::RegExp(_)),
         Value::Native(Native::ArrayConstructor) => return matches!(value, Value::Array(_)),
+        // A view is an instance of the constructor that names its element type, and of nothing
+        // else: `new Uint8Array(1) instanceof Int8Array` is false.
+        Value::Native(Native::TypedArrayConstructor(kind)) => {
+            return matches!(value, Value::TypedArray(view) if view.kind == *kind);
+        }
+        Value::Native(Native::ArrayBufferConstructor) => {
+            return matches!(value, Value::ArrayBuffer(_));
+        }
         // A Set or Map is an object carrying reserved state, so the test is for that state
         // rather than for a prototype the realm does not yet have as an object.
         Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
@@ -9523,6 +10004,22 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         // Node shows what the traps produce; this shows the target, and says so, rather than
         // running a program's code because something was printed.
         Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
+        Value::TypedArray(view) => {
+            let items = view
+                .items()
+                .iter()
+                .map(|item| inspect_nested(item, depth + 1, seen))
+                .collect::<Vec<_>>();
+            let name = view.kind.name();
+            if items.is_empty() {
+                format!("{name}(0) []")
+            } else {
+                format!("{name}({}) [ {} ]", items.len(), items.join(", "))
+            }
+        }
+        Value::ArrayBuffer(bytes) => {
+            format!("ArrayBuffer {{ byteLength: {} }}", bytes.borrow().len())
+        }
         Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
         Value::Date(time) => iso_string(time.get()).unwrap_or_else(|| "Invalid Date".to_owned()),
         // A console shows the literal's spelling, which is how it is told from a number.
@@ -10200,6 +10697,106 @@ fn prototype_object(closure: &Rc<Closure>) -> Value {
     prototype
 }
 
+/// The elements a typed array's constructor or `set` was given.
+fn typed_source(value: Option<&Value>) -> Vec<f64> {
+    match value {
+        Some(Value::Array(items)) => dense_items(&items.borrow())
+            .iter()
+            .map(Value::as_number)
+            .collect(),
+        Some(Value::TypedArray(view)) => (0..view.length)
+            .map(|index| view.get(index).unwrap_or(0.0))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `start` and `end` from a pair of possibly-negative, possibly-absent bounds.
+fn slice_bounds(arguments: &[Value], length: usize) -> (usize, usize) {
+    let resolve = |value: Option<&Value>, fallback: usize| -> usize {
+        match value {
+            None | Some(Value::Undefined) => fallback,
+            Some(value) => {
+                let at = value.as_number();
+                if !at.is_finite() {
+                    return if at < 0.0 { 0 } else { length };
+                }
+                if at < 0.0 {
+                    (length as f64 + at).max(0.0) as usize
+                } else {
+                    (at as usize).min(length)
+                }
+            }
+        }
+    };
+    let start = resolve(arguments.first(), 0);
+    let end = resolve(arguments.get(1), length);
+    (start, end.max(start))
+}
+
+/// `new Uint8Array(...)` in each of its four shapes.
+///
+/// A length allocates; an array or another view copies; an `ArrayBuffer` *shares*, which is the
+/// shape that makes two views over one buffer see each other's writes.
+fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Value {
+    let width = kind.width();
+    match arguments.first() {
+        Some(Value::ArrayBuffer(bytes)) => {
+            let total = bytes.borrow().len();
+            let offset = arguments.get(1).map_or(0.0, Value::as_number);
+            let offset = if offset.is_finite() && offset >= 0.0 {
+                (offset as usize).min(total)
+            } else {
+                0
+            };
+            let length = match arguments.get(2) {
+                None | Some(Value::Undefined) => total.saturating_sub(offset) / width,
+                Some(value) => {
+                    let length = value.as_number();
+                    if length.is_finite() && length >= 0.0 {
+                        (length as usize).min(total.saturating_sub(offset) / width)
+                    } else {
+                        0
+                    }
+                }
+            };
+            Value::TypedArray(Rc::new(TypedArrayData {
+                kind,
+                buffer: Rc::clone(bytes),
+                offset,
+                length,
+            }))
+        }
+        Some(Value::Array(_) | Value::TypedArray(_)) => {
+            let items = typed_source(arguments.first());
+            let view = TypedArrayData {
+                kind,
+                buffer: Rc::new(RefCell::new(vec![0; items.len() * width])),
+                offset: 0,
+                length: items.len(),
+            };
+            for (index, item) in items.into_iter().enumerate() {
+                view.set(index, item);
+            }
+            Value::TypedArray(Rc::new(view))
+        }
+        other => {
+            let length = other.map_or(0.0, Value::as_number);
+            let length = if length.is_finite() && length >= 0.0 {
+                length as usize
+            } else {
+                0
+            };
+            Value::TypedArray(Rc::new(TypedArrayData {
+                kind,
+                buffer: Rc::new(RefCell::new(vec![0; length * width])),
+                offset: 0,
+                length,
+            }))
+        }
+    }
+}
+
 /// What a proxy ultimately wraps, following a chain of them.
 ///
 /// For the operations that are defined on the *shape* of a value rather than on its properties
@@ -10477,6 +11074,8 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
         (Value::Promise(a), Value::Promise(b)) => Rc::ptr_eq(a, b),
         (Value::Proxy(a), Value::Proxy(b)) => Rc::ptr_eq(a, b),
+        (Value::TypedArray(a), Value::TypedArray(b)) => Rc::ptr_eq(a, b),
+        (Value::ArrayBuffer(a), Value::ArrayBuffer(b)) => Rc::ptr_eq(a, b),
         (Value::Bound(a), Value::Bound(b)) => Rc::ptr_eq(a, b),
         (Value::Settler(a, one), Value::Settler(b, other)) => Rc::ptr_eq(a, b) && one == other,
         // A BigInt is a primitive: two of them are equal when the numbers are, however they were
