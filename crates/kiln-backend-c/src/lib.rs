@@ -883,11 +883,9 @@ typedef struct kiln_microtask {
     int rejected;
 } kiln_microtask;
 
-/* One scheduled callback.
- *
- * `sequence` breaks ties between timers due at the same instant, so two `setTimeout(f, 0)` calls
- * run in the order they were made rather than in whatever order the array happens to hold them --
- * which is a difference a program can see and therefore one the two engines have to share. */
+/* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,
+ * repeat policy and cancellation; this allocation contains only the language state its opaque
+ * work callback understands. */
 typedef struct kiln_timer {
     kiln_value callback;
     kiln_value *args;
@@ -918,7 +916,13 @@ int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
+typedef int (*kiln_realm_entry_fn)(void *context);
+int kiln_realm_create(uint64_t *out_realm);
+int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
+int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                            void *work, uint64_t *out_id);
@@ -5489,54 +5493,52 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL: {
-            kiln_timer entry;
+            kiln_timer *entry;
             double delay = argc > 1 ? second : 0.0;
+            uint64_t id = 0;
             /* A negative, missing or NaN delay is zero: "as soon as possible", which is still
              * after everything already queued. */
             if (!(isfinite(delay) && delay > 0.0)) {
                 delay = 0.0;
             }
-            status = kiln_c99_reserve((void **)&kiln_c99_timers, &kiln_c99_timer_capacity,
-                                      kiln_c99_timer_count + 1, sizeof *kiln_c99_timers);
-            if (status != KILN_C99_OK) {
-                return status;
+            entry = (kiln_timer *)malloc(sizeof *entry);
+            if (entry == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
             }
-            kiln_c99_next_sequence += 1;
-            entry.id = kiln_c99_next_timer_id;
-            kiln_c99_next_timer_id += 1.0;
-            entry.due = kiln_c99_now + delay;
-            entry.sequence = kiln_c99_next_sequence;
-            entry.callback = argc > 0 ? args[0] : kiln_c99_undefined();
-            entry.repeats = code == KILN_C99_METHOD_SET_INTERVAL;
-            entry.repeat = delay;
+            entry->callback = argc > 0 ? args[0] : kiln_c99_undefined();
             /* Everything after the delay is handed to the callback, which is how a timer carries
              * state without a closure. */
-            entry.argc = argc > 2 ? argc - 2 : 0;
-            entry.args = NULL;
-            if (entry.argc != 0) {
-                entry.args = (kiln_value *)malloc(entry.argc * sizeof *entry.args);
-                if (entry.args == NULL) {
+            entry->argc = argc > 2 ? argc - 2 : 0;
+            entry->args = NULL;
+            if (entry->argc != 0) {
+                entry->args = (kiln_value *)malloc(entry->argc * sizeof *entry->args);
+                if (entry->args == NULL) {
+                    free(entry);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                memcpy(entry.args, args + 2, entry.argc * sizeof *entry.args);
+                memcpy(entry->args, args + 2, entry->argc * sizeof *entry->args);
             }
-            kiln_c99_timers[kiln_c99_timer_count] = entry;
-            kiln_c99_timer_count += 1;
-            *result = kiln_c99_number(entry.id);
+            status = code == KILN_C99_METHOD_SET_INTERVAL
+                         ? kiln_realm_set_interval(delay, kiln_c99_run_timer,
+                                                   kiln_c99_drop_timer, entry, &id)
+                         : kiln_realm_set_timeout(delay, kiln_c99_run_timer,
+                                                  kiln_c99_drop_timer, entry, &id);
+            if (status != KILN_C99_OK) {
+                kiln_c99_drop_timer(entry);
+                return status;
+            }
+            *result = kiln_c99_number((double)id);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_CLEAR_TIMEOUT:
         case KILN_C99_METHOD_CLEAR_INTERVAL: {
             double id = argc > 0 ? first : 0.0 / 0.0;
-            size_t index = 0;
-            while (index < kiln_c99_timer_count) {
-                if (kiln_c99_timers[index].id == id) {
-                    memmove(kiln_c99_timers + index, kiln_c99_timers + index + 1,
-                            (kiln_c99_timer_count - index - 1) * sizeof *kiln_c99_timers);
-                    kiln_c99_timer_count -= 1;
-                    continue;
+            if (isfinite(id) && id >= 1.0 && floor(id) == id &&
+                id <= 9007199254740991.0) {
+                status = kiln_realm_clear_timer((uint64_t)id);
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
-                index += 1;
             }
             *result = kiln_c99_undefined();
             return KILN_C99_OK;
@@ -6218,11 +6220,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_DATE_NOW:
-            /* The clock is virtual and nothing here advances it (ADR 0015). A program that asks
-             * the time twice gets the same answer, which is what makes a run repeatable -- and
-             * is why a probe may compare `typeof Date.now()` and nothing more. */
-            *result = kiln_c99_number(0.0);
+        {
+            double milliseconds;
+            status = kiln_realm_now(&milliseconds);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = kiln_c99_number(milliseconds);
             return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_COLLECTION_GET:
         case KILN_C99_METHOD_COLLECTION_SET:
         case KILN_C99_METHOD_COLLECTION_ADD:
@@ -9484,42 +9490,25 @@ static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
     return KILN_C99_THROWN;
 }
 
-/* The microtask queue.
- *
- * One per generated unit rather than one per program, drained when the unit's entry point
- * finishes. For a single module -- which is what `kiln run` compiles and what every probe here
- * is -- that is exactly node's ordering: the body runs to completion and then the queue drains.
- * For a *graph* it is an approximation, because node drains after every module body rather than
- * after each one; see NOTES.md, where the shared-queue design that fixes it is written down. */
-static kiln_microtask *kiln_c99_queue;
-static size_t kiln_c99_queue_head;
-static size_t kiln_c99_queue_count;
-static size_t kiln_c99_queue_capacity;
-
-
+/* Generated code owns each work payload because only it understands `kiln_value`. The Realm
+ * Runtime owns queueing, ordering, virtual time, cancellation and disposal timing through opaque
+ * pointers; no language value layout crosses the private ABI. */
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected) {
+    kiln_microtask *task;
     int status;
-    if (kiln_c99_queue_head > 0 && kiln_c99_queue_count == kiln_c99_queue_capacity) {
-        /* Reclaim what has already run before growing: a long chain of `then`s would otherwise
-         * grow the queue by one for every link even though only one is ever live. */
-        size_t index;
-        for (index = 0; index < kiln_c99_queue_count - kiln_c99_queue_head; ++index) {
-            kiln_c99_queue[index] = kiln_c99_queue[kiln_c99_queue_head + index];
-        }
-        kiln_c99_queue_count -= kiln_c99_queue_head;
-        kiln_c99_queue_head = 0;
-    }
-    status = kiln_c99_reserve((void **)&kiln_c99_queue, &kiln_c99_queue_capacity,
-                              kiln_c99_queue_count + 1, sizeof *kiln_c99_queue);
+    task = (kiln_microtask *)malloc(sizeof *task);
+    if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
+    task->handler = handler;
+    task->argument = argument;
+    task->derived = derived;
+    task->rejected = rejected;
+    status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
+                                        task);
     if (status != KILN_C99_OK) {
+        kiln_c99_drop_microtask(task);
         return status;
     }
-    kiln_c99_queue[kiln_c99_queue_count].handler = handler;
-    kiln_c99_queue[kiln_c99_queue_count].argument = argument;
-    kiln_c99_queue[kiln_c99_queue_count].derived = derived;
-    kiln_c99_queue[kiln_c99_queue_count].rejected = rejected;
-    kiln_c99_queue_count += 1;
     return KILN_C99_OK;
 }
 
@@ -9649,102 +9638,56 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
     return KILN_C99_OK;
 }
 
-/* Run the queue until it is empty, which is what "after the synchronous part" means. */
-/* The event loop: microtasks until there are none, then the earliest due timer, then round
- * again.
- *
- * The order is the observable one. Everything already queued runs before any timer, which is why
- * `Promise.resolve().then(f)` beats `setTimeout(g, 0)` however early `g` was scheduled -- and it
- * is checked between turns rather than at each settlement, so a `.catch` attached on the next
- * line still counts as attached. */
-static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown) {
-    for (;;) {
-        size_t index;
-        size_t chosen;
-        kiln_timer timer;
-        kiln_value produced;
-        int status = kiln_c99_drain(host, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        chosen = kiln_c99_timer_count;
-        for (index = 0; index < kiln_c99_timer_count; ++index) {
-            if (chosen == kiln_c99_timer_count ||
-                kiln_c99_timers[index].due < kiln_c99_timers[chosen].due ||
-                (kiln_c99_timers[index].due == kiln_c99_timers[chosen].due &&
-                 kiln_c99_timers[index].sequence < kiln_c99_timers[chosen].sequence)) {
-                chosen = index;
-            }
-        }
-        if (chosen == kiln_c99_timer_count) {
-            return KILN_C99_OK;
-        }
-        timer = kiln_c99_timers[chosen];
-        if (kiln_c99_now < timer.due) {
-            kiln_c99_now = timer.due;
-        }
-        if (timer.repeats) {
-            /* Re-armed *before* running, and under the same id, so a `clearInterval` inside the
-             * callback cancels the next run rather than one that no longer exists. A zero delay
-             * becomes one, or an interval would starve every timer behind it. */
-            kiln_c99_next_sequence += 1;
-            kiln_c99_timers[chosen].due =
-                kiln_c99_now + (timer.repeat > 1.0 ? timer.repeat : 1.0);
-            kiln_c99_timers[chosen].sequence = kiln_c99_next_sequence;
-        } else {
-            memmove(kiln_c99_timers + chosen, kiln_c99_timers + chosen + 1,
-                    (kiln_c99_timer_count - chosen - 1) * sizeof *kiln_c99_timers);
-            kiln_c99_timer_count -= 1;
-        }
-        status = kiln_c99_call(host, &produced, timer.callback, kiln_c99_undefined(),
-                               timer.argc == 0 ? NULL : timer.args, timer.argc, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-    }
+static void kiln_c99_drop_microtask(void *work) {
+    free(work);
 }
 
-static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
-    while (kiln_c99_queue_head < kiln_c99_queue_count) {
-        kiln_microtask task = kiln_c99_queue[kiln_c99_queue_head];
-        kiln_value produced;
-        int status;
-        kiln_c99_queue_head += 1;
-        if (!kiln_c99_is_callable(task.handler)) {
-            /* No handler for this side, so the value travels on unchanged. */
-            if (task.derived.tag == KILN_VALUE_PROMISE) {
-                status = kiln_c99_settle(task.derived, task.argument, task.rejected);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-            }
-            continue;
+static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_pointer) {
+    kiln_microtask *task = (kiln_microtask *)work;
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    kiln_value produced;
+    int status;
+    if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (!kiln_c99_is_callable(task->handler)) {
+        /* No handler for this side, so the value travels on unchanged. */
+        if (task->derived.tag == KILN_VALUE_PROMISE) {
+            return kiln_c99_settle(task->derived, task->argument, task->rejected);
         }
-        status = kiln_c99_call(host, &produced, task.handler, kiln_c99_undefined(), &task.argument,
-                               1, depth, thrown);
-        if (status == KILN_C99_THROWN) {
-            /* A handler that throws rejects the promise it was producing, rather than failing
-             * the program: that is the whole reason `catch` exists further down the chain. */
-            if (task.derived.tag == KILN_VALUE_PROMISE) {
-                status = kiln_c99_settle(task.derived, *thrown, 1);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                continue;
-            }
-            return KILN_C99_THROWN;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_call(host, &produced, task->handler, kiln_c99_undefined(),
+                           &task->argument, 1, 0, thrown);
+    if (status == KILN_C99_THROWN) {
+        /* A handler that throws rejects the promise it was producing, rather than failing the
+         * program: that is the whole reason `catch` exists further down the chain. */
+        if (task->derived.tag == KILN_VALUE_PROMISE) {
+            return kiln_c99_settle(task->derived, *thrown, 1);
         }
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        if (task.derived.tag == KILN_VALUE_PROMISE) {
-            status = kiln_c99_settle(task.derived, produced, 0);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-        }
+        return KILN_C99_THROWN;
+    }
+    if (status != KILN_C99_OK) return status;
+    if (task->derived.tag == KILN_VALUE_PROMISE) {
+        return kiln_c99_settle(task->derived, produced, 0);
     }
     return KILN_C99_OK;
+}
+
+static void kiln_c99_drop_timer(void *work) {
+    kiln_timer *timer = (kiln_timer *)work;
+    if (timer == NULL) return;
+    free(timer->args);
+    free(timer);
+}
+
+static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
+    kiln_timer *timer = (kiln_timer *)work;
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    kiln_value produced;
+    if (timer == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_c99_call(host, &produced, timer->callback, kiln_c99_undefined(),
+                         timer->argc == 0 ? NULL : timer->args, timer->argc, 0, thrown);
 }
 
 /* One step of an async function: resume the body, and decide what to do with where it stopped.
@@ -11689,8 +11632,109 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     }
 }
 
+fn render_scalar_realm_wrapper(output: &mut String, symbol: &str) {
+    writeln!(
+        output,
+        r#"
+typedef struct {symbol}_realm_context {{
+    kiln_host *host;
+    kiln_value *result;
+}} {symbol}_realm_context;
+
+static int {symbol}_realm_entry(void *opaque) {{
+    {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return {symbol}_body(context->host, context->result);
+}}
+
+int {symbol}(kiln_host *host, kiln_value *result) {{
+    {symbol}_realm_context context;
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_is_active()) return {symbol}_body(host, result);
+    context.host = host;
+    context.result = result;
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_drive(realm, host, result);
+    if (realm != 0) {{
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }}
+    if (status != KILN_C99_OK && kiln_c99_crosses_boundary(*result))
+        *result = kiln_c99_text(*result);
+    return status;
+}}
+"#
+    )
+    .unwrap();
+}
+
+fn render_module_realm_wrapper(output: &mut String, symbol: &str) {
+    writeln!(
+        output,
+        r#"
+typedef struct {symbol}_realm_context {{
+    kiln_host *host;
+    kiln_value *result;
+    const kiln_value *imports;
+    size_t import_count;
+    kiln_value *exports;
+    size_t export_count;
+}} {symbol}_realm_context;
+
+static int {symbol}_realm_entry(void *opaque) {{
+    {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
+    if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return {symbol}_body(context->host, context->result, context->imports,
+                         context->import_count, context->exports, context->export_count);
+}}
+
+int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
+             size_t import_count, kiln_value *exports, size_t export_count) {{
+    {symbol}_realm_context context;
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_is_active())
+        return {symbol}_body(host, result, imports, import_count, exports, export_count);
+    context.host = host;
+    context.result = result;
+    context.imports = imports;
+    context.import_count = import_count;
+    context.exports = exports;
+    context.export_count = export_count;
+    status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_drive(realm, host, result);
+    if (realm != 0) {{
+        destroy_status = kiln_realm_destroy(realm);
+        if (status == KILN_C99_OK) status = destroy_status;
+    }}
+    if (status != KILN_C99_OK && kiln_c99_crosses_boundary(*result))
+        *result = kiln_c99_text(*result);
+    return status;
+}}
+"#
+    )
+    .unwrap();
+}
+
 fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     let plan = validate_program(program).expect("render called after validation");
+    let callables = produces_references(program);
+    let entry_symbol = if callables {
+        format!("{symbol}_body")
+    } else {
+        symbol.to_owned()
+    };
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 64);
     output.push_str(HEADER);
@@ -11711,7 +11755,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
-        "int {symbol}(kiln_host *host, kiln_value *result) {{"
+        "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
+        if callables { "static " } else { "" }
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
@@ -11721,7 +11766,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
     // must not cross it: an uncaught throw leaves as text in `*result`.
-    if produces_references(program) {
+    if callables {
         output.push_str("    int depth = 0;\n");
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
@@ -11754,7 +11799,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
-        callables: produces_references(program),
+        callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry { exports: None },
         guarded: dead_zone_slots(&program.code),
@@ -11766,12 +11811,21 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    if callables {
+        render_scalar_realm_wrapper(&mut output, symbol);
+    }
     output
 }
 
 fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
+    let callables = produces_references(program);
+    let entry_symbol = if callables {
+        format!("{symbol}_body")
+    } else {
+        symbol.to_owned()
+    };
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
     output.push_str(HEADER);
@@ -11794,7 +11848,8 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     render_functions(&mut output, program, &plan, symbol);
     writeln!(
         output,
-        "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
+        "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
+        if callables { "static " } else { "" }
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
@@ -11804,7 +11859,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
     // must not cross it: an uncaught throw leaves as text in `*result`.
-    if produces_references(program) {
+    if callables {
         output.push_str("    int depth = 0;\n");
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
@@ -11865,7 +11920,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
-        callables: produces_references(program),
+        callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
             exports: Some(&module.exports),
@@ -11879,6 +11934,9 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    if callables {
+        render_module_realm_wrapper(&mut output, symbol);
+    }
     output
 }
 
@@ -12576,7 +12634,7 @@ fn emit_instruction(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry { exports: None } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
@@ -12584,13 +12642,6 @@ fn emit_instruction(
                 output.push_str(
                     "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
                 );
-                if *callables {
-                    // Everything the body queued runs before the module is finished, which is
-                    // what "after the synchronous part" means.
-                    output.push_str(
-                        "    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n",
-                    );
-                }
                 if *callables {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
@@ -13153,12 +13204,92 @@ int32_t kiln_bigint_compare(const void *left, const void *right) {
 int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
 "#;
 
+    /// Link-only Realm provider for backend unit tests.
+    ///
+    /// Scheduler behavior is covered through the real Rust archive in `kiln-native`; these tests
+    /// exercise generated scalar C directly. The fixture therefore owns and disposes any work it
+    /// is unexpectedly given without duplicating a second event loop in the backend test module.
+    const REALM_FIXTURE: &str = r#"
+static uint64_t kiln_test_next_timer_id = 1;
+static int kiln_test_realm_active = 0;
+
+int kiln_realm_create(uint64_t *out_realm) {
+    if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_realm = 1;
+    return KILN_C99_OK;
+}
+int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context) {
+    int status;
+    if (realm != 1 || entry == NULL || kiln_test_realm_active) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    kiln_test_realm_active = 1;
+    status = entry(context);
+    kiln_test_realm_active = 0;
+    return status;
+}
+int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
+    (void)host;
+    (void)thrown;
+    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_destroy(uint64_t realm) {
+    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_is_active(void) { return kiln_test_realm_active; }
+int kiln_realm_now(double *out_milliseconds) {
+    if (!kiln_test_realm_active || out_milliseconds == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    *out_milliseconds = 0.0;
+    return KILN_C99_OK;
+}
+int kiln_realm_queue_microtask(kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work) {
+    (void)run;
+    if (drop != NULL) drop(work);
+    return KILN_C99_OK;
+}
+static int kiln_test_set_timer(double delay_ms,
+                               kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work,
+                               uint64_t *out_id) {
+    (void)delay_ms;
+    (void)run;
+    if (out_id == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_id = kiln_test_next_timer_id++;
+    if (drop != NULL) drop(work);
+    return KILN_C99_OK;
+}
+int kiln_realm_set_timeout(double delay_ms,
+                           kiln_realm_work_fn run,
+                           kiln_realm_drop_fn drop,
+                           void *work,
+                           uint64_t *out_id) {
+    return kiln_test_set_timer(delay_ms, run, drop, work, out_id);
+}
+int kiln_realm_set_interval(double delay_ms,
+                            kiln_realm_work_fn run,
+                            kiln_realm_drop_fn drop,
+                            void *work,
+                            uint64_t *out_id) {
+    return kiln_test_set_timer(delay_ms, run, drop, work, out_id);
+}
+int kiln_realm_clear_timer(uint64_t id) {
+    (void)id;
+    return KILN_C99_OK;
+}
+"#;
+
     fn linked_source(module_source: &str, wrapper: &str) -> String {
         format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             kiln_native_number::runtime_source(),
             REGEXP_FIXTURE,
             module_source,
+            REALM_FIXTURE,
             wrapper
         )
     }

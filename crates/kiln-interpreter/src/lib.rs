@@ -10,8 +10,6 @@ use std::fmt;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
-
 use kiln_host_abi::{HostOps, HostValue};
 use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
 use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
@@ -340,6 +338,15 @@ pub enum Native {
     /// `ArrayBuffer`, and one constructor per view kind.
     ArrayBufferConstructor,
     ArrayBufferResize,
+    /// `SharedArrayBuffer`, and the one method that is its own rather than `ArrayBuffer`'s.
+    ///
+    /// A separate constructor rather than a flag on the one above, because a program tells the
+    /// two apart by identity: `sab instanceof ArrayBuffer` is false, the prototypes are
+    /// different objects, and `ArrayBuffer.prototype.resize` called on a shared buffer is a
+    /// `TypeError`. One constructor answering both would make every one of those agree when the
+    /// language says they disagree.
+    SharedArrayBufferConstructor,
+    ArrayBufferGrow,
     ArrayBufferSlice,
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
@@ -754,6 +761,9 @@ impl Native {
             (Self::ArrayBufferConstructor, "isView") => {
                 Some(Value::Native(Self::ArrayBufferIsView))
             }
+            (Self::SharedArrayBufferConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::SharedArrayBuffer),
+            )),
             (Self::DataViewConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::DataView)))
             }
@@ -820,6 +830,7 @@ impl Native {
                 PrototypeTable::RegExp => Self::RegExpConstructor,
                 PrototypeTable::Date => Self::DateConstructor,
                 PrototypeTable::ArrayBuffer => Self::ArrayBufferConstructor,
+                PrototypeTable::SharedArrayBuffer => Self::SharedArrayBufferConstructor,
                 PrototypeTable::TypedArray => Self::TypedArrayIntrinsic,
                 PrototypeTable::TypedArrayFor(kind) => Self::TypedArrayConstructor(kind),
                 PrototypeTable::DataView => Self::DataViewConstructor,
@@ -843,7 +854,8 @@ impl Native {
                     PrototypeTable::Function => tabulated_function_property(name),
                     PrototypeTable::RegExp => regexp_method(name),
                     PrototypeTable::Date => date_method(name),
-                    PrototypeTable::ArrayBuffer => array_buffer_method(name),
+                    PrototypeTable::ArrayBuffer => array_buffer_method(false, name),
+                    PrototypeTable::SharedArrayBuffer => array_buffer_method(true, name),
                     PrototypeTable::TypedArray => typed_array_method(name),
                     // The per-view table carries only what differs between the views; everything
                     // else is inherited from `%TypedArray%.prototype` one link up the chain, which
@@ -1828,6 +1840,10 @@ pub enum PrototypeTable {
     RegExp,
     Date,
     ArrayBuffer,
+    /// `SharedArrayBuffer.prototype`. Kept apart from the table above because the two share no
+    /// methods a program can observe as shared: `resize` is on one and `grow` on the other, and
+    /// each throws when reached with the other's receiver.
+    SharedArrayBuffer,
     /// `%TypedArray%.prototype`, where every view's methods actually live.
     TypedArray,
     /// `Int8Array.prototype` and its eight siblings. Kept apart from the table above, and from
@@ -2106,7 +2122,8 @@ fn coerce_element(kind: TypedKind, value: &Value) -> Result<Value, ExecutionErro
     })))
 }
 
-/// The bytes behind an `ArrayBuffer`, and the ceiling a resizable one may move within.
+/// The bytes behind an `ArrayBuffer` or a `SharedArrayBuffer`, and the ceiling a resizable or
+/// growable one may move within.
 ///
 /// `max_byte_length` is the whole difference between the language's two kinds of buffer: `None`
 /// is a fixed-length buffer, and `Some(max)` one created with `{ maxByteLength: max }`, whose
@@ -2117,6 +2134,15 @@ fn coerce_element(kind: TypedKind, value: &Value) -> Result<Value, ExecutionErro
 pub struct BufferData {
     bytes: RefCell<Vec<u8>>,
     max_byte_length: Option<usize>,
+    /// Whether this is a `SharedArrayBuffer` rather than an `ArrayBuffer`.
+    ///
+    /// A flag rather than a second value type, because the bytes are the same bytes and every
+    /// view reads them the same way. What the flag decides is which *constructor* claims the
+    /// buffer -- and what the ceiling means: a shared buffer only ever grows, so no view over
+    /// one can be stranded and no shrink can drop bytes another holder is still reading. That
+    /// last part is the whole reason the language has a second buffer type, and it is exactly
+    /// what a single type with a `grow` alias would lose.
+    shared: bool,
 }
 
 /// Identity, not contents: two buffers holding the same bytes are still two buffers, and a
@@ -2133,6 +2159,7 @@ impl BufferData {
         Rc::new(Self {
             bytes: RefCell::new(vec![0; length]),
             max_byte_length: None,
+            shared: false,
         })
     }
 
@@ -2147,10 +2174,37 @@ impl BufferData {
     /// must not resurrect what was there before -- which is exactly the stale read a view over
     /// the old length would otherwise be able to perform.
     fn resize(&self, length: usize) -> Result<(), ExecutionError> {
+        if self.shared {
+            return Err(ExecutionError::NotABuffer);
+        }
         let Some(max) = self.max_byte_length else {
             return Err(ExecutionError::BufferNotResizable);
         };
         if length > max {
+            return Err(ExecutionError::BufferLengthOutOfRange {
+                length: length as f64,
+            });
+        }
+        self.bytes.borrow_mut().resize(length, 0);
+        Ok(())
+    }
+
+    /// Move a growable shared buffer's length up within its ceiling.
+    ///
+    /// Only up. A shared buffer is reachable from more than one holder by construction, and a
+    /// shrink would pull bytes out from under a holder that has no way to learn it happened --
+    /// which is why the specification gives the shared type `grow` instead of `resize` and
+    /// makes a request below the current length a `RangeError` rather than a no-op. Growing to
+    /// exactly the current length is allowed and does nothing, which is what makes `grow` safe
+    /// to call in a loop that is racing another holder.
+    fn grow(&self, length: usize) -> Result<(), ExecutionError> {
+        if !self.shared {
+            return Err(ExecutionError::NotABuffer);
+        }
+        let Some(max) = self.max_byte_length else {
+            return Err(ExecutionError::BufferNotGrowable);
+        };
+        if length > max || length < self.byte_length() {
             return Err(ExecutionError::BufferLengthOutOfRange {
                 length: length as f64,
             });
@@ -2857,7 +2911,12 @@ impl Value {
             Self::Proxy(proxy) => proxy.target.to_display_string(),
             // Like an array: `String(new Uint8Array([1, 2]))` is "1,2".
             Self::TypedArray(view) => join(&view.items(), ",").unwrap_or_default(),
-            Self::ArrayBuffer(_) => "[object ArrayBuffer]".to_owned(),
+            Self::ArrayBuffer(buffer) => if buffer.shared {
+                "[object SharedArrayBuffer]"
+            } else {
+                "[object ArrayBuffer]"
+            }
+            .to_owned(),
             Self::DataView(_) => "[object DataView]".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
@@ -3027,18 +3086,15 @@ pub enum ExecutionError {
     MixedBigInt,
     /// A radix or digit count outside the range its method accepts.
     ///
-    /// A catchable `RangeError` in the specification; fatal here for the same reason
-    /// [`Self::CyclicJson`] is.
+    /// A catchable `RangeError`, in the specification and here -- see [`Self::CyclicJson`].
     RadixOutOfRange,
     /// `reduce` on an empty array with no initial value.
     ///
-    /// A catchable `TypeError` in the specification; fatal here for the same reason
-    /// [`Self::CyclicJson`] is.
+    /// A catchable `TypeError`, in the specification and here -- see [`Self::CyclicJson`].
     EmptyReduce,
     /// `JSON.parse` was given text that is not JSON.
     ///
-    /// A catchable `SyntaxError` in the specification, and fatal here for the same reason
-    /// [`Self::CyclicJson`] is: a native cannot yet raise a value the program can catch.
+    /// A catchable `SyntaxError`, in the specification and here -- see [`Self::CyclicJson`].
     InvalidJson,
     /// A pattern the regexp engine will not take.
     ///
@@ -3047,18 +3103,35 @@ pub enum ExecutionError {
     InvalidRegExp,
     /// `JSON.stringify` reached a value that contains itself.
     ///
-    /// The specification throws a catchable `TypeError` here. A native cannot yet raise a value
-    /// the program can catch, so this is fatal instead -- wrong in a way that is loud and easy
-    /// to fix later, rather than quiet and wrong now.
+    /// A catchable `TypeError` in the specification, and catchable here.
+    ///
+    /// This is the anchor the variants around it point at, so the mechanism is written down once:
+    /// [`Vm::catchable`] turns any error whose [`Self::as_javascript_error`] answers a kind into a
+    /// thrown value and hands control to the handler, and every variant in that mapping is
+    /// catchable provided its raising site is reached through `catchable` rather than through a
+    /// bare `?`.
+    ///
+    /// The comment that stood here for a long time said the opposite -- that a native could not
+    /// yet raise a value a program could catch. That was true once and outlived the mechanism,
+    /// and it is worth knowing that it cost a reader most of an afternoon: the claim is exactly
+    /// the kind a careful codebase gets trusted on. If you add a variant a program should be able
+    /// to catch, put it in the mapping *and* check that whatever raises it is reached through
+    /// `catchable`; a bare `?` from inside `run_frames` is what makes one fatal by accident.
     CyclicJson,
+    /// `JSON.stringify` reached a BigInt.
+    ///
+    /// A catchable `TypeError`, in the specification and here -- see [`Self::CyclicJson`]. It has
+    /// its own variant rather than borrowing the cycle's because the two share nothing but their
+    /// error kind, and a program that catches this should not be told its value contains itself.
+    BigIntNotSerialisable,
     /// ToPrimitive reached the end without a primitive: no `@@toPrimitive`, and `valueOf` and
     /// `toString` either absent or both answering objects.
     ///
-    /// The specification throws a catchable `TypeError`, and this is fatal here for the same
-    /// reason [`Self::CyclicJson`] is. *Stopping* is the point. This used to answer
-    /// `[object Object]` and carry on, which is not one wrong value but a wrong program: every
-    /// line after the fault ran, and the process exited 0 where the language says it ends. A loud
-    /// stop is wrong in one place; inventing a value is wrong in all of them.
+    /// A catchable `TypeError`, in the specification and here -- see [`Self::CyclicJson`].
+    ///
+    /// This used to answer `[object Object]` and carry on, which is not one wrong value but a
+    /// wrong program: every line after the fault ran, and the process exited 0 where the language
+    /// ends it.
     NotPrimitive,
     /// A `.return()` signal finished unwinding a generator. Never surfaces to a caller: it is
     /// caught by the `return` that raised it.
@@ -3117,6 +3190,10 @@ pub enum ExecutionError {
     /// no-op: a fixed-length buffer is not a resizable one that happens to refuse, and a
     /// program that cannot tell the two apart will read the wrong bytes afterwards.
     BufferNotResizable,
+    /// `grow` on a shared buffer created without a `maxByteLength`, for the same reason
+    /// [`Self::BufferNotResizable`] exists: a fixed-length buffer is not a growable one that
+    /// happens to refuse.
+    BufferNotGrowable,
     /// A buffer length outside what the specification accepts -- negative, unrepresentable, or
     /// above the ceiling the buffer was created with.
     BufferLengthOutOfRange {
@@ -3149,6 +3226,12 @@ pub enum ExecutionError {
     /// `ToBigInt` of a string that is not an integer literal. A `SyntaxError`, because a BigInt
     /// has no NaN to become.
     InvalidBigIntString,
+    /// A copy between two typed arrays whose elements are in different numeric towers.
+    ///
+    /// Its own refusal rather than a per-element one, because the specification makes it before
+    /// looking at a single element: copying an empty `BigInt64Array` into a `Uint8Array` throws
+    /// just as a full one does, and there is no element there to blame it on.
+    TypedArrayContentTypeMismatch,
     /// An iterator method reached with a receiver that cannot be stepped, or a `flatMap` mapper
     /// that answered something that is not iterable.
     NotAnIterator,
@@ -3270,6 +3353,9 @@ impl fmt::Display for ExecutionError {
             Self::BufferNotResizable => {
                 write!(formatter, "cannot resize a non-resizable ArrayBuffer")
             }
+            Self::BufferNotGrowable => {
+                write!(formatter, "cannot grow a non-growable SharedArrayBuffer")
+            }
             Self::BufferLengthOutOfRange { length } => {
                 write!(formatter, "invalid ArrayBuffer length {length}")
             }
@@ -3298,6 +3384,9 @@ impl fmt::Display for ExecutionError {
             Self::InvalidBigIntString => {
                 write!(formatter, "cannot convert this string to a BigInt")
             }
+            Self::TypedArrayContentTypeMismatch => {
+                write!(formatter, "cannot mix BigInt and non-BigInt typed arrays")
+            }
             Self::NotAnIterator => write!(formatter, "receiver is not an iterator"),
             Self::IteratorResultNotAnObject => {
                 write!(formatter, "iterator result is not an object")
@@ -3325,6 +3414,9 @@ impl fmt::Display for ExecutionError {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
+            Self::BigIntNotSerialisable => {
+                write!(formatter, "do not know how to serialize a BigInt")
+            }
             Self::NotPrimitive => {
                 write!(formatter, "cannot convert object to primitive value")
             }
@@ -3405,6 +3497,10 @@ impl ExecutionError {
                 ErrorKind::Type,
                 "Cannot resize a non-resizable ArrayBuffer".to_owned(),
             ),
+            Self::BufferNotGrowable => (
+                ErrorKind::Type,
+                "Cannot grow a non-growable SharedArrayBuffer".to_owned(),
+            ),
             Self::BufferLengthOutOfRange { .. } => {
                 (ErrorKind::Range, "Invalid ArrayBuffer length".to_owned())
             }
@@ -3443,6 +3539,10 @@ impl ExecutionError {
             Self::InvalidBigIntString => (
                 ErrorKind::Syntax,
                 "Cannot convert this string to a BigInt".to_owned(),
+            ),
+            Self::TypedArrayContentTypeMismatch => (
+                ErrorKind::Type,
+                "Cannot mix BigInt and non-BigInt typed arrays".to_owned(),
             ),
             Self::NotAnIterator => (
                 ErrorKind::Type,
@@ -3484,6 +3584,10 @@ impl ExecutionError {
             Self::CyclicJson => (
                 ErrorKind::Type,
                 "Converting circular structure to JSON".to_owned(),
+            ),
+            Self::BigIntNotSerialisable => (
+                ErrorKind::Type,
+                "Do not know how to serialize a BigInt".to_owned(),
             ),
             Self::NotPrimitive => (
                 ErrorKind::Type,
@@ -4141,7 +4245,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         operator,
                         UnaryOp::Negate | UnaryOp::Plus | UnaryOp::BitwiseNot
                     ) {
-                        self.as_primitive(&value, false, current)?
+                        // Through `catchable`, because reducing can fail in a way the program is
+                        // allowed to catch: an object with no route to a primitive is a
+                        // `TypeError`, not the end of the run.
+                        let reduced = self.as_primitive(&value, false, current);
+                        let Some(reduced) = self.catchable(reduced, current)? else {
+                            continue;
+                        };
+                        reduced
                     } else {
                         value
                     };
@@ -4227,10 +4338,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         ) || (matches!(operator, BinaryOp::LooseEqual | BinaryOp::LooseNotEqual)
                             && mixed);
                     let (left, right) = if reduces {
-                        (
-                            self.as_primitive(&left, false, current)?,
-                            self.as_primitive(&right, false, current)?,
-                        )
+                        // Left before right, and each through `catchable`: the reduction runs
+                        // user code, so it can both fail catchably and observe the order.
+                        let reduced = self.as_primitive(&left, false, current);
+                        let Some(left) = self.catchable(reduced, current)? else {
+                            continue;
+                        };
+                        let reduced = self.as_primitive(&right, false, current);
+                        let Some(right) = self.catchable(reduced, current)? else {
+                            continue;
+                        };
+                        (left, right)
                     } else {
                         (left, right)
                     };
@@ -5722,7 +5840,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ArrayFrom => self.array_from(arguments, instruction),
-            Native::ArrayBufferConstructor => self.construct_array_buffer(arguments, instruction),
+            Native::ArrayBufferConstructor => {
+                self.construct_array_buffer(false, arguments, instruction)
+            }
+            Native::SharedArrayBufferConstructor => {
+                self.construct_array_buffer(true, arguments, instruction)
+            }
             Native::DataViewConstructor => self.construct_data_view(arguments, instruction),
             Native::DataViewGet(kind) => self.data_view_get(kind, receiver, arguments, instruction),
             Native::DataViewSet(kind) => self.data_view_set(kind, receiver, arguments, instruction),
@@ -6266,6 +6389,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let value = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                // A typed array's `[[Set]]` writes *through itself*: handed a different
+                // receiver and an index the view does not have, the specification returns true
+                // without even coercing the value, because there is no slot to convert it for.
+                // An ordinary assignment always passes the view as its own receiver, so
+                // `Reflect.set` is the only place this is reachable -- and the only place the
+                // skipped `valueOf` can be seen.
+                if let Some(Value::TypedArray(view)) = arguments.first()
+                    && let Some(receiver) = arguments.get(3)
+                    && !same_value(receiver, &target)
+                    && array_index(&key).is_some_and(|index| index >= view.len())
+                {
+                    return Ok(Value::Boolean(true));
+                }
                 self.set_computed(&target, &key, value, instruction)?;
                 Ok(Value::Boolean(true))
             }
@@ -6534,6 +6670,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// the mistake until something reads past the end.
     fn construct_array_buffer(
         &mut self,
+        shared: bool,
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
@@ -6548,7 +6685,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => None,
         };
         let Some(max) = max else {
-            return Ok(Value::ArrayBuffer(BufferData::fixed(length)));
+            return Ok(Value::ArrayBuffer(Rc::new(BufferData {
+                bytes: RefCell::new(vec![0; length]),
+                max_byte_length: None,
+                shared,
+            })));
         };
         // The ceiling is what a later `resize` may reach, so it is the figure the allocation
         // bound has to be applied to -- otherwise a program could reserve unbounded memory one
@@ -6570,6 +6711,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::ArrayBuffer(Rc::new(BufferData {
             bytes: RefCell::new(vec![0; length]),
             max_byte_length: Some(max),
+            shared,
         })))
     }
 
@@ -7558,7 +7700,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ),
             None => {
                 // Reducing an empty array with no initial value has no answer to give, which is
-                // a TypeError in the specification and fatal here for want of a way to throw one.
+                // a catchable TypeError in the specification and catchable here too.
                 // The seed is the first element that is *there* from whichever end the walk
                 // starts: an array of nothing but holes has no answer to give, exactly as an
                 // empty one does not.
@@ -8754,6 +8896,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor));
         globals.set_non_enumerable("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
+        globals.set_non_enumerable(
+            "SharedArrayBuffer",
+            Value::Native(Native::SharedArrayBufferConstructor),
+        );
         globals.set_non_enumerable("DataView", Value::Native(Native::DataViewConstructor));
         globals.set_non_enumerable("Iterator", Value::Native(Native::IteratorConstructor));
         globals.set_non_enumerable(
@@ -8791,6 +8937,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable(
             "Float64Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::Float64)),
+        );
+        globals.set_non_enumerable(
+            "BigInt64Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::BigInt64)),
+        );
+        globals.set_non_enumerable(
+            "BigUint64Array",
+            Value::Native(Native::TypedArrayConstructor(TypedKind::BigUint64)),
         );
 
         // The global functions, which a program can also reach by their bare names -- and has to
@@ -9086,7 +9240,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.stack.push(wrap_primitive(primitive));
             }
             Value::Native(Native::ArrayBufferConstructor) => {
-                let built = self.construct_array_buffer(&arguments, current)?;
+                let built = self.construct_array_buffer(false, &arguments, current)?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::SharedArrayBufferConstructor) => {
+                let built = self.construct_array_buffer(true, &arguments, current)?;
                 self.stack.push(built);
             }
             Value::Native(Native::DataViewConstructor) => {
@@ -10008,7 +10166,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             Value::ArrayBuffer(buffer) => match name {
                 "byteLength" => Value::Number(buffer.byte_length() as f64),
-                "resizable" => Value::Boolean(buffer.max_byte_length.is_some()),
+                // Each buffer type answers only its own name for the ceiling's meaning. A
+                // shared buffer has no `resizable` and an unshared one no `growable`: the
+                // specification makes each accessor a `TypeError` on the other type, and
+                // answering `false` instead would tell a program that a growable buffer cannot
+                // grow.
+                "resizable" if !buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
+                "growable" if buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
                 // A fixed-length buffer answers its own length rather than zero or `undefined`:
                 // the accessor is defined for every buffer, and "the most this can ever hold"
                 // is a question a fixed buffer has an answer to.
@@ -10018,10 +10182,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .unwrap_or_else(|| buffer.byte_length()) as f64,
                 ),
                 // Always false, and honestly so: this realm has no way to detach a buffer, so
-                // there is no state here that a `true` could ever describe.
-                "detached" => Value::Boolean(false),
+                // there is no state here that a `true` could ever describe. A shared buffer has
+                // no `detached` at all -- there is nothing that could detach it.
+                "detached" if !buffer.shared => Value::Boolean(false),
+                "constructor" if buffer.shared => {
+                    Value::Native(Native::SharedArrayBufferConstructor)
+                }
                 "constructor" => Value::Native(Native::ArrayBufferConstructor),
-                other => array_buffer_method(other),
+                other => array_buffer_method(buffer.shared, other),
             },
             Value::DataView(view) => match name {
                 "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
@@ -11169,8 +11337,8 @@ fn json_stringify(
         }
         Value::ArrayBuffer(_) | Value::DataView(_) => Some("{}".to_owned()),
         // Neither has a BigInt: the specification makes serialising one a TypeError rather than
-        // an omission, and it is fatal here for the same reason a cycle is.
-        Value::BigInt(_) => return Err(ExecutionError::CyclicJson),
+        // an omission, and it is catchable here for the same reason a cycle is.
+        Value::BigInt(_) => return Err(ExecutionError::BigIntNotSerialisable),
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
     })
 }
@@ -11371,7 +11539,13 @@ fn call_native(
                 Value::RegExp(_) => "RegExp",
                 Value::Promise(_) => "Promise",
                 Value::TypedArray(view) => view.kind.name(),
-                Value::ArrayBuffer(_) => "ArrayBuffer",
+                Value::ArrayBuffer(buffer) => {
+                    if buffer.shared {
+                        "SharedArrayBuffer"
+                    } else {
+                        "ArrayBuffer"
+                    }
+                }
                 Value::DataView(_) => "DataView",
                 Value::Function(_)
                 | Value::Native(_)
@@ -11657,7 +11831,7 @@ fn call_native(
         Native::RegExpToString => Value::String(receiver.to_display_string()),
         // Reading `{ maxByteLength }` off the options bag is an ordinary property read, which
         // may run a getter, so the machine has to be the one to do it.
-        Native::ArrayBufferConstructor => {
+        Native::ArrayBufferConstructor | Native::SharedArrayBufferConstructor => {
             unreachable!("`ArrayBuffer` is dispatched by the interpreter")
         }
         // Every `DataView` entry point coerces an argument, and coercing one runs a method.
@@ -11693,6 +11867,15 @@ fn call_native(
             buffer.resize(bounded_buffer(length, 1)?)?;
             Value::Undefined
         }
+        // `sab.grow(n)` moves the length up; a buffer with no ceiling has no room to move into.
+        Native::ArrayBufferGrow => {
+            let Value::ArrayBuffer(buffer) = receiver else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            let length = to_index(arguments.first())?;
+            buffer.grow(bounded_buffer(length, 1)?)?;
+            Value::Undefined
+        }
         // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
         // the original -- or a write through a view onto it -- is not visible through the copy.
         // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
@@ -11710,6 +11893,11 @@ fn call_native(
             Value::ArrayBuffer(Rc::new(BufferData {
                 bytes: RefCell::new(bytes[start..end].to_vec()),
                 max_byte_length: None,
+                // A slice of a shared buffer is itself shared, and a slice of an unshared one is
+                // not: the specification builds the result with the *receiver's* constructor,
+                // and a program that sliced a `SharedArrayBuffer` and got back something it
+                // could not hand to another holder would have lost the only property it wanted.
+                shared: buffer.shared,
             }))
         }
         Native::TypedArrayConstructor(kind) => construct_typed_array(kind, arguments)?,
@@ -11737,8 +11925,9 @@ fn call_native(
             } else {
                 0
             };
+            same_content_type(view.kind, arguments.first())?;
             for (index, item) in typed_source(arguments.first()).into_iter().enumerate() {
-                view.set(offset + index, item);
+                view.set(offset + index, &item)?;
             }
             Value::Undefined
         }
@@ -11765,10 +11954,12 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
-            let filler = arguments.first().map_or(0.0, Value::as_number);
+            // Converted once, and before the range is worked out, so `fill` refuses a Number
+            // on a BigInt array whether or not there is a slot for it to land in.
+            let filler = coerce_element(view.kind, arguments.first().unwrap_or(&Value::Undefined))?;
             let (start, end) = slice_bounds(arguments.get(1..).unwrap_or_default(), view.len());
             for index in start..end {
-                view.set(index, filler);
+                view.set(index, &filler)?;
             }
             receiver.clone()
         }
@@ -13262,8 +13453,14 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         Value::Native(Native::TypedArrayConstructor(kind)) => {
             return matches!(value, Value::TypedArray(view) if view.kind == *kind);
         }
+        // The two buffer types are told apart by their flag and by nothing else: a shared
+        // buffer is not an `ArrayBuffer`, which is what makes `ArrayBuffer.isView` and every
+        // brand check in the specification able to refuse it.
         Value::Native(Native::ArrayBufferConstructor) => {
-            return matches!(value, Value::ArrayBuffer(_));
+            return matches!(value, Value::ArrayBuffer(buffer) if !buffer.shared);
+        }
+        Value::Native(Native::SharedArrayBufferConstructor) => {
+            return matches!(value, Value::ArrayBuffer(buffer) if buffer.shared);
         }
         Value::Native(Native::DataViewConstructor) => {
             return matches!(value, Value::DataView(_));
@@ -13365,7 +13562,11 @@ fn prototype_of(value: &Value) -> Value {
         Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
         Value::Promise(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Promise)),
         Value::Object(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
-        Value::ArrayBuffer(_) => Value::Native(Native::PrototypeOf(PrototypeTable::ArrayBuffer)),
+        Value::ArrayBuffer(buffer) => Value::Native(Native::PrototypeOf(if buffer.shared {
+            PrototypeTable::SharedArrayBuffer
+        } else {
+            PrototypeTable::ArrayBuffer
+        })),
         Value::DataView(_) => Value::Native(Native::PrototypeOf(PrototypeTable::DataView)),
         Value::TypedArray(view) => Value::Native(Native::PrototypeOf(
             PrototypeTable::TypedArrayFor(view.kind),
@@ -14411,7 +14612,12 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             }
         }
         Value::ArrayBuffer(buffer) => {
-            format!("ArrayBuffer {{ byteLength: {} }}", buffer.byte_length())
+            let name = if buffer.shared {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            };
+            format!("{name} {{ byteLength: {} }}", buffer.byte_length())
         }
         Value::DataView(view) => format!(
             "DataView {{ byteLength: {}, byteOffset: {} }}",
@@ -15226,9 +15432,14 @@ fn typed_array_method(name: &str) -> Value {
 /// buffers by reading `ArrayBuffer.prototype.resize` off this table -- Test262's own harness
 /// does exactly that before it builds a single resizable-buffer test -- so the table answering
 /// `undefined` for everything is what made that whole area unreachable.
-fn array_buffer_method(name: &str) -> Value {
+fn array_buffer_method(shared: bool, name: &str) -> Value {
     match name {
-        "resize" => Value::Native(Native::ArrayBufferResize),
+        // The one method each type has that the other does not, and the reason they cannot
+        // share a table: a program feature-detects a growable shared buffer by reading
+        // `SharedArrayBuffer.prototype.grow`, and finding `resize` there instead would tell it
+        // the buffer shrinks.
+        "resize" if !shared => Value::Native(Native::ArrayBufferResize),
+        "grow" if shared => Value::Native(Native::ArrayBufferGrow),
         "slice" => Value::Native(Native::ArrayBufferSlice),
         _ => Value::Undefined,
     }
@@ -15421,17 +15632,30 @@ fn prototype_object(closure: &Rc<Closure>) -> Value {
 }
 
 /// The elements a typed array's constructor or `set` was given.
-fn typed_source(value: Option<&Value>) -> Vec<f64> {
+///
+/// Left as values rather than flattened to numbers: whether an element is a Number or a BigInt
+/// is what decides whether writing it through the destination is a conversion or a `TypeError`,
+/// so collapsing the two here would decide that question in the wrong place.
+fn typed_source(value: Option<&Value>) -> Vec<Value> {
     match value {
-        Some(Value::Array(items)) => dense_items(&items.borrow())
-            .iter()
-            .map(Value::as_number)
-            .collect(),
-        Some(Value::TypedArray(view)) => (0..view.len())
-            .map(|index| view.get(index).unwrap_or(0.0))
-            .collect(),
+        Some(Value::Array(items)) => dense_items(&items.borrow()),
+        Some(Value::TypedArray(view)) => view.items(),
         _ => Vec::new(),
     }
+}
+
+/// Refuse a copy between views whose elements are in different numeric towers.
+///
+/// Checked on the pair rather than element by element, because that is where the specification
+/// checks it: `ToBigInt` is never reached for a typed-array source, so the refusal has to come
+/// from the kinds themselves and has to hold for an empty source too.
+fn same_content_type(kind: TypedKind, source: Option<&Value>) -> Result<(), ExecutionError> {
+    if let Some(Value::TypedArray(view)) = source
+        && view.kind.is_big() != kind.is_big()
+    {
+        return Err(ExecutionError::TypedArrayContentTypeMismatch);
+    }
+    Ok(())
 }
 
 /// `start` and `end` from a pair of possibly-negative, possibly-absent bounds.
@@ -15497,6 +15721,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
             }))
         }
         Some(Value::Array(_) | Value::TypedArray(_)) => {
+            same_content_type(kind, arguments.first())?;
             let items = typed_source(arguments.first());
             let view = TypedArrayData {
                 kind,
@@ -15505,7 +15730,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
                 length: Some(items.len()),
             };
             for (index, item) in items.into_iter().enumerate() {
-                view.set(index, item);
+                view.set(index, &item)?;
             }
             Value::TypedArray(Rc::new(view))
         }
@@ -16463,6 +16688,10 @@ fn empty_items(count: usize) -> String {
 fn native_js_name(native: &Native) -> String {
     match native {
         Native::Error(kind) => kind.name().to_owned(),
+        // A view constructor is named for its element type -- `Uint8Array`, `BigInt64Array` --
+        // and the derivation cannot reach it: the payload it discards as "not part of the name"
+        // is the only place the type is written, so what is left spells the family instead.
+        Native::TypedArrayConstructor(kind) => kind.name().to_owned(),
         // The URI four are an acronym the variant spelling flattens: `DecodeUri` lowers to
         // `decodeUri`, and the language spells it `decodeURI`. A derivation cannot recover a case
         // distinction that the input does not carry, so these are named outright.
@@ -17015,21 +17244,54 @@ mod tests {
     #[test]
     fn a_data_view_defaults_to_the_opposite_order_from_the_platform() {
         let mut written = [0_u8; 2];
-        TypedKind::Int16.encode(258.0, &mut written);
+        TypedKind::Int16.encode(&Value::Number(258.0), &mut written);
         order_bytes(&mut written, false);
         assert_eq!(written, [0x01, 0x02], "the high byte leads");
 
         let mut same_order = written;
         order_bytes(&mut same_order, false);
-        assert_eq!(TypedKind::Int16.decode(&same_order), 258.0);
+        assert_eq!(TypedKind::Int16.decode(&same_order), Value::Number(258.0));
 
         let mut other_order = written;
         order_bytes(&mut other_order, true);
         assert_eq!(
             TypedKind::Int16.decode(&other_order),
-            513.0,
+            Value::Number(513.0),
             "the same bytes read the other way round"
         );
+    }
+
+    /// A `BigInt64Array` element is a BigInt, not a number, and the sixty-four bits survive.
+    ///
+    /// `2^63 - 1` is the value that proves it: the nearest `f64` to it is `2^63`, so a view
+    /// that decoded through a double would answer a number one larger than what was stored and
+    /// nothing inside the program could tell.
+    #[test]
+    fn a_big_element_round_trips_without_rounding() {
+        let mut written = [0_u8; 8];
+        let value = Value::BigInt(Rc::new(num_bigint::BigInt::from(i64::MAX)));
+        TypedKind::BigInt64.encode(&value, &mut written);
+        assert_eq!(TypedKind::BigInt64.decode(&written), value);
+        // The same bits, read unsigned, are the other end of the wrap.
+        TypedKind::BigInt64.encode(
+            &Value::BigInt(Rc::new(num_bigint::BigInt::from(-1))),
+            &mut written,
+        );
+        assert_eq!(
+            TypedKind::BigUint64.decode(&written),
+            Value::BigInt(Rc::new(num_bigint::BigInt::from(u64::MAX)))
+        );
+    }
+
+    /// The two numeric towers do not cross, in either direction.
+    #[test]
+    fn an_element_refuses_the_other_numeric_tower() {
+        let one = Value::Number(1.0);
+        let big = Value::BigInt(Rc::new(num_bigint::BigInt::from(1)));
+        assert!(coerce_element(TypedKind::BigInt64, &one).is_err());
+        assert!(coerce_element(TypedKind::Uint8, &big).is_err());
+        assert_eq!(coerce_element(TypedKind::BigInt64, &big).unwrap(), big);
+        assert_eq!(coerce_element(TypedKind::Uint8, &one).unwrap(), one);
     }
 
     /// `typeof null` is "object" -- a specification bug old enough to be load-bearing, and
