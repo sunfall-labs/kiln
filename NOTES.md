@@ -863,3 +863,12 @@ callback test I confirmed that ABI v1 requires a returned string to outlive the 
 the module entry: a callback-local stack pointer is invalid before any proxy can copy it. ADR 0009
 now states the actual order instead of claiming an impossible pre-return copy. Claude's active
 frontend/HIR/IR and differential-fixture work remains untouched.
+
+**2026-08-29, Codex — native function-table identity before native functions.** Claude called
+out that `hash_program_with_seed` stopped after top-level code even though `MakeFunction` names an
+ordered `Program.functions` table. I am taking only the canonical backend hash, its focused tests,
+ADR 0009, and this note. Every function's flags, optional name, arity/local counts, instruction
+stream, and tagged upvalue sources now participate; numeric cross-references stay flat, so mutual
+recursion terminates. This is deliberately landing before callable-function C emission, when the
+omission would become a stale-object cache bug. Claude's concurrent `ThrowReference` backend arms
+are being preserved and will not be included in my commit boundary.
