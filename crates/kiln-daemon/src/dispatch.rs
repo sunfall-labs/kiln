@@ -9,7 +9,7 @@ use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, Response, RunSummary,
-    ScalarValueSummary, SourceView, Stats,
+    ScalarValueSummary, Stats,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -241,13 +241,12 @@ pub(crate) fn check<E: QueryEngine>(
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
 ) -> Response {
-    check_with_cache(engine, None, SourceView(0), path, project_root, resolutions)
+    check_with_cache(engine, None, path, project_root, resolutions)
 }
 
 pub(crate) fn check_with_cache<E: QueryEngine>(
     engine: &mut E,
     cache: Option<&mut GraphCache>,
-    source_view: SourceView,
     path: String,
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
@@ -280,14 +279,7 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
         entry.and_then(|entry| {
-            match graph_snapshot(
-                engine,
-                cache,
-                source_view,
-                &entry,
-                &project_root,
-                resolutions,
-            ) {
+            match graph_snapshot(engine, cache, &entry, &project_root, resolutions) {
                 Ok(graph) => graph.resolved_export_names(&entry),
                 Err(error) => {
                     diagnostics.extend(module_graph_diagnostics(error));
@@ -317,13 +309,12 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
 ) -> Result<PreparedRun, String> {
-    prepare_run_with_cache(engine, None, SourceView(0), path, project_root, resolutions)
+    prepare_run_with_cache(engine, None, path, project_root, resolutions)
 }
 
 pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     engine: &mut E,
     cache: Option<&mut GraphCache>,
-    source_view: SourceView,
     path: String,
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
@@ -332,14 +323,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
-            graph: graph_snapshot(
-                engine,
-                cache,
-                source_view,
-                &entry,
-                &project_root,
-                resolutions,
-            ),
+            graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions),
             path,
             file,
             revision: engine.revision().0,
@@ -602,7 +586,6 @@ fn build_graph<E: QueryEngine>(
 pub(crate) fn graph_snapshot<E: QueryEngine>(
     engine: &mut E,
     cache: Option<&mut GraphCache>,
-    source_view: SourceView,
     entry: &Path,
     project_root: &str,
     resolutions: Option<&kiln_proto::ResolutionMap>,
@@ -634,7 +617,6 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
     let key = GraphCacheKey::new(
         canonical_root,
         canonical_entry.clone(),
-        source_view,
         engine.revision().0,
         resolutions,
     );
@@ -698,22 +680,14 @@ pub(crate) fn native_graph<E: QueryEngine>(
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    graph_snapshot(
-        engine,
-        None,
-        SourceView(0),
-        &entry,
-        project_root,
-        resolutions,
-    )
-    .map(Some)
-    .map_err(|error| error.to_string())
+    graph_snapshot(engine, None, &entry, project_root, resolutions)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn native_graph_with_cache<E: QueryEngine>(
     engine: &mut E,
     cache: &mut GraphCache,
-    source_view: SourceView,
     path: &str,
     project_root: &str,
     resolutions: Option<&kiln_proto::ResolutionMap>,
@@ -723,16 +697,9 @@ pub(crate) fn native_graph_with_cache<E: QueryEngine>(
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    graph_snapshot(
-        engine,
-        Some(cache),
-        source_view,
-        &entry,
-        project_root,
-        resolutions,
-    )
-    .map(Some)
-    .map_err(|error| error.to_string())
+    graph_snapshot(engine, Some(cache), &entry, project_root, resolutions)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn execute_program(

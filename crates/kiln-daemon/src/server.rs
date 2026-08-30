@@ -586,6 +586,8 @@ fn commit_sync<E: QueryEngine>(
             Ok(view) => view,
             Err(message) => return Response::Error { message },
         };
+        let revision = guard.engine.revision().0;
+        let resolutions_changed = guard.resolutions.as_ref() != Some(&transaction.resolutions);
         let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
             let active = guard.engine.source_files();
             for (file, path) in active {
@@ -606,7 +608,9 @@ fn commit_sync<E: QueryEngine>(
             return internal_error(&*payload);
         }
         guard.resolutions = Some(transaction.resolutions);
-        guard.graph_cache.invalidate();
+        if guard.engine.revision().0 != revision || resolutions_changed {
+            guard.graph_cache.invalidate();
+        }
         guard.source_view = next_view;
         return Response::Synced {
             source_view: guard.source_view,
@@ -633,6 +637,7 @@ fn set_source<E: QueryEngine>(
         Ok(view) => view,
         Err(message) => return Response::Error { message },
     };
+    let revision = guard.engine.revision().0;
     let mutation = panic::catch_unwind(AssertUnwindSafe(|| {
         let file = guard.engine.intern(&path);
         guard.engine.set_source(file, text);
@@ -643,8 +648,10 @@ fn set_source<E: QueryEngine>(
         return internal_error(&*payload);
     }
     // Direct updates are authority events even when bytes are identical, matching CommitSync's
-    // warm no-op behavior and ensuring clients cannot reuse an old view indefinitely.
-    guard.graph_cache.invalidate();
+    // warm no-op behavior. The view still advances, but a content-identical graph remains valid.
+    if guard.engine.revision().0 != revision {
+        guard.graph_cache.invalidate();
+    }
     guard.source_view = next_view;
     Response::SourceUpdated {
         source_view: guard.source_view,
@@ -756,14 +763,7 @@ fn handle<E: QueryEngine>(
             project_root,
             source_view,
         } => handle_source_request(state, source_view, |engine, cache, resolutions| {
-            check_with_cache(
-                engine,
-                Some(cache),
-                source_view,
-                path,
-                project_root,
-                resolutions,
-            )
+            check_with_cache(engine, Some(cache), path, project_root, resolutions)
         }),
         Request::Project { source_view } => {
             handle_source_request(state, source_view, |engine, _cache, _| {
@@ -907,7 +907,6 @@ fn handle_run<E: QueryEngine>(
             prepare_run_with_cache(
                 engine,
                 Some(graph_cache),
-                source_view,
                 path,
                 project_root,
                 resolutions.as_ref(),
@@ -975,7 +974,6 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             let graph = native_graph_with_cache(
                 engine,
                 graph_cache,
-                source_view,
                 &path,
                 &project_root,
                 resolutions.as_ref(),
@@ -1129,7 +1127,6 @@ fn prepare_native_snapshot<E: QueryEngine>(
         let graph = native_graph_with_cache(
             engine,
             graph_cache,
-            source_view,
             path,
             project_root,
             resolutions.as_ref(),

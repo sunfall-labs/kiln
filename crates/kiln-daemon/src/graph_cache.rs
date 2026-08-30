@@ -7,7 +7,7 @@
 
 use kiln_digest::Digest;
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{ResolutionMap, SourceView};
+use kiln_proto::ResolutionMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,12 +16,15 @@ use std::sync::Arc;
 /// a longer-lived backing store.
 pub(crate) const GRAPH_CACHE_FORMAT: u16 = 1;
 
-/// The exact authority and context that produced one graph.
+/// The exact content and linking context that produced one graph.
+///
+/// `SourceView` deliberately does not participate. It is a compare-and-swap authority token
+/// validated while the daemon lock is held, not content identity; a byte-identical authoritative
+/// sync advances the token without changing the graph represented here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GraphCacheKey {
     pub(crate) project_root: PathBuf,
     pub(crate) entry: PathBuf,
-    pub(crate) source_view: SourceView,
     pub(crate) revision: u64,
     /// `None` means no pinned resolution snapshot was supplied.  It is deliberately distinct from
     /// the identity of an empty [`ResolutionMap`].
@@ -33,14 +36,12 @@ impl GraphCacheKey {
     pub(crate) fn new(
         project_root: PathBuf,
         entry: PathBuf,
-        source_view: SourceView,
         revision: u64,
         resolutions: Option<&ResolutionMap>,
     ) -> Self {
         Self {
             project_root,
             entry,
-            source_view,
             revision,
             resolution_identity: resolutions.map(ResolutionMap::identity),
             format: GRAPH_CACHE_FORMAT,
@@ -99,8 +100,9 @@ impl GraphCache {
         Ok(graph)
     }
 
-    /// Drop a retained graph after a source authority event.  Key checks remain the safety net for
-    /// any future mutation path that forgets to call this method.
+    /// Drop a retained graph after a content mutation or a failed mutation whose effects are
+    /// uncertain. Key checks remain the safety net for any future mutation path that forgets to
+    /// call this method.
     pub(crate) fn invalidate(&mut self) {
         self.stats.invalidations += 1;
         self.entry = None;
@@ -159,21 +161,19 @@ mod tests {
     fn key(
         root: &std::path::Path,
         entry: &std::path::Path,
-        source_view: u64,
         revision: u64,
         resolutions: Option<&ResolutionMap>,
     ) -> GraphCacheKey {
         GraphCacheKey::new(
             root.to_path_buf(),
             entry.to_path_buf(),
-            SourceView(source_view),
             revision,
             resolutions,
         )
     }
 
     #[test]
-    fn every_authority_dimension_is_part_of_the_cache_key() {
+    fn every_content_dimension_is_part_of_the_cache_key() {
         let (root, first, second, graph) = graph_fixture();
         let package = ResolutionMap::new(
             root.to_string_lossy(),
@@ -186,7 +186,7 @@ mod tests {
             }],
         )
         .expect("valid resolution map");
-        let base = key(&root, &first, 1, 1, None);
+        let base = key(&root, &first, 1, None);
         let mut cache = GraphCache::default();
 
         assert_eq!(
@@ -206,24 +206,23 @@ mod tests {
         assert_eq!(cache.stats().hits, 1);
 
         for changed in [
-            key(&root, &first, 1, 2, None),
-            key(&root, &first, 2, 2, None),
-            key(&root, &first, 2, 2, Some(&package)),
-            key(&root, &second, 2, 2, Some(&package)),
+            key(&root, &first, 2, None),
+            key(&root, &first, 2, Some(&package)),
+            key(&root, &second, 2, Some(&package)),
         ] {
             cache
                 .get_or_build(changed, || Ok::<_, ()>(graph.clone()))
                 .expect("changed authority builds a graph");
         }
-        assert_eq!(cache.stats().misses, 5);
-        assert_eq!(cache.stats().evictions, 4);
+        assert_eq!(cache.stats().misses, 4);
+        assert_eq!(cache.stats().evictions, 3);
         assert_eq!(cache.entries(), 1);
     }
 
     #[test]
     fn failed_builds_are_not_cached() {
         let (root, first, _second, graph) = graph_fixture();
-        let cache_key = key(&root, &first, 1, 1, None);
+        let cache_key = key(&root, &first, 1, None);
         let mut cache = GraphCache::default();
         assert_eq!(
             cache.get_or_build(cache_key.clone(), || Err::<ModuleGraph, _>(
@@ -242,8 +241,8 @@ mod tests {
     #[test]
     fn one_entry_eviction_does_not_invalidate_an_in_flight_snapshot() {
         let (root, first, second, graph) = graph_fixture();
-        let first_key = key(&root, &first, 1, 1, None);
-        let second_key = key(&root, &second, 1, 1, None);
+        let first_key = key(&root, &first, 1, None);
+        let second_key = key(&root, &second, 1, None);
         let mut cache = GraphCache::default();
         let in_flight = cache
             .get_or_build(first_key, || Ok::<_, ()>(graph.clone()))
@@ -259,7 +258,7 @@ mod tests {
     #[test]
     fn reset_stats_retains_the_snapshot() {
         let (root, first, _second, graph) = graph_fixture();
-        let cache_key = key(&root, &first, 1, 1, None);
+        let cache_key = key(&root, &first, 1, None);
         let mut cache = GraphCache::default();
         cache
             .get_or_build(cache_key, || Ok::<_, ()>(graph))
