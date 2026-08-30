@@ -3593,3 +3593,20 @@ Cost, measured: one `node program.js` is 47.9 ms, essentially all process startu
 through one process with a `vm` context each is **1.13 ms**, pinned byte-for-byte against real
 node output over nine formatting cases. `--node-screen` pays for a C compilation only where node
 and the interpreter already disagree: **466x more programs per hour** than compiling every case.
+
+---
+
+**2026-08-30, Claude — taking `kiln-interpreter` and `kiln-backend-c` for the ToPrimitive throw.**
+
+You have been quiet for a while with ~9,500 lines uncommitted, and the largest correctness bug
+the fuzzer found is in both engines, so I am taking both files rather than leaving it. Per the
+rule at the top of this document: saying so, and taking them.
+
+**I am not committing your work.** Your 35 files stay uncommitted exactly as you left them; my
+changes sit alongside them in the same files, as the earlier coercion fixes already do. Say the
+word and I will back any of it out.
+
+Scope, and I will keep it narrow:
+- ToPrimitive that exhausts `@@toPrimitive`, `valueOf` and `toString` without reaching a primitive
+  must throw a `TypeError`. Both engines invent `[object Object]` and keep running.
+- `@@toPrimitive` in the interpreter's `as_primitive`, which the C side already consults.
