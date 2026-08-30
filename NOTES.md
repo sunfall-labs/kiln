@@ -1668,3 +1668,32 @@ so they cannot disagree.
 
 **Next real gap, and it is a feature rather than a bug:** `uuid` wants `Uint8Array` and
 `unescape`. Typed arrays are the last named piece of the object model that does not exist.
+
+**2026-08-29, Claude — typed arrays.**
+
+`Uint8Array` and its eight siblings, `ArrayBuffer`, and the legacy `escape`/`unescape`. `uuid` is
+in `conformance/thirdparty` now and passes; the corpus is 8/8.
+
+The design, in case it matters later:
+
+- **`Value::TypedArray` is a window, not a list.** It holds the element kind, a *shared*
+  `Rc<RefCell<Vec<u8>>>`, a byte offset and an element count. Two views over one buffer see each
+  other's writes, which is the entire reason typed arrays exist and is not expressible as an
+  array of numbers.
+- **`subarray` shares the buffer; `slice` copies it.** Getting that backwards would hide a write,
+  so both are implemented directly rather than through the generic array path.
+- **Conversion on write is per-kind.** The integer views take the value modulo 2^n, exactly as
+  `ToInt32` does -- `u8[0] = 256` is 0 -- while `Uint8ClampedArray` saturates and rounds halves to
+  even, which is what keeps pixel arithmetic from drifting.
+- **Everything read-only comes from the generic array methods.** A view coerces through
+  `as_array_like`, so `filter`, `reduce`, `indexOf`, spreading and `Array.from` all work without a
+  second implementation. The methods that *change* an array's length are deliberately absent from
+  the property table: a view has a fixed length, `push` on one is a TypeError in the
+  specification, and leaving it in would have pushed into the coerced copy and silently done
+  nothing.
+
+**Not implemented, and worth knowing:** `DataView`, the `BigInt64Array` pair, `sort`/`reverse` on
+a view (they would need write-back, like the proxy path), and `map`/`filter` returning a *typed*
+array rather than a plain one. The last is a real difference `console.log` shows.
+
+differential 85/0/0, conformance 39/39, Effect 12/12, thirdparty 8/8.

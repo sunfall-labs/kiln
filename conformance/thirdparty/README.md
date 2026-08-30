@@ -32,6 +32,9 @@ All six pass. What each found is kept because it is the record of what only real
   document silently rendered as plain text -- the worst shape a missing global can take. It also
   found that `String.replace` with a *string* pattern ignored `$&`, `` $` ``, `$'` and `$$` in the
   replacement, where the regexp path handled them.
+- **uuid** was the one that wanted a *feature* rather than a fix: `Uint8Array`, `ArrayBuffer` and
+  the legacy `unescape`. It hashes a name into bytes, so it exercises the byte-level half of the
+  language nothing else here touches.
 - **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
   instead of defining an own property, that a named function expression could not call itself,
   and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
