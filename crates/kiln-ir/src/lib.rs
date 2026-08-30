@@ -145,6 +145,13 @@ pub enum Instruction {
     /// `new.target`. Follows the same rule as `this`: an ordinary call has none, a `new` call
     /// has the constructor it named, and an arrow uses the one from where it was written.
     LoadNewTarget,
+    /// Suspend on a promise and resume with what it settles to.
+    ///
+    /// Distinct from [`Instruction::Yield`], which it is identical to in an async *function*
+    /// where every suspension is an await. An async *generator* suspends for two different
+    /// reasons -- a value for its consumer, and a promise it is waiting on -- and the driver has
+    /// to tell them apart to know whether the consumer's step is finished.
+    Await,
     /// Register an exception handler at `target`, active until `PopHandler`.
     PushHandler(u32),
     PopHandler,
@@ -322,6 +329,11 @@ pub struct FunctionProto {
     pub arrow: bool,
     /// A generator: calling it builds an object rather than running the body.
     pub generator: bool,
+    /// `async function*`: both of the above at once.
+    ///
+    /// `generator` is set for an async function too -- its body suspends the same way -- so the
+    /// pair cannot say which of the three shapes this is. This is the third bit.
+    pub async_generator: bool,
     pub parameter_count: u32,
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
@@ -1057,7 +1069,8 @@ impl Compiler {
                 pattern,
                 iterable,
                 body,
-            } => self.for_of(*kind, pattern, iterable, body, statement.span),
+                awaiting,
+            } => self.for_of(*kind, pattern, iterable, body, *awaiting, statement.span),
             StatementKind::Throw(value) => {
                 self.expression(value);
                 self.code.push(Instruction::Throw);
@@ -1725,23 +1738,69 @@ impl Compiler {
         pattern: &Pattern,
         iterable: &Expression,
         body: &Statement,
+        awaiting: bool,
         span: Span,
     ) {
+        if awaiting && !self.compiling_function() {
+            // `for await` at module scope is top-level await under another name, and needs the
+            // module itself to be resumable.
+            self.error(Some(span), "top-level `for await` is not supported yet");
+            return;
+        }
         let iterator_binding = format!("%iter{}", self.hidden_bindings);
         let result_binding = format!("%step{}", self.hidden_bindings);
+        let asynchronous_binding = format!("%async{}", self.hidden_bindings);
         self.hidden_bindings += 1;
 
         self.scopes.push(HashMap::new());
 
-        // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than only
-        // an array.
-        self.expression(iterable);
         let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: symbol,
-            argc: 0,
-        });
-        self.declare_hidden(&iterator_binding, span);
+        if awaiting {
+            // `for await` prefers the async iterator and falls back to the sync one, and the two
+            // are awaited in different places: an async iterator's `next` returns a promise of
+            // the result, while a sync one returns the result directly and it is each *value*
+            // that may be a promise. Which was found is remembered rather than re-derived.
+            let subject = format!("%iterable{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.expression(iterable);
+            self.declare_hidden(&subject, span);
+
+            let asynchronous = self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+            self.load_hidden(&subject);
+            self.code.push(Instruction::GetProperty(asynchronous));
+            self.push_constant(Constant::Undefined);
+            self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+            let use_async = self.emit_jump(Instruction::JumpIfFalse(0));
+
+            self.load_hidden(&subject);
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
+            self.push_constant(Constant::Boolean(false));
+            let chosen = self.emit_jump(Instruction::Jump(0));
+
+            self.patch_jump(use_async);
+            self.load_hidden(&subject);
+            self.code.push(Instruction::CallMethod {
+                name: asynchronous,
+                argc: 0,
+            });
+            self.push_constant(Constant::Boolean(true));
+
+            self.patch_jump(chosen);
+            self.declare_hidden(&asynchronous_binding, span);
+            self.declare_hidden(&iterator_binding, span);
+        } else {
+            // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than
+            // only an array.
+            self.expression(iterable);
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
+            self.declare_hidden(&iterator_binding, span);
+        }
 
         // One handler for the whole loop rather than one per iteration: the guarded region is
         // the same every time round, and pushing it once keeps `continue` an ordinary jump.
@@ -1754,6 +1813,14 @@ impl Compiler {
             name: next,
             argc: 0,
         });
+        if awaiting {
+            // An async iterator hands back a promise of the result object; a sync one hands back
+            // the object itself and has nothing to wait for here.
+            self.load_hidden(&asynchronous_binding);
+            let ready = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.code.push(Instruction::Await);
+            self.patch_jump(ready);
+        }
         self.declare_hidden(&result_binding, span);
 
         self.load_hidden(&result_binding);
@@ -1767,6 +1834,14 @@ impl Compiler {
         self.load_hidden(&result_binding);
         let value = self.constant_index(Constant::String("value".to_owned()));
         self.code.push(Instruction::GetProperty(value));
+        if awaiting {
+            // The other half of the rule: a sync iterator's values are awaited one by one, which
+            // is what makes `for await (const x of promises)` work on a plain array.
+            self.load_hidden(&asynchronous_binding);
+            let ready = self.emit_jump(Instruction::JumpIfTruthy(0));
+            self.code.push(Instruction::Await);
+            self.patch_jump(ready);
+        }
         // A pattern, so `for (const [key, value] of entries)` binds both -- through the same
         // `bind_pattern` a declaration uses, defaults and nesting included.
         self.bind_pattern(kind, pattern, span);
@@ -2445,7 +2520,7 @@ impl Compiler {
                     return;
                 }
                 self.expression(value);
-                self.code.push(Instruction::Yield);
+                self.code.push(Instruction::Await);
             }
             ExpressionKind::Chain { expression: inner } => {
                 self.chains.push(Vec::new());
@@ -3321,6 +3396,7 @@ impl Compiler {
             // machine cares about -- so it is compiled as a generator and driven by the async
             // driver rather than by the program.
             generator: function.generator || function.asynchronous,
+            async_generator: function.generator && function.asynchronous,
             parameter_count,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),

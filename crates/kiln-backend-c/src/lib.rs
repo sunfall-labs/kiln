@@ -830,6 +830,7 @@ fn stack_effect(
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::Yield
+        | Instruction::Await
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => Err(EmitError::Unsupported {
@@ -1078,6 +1079,7 @@ fn emit_instruction(
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::Yield
+        | Instruction::Await
         | Instruction::SetPrototype
         | Instruction::SuperCall { .. }
         | Instruction::SuperForward => {
@@ -1290,6 +1292,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::PopHandler => byte(&mut hash, 39),
             Instruction::Yield => byte(&mut hash, 42),
+            Instruction::Await => byte(&mut hash, 60),
             Instruction::Throw => byte(&mut hash, 40),
             Instruction::LoadArguments => byte(&mut hash, 37),
             Instruction::RestArguments(count) => {
@@ -1482,6 +1485,9 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     }
     byte(hash, u8::from(function.arrow));
     byte(hash, u8::from(function.generator));
+    // Appended after `generator`, which is where a new flag has to go: the bytes before it are a
+    // persisted cache key and cannot move.
+    byte(hash, u8::from(function.async_generator));
     word(hash, u64::from(function.parameter_count));
     word(hash, u64::from(function.local_count));
 
@@ -1636,6 +1642,7 @@ mod tests {
             name: None,
             arrow: false,
             generator: false,
+            async_generator: false,
             parameter_count: 0,
             local_count: 0,
             code,
@@ -1680,6 +1687,7 @@ mod tests {
             },
             FunctionProto {
                 generator: true,
+                async_generator: false,
                 ..function(vec![Instruction::Return])
             },
             FunctionProto {

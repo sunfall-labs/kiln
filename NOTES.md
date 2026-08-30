@@ -1335,3 +1335,39 @@ Then three things the `new.target` probe exposed, each of which was a silent wro
 output for every class instance.
 
 differential 70/0/0, conformance 39/39, all twelve Effect bundles still byte-identical.
+
+**2026-08-29, Claude — `for await` and async generators; the async story is complete.**
+
+The last two entries from the refusal audit.
+
+**`for await`** is a flag on `StatementKind::ForOf` rather than a statement of its own, because
+the two differ only in where the awaits go -- the iterator protocol, the per-iteration binding,
+and closing the iterator on an early exit are the same loop. The awaits are not in the same place
+for the two iterator kinds, and that is not a detail: an **async** iterator's `next` returns a
+promise of the result object, while a **sync** one returns the object directly and it is each
+*value* that may be a promise. Which was found is decided once, before the loop, and remembered in
+a hidden binding -- `for await` over a plain array of promises and over a real async iterator are
+both correct, and neither pays a spurious tick.
+
+**Async generators** needed the machine to tell an `await` from a `yield`, which it could not: an
+async function is compiled as a generator, so every suspension was a `Yield` and that was fine
+while only one kind existed. Now:
+
+- **`Instruction::Await` is distinct from `Yield`** (**hash tag 60**). They are identical in the
+  machine -- both leave the registers for the caller to snapshot -- and differ only in what they
+  tell the driver, recorded on `GeneratorState.awaiting`.
+- **`FunctionProto.async_generator`** is a third flag, because `generator` is already set for an
+  async function and the pair cannot distinguish the three shapes. In the proto hash it is
+  **appended after `generator`**; the bytes before it did not move.
+- `drive_async_generator` re-arms on the awaited promise when the body is waiting and resolves
+  the consumer's step promise when it yields. `Sink::AsyncGenerator` is the reaction that carries
+  it, holding a *step* promise where `Sink::Async` holds the whole function's.
+- An async generator object answers to `@@asyncIterator` and not `@@iterator`. Deliberate: a
+  `for-of` over one would hand back result objects that are promises, which is precisely the
+  mistake `for await` exists to prevent, so it fails instead of half-working.
+
+That closes the audit. What remains refused, in the order I would take it: `super.x = v`,
+`#x in o`, `import.meta`, dynamic `import()`, `using` declarations, JSX, V8 intrinsics. None of
+them fired on the Effect bundles.
+
+differential 72/0/0, conformance 39/39, 46 test binaries, clippy clean.

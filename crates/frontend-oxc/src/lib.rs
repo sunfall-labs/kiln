@@ -306,7 +306,7 @@ impl Lowerer {
                     .map(|update| self.expression(update)),
                 body: Box::new(self.statement_or_unsupported(&statement.body)),
             },
-            Statement::ForOfStatement(statement) if !statement.r#await => {
+            Statement::ForOfStatement(statement) => {
                 let ForStatementLeft::VariableDeclaration(declaration) = &statement.left else {
                     return Some(HirStatement {
                         kind: self.unsupported_statement(
@@ -332,6 +332,7 @@ impl Lowerer {
                     pattern,
                     iterable: self.expression(&statement.right),
                     body: Box::new(self.statement_or_unsupported(&statement.body)),
+                    awaiting: statement.r#await,
                 }
             }
             Statement::ForInStatement(statement) => {
@@ -350,9 +351,6 @@ impl Lowerer {
                     object: self.expression(&statement.right),
                     body: Box::new(self.statement_or_unsupported(&statement.body)),
                 }
-            }
-            Statement::ForOfStatement(_) => {
-                self.unsupported_statement("for-in or for-await-of statement", statement_span)
             }
             Statement::BreakStatement(statement) => HirStatementKind::Break {
                 label: statement.label.as_ref().map(|label| label.name.to_string()),

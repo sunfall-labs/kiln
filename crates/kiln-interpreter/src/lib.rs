@@ -838,6 +838,12 @@ pub struct GeneratorState {
     /// False until the first `next`, which starts the body rather than resuming a `yield`.
     started: bool,
     done: bool,
+    /// Why the body suspended: an `await` rather than a `yield`.
+    ///
+    /// Meaningless for a plain generator, which only ever yields, and for an async function,
+    /// which only ever awaits. An async generator does both, and its driver has to know whether
+    /// the consumer's step is finished or whether it is still waiting on something.
+    awaiting: bool,
 }
 
 impl PartialEq for GeneratorState {
@@ -1564,6 +1570,7 @@ pub fn execute<H: HostOps + ?Sized>(
         error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
         new_target: Value::Undefined,
+        suspended_awaiting: false,
         frames: Vec::new(),
         instruction: 0,
         function_names: program
@@ -1610,6 +1617,17 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     }
     data.freeze();
     Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// Whether this generator object came from an `async function*`.
+fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
+    let state = state.borrow();
+    state
+        .closure
+        .program
+        .functions
+        .get(state.closure.function as usize)
+        .is_some_and(|proto| proto.async_generator)
 }
 
 /// The own properties of a namespace object, in the order it holds them.
@@ -1672,6 +1690,7 @@ pub fn execute_module<H: HostOps + ?Sized>(
         error_prototypes: [const { None }; ErrorKind::ALL.len()],
         this_value: Value::Undefined,
         new_target: Value::Undefined,
+        suspended_awaiting: false,
         frames: Vec::new(),
         instruction: 0,
         function_names: module
@@ -1792,6 +1811,12 @@ enum Sink {
     /// An `await` inside an async function: resume its body with whatever the awaited promise
     /// produced, and settle the function's own promise when the body finishes.
     Async(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    /// An `await` inside an async *generator*: resume its body, and settle the promise the
+    /// consumer's `next()` returned once the body reaches its next `yield` or finishes.
+    ///
+    /// The promise here belongs to one step rather than to the whole function, which is the
+    /// whole difference between the two.
+    AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
 }
 
 /// The shared state of one `Promise.all`, `allSettled`, `race` or `any`.
@@ -1917,6 +1942,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
+    /// Whether the suspension that just happened was an `await` rather than a `yield`.
+    ///
+    /// Written where the body stops and read by whoever resumed it, because the instruction that
+    /// stopped is not otherwise visible from there.
+    suspended_awaiting: bool,
     /// `new.target` in the running frame: the constructor a `new` call named, or `undefined`.
     ///
     /// Held beside `this` and saved with it, because it follows exactly the same rule -- an
@@ -2287,11 +2317,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::PopHandler => {
                     self.handlers.pop();
                 }
-                Instruction::Yield => {
-                    // Returning straight out of the loop leaves the generator's registers in
-                    // place; the caller snapshots them. A `Return` would have popped the frame.
+                // Identical in the machine: both leave the generator's registers in place for
+                // the caller to snapshot, where a `Return` would have popped the frame. They
+                // differ only in what they tell the driver, which is recorded on the state by
+                // whoever resumed it.
+                Instruction::Yield | Instruction::Await => {
                     let value = self.pop(current)?;
                     self.suspended = true;
+                    self.suspended_awaiting = matches!(opcode, Instruction::Await);
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
@@ -2946,6 +2979,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments: received,
             started: false,
             done: false,
+            awaiting: false,
         }))))
     }
 
@@ -3081,6 +3115,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             state.stack = self.stack.split_off(stack_base);
             state.handlers = retained;
             state.started = true;
+            state.awaiting = self.suspended_awaiting;
             drop(state);
 
             self.restore_caller_frame();
@@ -3818,7 +3853,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             match method {
                 // Dispatched before `array_callback` is reached; a generator method is not an
                 // array walk.
-                CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
+                CallbackMethod::GeneratorNext
+                | CallbackMethod::GeneratorReturn
+                | CallbackMethod::AsyncGeneratorNext => {
                     unreachable!("generator methods are handled by `invoke`")
                 }
                 CallbackMethod::Reduce => {
@@ -3857,7 +3894,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
 
         Ok(match method {
-            CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn => {
+            CallbackMethod::GeneratorNext
+            | CallbackMethod::GeneratorReturn
+            | CallbackMethod::AsyncGeneratorNext => {
                 unreachable!("generator methods are handled by `invoke`")
             }
             CallbackMethod::Reduce => unreachable!("`reduce` is handled by `array_reduce`"),
@@ -4309,6 +4348,51 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// Advance an async generator one consumer step, settling `step` when it stops.
+    ///
+    /// An async generator suspends for two reasons. An `await` is invisible to the consumer: the
+    /// body is waiting on something and the step is not finished, so this re-arms itself on the
+    /// awaited promise. A `yield` is the step's result. That distinction is the whole of what
+    /// separates this from [`Vm::drive_async`], which has only the first kind.
+    fn drive_async_generator(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        step: &Rc<RefCell<PromiseState>>,
+        resume: Resume,
+    ) -> Result<(), ExecutionError> {
+        let instruction = self.instruction;
+        match self.resume_catching(generator, resume, instruction)? {
+            Err(thrown) => self.settle(step, &Settled::Rejected(thrown)),
+            Ok((value, true)) => {
+                let result = iteration_result(value, true);
+                self.resolve_promise(step, result);
+            }
+            Ok((value, false)) if !generator.borrow().awaiting => {
+                let result = iteration_result(value, false);
+                self.resolve_promise(step, result);
+            }
+            Ok((awaited, false)) => {
+                // Waiting, not yielding: the same fast path `await` takes in an async function.
+                let target = match awaited {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGenerator(Rc::clone(generator), Rc::clone(step)),
+                    false,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Resume a generator, recovering what it threw rather than unwinding past this point.
     fn resume_catching(
         &mut self,
@@ -4440,6 +4524,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 self.settle(&promise, &outcome);
                 return Ok(());
+            }
+            Sink::AsyncGenerator(generator, step) => {
+                let (generator, step) = (Rc::clone(generator), Rc::clone(step));
+                let resume = match outcome {
+                    Settled::Fulfilled(value) => Resume::Send(value),
+                    Settled::Rejected(reason) => Resume::Throw(reason),
+                };
+                return self.drive_async_generator(&generator, &step, resume);
             }
             Sink::Async(generator, promise) => {
                 let (generator, promise) = (Rc::clone(generator), Rc::clone(promise));
@@ -5460,6 +5552,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
+            // An async generator's `next` hands back a promise of the step, and it answers to
+            // `@@asyncIterator` rather than `@@iterator`: a `for-of` over one would get result
+            // objects that are promises, which is exactly the mistake `for await` exists to
+            // avoid, so it is left to fail rather than half-work.
+            Value::Generator(state) if is_async_generator(state) => match name {
+                "next" => Value::Callback(CallbackMethod::AsyncGeneratorNext),
+                key if key == WellKnown::AsyncIterator.property_key() => {
+                    Value::Native(Native::IteratorSelf)
+                }
+                _ => Value::Undefined,
+            },
+            // A generator object is its own iterator, which is what lets one be used directly in
+            // `for-of` and in a spread.
             Value::Generator(_) => match name {
                 "next" => Value::Callback(CallbackMethod::GeneratorNext),
                 "return" => Value::Callback(CallbackMethod::GeneratorReturn),
@@ -5500,6 +5605,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => self
                 .dispatch_native(native, &receiver, &arguments, instruction)
                 .map(Some),
+            // `next` on an async generator answers with a promise rather than a result: the
+            // body may await any number of times before it reaches the value the consumer asked
+            // for, and none of that can happen inside this call.
+            Value::Callback(CallbackMethod::AsyncGeneratorNext) => {
+                let Value::Generator(generator) = &receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let generator = Rc::clone(generator);
+                let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let step = PromiseState::pending();
+                self.drive_async_generator(&generator, &step, Resume::Send(sent))?;
+                Ok(Some(Value::Promise(step)))
+            }
             // Generator methods drive the machine, so they cannot go through `array_callback`.
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
@@ -5746,7 +5867,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if proto.generator {
             // Calling a generator function does not run it: it captures the arguments and hands
             // back an object whose `next` runs the body up to each `yield`.
-            let asynchronous = proto.asynchronous;
+            // An async generator is called like a plain one: it hands back an object, and
+            // nothing runs until the consumer asks for a step.
+            let asynchronous = proto.asynchronous && !proto.async_generator;
             let generator = self.build_generator(&closure, argc, instruction)?;
             if !asynchronous {
                 self.stack.push(generator);
@@ -7689,6 +7812,8 @@ pub enum CallbackMethod {
     GeneratorNext,
     /// `return` on a generator: finishes it without resuming.
     GeneratorReturn,
+    /// `next` on an async generator: hands back a promise of the step.
+    AsyncGeneratorNext,
     Map,
     ForEach,
     Filter,
@@ -9179,6 +9304,7 @@ mod tests {
                 name: Some("second".to_owned()),
                 arrow: false,
                 generator: false,
+                async_generator: false,
                 parameter_count: 2,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
@@ -9726,6 +9852,7 @@ mod tests {
                     name: Some("outer".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -9742,6 +9869,7 @@ mod tests {
                     name: Some("inner".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -9780,6 +9908,7 @@ mod tests {
                     name: Some("outer".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 1,
                     code: vec![
@@ -9796,6 +9925,7 @@ mod tests {
                     name: Some("read".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
@@ -9818,6 +9948,7 @@ mod tests {
                 name: None,
                 arrow: false,
                 generator: false,
+                async_generator: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![Instruction::Return],
@@ -9909,6 +10040,7 @@ mod tests {
                 name: Some("forever".to_owned()),
                 arrow: false,
                 generator: false,
+                async_generator: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![
@@ -9952,6 +10084,7 @@ mod tests {
                     name: Some("write".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![
@@ -9967,6 +10100,7 @@ mod tests {
                     name: Some("read".to_owned()),
                     arrow: false,
                     generator: false,
+                    async_generator: false,
                     parameter_count: 0,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],
@@ -10748,6 +10882,7 @@ mod tests {
                 name: None,
                 arrow: false,
                 generator: false,
+                async_generator: false,
                 parameter_count: 0,
                 local_count: 0,
                 code: vec![
