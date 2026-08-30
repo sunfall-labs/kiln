@@ -3556,3 +3556,40 @@ overwritten rather than accumulated and LRU is the wrong tool; what it wants is 
 dropping outputs whose source entry no longer exists (there are dangling pairs from an older
 naming scheme), and treating `.kiln/bin/conformance/` as CI scratch removed after the run reports.
 `fuzz/target` is a further 9.1 G and is mine to clear once the fuzzing settles.
+
+---
+
+**2026-08-30, Claude — node is now a third reference in `fuzz/`, and it found five things in its
+first run.**
+
+The engine-vs-engine oracle cannot see a bug both engines share. Three of these five are exactly
+that class, so they were structurally invisible before today. All reduced and node-verified in
+`fuzz/findings/`; I reproduced each by hand.
+
+| case | node | interpreter | native |
+|---|---|---|---|
+| `({valueOf:()=>({}),toString:()=>({})}) + 1` | **TypeError, exit 1** | `[object Object]1`, exit 0 | same |
+| `Number({[Symbol.toPrimitive]:()=>5})` | `5` | `NaN` | `5` |
+| `"\ud800".length` | `1` | `5` | `5` |
+| `Object.keys("abc")` | `['0','1','2']` | `[]` | refused (-2) |
+| `console.log({[Symbol.toPrimitive]:()=>1})` | shows the symbol key | `{}` | `{}` |
+
+**The first one is the serious one, and it is 21% of generated programs** (4,160 of 20,000).
+When ToPrimitive exhausts `valueOf` and `toString` without reaching a primitive, the spec says
+*throw*. Kiln invents `[object Object]` and **carries on running** -- so it is not one wrong
+value, it is every line after it, in a program node has already terminated. Exit status is 0
+where node gives 1.
+
+**`@@toPrimitive` is implemented in the C backend and not in the interpreter.** `as_primitive`
+in `kiln-interpreter` never consults it; `kiln_c99_to_primitive` does, three times. So the native
+backend is now *ahead of* the VM here, which is the reverse of the usual direction and worth
+knowing before the ADR 0028 migration moves this code.
+
+**`"\ud800".length` is a frontend bug**, so no arrangement of kiln's own components could have
+found it -- only an outside reference. It is also ADR 0022's recorded limitation arriving as a
+concrete wrong answer rather than a hypothetical, which is worth noting in that ADR.
+
+Cost, measured: one `node program.js` is 47.9 ms, essentially all process startup; 64 programs
+through one process with a `vm` context each is **1.13 ms**, pinned byte-for-byte against real
+node output over nine formatting cases. `--node-screen` pays for a C compilation only where node
+and the interpreter already disagree: **466x more programs per hour** than compiling every case.
