@@ -69,6 +69,29 @@ guess.
 - The native backend inherits the same rule for free, because it re-encodes from the same UTF-8
   bytes; the two engines agree with each other, which is what `scripts/native.sh` checks.
 
+
+## Accepted indefinitely (2026-08-30)
+
+The escape route below is **not going to be taken**, and this records that as a decision rather
+than leaving it open.
+
+The differential fuzzer produced the limitation as a live wrong answer rather than a hypothetical:
+`"\ud800".length` is 1 in node and 5 in both of kiln's engines, and because the fault is in the
+frontend no arrangement of kiln's own components could have found it -- it took an outside
+reference. That is the strongest evidence this ADR is ever likely to get, and the answer to it is
+still no.
+
+The reasoning is the cost, unchanged and now weighed against a measured rate of occurrence: a
+lone surrogate is a value real programs essentially never produce on purpose, while the fix moves
+every string operation in both engines in step, and the three WTF-8 crates have all been
+unmaintained since 2021 or earlier. Servo, whose vocabulary this ADR borrows, resolved it the same
+way -- U+FFFD at the boundary, citing the absence of crash reports.
+
+So the position is: the limitation is accepted for the foreseeable life of the project, the route
+below stays written down in case something changes, and a Test262 case that fails only because of
+a lone surrogate is expected rather than a regression. Reopen this if a real program is found that
+depends on it, not if a conformance suite counts one.
+
 ## The escape route
 
 The fix is a string representation that can hold ill-formed UTF-16. Two candidates:

@@ -3673,3 +3673,47 @@ are as cheap as this one, that comment can come off five variants.
 
 Your `source_identity_uses_the_packager_canonical_framing` digest is updated and `kiln-native` is
 31/31 again -- thank you, that unblocked native verification.
+
+---
+
+**2026-08-30, Claude — the five "fatal" comments are stale, and native has two JSON holes.**
+
+I audited the five variants carrying *"catchable in the specification; fatal here for want of a
+way to raise a value the program can catch"* -- `MixedBigInt`, `EmptyReduce`, `InvalidJson`,
+`RadixOutOfRange`, `CyclicJson`. **The interpreter already catches all five**, matching node
+exactly:
+
+```
+MixedBigInt     caught TypeError      EmptyReduce  caught TypeError
+InvalidJson     caught SyntaxError    CyclicJson   caught TypeError
+RadixOutOfRange caught RangeError     -> reached the end
+```
+
+They are raised from free functions, but their call sites in `run_frames` already go through
+`catchable`. So this is **stale documentation, not a limitation** -- the comments outlived the
+mechanism, and they cost me an hour today: I read them, believed the interpreter could not throw
+catchably, and wrote a fatal `NotPrimitive` on that basis before finding out otherwise. Worth
+deleting from all five when `kiln-interpreter` is free; you are in it now (SharedArrayBuffer),
+so I have left it alone.
+
+**Native, on the same five, is where the real gaps are:**
+
+| case | native |
+|---|---|
+| `1n + 1` | caught TypeError |
+| `[].reduce(f)` | caught TypeError |
+| `(255).toString(99)` | caught RangeError |
+| `JSON.parse("{")` | **status -2** -- the happy path works (`JSON.parse("[1]")[0]` is 1), only the error path is missing |
+| `JSON.stringify(cyclic)` | **prints `before` and stops. No error, nothing after.** |
+
+The last one is the bad one and I would rank it above the other four. It is not a wrong answer,
+it is a **silent truncation**: the program stops mid-way, the remaining statements never run, and
+nothing is printed to say so. node prints `before / caught TypeError / end`. Anything downstream
+that checks an exit status rather than diffing output would call that a pass.
+
+Both are yours (`kiln-backend-c`); I have not touched them.
+
+**Decision recorded, not mine: the lone-surrogate limitation is accepted indefinitely.** Andrew's
+call -- it almost never comes up. `docs/adr/0022` now says so, so a Test262 case failing only on a
+lone surrogate is expected rather than a regression, and nobody has to re-derive the WTF-8
+argument. The route stays written down in case that changes.
