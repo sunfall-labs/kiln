@@ -287,7 +287,7 @@ impl Native {
     /// program anybody reviewed, so the harness needs to be able to give up on it. Output is
     /// redirected to files rather than pipes, which also removes the classic deadlock where a
     /// child fills the pipe buffer while the parent is blocked waiting for it to exit.
-    fn run(&self, program: &Program, tag: &str) -> Result<NativeRun, Outcome> {
+    pub fn run(&self, program: &Program, tag: &str) -> Result<NativeRun, Outcome> {
         let directory = self.workspace.join(tag);
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).map_err(|error| {
@@ -353,6 +353,25 @@ impl Native {
             cached: report.cache_hits.executable,
         })
     }
+}
+
+/// Build and run one program natively and report *what it printed*, rather than a verdict about
+/// it.
+///
+/// [`compare`] answers "do the two engines agree", and collapses the native side to that answer:
+/// its `Match` arm does not carry the bytes, because when they match the interpreter's bytes are
+/// the same bytes. A third reference makes that collapse lossy -- `triage.rs` has to be able to
+/// say *both engines printed this and node printed that*, and it cannot say it about an output
+/// nobody kept. So this returns the run and leaves the judging to the caller.
+pub fn observe(
+    native: &Native,
+    program: &Program,
+    tag: &str,
+    cost: &mut Cost,
+) -> Result<NativeRun, Outcome> {
+    let run = native.run(program, tag)?;
+    cost.observe(&run);
+    Ok(run)
 }
 
 /// One discovered toolchain per thread, reached without capturing it.

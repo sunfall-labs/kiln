@@ -7,11 +7,19 @@
 //! README says exactly what that costs: "a real program composes features in combinations nobody
 //! wrote a test for". This crate is the machine that writes them.
 //!
-//! Three targets, in `tests/`:
+//! A corpus is not the only thing that only contains what somebody thought of. **Two engines that
+//! share a frontend, a lowering and a set of builtins agree about their shared mistakes**, and when
+//! they do, a comparison between them reports a pass. `NOTES.md` records that happening twice --
+//! *"Both engines were wrong in the same way, which is why no corpus caught it: they agreed."* So
+//! there is a third reference here too: `node`, off `PATH`, sharing nothing with either. See
+//! [`node`] and [`triage`].
+//!
+//! Four targets, in `tests/`:
 //!
 //! | target | what it compares | cost per case |
 //! |---|---|---|
 //! | `differential_native` | interpreter stdout vs native stdout | a C compile -- see `README.md` |
+//! | `node_reference` | the batched node reference against a real node process | ~48 ms |
 //! | `structured_ir` | the emitter and the VM against hand-built bytecode | microseconds |
 //! | `memo_oracle` | a memoized query engine vs a from-scratch one | microseconds |
 //!
@@ -180,7 +188,9 @@ use bolero as _;
 pub mod engines;
 pub mod ir;
 pub mod js;
+pub mod node;
 pub mod oracle;
+pub mod triage;
 
 #[cfg(test)]
 mod tests {

@@ -7,17 +7,28 @@ checks that claim over a hand-written corpus, and `conformance/README.md` says e
 corpus costs: *"a real program composes features in combinations nobody wrote a test for"*. This
 crate writes those programs.
 
-It found three on the day it was built — one root cause, reached three ways, in 1,500
-generated programs. See **Findings** below.
+It found three on the day it was built — one root cause, reached three ways, in 1,500 generated
+programs. It then grew a **third reference**, because two engines that share a frontend, a lowering
+and a set of builtins agree about their shared mistakes: adding `node` and generating values that
+answer back during conversion found five more, three of which the two-engine comparison reports as
+a *pass*. See **Findings** and **Findings, node as the reference** below.
 
 ## Contents
 
 | target | what it compares | measured cost per case |
 |---|---|---|
 | `differential_native` | interpreter stdout vs native stdout, byte for byte | **446 ms** (clang) / **819 ms** (zig) |
+| `node_reference` | the batched node reference against a real `node` process, and five pinned findings | 48 ms |
 | `structured_ir` | `kiln_backend_c::validate` against the interpreter's own idea of well-formed | 232 µs |
 | `memo_oracle` | a memoized query engine against a from-scratch one | 23 µs |
-| `generator_health` | the generators themselves, against being empty | 7 µs |
+| `generator_health` | the generators themselves, against being empty and against missing a shape | 7 µs |
+
+and two soak modes, which are where the work actually happens:
+
+| mode | what it compares | measured cost per case |
+|---|---|---|
+| `soak --node-screen` | node vs the interpreter, escalating only disagreements to a native build | **1.22 ms** |
+| `soak --node` | node vs the interpreter vs the native backend, every case | **569 ms** |
 
 Everything is standalone: `fuzz` is excluded from the root workspace (`exclude = ["fuzz"]`,
 ADR 0004) and carries its own lockfile, so bolero, libFuzzer and a C++ runtime never enter the
@@ -81,6 +92,15 @@ knowing before adding a file here:
 ```sh
 cd fuzz
 
+# node as a third reference. 20,000 cases in 24 s, and the run that produced findings 4 to 8.
+cargo run --release --bin soak -- --node-screen --cases 20000 --seed 2026
+
+# All three references on every case. Thorough, and 466x the price.
+KILN_FUZZ_CC=/usr/bin/clang cargo run --release --bin soak -- --node --cases 200 --seed 7
+
+# One whole generated program per distinct finding, written out as a starting point for reducing.
+cargo run --release --bin soak -- --node-screen --cases 20000 --findings /tmp/leads
+
 # The long-running mode for the native target. Prints the outcome distribution, the reason
 # distribution, and the measured cost breakdown; exits non-zero on any defect. Eleven minutes,
 # and the run that produced finding 1.
@@ -90,8 +110,9 @@ cargo run --release --bin soak -- --cases 1500 --seed 101
 cargo run --release --bin soak -- --cases 5000 --interpret-only
 cargo run --release --bin soak -- --cases 5000 --lower-only
 
-# One file through both engines, which is what you use on a reported divergence.
-cargo run --release --bin differ -- findings/tonumber-on-an-array.js
+# One file through all three, which is what you use on a reported divergence. node and the C
+# toolchain are each optional and each say so when missing.
+cargo run --release --bin differ -- findings/symbol-to-primitive-is-ignored.js
 
 # Which compiler. Discovery finds zig first here and clang is twice as fast; see the cost table.
 KILN_FUZZ_CC=/usr/bin/clang cargo run --release --bin soak -- --cases 1500
@@ -170,6 +191,233 @@ control error**: the native surface currently covers about one in seven of the p
 generator writes. That is a work queue and not a defect — it names itself, and nobody is misled by
 it — but it is also the number to watch, because every point it rises is another program the
 differential comparison can actually make.
+
+---
+
+## node, and why two engines agreeing is not evidence
+
+`differential_native` compares the interpreter against the native backend. They consume the same
+bytecode, out of the same lowering, behind the same frontend, and they inherit every decision
+either of those made. **When both are wrong in the same way the comparison sees agreement and
+reports a pass**, and that is not a hypothesis: `NOTES.md` records it twice in the project's own
+words — *"Both engines were wrong in the same way, which is why no corpus caught it: they
+agreed."* — once for frozen arrays and once for `delete`.
+
+So `src/node.rs` adds an implementation that shares nothing with either: `node`, off `PATH`. The
+convention is `scripts/differential.sh`'s and is not reinvented — the reference answer is
+**observed by running the program**, never transcribed, and node runs under `TZ=UTC` because kiln's
+realm is always UTC (ADR 0015) and a zone read from the environment is host state.
+
+### The outcomes, kept apart on purpose
+
+A fuzzer that cries wolf gets switched off, and the cheapest way to cry wolf is to put a refusal
+and a wrong answer in the same bucket. `src/triage.rs` does not:
+
+    GENERATOR-BUG          node refused the source. `js.rs` emitted something that is not
+                           JavaScript. Nothing has been learned about kiln, and the fix is in this
+                           crate. `tests/node_reference.rs` asserts this never happens.
+    not-comparable         lowering refused, or the interpreter's screening budget stopped it.
+    refused                a kiln engine stopped inside its implemented surface, having printed a
+                           prefix of what node printed. The backlog: the growing native surface,
+                           and ADR 0017's unresolved identifiers.
+    agrees                 everything that ran printed the same bytes.
+
+    INTERPRETER-vs-NODE    the interpreter disagreed with node and the native backend did not.
+    NATIVE-vs-NODE         the native backend disagreed with node and the interpreter did not.
+                           Also an engine/engine divergence — reported this way because node
+                           naming *which* engine is wrong is more than two engines could say.
+    ENGINES-DIVERGE        the two engines disagreed with each other and node matched neither.
+    BOTH-ENGINES-vs-NODE   **both engines printed the same bytes and node printed different ones.**
+                           The class this exists for, and a silent pass under the two-engine
+                           comparison.
+
+The rule underneath all of them is `engines.rs`'s, extended to a third party: **an engine that
+stops is allowed to have printed less, and an engine that finishes is not allowed to have printed
+anything different.** One corollary is worth stating because it caught the largest finding below:
+a kiln engine that runs to completion where *node threw* is a wrong answer too. It produced a value
+node says the program does not have.
+
+Two things the classification refuses to do, both for the same reason — a headline it cannot
+support is worse than no headline:
+
+- A native **refusal** is never counted as the native backend agreeing with the interpreter, so
+  `BOTH-ENGINES-vs-NODE` is never claimed on an answer nobody obtained.
+- `engines::observe` exists because `engines::compare` collapses a match into "the same bytes as
+  the interpreter" and does not keep them. Claiming both engines printed something requires having
+  the bytes.
+
+### Cost, measured
+
+| stage | measured |
+|---|---|
+| one `node program.js` process | 47.9 ms |
+| one program through the batched reference | **1.13 ms** |
+| `--node-screen`, whole loop, 20,000 cases in 24.34 s | **1.22 ms** |
+| `--node`, whole loop, 192 cases in 109.16 s | **568.6 ms** |
+
+The 42× between the first two rows is `src/node_batch.js`: sixty-four generated programs in one
+node process, each in its own `vm` context. Nearly all of a `node program.js` is process startup,
+and at 48 ms a case node would *be* the run — a 20,000-case screen would take sixteen minutes
+instead of twenty-four seconds.
+
+**What would make that worthless is formatting that is not node's.** `console.log` does not print
+values, it inspects them — `[ 1, 2 ]`, `{ p0: 'x' }`, `<1 empty item>` — and a driver whose
+formatting drifted by one space would report a divergence on every program that logged an array. So
+the driver formats nothing: it hands a real `node:console` a `Writable` instead of fd 1. That is
+pinned, not assumed —
+`node_reference::the_batched_reference_prints_exactly_what_a_real_node_process_prints` runs nine
+hand-written formatting cases and twenty-four generated programs through both paths and requires
+byte equality.
+
+**The escalation is the point of `--node-screen`.** node plus the interpreter is 1.22 ms; a native
+build is 446 ms. Cases where node and the interpreter already agree do not get a C compilation,
+because there is nothing there for the native side to settle that a plain `--cases N` run would not
+settle more cheaply. That is 466× more programs per hour, against giving up the engine/engine
+comparison on cases that looked fine — which is exactly the comparison the original mode runs.
+
+### What is excluded, and why
+
+The four properties `js.rs` guarantees — termination, bounded work, determinism, resolvability —
+were already what made a two-engine comparison meaningful, and every one of them is load-bearing
+again here for a different reason: node has a real clock, real entropy and a real heap.
+
+- **No `Date`, no `Date.now`, no `new Date()`, no timers.** kiln's clock is virtual and node's is
+  not (ADR 0012, ADR 0015). `scripts/differential.sh` documents the same trap.
+- **No `Math.random`.**
+- **No `Map`, no `Set`, no `for..in`.** Iteration order over a `Map` keyed on objects is
+  insertion order in both, but nothing in this grammar can produce two distinct objects with a
+  stable relative order to key it on, so the generator does not go there at all.
+- **No unbounded loops and no user-written loop condition.** The one loop form is
+  `for (let i = 0; i < K; i++)` with `K` a literal in `0..=3` and an induction variable nothing can
+  assign to. Nesting is capped at two, so the innermost body runs at most nine times.
+- **No recursion.** Calls are erased inside function bodies, so the call graph is one level deep.
+- **`node --max-old-space-size=512`**, a 10 s per-program timeout and a 1 MB output ceiling in the
+  driver. All three are third fences behind the generator bounds and the interpreter screen, and
+  they are here because a fuzzing loop that can be made to allocate without bound eats the machine.
+  It is much cheaper to lose a case than a machine.
+
+The ordering is a safety property and not a preference: **lower, interpret, then node.** The
+interpreter's 50,000-step screen is what bounds everything downstream, so node is only ever handed
+a program the cheap engine already finished.
+
+### False positives, and what was done about each
+
+| what it was | what it turned out to be |
+|---|---|
+| 517 of 2,000 cases reported as `INTERPRETER-vs-NODE`, most with node printing nothing at all | **Not a false positive.** One real bug — finding 4 below — reached 828 different ways. |
+| The same bug arriving as **155 distinct findings** | A real reporting defect. When node stops and kiln does not, the bytes the two "disagree on" are whatever the generated program happened to print next, so grouping on the differing line split one root cause across a hundred entries. `Verdict::signature` now keys those on node's *reason for stopping*: 155 entries became 1. |
+| Signatures reading `node=<end> kiln=<end>`, which name nothing | Every line matched and the outputs still differed — a trailing newline, or a `\r`, which `str::lines` folds away. The signature now says so and gives both byte counts. |
+| A lone surrogate reaching stdout | Genuinely lossy at the process boundary — node writes U+FFFD — but **both sides are lossy identically**, and the underlying bug (finding 6) is visible in `.length` without going near the boundary. |
+
+Two things are deliberately *not* suppressed even though each fires often. The
+`Cannot convert object to primitive value` class is 21% of all generated programs, and the
+`console.log` formatting gaps fire on any program that logs a wide object — both are real, both are
+one root cause each, and the deduplicated report shows each as one line with a count. Suppressing a
+real finding because it is common is how the frozen-array bug survived.
+
+---
+
+## Findings, node as the reference
+
+Five root causes from `soak --node-screen --cases 20000 --seed 2026` (24 seconds) and
+`--cases 4000 --seed 101`. Every one is reduced to a one-liner in `findings/`, and every reduction
+was re-checked against node before it was written down. **Three of the five are wrong in both
+engines**, which is to say invisible to the comparison this crate started with.
+
+### 4. ToPrimitive invents a value where the specification says the program has none
+
+`findings/no-primitive-available-does-not-throw-minimal.js` — **BOTH-ENGINES-vs-NODE**, and the
+single most common finding in the corpus: **4,160 of 20,000 generated programs**, 21%.
+
+```js
+console.log({ valueOf: () => ({}), toString: () => ({}) } + 1);
+```
+
+```
+node:                   TypeError: Cannot convert object to primitive value   (exit 1, no stdout)
+interpreter and native: [object Object]1
+```
+
+When neither method returns a primitive, step 6 of OrdinaryToPrimitive raises. kiln does not — so a
+program that must stop keeps running, and everything after that point is output node never produces
+at all. Both engines agree, so `differential_native` calls it a match.
+
+### 5. `Symbol.toPrimitive` is not consulted
+
+`findings/symbol-to-primitive-is-ignored.js` — **INTERPRETER-vs-NODE**: the native backend is
+right and the interpreter is wrong.
+
+```js
+const o = { [Symbol.toPrimitive]: (hint) => (hint === "string" ? "S" : 5) };
+```
+
+| expression | node & native | interpreter |
+|---|---|---|
+| `Number(o)` | `5` | `NaN` |
+| `String(o)` | `S` | `[object Object]` |
+| `o + 1` | `6` | `[object Object]1` |
+| `` `t${o}` `` | `tS` | `t[object Object]` |
+| `o < 1` | `false` | `false` |
+
+The last row is why this needed finding rather than reasoning about: relational comparison happens
+to agree, so a probe that only tested `<` reports a pass.
+
+### 6. A lone surrogate escape is read as five code units
+
+`findings/lone-surrogate-escape-minimal.js` — **BOTH-ENGINES-vs-NODE**, and necessarily so: this
+is the frontend reading a string literal, and both engines are handed the same wrong string. There
+is no arrangement of kiln components that could have caught it.
+
+```js
+console.log("\ud800".length);   // node 1, kiln 5
+console.log("a\ud800b".length); // node 3, kiln 7
+```
+
+kiln reads `"\ud800"` as a replacement character followed by the literal text `d800`. The string is
+already in `js.rs`'s `STRINGS` pool, chosen for ADR 0022's reasons; it took a third reference to
+notice that kiln does not read it.
+
+### 7. `Object.keys` of a string is empty
+
+`findings/object-keys-of-a-string.js` — **INTERPRETER-vs-NODE**; the native backend refuses this
+program with `KILN_C99_CONTROL_ERROR`, so it has no opinion.
+
+```js
+Object.keys("abc")            // node [ '0', '1', '2' ]   interpreter []
+Object.keys([7, 8])           // node [ '0', '1' ]        interpreter [ '0', '1' ]   (correct)
+Math.abs(Object.keys("t0"))   // node NaN                 interpreter 0
+```
+
+Arrays are right, which is what makes this specific. The third line is how it was found: an empty
+array converts to `0` and a two-element one does not convert at all, so the wrong answer travels.
+
+### 8. Three gaps in `console.log`'s inspection
+
+`findings/console-inspect-gaps.js` — **BOTH-ENGINES-vs-NODE**, all three, and expected to be:
+`NOTES.md` records that `kiln_c99_inspect` is a deliberate C port of the interpreter's `inspect`,
+so the two agree by construction and the engine/engine comparison can never see a gap in what they
+were both told to do. `conformance/differential/console-inspect.js` covers this area against node
+and passes; these are three shapes it does not contain.
+
+| | node | both engines |
+|---|---|---|
+| a symbol-keyed property | `{ Symbol(Symbol.toPrimitive): [Function: [Symbol.toPrimitive]] }` | `{}` |
+| an object past the break length | broken across five lines | one line |
+| an array nested under objects | `{ p0: { p1: [ [] ] } }` | `{ p0: { p1: [ [Array] ] } }` |
+
+The third is not the depth limit itself — `[[[[1]]]]` and `{p0:{p1:{p2:{p3:1}}}}` both agree with
+node — but where an array reached through objects sits relative to it.
+
+### Confirmed fixed while this was being written
+
+Two bugs named as known when this work started were fixed in the tree mid-session, and both are now
+regression tests in `tests/node_reference.rs` rather than findings:
+
+- `parseInt({toString: () => "99"})` and `parseFloat` — was `NaN` in **both** engines, is now `99`.
+  This is the shape that motivated the whole exercise: while it was broken the two engines agreed,
+  so `differential_native` reported a match and said nothing.
+- `Math.abs({valueOf: () => 42})` and the rest of the single-argument builtin path — was `NaN` in
+  the interpreter and correct in the native backend, and is now correct in both.
 
 ---
 
@@ -305,6 +553,23 @@ and nested objects started appearing at all. Related: `Roomy<T>` declares no upp
 because bolero's driver picks a value's byte budget from that hint and a recursive type's derived
 hint is a few dozen bytes.
 
+**The grammar had no value that answers back during conversion.** It produced arrays and plain
+objects, and that gap is exactly why the differential run found `Math.abs([0])` and missed
+`Math.abs({valueOf: () => 42})` — the more general bug, and the one that was broken for longer. An
+array converts through the same ToPrimitive machinery, but through the *built-in*
+`Array.prototype.toString`, so a path that skips ToPrimitive and reads an internal slot instead
+still gets an array right often enough to look correct; a user method cannot be skipped and then
+guessed. `Expression::Coerce` now generates ten shapes — `valueOf`, `toString`, both disagreeing,
+either returning a non-primitive, neither returning a primitive, a non-callable `valueOf`, and
+three `Symbol.toPrimitive` forms — paired in the same node with one of twenty-four consumers, so
+`Number(o)`, `parseInt(o)`, `` `t${o}` ``, `o * 2`, `o < 1` and `o == 1` are reachable in one draw
+rather than when the tree happens to put them together. Pairing them is the point: a shape the
+grammar *can* emit once in ten thousand programs is not coverage, and
+`coercion_shapes_appear_often_enough_to_be_coverage` asserts a floor per shape and per consumer
+rather than in aggregate, because ten variants that fail differently can hide behind one popular
+sibling in any total. Measured over 4,000 programs: 3,785 carry a coercion object, the rarest shape
+appears 408 times per thousand, the rarest consumer 165. Findings 4 through 8 all came out of it.
+
 One deliberate distortion is worth stating. `Expression::Member` and `Expression::Computed` render
 their receiver as `((expr) ?? {})`. Without the guard, three quarters of every generated program
 died on `undefined.p0` and the corpus measured the TypeError path and nothing else; with it, 64%
@@ -317,11 +582,15 @@ where the remaining third still stops.
       src/lib.rs          Many, Nested, Roomy — the generator combinators, and why each exists
       src/js.rs           a grammar of valid, terminating, deterministic JavaScript
       src/ir.rs           a small compiler to well-formed kiln-ir, plus single-field perturbations
-      src/engines.rs      the comparison, the classification, and the screening budget
+      src/engines.rs      the two-engine comparison, the classification, and the screening budget
+      src/node.rs         node off PATH: one process per program, or sixty-four in one
+      src/node_batch.js   the batched reference, which formats nothing and hands node's own
+                          `console` a Writable instead of fd 1
+      src/triage.rs       the three-way classification, and the rule it judges by
       src/oracle.rs       the memo property, ported from crates/kiln-db/tests/oracle.rs
-      src/bin/soak.rs     the long-running native mode; the source of the cost table above
-      src/bin/differ.rs   one file through both engines, for reducing a reported divergence
-      tests/              the four targets
+      src/bin/soak.rs     the long-running modes; the source of both cost tables above
+      src/bin/differ.rs   one file through all three, for reducing a reported divergence
+      tests/              the five targets
       findings/           reduced reproductions, with what node says about each
       examples/           entropy_probe: how many bytes one generated program consumes
 
