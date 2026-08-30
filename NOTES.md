@@ -1588,3 +1588,34 @@ Refusals left: `import.meta`, dynamic `import()`, `using` declarations, JSX, V8 
 first two are real features; the rest are not this compiler's business yet.
 
 differential 78/0/0.
+
+**2026-08-29, Claude — four more libraries; four more silent wrong answers.**
+
+Added js-yaml, semver and mustache to `conformance/thirdparty` (picocolors turned out to have no
+interesting surface). Same pattern as before: each found something within seconds of first
+running, and none of them was a refusal.
+
+- **`Map.prototype.values()` and `.keys()` yielded whole `[key, value]` pairs.** So
+  `[...map.values()]` was an array of pairs, and every library that builds a list that way got
+  the wrong shape -- semver's `Range` ended up holding arrays where it expected comparators, and
+  the failure surfaced three call frames later as "array.test is not a function". The iterator
+  now carries what to project, decided where the collection's kind is known. `Set.entries()`
+  pairs each value with itself, which is how one protocol serves both.
+- **`Map`/`Set` had no `forEach`.**
+- **A regexp's `toString` was `Error.prototype.toString`**, so every regexp stringified as
+  "Error". Anything logging or comparing a pattern got that.
+- **`RegExp.prototype` and `Date.prototype` did not exist.**
+  `RegExp.prototype.test.call(re, s)` is how a library avoids a monkey-patched `test`, and
+  mustache does exactly that.
+- **`String.prototype.substring` and `substr` were missing entirely.** Not obscure -- `substring`
+  is one of the oldest string methods there is.
+
+**js-yaml does not pass**, and its repro is small enough to hand over: `load("a:\n  b: 1\n")`
+throws "incomplete mapping pair in event stream" where node returns `{a: {b: 1}}`. A *flat*
+mapping and a sequence both parse correctly, so it is specifically the nested block. I probed
+every primitive its scanner uses -- `charCodeAt` past the end, prefix and postfix increment of a
+member expression used as an argument, `Object.create(null)`, `Map` with object keys, optional
+chaining on null -- and all of them agree with node, so whatever diverges is further in than I
+got. Written down rather than left as "js-yaml is broken".
+
+Corpus now: date-fns, zod, semver, mustache passing; immer and js-yaml not. differential 80/0/0.

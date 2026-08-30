@@ -19,7 +19,7 @@ fi
 mkdir -p "$SCRATCH"
 cd "$SCRATCH"
 [[ -f package.json ]] || npm init -y >/dev/null
-npm install --no-audit --no-fund zod immer date-fns >/dev/null
+npm install --no-audit --no-fund zod immer date-fns js-yaml semver mustache >/dev/null
 
 for probe in "$DIR"/probes/*.mjs; do
 	name=$(basename "$probe" .mjs)

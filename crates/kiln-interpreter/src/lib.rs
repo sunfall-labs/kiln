@@ -271,6 +271,12 @@ pub enum Native {
     /// method and `call` it onto a receiver of their own.
     PrototypeOf(PrototypeTable),
     StringRaw,
+    RegExpToString,
+    StringSubstring,
+    StringSubstr,
+    CollectionKeys,
+    CollectionForEach,
+    CollectionEntries,
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
     /// `Proxy`, which is only ever reached through `new`.
@@ -492,6 +498,12 @@ impl Native {
             (Self::NumberConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Number)))
             }
+            (Self::RegExpConstructor, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::RegExp)))
+            }
+            (Self::DateConstructor, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Date)))
+            }
             // A method read off one of these tables is unbound, exactly as reading it off an
             // instance is: `call` and `apply` are what supply the receiver.
             // `Proxy.revocable(target, handler)` hands back the proxy and the switch that turns
@@ -508,6 +520,8 @@ impl Native {
                 PrototypeTable::String => Self::StringConstructor,
                 PrototypeTable::Number => Self::NumberConstructor,
                 PrototypeTable::Function => Self::FunctionConstructor,
+                PrototypeTable::RegExp => Self::RegExpConstructor,
+                PrototypeTable::Date => Self::DateConstructor,
             })),
             (Self::PrototypeOf(table), _) => Some(match table {
                 PrototypeTable::Object => object_property(name),
@@ -515,6 +529,8 @@ impl Native {
                 PrototypeTable::String => string_property(name),
                 PrototypeTable::Number => number_property(name),
                 PrototypeTable::Function => function_property(name),
+                PrototypeTable::RegExp => regexp_method(name),
+                PrototypeTable::Date => date_method(name),
             }),
             (Self::ObjectConstructor, "preventExtensions") => {
                 Some(Value::Native(Self::ObjectPreventExtensions))
@@ -903,6 +919,8 @@ pub enum PrototypeTable {
     String,
     Number,
     Function,
+    RegExp,
+    Date,
 }
 
 /// A proxy's two halves.
@@ -3745,6 +3763,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .collect(),
                 )))
             }
+            // `map.forEach(cb)` calls back into the program, so it belongs here rather than in
+            // the pure table. A Set passes its value as both arguments, which is the same shape
+            // its `entries` takes and the reason one callback signature serves both.
+            Native::CollectionForEach => {
+                let Some((entries, is_map)) = collection_state(receiver) else {
+                    return Ok(Value::Undefined);
+                };
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let mut index = 0;
+                // The length is re-read each step: entries added while iterating are visited,
+                // which is what a Set does and is observable.
+                loop {
+                    let entry = entries.borrow().get(index).cloned();
+                    let Some(entry) = entry else { break };
+                    index += 1;
+                    if matches!(entry, Value::Native(Native::Tombstone)) {
+                        continue;
+                    }
+                    let (key, value) = match (is_map, &entry) {
+                        (true, Value::Array(pair)) => {
+                            let pair = pair.borrow();
+                            (
+                                pair.first().cloned().unwrap_or(Value::Undefined),
+                                pair.get(1).cloned().unwrap_or(Value::Undefined),
+                            )
+                        }
+                        _ => (entry.clone(), entry.clone()),
+                    };
+                    self.call_value(
+                        &callback,
+                        this_value.clone(),
+                        vec![value, key, receiver.clone()],
+                        instruction,
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
             Native::FunctionCall | Native::FunctionApply => {
                 let this_value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let rest = if matches!(native, Native::FunctionCall) {
@@ -6167,7 +6223,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::RegExp(regexp) => match name {
                 "test" => Value::Native(Native::RegExpTest),
                 "exec" => Value::Native(Native::RegExpExec),
-                "toString" => Value::Native(Native::ErrorToString),
+                // Its own, not the error one: a regexp prints as `/source/flags`, and reusing
+                // `Error.prototype.toString` made every regexp stringify as "Error".
+                "toString" => Value::Native(Native::RegExpToString),
                 "source" => Value::String(regexp.source.clone()),
                 "flags" => Value::String(regexp.flags.clone()),
                 "global" => Value::Boolean(regexp.global),
@@ -7451,6 +7509,7 @@ fn call_native(
             unreachable!("`String` is dispatched by the interpreter")
         }
         Native::ErrorToString => Value::String(error_to_string(receiver)),
+        Native::RegExpToString => Value::String(receiver.to_display_string()),
         Native::ObjectSetPrototypeOf => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
             if let Some(prototype) = arguments.get(1) {
@@ -7491,6 +7550,7 @@ fn call_native(
         | Native::ObjectDefineProperty
         | Native::ObjectDefineProperties
         | Native::StringRaw
+        | Native::CollectionForEach
         | Native::FunctionCall
         | Native::FunctionApply
         | Native::FunctionBind
@@ -7969,6 +8029,8 @@ fn call_native(
         | Native::StringTrimStart
         | Native::StringTrimEnd
         | Native::StringConcat
+        | Native::StringSubstring
+        | Native::StringSubstr
         | Native::StringCodePointAt
         | Native::StringLocaleCompare
         | Native::StringNormalize => {
@@ -8116,6 +8178,49 @@ fn call_native(
                     Value::Number(text.rfind(&needle).map_or(-1.0, |offset| {
                         text[..offset].chars().count() as f64
                     }))
+                }
+                // `substring` clamps both ends into range and swaps them if they are the wrong
+                // way round, where `slice` counts a negative from the end and yields nothing
+                // when they cross. The two look alike and agree on almost no edge case.
+                Native::StringSubstring => {
+                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let clamp = |value: f64| -> usize {
+                        if value.is_nan() || value < 0.0 {
+                            0
+                        } else {
+                            (value as usize).min(units.len())
+                        }
+                    };
+                    let first = clamp(arguments.first().map_or(0.0, Value::as_number));
+                    let second = match arguments.get(1) {
+                        Some(Value::Undefined) | None => units.len(),
+                        Some(value) => clamp(value.as_number()),
+                    };
+                    let (start, end) = (first.min(second), first.max(second));
+                    Value::String(String::from_utf16_lossy(&units[start..end]))
+                }
+                Native::StringSubstr => {
+                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let start = arguments.first().map_or(0.0, Value::as_number);
+                    // A negative start counts from the end, which is the one thing `substr`
+                    // does that `substring` does not.
+                    let start = if start < 0.0 {
+                        (units.len() as f64 + start).max(0.0) as usize
+                    } else {
+                        (start as usize).min(units.len())
+                    };
+                    let count = match arguments.get(1) {
+                        Some(Value::Undefined) | None => units.len() - start,
+                        Some(value) => {
+                            let count = value.as_number();
+                            if count.is_nan() || count < 0.0 {
+                                0
+                            } else {
+                                (count as usize).min(units.len() - start)
+                            }
+                        }
+                    };
+                    Value::String(String::from_utf16_lossy(&units[start..start + count]))
                 }
                 Native::StringCodePointAt => {
                     let index = arguments.first().map_or(0.0, Value::as_number);
@@ -8267,13 +8372,27 @@ fn call_native(
                 None => Value::Boolean(false),
             }
         }
-        Native::CollectionValues => {
-            let Some((entries, _)) = collection_state(receiver) else {
+        Native::CollectionValues | Native::CollectionKeys | Native::CollectionEntries => {
+            let Some((entries, is_map)) = collection_state(receiver) else {
                 return Ok(Value::Undefined);
             };
             let mut iterator = ObjectData::default();
             iterator.set("@@iterated", Value::Array(entries));
             iterator.set("@@index", Value::Number(0.0));
+            // What to hand back for each stored entry. Decided here, where the collection's kind
+            // is known, so the iterator itself needs no reference back to it.
+            iterator.set(
+                "@@part",
+                Value::String(
+                    match (is_map, native) {
+                        (true, Native::CollectionKeys) => "key",
+                        (true, Native::CollectionValues) => "value",
+                        (false, Native::CollectionEntries) => "self-pair",
+                        _ => "whole",
+                    }
+                    .to_owned(),
+                ),
+            );
             iterator.set("next", Value::Native(Native::CollectionIteratorNext));
             iterator.set(
                 WellKnown::Iterator.property_key(),
@@ -8298,6 +8417,10 @@ fn call_native(
             let Value::Array(entries) = &iterated else {
                 return Ok(iteration_result(Value::Undefined, true));
             };
+            let part = state
+                .borrow()
+                .get("@@part")
+                .map_or_else(String::new, |value| value.to_display_string());
             // Skip holes left by deletion, and re-read the length each step so entries added
             // during iteration are seen -- both are observable and both are what a Set does.
             loop {
@@ -8314,7 +8437,19 @@ fn call_native(
                         state
                             .borrow_mut()
                             .set("@@index", Value::Number(index as f64 + 1.0));
-                        return Ok(iteration_result(value, false));
+                        let projected = match (part.as_str(), &value) {
+                            ("key", Value::Array(pair)) => {
+                                pair.borrow().first().cloned().unwrap_or(Value::Undefined)
+                            }
+                            ("value", Value::Array(pair)) => {
+                                pair.borrow().get(1).cloned().unwrap_or(Value::Undefined)
+                            }
+                            ("self-pair", value) => {
+                                Value::Array(ArrayData::new(vec![value.clone(), value.clone()]))
+                            }
+                            _ => value,
+                        };
+                        return Ok(iteration_result(projected, false));
                     }
                 }
             }
@@ -8582,6 +8717,9 @@ fn string_property(name: &str) -> Value {
         "includes" => Value::Native(Native::StringIncludes),
         "indexOf" => Value::Native(Native::StringIndexOf),
         "slice" => Value::Native(Native::StringSlice),
+        "substring" => Value::Native(Native::StringSubstring),
+        // Deprecated in the specification and still everywhere in the wild.
+        "substr" => Value::Native(Native::StringSubstr),
         "split" => Value::Native(Native::StringSplit),
         "trim" => Value::Native(Native::StringTrim),
         "startsWith" => Value::Native(Native::StringStartsWith),
@@ -8633,10 +8771,20 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
         (true, "get") => Value::Native(Native::MapGet),
         (true, "has") => Value::Native(Native::MapHas),
         (true, "delete") => Value::Native(Native::MapDelete),
-        (_, "values" | "keys" | "entries") => Value::Native(Native::CollectionValues),
-        (_, key) if key == WellKnown::Iterator.property_key() => {
-            Value::Native(Native::CollectionValues)
-        }
+        // A Map stores `[key, value]` pairs, so `keys` and `values` project out of them where
+        // `entries` hands the pair over whole. A Set stores bare values, and its `entries` pairs
+        // each one with itself -- which is the specification's way of giving the two collections
+        // one iteration protocol.
+        (_, "forEach") => Value::Native(Native::CollectionForEach),
+        (_, "values") => Value::Native(Native::CollectionValues),
+        (_, "keys") => Value::Native(Native::CollectionKeys),
+        (_, "entries") => Value::Native(Native::CollectionEntries),
+        // The default iteration of a Map is its entries and of a Set is its values.
+        (is_map, key) if key == WellKnown::Iterator.property_key() => Value::Native(if is_map {
+            Native::CollectionEntries
+        } else {
+            Native::CollectionValues
+        }),
         _ => Value::Undefined,
     }
 }
@@ -9816,6 +9964,29 @@ fn match_result(
 /// The text of a UTF-16 range, as a JavaScript string.
 fn utf16_slice(subject: &[u16], range: std::ops::Range<usize>) -> String {
     String::from_utf16_lossy(&subject[range])
+}
+
+/// The methods on `RegExp.prototype`, without the per-instance data a regexp also answers to.
+///
+/// A program reaches for these to call one against a receiver of its own -- `RegExp.prototype
+/// .test.call(re, s)` is how a library avoids a monkey-patched `test`.
+fn regexp_method(name: &str) -> Value {
+    match name {
+        "test" => Value::Native(Native::RegExpTest),
+        "exec" => Value::Native(Native::RegExpExec),
+        "toString" => Value::Native(Native::RegExpToString),
+        _ => Value::Undefined,
+    }
+}
+
+/// The methods on `Date.prototype`, for the same reason.
+fn date_method(name: &str) -> Value {
+    match name {
+        "getTime" | "valueOf" => Value::Native(Native::DateField(DateField::Time)),
+        "toISOString" | "toJSON" => Value::Native(Native::DateToIso),
+        "toString" => Value::Native(Native::DateToString),
+        _ => Value::Undefined,
+    }
 }
 
 /// What every object inherits from `Object.prototype`.
