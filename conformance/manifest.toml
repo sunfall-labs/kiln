@@ -30,7 +30,7 @@
 # The pass count is therefore not in this file and cannot be derived from it. It comes from
 # `kiln test conformance/guard`, which runs every probe, prints the distribution of reasons for
 # the ones that fail, and exits non-zero while any of them does. At the time of writing that is
-# 0 of 20 passing, all of them refused during lowering: the interpreter supports no user function
+# 0 of 21 passing, all of them refused during lowering: the interpreter supports no user function
 # calls, no objects and no property access. That number is a measurement and will move; this file
 # is not where it is recorded.
 #
@@ -46,7 +46,7 @@ source_repo = "~/Developer/Personal/oss/porffor-effect-findings"
 source_commit = "bfdd2b0"
 source_commit_subject = "porffor/Effect: findings, and the three regression gates"
 ported = "2026-08-29"
-guard_tests = 20
+guard_tests = 21
 effect_tests = 12
 total_tests = 32
 
@@ -54,10 +54,10 @@ total_tests = 32
 # transcribed: every value below is what `node v25.9.0` actually printed on this machine.
 [corpus.expected_output_method]
 guard = """
-Ran `node <probe>.js` for each of the 20 probes, capturing stdout and stderr merged, and \
+Ran `node <probe>.js` for each of the 21 probes, capturing stdout and stderr merged, and \
 recorded the bytes verbatim. The original corpus never stored expected output at all - its \
 guard/run.sh diffs porffor's output against a live `node` run each time - so there was no \
-recorded value to copy and it had to be produced. All 20 exit 0 and write nothing to stderr.\
+recorded value to copy and it had to be produced. All 21 exit 0 and write nothing to stderr.\
 """
 effect = """
 Each program carries an `// expect:` comment, but those are lossy: they join lines with " | " \
@@ -77,7 +77,7 @@ the mock event driver's virtual time rather than by real sleeping, and the tests
 """
 
 # ---------------------------------------------------------------------------------------------
-# guard/ - 20 standalone probes, one behaviour each.
+# guard/ - 21 standalone probes, one behaviour each.
 #
 # `catches` records which compiler defect the probe was written to catch. In the source corpus
 # that rationale lives in guard/gen.mjs (the generator), NOT in the probe files - only three of
@@ -879,4 +879,25 @@ expected_stdout = """
 true s -150 0
 {"n":"a\\"b\\\\cé\\n"}
 true
+"""
+
+[[test]]
+id = "guard/g20-property-completeness"
+group = "guard"
+source = "guard/g20-property-completeness.js"
+status = "runnable"
+features = ["property-key-order", "property-descriptors", "function-properties", "array-iterator", "object-statics"]
+catches = """
+Integer-index, string, and symbol key ordering; non-enumerable descriptor defaults; callable own
+properties through `in`, spread, and `Object.assign`; and arrays honoring an overridden
+`Symbol.iterator` in spread and `Array.from`. These paths share one typed-key store and regress
+together when any operation falls back to a type-only shortcut.
+"""
+expected_stdout = """
+1,2,b,a,z,hidden,Symbol(first),Symbol(second)
+1,2,b,a,z 4,2,1,3,6 1:4,2:2,b:1,a:3,z:6
+2 7 8
+true true visible visible,hidden,Symbol(first)
+1 1 true false
+7,8 7,8
 """
