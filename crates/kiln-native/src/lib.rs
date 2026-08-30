@@ -2841,8 +2841,12 @@ int main(void) {
 
         for (name, program) in scalar_equivalence_programs() {
             let mut host = kiln_runtime::CaptureHost::new();
-            kiln_interpreter::execute(std::rc::Rc::new(program.clone()), &mut host, Default::default())
-                .unwrap_or_else(|error| panic!("interpreter fixture {name} failed: {error}"));
+            kiln_interpreter::execute(
+                std::rc::Rc::new(program.clone()),
+                &mut host,
+                Default::default(),
+            )
+            .unwrap_or_else(|error| panic!("interpreter fixture {name} failed: {error}"));
             let expected = host.into_stdout().into_bytes();
             let native = builder
                 .run(

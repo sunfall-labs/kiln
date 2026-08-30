@@ -304,6 +304,12 @@ pub enum StatementKind {
         pattern: Pattern,
         iterable: Expression,
         body: Box<Statement>,
+        /// `for await (… of …)`: take the async iterator when there is one, and await each step.
+        ///
+        /// A flag rather than a separate statement, because the two differ only in where the
+        /// awaits go -- the iterator protocol, the per-iteration binding, and closing the
+        /// iterator on an early exit are the same loop.
+        awaiting: bool,
     },
     /// `throw expression`.
     Throw(Expression),
