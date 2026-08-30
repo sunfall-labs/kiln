@@ -629,6 +629,13 @@ impl NativeBuilder {
         let runtime_link_digest = runtime_dso
             .as_ref()
             .map_or(runtime_digest, |runtime| runtime.digest);
+        let executable_inputs = executable_link_inputs(
+            [application_digest],
+            runtime_link_digest,
+            launcher_digest,
+            number_provider_digest,
+            dynamic_runtime,
+        );
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -637,12 +644,7 @@ impl NativeBuilder {
             &target,
             profile.cache(),
             link_options_digest,
-            [
-                application_digest,
-                runtime_link_digest,
-                launcher_digest,
-                number_provider_digest,
-            ],
+            executable_inputs,
         );
         let (executable, executable_digest, executable_hit, link_elapsed) =
             match self.cache.lookup(&executable_key)? {
@@ -1516,17 +1518,16 @@ impl NativeBuilder {
         } else {
             Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes())
         };
-        let mut link_inputs = module_objects
-            .iter()
-            .map(|(_, digest, _)| *digest)
-            .collect::<Vec<_>>();
-        link_inputs.push(
-            runtime_dso
-                .as_ref()
-                .map_or(runtime_digest, |runtime| runtime.digest),
+        let runtime_link_digest = runtime_dso
+            .as_ref()
+            .map_or(runtime_digest, |runtime| runtime.digest);
+        let link_inputs = executable_link_inputs(
+            module_objects.iter().map(|(_, digest, _)| *digest),
+            runtime_link_digest,
+            launcher_digest,
+            number_provider_digest,
+            dynamic_runtime,
         );
-        link_inputs.push(launcher_digest);
-        link_inputs.push(number_provider_digest);
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -3188,6 +3189,24 @@ fn dynamic_cli_runtime_enabled(profile: NativeProfile) -> bool {
     profile == NativeProfile::Dev && cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
+fn executable_link_inputs(
+    modules: impl IntoIterator<Item = Digest>,
+    runtime: Digest,
+    launcher: Digest,
+    provider: Digest,
+    dynamic_runtime: bool,
+) -> Vec<Digest> {
+    let mut inputs = modules.into_iter().collect::<Vec<_>>();
+    // Artifact inputs preserve linker order. A static runtime is an object before the launcher;
+    // the Dev runtime DSO and provider archive are libraries after the launcher object.
+    if dynamic_runtime {
+        inputs.extend([launcher, runtime, provider]);
+    } else {
+        inputs.extend([runtime, launcher, provider]);
+    }
+    inputs
+}
+
 fn cli_runtime_content_identity(
     compiler: &str,
     runtime_abi: &str,
@@ -3353,6 +3372,23 @@ mod tests {
 
         assert_ne!(unset, empty_sdk_root);
         assert_ne!(unset, empty_deployment);
+    }
+
+    #[test]
+    fn executable_cache_inputs_follow_static_and_dynamic_link_order() {
+        let module = Digest::hash(b"module");
+        let runtime = Digest::hash(b"runtime");
+        let launcher = Digest::hash(b"launcher");
+        let provider = Digest::hash(b"provider");
+
+        assert_eq!(
+            executable_link_inputs([module], runtime, launcher, provider, false),
+            vec![module, runtime, launcher, provider]
+        );
+        assert_eq!(
+            executable_link_inputs([module], runtime, launcher, provider, true),
+            vec![module, launcher, runtime, provider]
+        );
     }
 
     #[test]
