@@ -298,6 +298,7 @@ pub enum Native {
     ObjectFromEntries,
     ArrayOf,
     StringFromCharCode,
+    StringFromCodePoint,
     Reflect,
     ReflectOwnKeys,
     ReflectGet,
@@ -755,6 +756,9 @@ impl Native {
             (Self::StringConstructor, "raw") => Some(Value::Native(Self::StringRaw)),
             (Self::StringConstructor, "fromCharCode") => {
                 Some(Value::Native(Self::StringFromCharCode))
+            }
+            (Self::StringConstructor, "fromCodePoint") => {
+                Some(Value::Native(Self::StringFromCodePoint))
             }
             // `Reflect` is mostly the `Object` statics with a different failure convention, and
             // the ones a program actually reaches are the ones that behave identically here.
@@ -3367,6 +3371,14 @@ pub enum ExecutionError {
     ProxyNotSerialisable,
     /// `array.length = x` where `x` is not a whole number in range.
     InvalidArrayLength,
+    /// `String.fromCodePoint` handed something that is not a code point.
+    ///
+    /// Carries what was written rather than a fixed sentence: the specification refuses a
+    /// fraction, a `NaN`, an infinity and anything above `U+10FFFF` under one rule, and the
+    /// value is the only thing that says which of them this was.
+    InvalidCodePoint {
+        value: String,
+    },
     /// A `TypeError` the specification states with wording of its own.
     ///
     /// Every other variant here stands for one condition and builds its message from it. The
@@ -3576,6 +3588,7 @@ impl fmt::Display for ExecutionError {
                 write!(formatter, "generator is already running")
             }
             Self::InvalidArrayLength => write!(formatter, "invalid array length"),
+            Self::InvalidCodePoint { value } => write!(formatter, "invalid code point {value}"),
             Self::TemporalFailure { message, .. } => write!(formatter, "{message}"),
             Self::IntlFailure { message, .. } => write!(formatter, "{message}"),
             Self::BufferTooLarge { bytes } => write!(
@@ -3730,6 +3743,9 @@ impl ExecutionError {
                 "Cannot perform this operation on a revoked proxy".to_owned(),
             ),
             Self::InvalidArrayLength => (ErrorKind::Range, "Invalid array length".to_owned()),
+            Self::InvalidCodePoint { value } => {
+                (ErrorKind::Range, format!("Invalid code point {value}"))
+            }
             // Catchable, and with the engine's own classification kept: a program that asks for
             // an impossible date is told `RangeError` because that is what the specification
             // says, not because this is the nearest kind to hand.
@@ -7821,12 +7837,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A step that is not an object has no `done` to read, and treating its absence as
             // "not done" is the same non-terminating walk by another route.
             if !is_an_object(&step) {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: format!(
-                        "iterator result {} is not an object",
-                        step.to_display_string()
-                    ),
-                });
+                return Err(ExecutionError::IteratorResultNotAnObject);
             }
             if self.read_property(&step, "done", instruction)?.is_truthy() {
                 return Ok(collected);
@@ -12264,6 +12275,32 @@ fn call_native(
                 .map(|value| value.as_number() as u16)
                 .collect::<Vec<_>>(),
         )),
+        // Each argument is a whole *code point*, not a UTF-16 unit, so an astral one becomes the
+        // surrogate pair that spells it. This is what `harness/regExpUtils.js` builds its test
+        // strings with, so its absence took every property-escape test with it.
+        Native::StringFromCodePoint => {
+            let mut units = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                let number = argument.as_number();
+                // One comparison for the specification's three refusals: `ToIntegerOrInfinity`
+                // differing from the number itself rejects a fraction, a `NaN` and an infinity,
+                // and the range check rejects anything outside Unicode.
+                if number.fract() != 0.0 || !(0.0..=1_114_111.0).contains(&number) {
+                    return Err(ExecutionError::InvalidCodePoint {
+                        value: argument.to_display_string(),
+                    });
+                }
+                let code_point = number as u32;
+                if let Ok(unit) = u16::try_from(code_point) {
+                    units.push(unit);
+                } else {
+                    let offset = code_point - 0x1_0000;
+                    units.push(0xD800 + (offset >> 10) as u16);
+                    units.push(0xDC00 + (offset & 0x3FF) as u16);
+                }
+            }
+            Value::String(String::from_utf16_lossy(&units))
+        }
         Native::ObjectFreeze => {
             match arguments.first().unwrap_or(&Value::Undefined) {
                 Value::Object(object) => object.borrow_mut().freeze(),
