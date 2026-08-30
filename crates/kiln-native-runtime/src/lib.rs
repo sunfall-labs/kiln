@@ -8,16 +8,8 @@
 
 use std::sync::OnceLock;
 
-use kiln_native_number::{
-    NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION, runtime_source as native_number_runtime_source,
-};
-
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 3;
-
-// Changing either number conversion changes the runtime source and requires an identity bump.
-const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
-const _: () = assert!(NUMBER_PARSE_VERSION == 1);
+pub const NATIVE_RUNTIME_VERSION: u32 = 4;
 
 /// C entry-point ABI version declared by [`embedding_header`].
 pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
@@ -94,16 +86,11 @@ pub type RuntimeError = RuntimeSourceError;
 pub fn runtime_source() -> &'static str {
     RUNTIME_SOURCE
         .get_or_init(|| {
-            let number_source = native_number_runtime_source();
             let mut source = String::with_capacity(
-                RUNTIME_PREFIX.len()
-                    + embedding_header().len()
-                    + number_source.len()
-                    + RUNTIME_BODY.len(),
+                RUNTIME_PREFIX.len() + embedding_header().len() + RUNTIME_BODY.len(),
             );
             source.push_str(RUNTIME_PREFIX);
             source.push_str(embedding_header());
-            source.push_str(number_source);
             source.push_str(RUNTIME_BODY);
             source
         })
@@ -165,7 +152,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 3
+#define KILN_NATIVE_RUNTIME_VERSION 4
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -254,6 +241,11 @@ const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOp
 "#;
 
 const RUNTIME_BODY: &str = r#"
+/* Private number-provider ABI. The native linker supplies these from the validated runtime
+ * provider artifact; they are deliberately absent from the public embedding header. */
+extern int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
+extern double kiln_string_to_number(const char *bytes, size_t length);
+
 static int kiln_cli_write_bytes(const char *bytes, size_t length) {
     if (length != 0 && bytes == NULL) {
         return KILN_C99_HOST_ERROR;
@@ -399,16 +391,15 @@ mod tests {
         assert!(
             runtime_source().contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
         );
-        assert!(runtime_source().contains(kiln_native_number::source()));
+        assert!(runtime_source().contains("Private number-provider ABI"));
+        assert!(!runtime_source().contains("Copyright 2024 Tiago Carvalho"));
         assert!(!runtime_source().contains("%.17g"));
         assert!(!runtime_source().contains("kiln_module_"));
     }
 
     #[test]
-    fn runtime_identity_includes_native_number_conversion_versions() {
-        assert_eq!(NUMBER_FORMAT_VERSION, 1);
-        assert_eq!(NUMBER_PARSE_VERSION, 1);
-        assert_eq!(NATIVE_RUNTIME_VERSION, 3);
+    fn runtime_identity_is_separate_from_the_private_number_provider() {
+        assert_eq!(NATIVE_RUNTIME_VERSION, 4);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));
@@ -613,6 +604,7 @@ int main(void) {
         let launcher = root.join("launcher.c");
         let header = root.join("kiln_host.h");
         let stub = root.join("stub.c");
+        let number_provider = root.join("number-provider.c");
         let executable = root.join("kiln-test");
         std::fs::write(&runtime, runtime_source()).expect("write runtime");
         std::fs::write(
@@ -622,6 +614,8 @@ int main(void) {
         .expect("write launcher");
         std::fs::write(&header, embedding_header()).expect("write header");
         std::fs::write(&stub, STUB_SOURCE).expect("write stub");
+        std::fs::write(&number_provider, kiln_native_number::runtime_source())
+            .expect("write test number provider");
         let compile = Command::new(cc)
             .args([
                 "-std=c11",
@@ -632,7 +626,12 @@ int main(void) {
                 // Ryu's portable amalgamation retains target-specific static inline helpers.
                 "-Wno-unused-function",
             ])
-            .args([runtime.as_os_str(), launcher.as_os_str(), stub.as_os_str()])
+            .args([
+                runtime.as_os_str(),
+                launcher.as_os_str(),
+                stub.as_os_str(),
+                number_provider.as_os_str(),
+            ])
             .arg("-o")
             .arg(&executable)
             .output()

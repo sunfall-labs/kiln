@@ -14,6 +14,8 @@ kiln-module-graph = { workspace = true }
 kiln-native-number = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 kiln-interpreter = { workspace = true }
