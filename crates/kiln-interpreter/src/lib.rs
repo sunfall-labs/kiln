@@ -3491,13 +3491,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
                     let found = match target {
-                        Value::Object(object) => {
-                            object.borrow().get_own(internal_key(&name)).is_some()
-                        }
+                        Value::Object(object) => object
+                            .borrow()
+                            .get_own_property(internal_key(&name))
+                            .is_some(),
                         Value::Function(closure) => closure
                             .properties
                             .borrow()
-                            .get_own(internal_key(&name))
+                            .get_own_property(internal_key(&name))
                             .is_some(),
                         other => {
                             self.throw_error(
@@ -3522,17 +3523,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // of the rest of the shape it shares.
                     let private_key = internal_key(&name);
                     let found = match &target {
-                        Value::Object(object) => {
-                            object.borrow().get_own(private_key.clone()).cloned()
-                        }
+                        Value::Object(object) => object
+                            .borrow()
+                            .get_own_property(private_key.clone())
+                            .cloned(),
                         Value::Function(closure) => closure
                             .properties
                             .borrow()
-                            .get_own(private_key.clone())
+                            .get_own_property(private_key.clone())
                             .cloned(),
                         _ => None,
                     };
-                    let Some(value) = found else {
+                    let Some(property) = found else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
@@ -3543,24 +3545,48 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     };
-                    self.stack.push(value);
+                    match property {
+                        Property::Value(value) => self.stack.push(value),
+                        Property::Accessor {
+                            get: Some(getter), ..
+                        } => {
+                            let read = self.call_value(&getter, target, Vec::new(), current);
+                            let Some(value) = self.catchable(read, current)? else {
+                                continue;
+                            };
+                            self.stack.push(value);
+                        }
+                        Property::Accessor { get: None, .. } => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "Cannot read private member #{} which has no getter",
+                                    name.trim_start_matches("@@private:")
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
+                    }
                 }
                 Instruction::SetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let present = match &target {
-                        Value::Object(object) => {
-                            object.borrow().get_own(internal_key(&name)).is_some()
-                        }
+                    let private_key = internal_key(&name);
+                    let found = match &target {
+                        Value::Object(object) => object
+                            .borrow()
+                            .get_own_property(private_key.clone())
+                            .cloned(),
                         Value::Function(closure) => closure
                             .properties
                             .borrow()
-                            .get_own(internal_key(&name))
-                            .is_some(),
-                        _ => false,
+                            .get_own_property(private_key.clone())
+                            .cloned(),
+                        _ => None,
                     };
-                    if !present {
+                    let Some(property) = found else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
@@ -3570,16 +3596,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             current,
                         )?;
                         continue;
-                    }
-                    match target {
-                        Value::Object(object) => {
-                            object.borrow_mut().set(internal_key(&name), value.clone())
+                    };
+                    match property {
+                        Property::Value(_) => match target {
+                            Value::Object(object) => {
+                                object.borrow_mut().set(private_key, value.clone())
+                            }
+                            Value::Function(closure) => closure
+                                .properties
+                                .borrow_mut()
+                                .set(private_key, value.clone()),
+                            _ => {}
+                        },
+                        Property::Accessor {
+                            set: Some(setter), ..
+                        } => {
+                            let written =
+                                self.call_value(&setter, target, vec![value.clone()], current);
+                            if self.catchable(written, current)?.is_none() {
+                                continue;
+                            }
                         }
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow_mut()
-                            .set(internal_key(&name), value.clone()),
-                        _ => {}
+                        Property::Accessor { set: None, .. } => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "Cannot write private member #{} which has no setter",
+                                    name.trim_start_matches("@@private:")
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
                     }
                     self.stack.push(value);
                 }
@@ -4758,12 +4806,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let enumerable = self
                     .read_property(&descriptor, "enumerable", instruction)?
                     .is_truthy();
+                let value_present = has_property(&descriptor, &Value::String("value".to_owned()));
+                let getter_present = has_property(&descriptor, &Value::String("get".to_owned()));
+                let setter_present = has_property(&descriptor, &Value::String("set".to_owned()));
+                let existing = match &target {
+                    Value::Object(object) => object.borrow().get_own_property(key.clone()).cloned(),
+                    Value::Function(closure) => closure
+                        .properties
+                        .borrow()
+                        .get_own_property(key.clone())
+                        .cloned(),
+                    Value::Array(items) => {
+                        match string_key(&key).and_then(|key| key.parse::<usize>().ok()) {
+                            Some(index) => items.borrow().get(index).and_then(|value| {
+                                (!matches!(value, Value::Native(Native::Hole)))
+                                    .then(|| Property::Value(value.clone()))
+                            }),
+                            None => items
+                                .properties
+                                .borrow()
+                                .get_own_property(key.clone())
+                                .cloned(),
+                        }
+                    }
+                    _ => None,
+                };
                 let getter = self.read_property(&descriptor, "get", instruction)?;
                 let setter = self.read_property(&descriptor, "set", instruction)?;
-                if is_callable(&getter) || is_callable(&setter) {
+                if getter_present || setter_present {
+                    let (old_getter, old_setter) = match existing {
+                        Some(Property::Accessor { get, set }) => (get, set),
+                        _ => (None, None),
+                    };
                     let halves = (
-                        is_callable(&getter).then_some(getter),
-                        is_callable(&setter).then_some(setter),
+                        if getter_present {
+                            is_callable(&getter).then_some(getter)
+                        } else {
+                            old_getter
+                        },
+                        if setter_present {
+                            is_callable(&setter).then_some(setter)
+                        } else {
+                            old_setter
+                        },
                     );
                     match &target {
                         Value::Object(object) => {
@@ -4779,8 +4864,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         _ => {}
                     }
+                } else if !value_present && existing.is_some() {
+                    // A partial descriptor such as `{ enumerable: false }` changes only the
+                    // requested attributes. In particular, it must not turn an existing
+                    // accessor into a data property whose value is `undefined`.
                 } else {
-                    let value = self.read_property(&descriptor, "value", instruction)?;
+                    let value = if value_present {
+                        self.read_property(&descriptor, "value", instruction)?
+                    } else {
+                        match existing {
+                            Some(Property::Value(value)) => value,
+                            _ => Value::Undefined,
+                        }
+                    };
                     // An own property, not an assignment: see `ObjectData::define_value`.
                     match &target {
                         Value::Object(object) => object.borrow_mut().define_value(&key, value),
@@ -10807,6 +10903,9 @@ fn own_property_exists(target: &Value, key: &Value) -> bool {
                     .get(index as usize)
                     .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
             }
+            if key == PropertyKey::String("length".to_owned()) {
+                return true;
+            }
             items.properties.borrow().get_own_property(key).is_some()
         }
         Value::String(text) => match key {
@@ -12608,6 +12707,7 @@ fn own_property_keys(target: &Value) -> Vec<PropertyKey> {
                 .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
                 .map(|(index, _)| PropertyKey::String(index.to_string()))
                 .collect();
+            keys.push(PropertyKey::String("length".to_owned()));
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
@@ -12639,6 +12739,10 @@ fn own_property_entries(value: &Value) -> Vec<(PropertyKey, Property)> {
                     )
                 })
                 .collect::<Vec<_>>();
+            properties.push((
+                PropertyKey::String("length".to_owned()),
+                Property::Value(Value::Number(items.borrow().len() as f64)),
+            ));
             properties.extend(from_object(&items.properties.borrow()));
             properties
         }
@@ -12663,6 +12767,8 @@ fn own_property_entries(value: &Value) -> Vec<(PropertyKey, Property)> {
 /// actually build -- a plain object and a frozen one -- and wrong only for a property made
 /// non-writable on its own, which nothing can express yet.
 fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
+    let intrinsic_array_length =
+        matches!(target, Value::Array(_)) && *key == PropertyKey::String("length".to_owned());
     let frozen = match target {
         Value::Object(object) => object.borrow().is_frozen(),
         Value::Function(closure) => closure.properties.borrow().is_frozen(),
@@ -12672,10 +12778,18 @@ fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
     let property = match target {
         Value::Object(object) => object.borrow().get_own_property(key).cloned(),
         Value::Function(closure) => closure.properties.borrow().get_own_property(key).cloned(),
-        Value::Array(items) => match string_key(key).and_then(|key| key.parse::<usize>().ok()) {
-            Some(index) => match items.borrow().get(index) {
-                Some(Value::Native(Native::Hole)) | None => None,
-                Some(item) => Some(Property::Value(item.clone())),
+        Value::Array(items) => match string_key(key) {
+            Some("length") => Some(Property::Value(Value::Number(items.borrow().len() as f64))),
+            Some(name) => match name.parse::<usize>().ok() {
+                Some(index) => match items.borrow().get(index) {
+                    Some(Value::Native(Native::Hole)) | None => None,
+                    Some(item) => Some(Property::Value(item.clone())),
+                },
+                None => items
+                    .properties
+                    .borrow()
+                    .get_own_property(key.clone())
+                    .cloned(),
             },
             None => items
                 .properties
@@ -12700,7 +12814,10 @@ fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
         "enumerable",
         Value::Boolean(own_enumerable(target, &key_value(key))),
     );
-    data.set("configurable", Value::Boolean(!frozen));
+    data.set(
+        "configurable",
+        Value::Boolean(!frozen && !intrinsic_array_length),
+    );
     Some(Value::Object(Rc::new(RefCell::new(data))))
 }
 
@@ -13986,6 +14103,75 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn private_accessor_reads_call_getter_and_private_in_checks_slot() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![Constant::String("@@private:0:value".into()), number(7.0)],
+            code: vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::MakeFunction(0),
+                Instruction::DefinePrivateAccessor {
+                    name: 0,
+                    setter: false,
+                },
+                Instruction::Dup,
+                Instruction::PrivateIn(0),
+                Instruction::Pop,
+                Instruction::GetPrivate(0),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                asynchronous: false,
+                name: Some("get value".into()),
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                parameter_count: 0,
+                local_count: 0,
+                code: vec![Instruction::Const(1), Instruction::Return],
+                upvalues: Vec::new(),
+            }],
+        };
+        assert_eq!(run(&program), Ok(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn private_accessor_without_setter_rejects_writes_in_module_semantics() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![Constant::String("@@private:0:value".into()), number(2.0)],
+            code: vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::MakeFunction(0),
+                Instruction::DefinePrivateAccessor {
+                    name: 0,
+                    setter: false,
+                },
+                Instruction::Const(1),
+                Instruction::SetPrivate(0),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                asynchronous: false,
+                name: Some("get value".into()),
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                parameter_count: 0,
+                local_count: 0,
+                code: vec![Instruction::Const(1), Instruction::Return],
+                upvalues: Vec::new(),
+            }],
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::Uncaught { message, .. }) if message.contains("no setter")
+        ));
+    }
+
     fn number(value: f64) -> Constant {
         Constant::Number(value.to_bits())
     }
@@ -14514,6 +14700,64 @@ mod tests {
                 .into_iter()
                 .find(|(key, _)| key == &PropertyKey::Symbol(symbol.clone())),
             Some((_, Property::Accessor { .. }))
+        ));
+    }
+
+    #[test]
+    fn array_own_property_apis_include_intrinsic_length() {
+        let value = Value::Array(ArrayData::new(vec![Value::Number(1.0)]));
+        assert!(own_property_exists(&value, &Value::String("length".into())));
+        assert_eq!(
+            own_property_keys(&value),
+            vec![
+                PropertyKey::String("0".into()),
+                PropertyKey::String("length".into())
+            ]
+        );
+        let descriptor = own_descriptor(&value, &PropertyKey::String("length".into()))
+            .expect("array length descriptor");
+        assert!(matches!(
+            descriptor,
+            Value::Object(object)
+                if object.borrow().get("configurable") == Some(Value::Boolean(false))
+        ));
+    }
+
+    #[test]
+    fn partial_define_property_preserves_an_existing_accessor() {
+        let mut source = ObjectData::default();
+        source.define_accessor(
+            "value",
+            Some(Value::Native(Native::ArrayValues)),
+            Some(Value::Native(Native::ArrayPush)),
+        );
+        let target = Value::Object(Rc::new(RefCell::new(source)));
+        let mut descriptor = ObjectData::default();
+        descriptor.set("enumerable", Value::Boolean(false));
+        let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        vm.dispatch_native(
+            Native::ObjectDefineProperty,
+            &Value::Undefined,
+            &[target.clone(), Value::String("value".into()), descriptor],
+            0,
+        )
+        .expect("define property");
+        assert!(matches!(
+            target,
+            Value::Object(object)
+                if matches!(
+                    object.borrow().get_own_property("value"),
+                    Some(Property::Accessor { .. })
+                )
         ));
     }
 

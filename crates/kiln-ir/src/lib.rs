@@ -3169,33 +3169,33 @@ impl Compiler {
                 span: class.span,
             },
         };
+        // Compile every method while the class's private scope and lexical bindings are active,
+        // but before entering the constructor. In particular, compiling a private method as a
+        // constructor field expression would let it capture constructor parameters -- a method
+        // body is created in class lexical context, never in one particular constructor call.
+        let mut compiled_methods = Vec::with_capacity(class.methods.len());
+        for method in &class.methods {
+            let Some(body) = self.compile_function(&method.function, class.span) else {
+                return;
+            };
+            compiled_methods.push(body);
+        }
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
-        // A private instance method is installed on each *instance*, not on the prototype: that
+        // A private instance member is installed on each *instance*, not on the prototype: that
         // is what carries the brand, and what makes `D.f()` on a sibling class a TypeError rather
-        // than a call. Modelled as a field whose value is the function, so the constructor
-        // prologue that already installs fields installs these too.
-        let private_methods: Vec<ClassField> = class
+        // than a call. Accessor halves are included here too; defining them on the prototype
+        // would make `#x` reads fail the own-only brand check.
+        let private_methods: Vec<(ObjectKey, kiln_hir::MethodKind, u32)> = class
             .methods
             .iter()
-            .filter(|method| {
-                !method.is_static
-                    && matches!(method.key, ObjectKey::Private(_))
-                    && matches!(method.kind, kiln_hir::MethodKind::Normal)
-            })
-            .map(|method| ClassField {
-                key: method.key.clone(),
-                value: Some(Expression {
-                    kind: ExpressionKind::Function(Box::new(method.function.clone())),
-                    span: method.function.span,
-                }),
-                is_static: false,
-            })
+            .zip(compiled_methods.iter().copied())
+            .filter(|(method, _)| !method.is_static && matches!(method.key, ObjectKey::Private(_)))
+            .map(|(method, body)| (method.key.clone(), method.kind, body))
             .collect();
         let instance_fields: Vec<&ClassField> = class
             .fields
             .iter()
             .filter(|field| !field.is_static)
-            .chain(private_methods.iter())
             .collect();
         let Some(index) = self.compile_constructor(
             &constructor,
@@ -3205,6 +3205,7 @@ impl Compiler {
             // no message.
             synthesized_derived,
             &instance_fields,
+            &private_methods,
         ) else {
             return;
         };
@@ -3261,11 +3262,7 @@ impl Compiler {
             self.code.push(Instruction::Pop);
         }
 
-        for method in &class.methods {
-            let Some(body) = self.compile_function(&method.function, class.span) else {
-                return;
-            };
-
+        for (method, body) in class.methods.iter().zip(compiled_methods) {
             // Static methods hang off the constructor; instance methods off its prototype.
             self.load_local_or_cell(local);
             if !method.is_static {
@@ -3274,8 +3271,9 @@ impl Compiler {
 
             let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
-                // Installed on each instance by the constructor prologue instead.
-                ObjectKey::Private(_) if !method.is_static && !accessor => {
+                // Installed on each instance by the constructor prologue instead. This includes
+                // both ordinary private methods and accessor halves.
+                ObjectKey::Private(_) if !method.is_static => {
                     self.code.push(Instruction::Pop);
                     continue;
                 }
@@ -3423,7 +3421,7 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
     ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[])
+        self.compile_constructor(function, span, forwards_to_super, &[], &[])
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -3437,6 +3435,7 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
         fields: &[&ClassField],
+        private_methods: &[(ObjectKey, kiln_hir::MethodKind, u32)],
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
@@ -3530,6 +3529,28 @@ impl Compiler {
         if forwards_to_super {
             self.load_super();
             self.code.push(Instruction::SuperForward);
+            self.code.push(Instruction::Pop);
+        }
+        // Private methods and accessor halves are per-instance slots. Their function prototypes
+        // were compiled in the enclosing class context, so making the closure here captures
+        // only that context and cannot accidentally capture this constructor's parameters.
+        for (key, kind, body) in private_methods {
+            let ObjectKey::Private(member_name) = key else {
+                continue;
+            };
+            self.code.push(Instruction::LoadThis);
+            let name = self.constant_index(Constant::String(self.private_key(member_name)));
+            self.code.push(Instruction::MakeFunction(*body));
+            match kind {
+                kiln_hir::MethodKind::Get => self.code.push(Instruction::DefinePrivateAccessor {
+                    name,
+                    setter: false,
+                }),
+                kiln_hir::MethodKind::Set => self
+                    .code
+                    .push(Instruction::DefinePrivateAccessor { name, setter: true }),
+                kiln_hir::MethodKind::Normal => self.code.push(Instruction::InitPrivate(name)),
+            }
             self.code.push(Instruction::Pop);
         }
         for field in fields {
