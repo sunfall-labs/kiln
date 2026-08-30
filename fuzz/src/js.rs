@@ -80,9 +80,18 @@ const NUMBERS: [&str; 14] = [
 ];
 
 /// Strings chosen for the places string semantics are decided: empty, numeric-looking (so `+`
-/// and `==` have to choose), whitespace-only (`Number(" ")` is 0, not NaN), a lone surrogate,
-/// and an astral pair whose length in code units is not its length in scalar values (ADR 0022).
-const STRINGS: [&str; 8] = [
+/// and `==` have to choose), whitespace-only (`Number(" ")` is 0, not NaN), and an astral pair
+/// whose length in code units is not its length in scalar values (ADR 0022).
+///
+/// A **lone surrogate is deliberately not here**, though it is the sharpest input of the set.
+/// ADR 0022 accepts, indefinitely, that kiln cannot represent one: a Rust `String` is well-formed
+/// UTF-8 and has nowhere to put it. So every program containing one diverges from node no matter
+/// what else it does, and generating them would report the same accepted limitation forever --
+/// which is how a fuzzer earns being switched off. The bug itself is not lost: it is pinned in
+/// `findings/lone-surrogate-escape-minimal.js` and argued in the ADR.
+///
+/// Put it back the day that decision is reopened, and it should start failing immediately.
+const STRINGS: [&str; 7] = [
     r#""""#,
     r#""x""#,
     r#""0""#,
@@ -90,7 +99,6 @@ const STRINGS: [&str; 8] = [
     r#""  ""#,
     r#""\n""#,
     r#""😀""#,
-    r#""\ud800""#,
 ];
 
 #[derive(Debug, Clone, Arbitrary)]
