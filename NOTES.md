@@ -2111,14 +2111,21 @@ round-trips through its canonical decimal spelling, so `a["01"]` stays a named p
 "undefined is not a function" three frames from the cause. Same for a property read through
 `undefined` or `null`, which is a TypeError in the language.
 
-**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`,
-`CallMethod` (so no `a.push(x)` yet, though the runtime has the primitive), accessors, `delete`,
-`EnumerateKeys`, spread, `this`, `try`/`throw`, then generators and `async`.
+**Methods and `this` came with it.** `CallMethod` is not a `GetProperty` followed by a `Call`:
+that discards the receiver, and the read has to yield the *unbound* function so `a.f === a.f`
+holds. The receiver stays on the stack until the call, which is what lets both be true, and it
+becomes `this` in the body -- so `{ n: 0, bump() { this.n += 1 } }` runs natively. `this` in a
+module is undefined, because a module is strict and strict mode does not substitute the global
+object; the entry point declares a receiver only if the body asks for one.
+
+**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, the array
+and string *methods* (`a.push(x)` still refuses, though the runtime has the primitive), accessors,
+`delete`, `EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 4/4, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 5/5, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.

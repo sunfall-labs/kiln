@@ -252,7 +252,7 @@ typedef struct kiln_host {
  * interpreter uses, so both engines print `[Function 3]` for the same function. */
 struct kiln_closure;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            const kiln_value *args, size_t argc, int depth);
+                            kiln_value receiver, const kiln_value *args, size_t argc, int depth);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
@@ -549,8 +549,10 @@ static kiln_value kiln_c99_text(kiln_value value);
 
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
+/* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`
+ * is in a module: modules are strict, and strict mode does not substitute the global object. */
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         const kiln_value *args, size_t argc, int depth) {
+                         kiln_value receiver, const kiln_value *args, size_t argc, int depth) {
     kiln_closure *closure;
     if (!kiln_c99_is_callable(callee)) {
         return KILN_C99_CONTROL_ERROR;
@@ -571,7 +573,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
-    return closure->body(host, result, closure->upvalues, args, argc, depth + 1);
+    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1);
 }
 
 static kiln_value kiln_c99_number(double value) {
@@ -1551,23 +1553,23 @@ fn validate_code(
             }
             // A property name is emitted by naming the constant's own C symbol, and only a
             // string constant has one.
-            Instruction::GetProperty(name) | Instruction::SetProperty(name) => {
-                match program.constants.get(*name as usize) {
-                    Some(Constant::String(_)) => {}
-                    Some(_) => {
-                        return Err(invalid(
-                            index,
-                            format!("property name constant {name} is not a string"),
-                        ));
-                    }
-                    None => {
-                        return Err(invalid(
-                            index,
-                            format!("property name constant {name} is out of bounds"),
-                        ));
-                    }
+            Instruction::GetProperty(name)
+            | Instruction::SetProperty(name)
+            | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
+                Some(Constant::String(_)) => {}
+                Some(_) => {
+                    return Err(invalid(
+                        index,
+                        format!("property name constant {name} is not a string"),
+                    ));
                 }
-            }
+                None => {
+                    return Err(invalid(
+                        index,
+                        format!("property name constant {name} is out of bounds"),
+                    ));
+                }
+            },
             Instruction::LoadLocal(local)
             | Instruction::StoreLocal(local)
             | Instruction::NewCell(local)
@@ -1712,6 +1714,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::NewArray { .. }
         | Instruction::GetComputed
         | Instruction::SetComputed
+        | Instruction::CallMethod { .. }
+        | Instruction::LoadThis
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -1803,9 +1807,7 @@ fn stack_effect(
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
-        | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
-        | Instruction::LoadThis
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
@@ -1872,6 +1874,17 @@ fn stack_effect(
                 Err(underflow(3))
             } else {
                 Ok((height - 2, false))
+            }
+        }
+        Instruction::LoadThis => Ok((height + 1, false)),
+        // The receiver sits under the arguments, exactly where a callee would, and the result
+        // replaces both -- so a method call and a plain call have the same shape here.
+        Instruction::CallMethod { argc, .. } => {
+            let needed = usize::from(*argc) + 1;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
             }
         }
         // The callee sits under its arguments, and the result replaces both.
@@ -1964,16 +1977,28 @@ fn produces_callables(program: &Program) -> bool {
     makes_one(&program.code) || program.functions.iter().any(|proto| makes_one(&proto.code))
 }
 
+/// Whether a body reads `this`.
+///
+/// The module entry point has no receiver parameter, so it declares one only when the body asks
+/// for it -- and a module's `this` is undefined, because a module is strict and strict mode does
+/// not substitute the global object.
+fn uses_this(code: &[Instruction]) -> bool {
+    code.iter()
+        .any(|instruction| matches!(instruction, Instruction::LoadThis))
+}
+
 /// Whether the emitted entry point needs a call-depth counter.
 ///
 /// A program with no call is the scalar shape this backend has always produced, and it must keep
 /// producing byte-for-byte the same unit: the output is content-addressed, so even a declaration
 /// nothing reads would invalidate every cached object.
 fn tracks_call_depth(program: &Program) -> bool {
-    program
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Call { .. }))
+    program.code.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instruction::Call { .. } | Instruction::CallMethod { .. }
+        )
+    })
 }
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
@@ -2026,7 +2051,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, const kiln_value *args, size_t argc, int depth);"
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth);"
         )
         .unwrap();
     }
@@ -2066,14 +2091,14 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, const kiln_value *args, size_t argc, int depth) {{"
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(output, "    kiln_value locals[{locals}];").unwrap();
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
-    output.push_str("    (void)host; (void)upvalues; (void)depth;\n");
+    output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
     writeln!(
         output,
         "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
@@ -2135,6 +2160,9 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    if uses_this(&program.code) {
+        output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
+    }
     if tracks_call_depth(program) {
         output.push_str("    int depth = 0;\n");
     }
@@ -2195,6 +2223,9 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    if uses_this(&program.code) {
+        output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
+    }
     if tracks_call_depth(program) {
         output.push_str("    int depth = 0;\n");
     }
@@ -2316,9 +2347,7 @@ fn emit_instruction(
         | Instruction::SetPrivate(_)
         | Instruction::ConstructSpread
         | Instruction::IterableToArray
-        | Instruction::CallMethod { .. }
         | Instruction::CallComputed { .. }
-        | Instruction::LoadThis
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
@@ -2431,7 +2460,7 @@ fn emit_instruction(
             let argc = usize::from(*argc);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], kiln_c99_undefined(), call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -2516,6 +2545,23 @@ fn emit_instruction(
             output.push_str(
                 "    { kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(stack[sp - 1], key, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }\n",
             );
+        }
+        Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
+        // Not a `GetProperty` followed by a `Call`: that would discard the receiver, and the
+        // read has to yield the *unbound* function so `a.f === a.f` holds. The receiver stays on
+        // the stack until the call, which is what lets both be true at once.
+        Instruction::CallMethod { name, argc } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string method name before emission")
+            };
+            let argc = usize::from(*argc);
+            writeln!(
+                output,
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(self_value, {symbol}_constant_{name}, {}, &method); if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                text.len(),
+                argc + 1
+            )
+            .unwrap();
         }
         Instruction::LoadBuiltin(_) => {
             // Verification admits only `String`, so this needs no discrimination.
@@ -3969,14 +4015,14 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::LoadThis,
+                Instruction::LoadGlobal(0),
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadThis`")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("`LoadGlobal`")),
             "dead code must not bypass the native instruction allowlist"
         );
     }
