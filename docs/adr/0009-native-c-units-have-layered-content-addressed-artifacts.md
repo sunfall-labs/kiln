@@ -53,9 +53,11 @@ ordering and import/export-array wiring.
 `kiln-artifact-cache` stores typed records addressed by SHA-256 keys. Keys include artifact kind,
 compiler/backend identity, HostOps/runtime ABI, target, CPU policy, build profile, compatibility
 mode, options digest, and ordered input digests. Records also contain and verify the key and payload
-digests. Lookups stop on corruption rather than disguising it as a miss. Writes use a same-directory
-temporary file and atomic rename; layers are searched in order and only explicitly writable layers
-receive artifacts.
+digests. Lookups stop on corruption rather than disguising it as a miss. Cache records use a
+same-directory temporary file and no-replace hard-link installation; layers are searched in order
+and only explicitly writable layers receive artifacts. Materialized native outputs use
+same-directory temporaries and atomic replacement, retrying unique names so a temporary abandoned
+by a crashed, PID-reused process cannot block a later build.
 
 `kiln-native-toolchain` discovers Zig, Clang, a generic `cc`, or GCC, retains the canonical compiler
 path, version, family, and compiler-reported target, and exposes captured structured compile/link

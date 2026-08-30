@@ -2285,6 +2285,17 @@ fn write_materialized_temporary(
     bytes: &[u8],
     executable: bool,
 ) -> Result<PathBuf, NativeError> {
+    write_materialized_temporary_with(path, bytes, executable, || {
+        MATERIALIZE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    })
+}
+
+fn write_materialized_temporary_with(
+    path: &Path,
+    bytes: &[u8],
+    executable: bool,
+    mut next_counter: impl FnMut() -> u64,
+) -> Result<PathBuf, NativeError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2294,44 +2305,68 @@ fn write_materialized_temporary(
         path: parent.to_path_buf(),
         source,
     })?;
-    let temporary = parent.join(format!(
+    for _ in 0..128 {
+        let temporary = materialized_temporary_path(path, next_counter());
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(NativeError::Io {
+                    operation: "create temporary artifact",
+                    path: temporary,
+                    source,
+                });
+            }
+        };
+        let result = (|| {
+            file.write_all(bytes).map_err(|source| NativeError::Io {
+                operation: "write temporary artifact",
+                path: temporary.clone(),
+                source,
+            })?;
+            file.flush().map_err(|source| NativeError::Io {
+                operation: "flush temporary artifact",
+                path: temporary.clone(),
+                source,
+            })?;
+            if executable {
+                set_executable(&temporary)?;
+            }
+            drop(file);
+            Ok(temporary.clone())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        return result;
+    }
+    Err(NativeError::Io {
+        operation: "create unique temporary artifact",
+        path: path.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "temporary artifact name collided 128 times",
+        ),
+    })
+}
+
+fn materialized_temporary_path(path: &Path, counter: u64) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent.join(format!(
         ".{}.{}-{}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("kiln-artifact"),
         std::process::id(),
-        MATERIALIZE_COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| NativeError::Io {
-                operation: "create temporary artifact",
-                path: temporary.clone(),
-                source,
-            })?;
-        file.write_all(bytes).map_err(|source| NativeError::Io {
-            operation: "write temporary artifact",
-            path: temporary.clone(),
-            source,
-        })?;
-        file.flush().map_err(|source| NativeError::Io {
-            operation: "flush temporary artifact",
-            path: temporary.clone(),
-            source,
-        })?;
-        if executable {
-            set_executable(&temporary)?;
-        }
-        drop(file);
-        Ok(temporary.clone())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+        counter,
+    ))
 }
 
 fn publish_shared_artifacts(
@@ -3089,6 +3124,32 @@ mod tests {
                     .is_symlink()
             );
         }
+    }
+
+    #[test]
+    fn materialization_skips_a_stale_temporary_name() {
+        let root = TestDirectory::new("kiln-native-stale-temporary");
+        let destination = root.path.join("program");
+        let stale = materialized_temporary_path(&destination, 7);
+        fs::write(&stale, b"crashed writer").expect("seed stale temporary");
+        let mut counters = [7, 8].into_iter();
+
+        let temporary =
+            write_materialized_temporary_with(&destination, b"new artifact", false, || {
+                counters.next().expect("bounded retry sequence")
+            })
+            .expect("stale temporary is skipped");
+
+        assert_eq!(temporary, materialized_temporary_path(&destination, 8));
+        assert_eq!(
+            fs::read(&stale).expect("stale file remains"),
+            b"crashed writer"
+        );
+        assert_eq!(
+            fs::read(&temporary).expect("read new temporary"),
+            b"new artifact"
+        );
+        fs::remove_file(temporary).expect("remove new temporary");
     }
 
     #[test]
