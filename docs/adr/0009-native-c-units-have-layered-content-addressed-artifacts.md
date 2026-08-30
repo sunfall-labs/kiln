@@ -57,16 +57,15 @@ executable is materialized with executable permissions at the caller's requested
 Independent application, runtime, and launcher units compile concurrently on a cold build. Native
 runs launch a process-owned executable before publishing the stable output path, so concurrent
 requests cannot replace the program another request is about to execute. The CLI launcher pins the
-C numeric locale before module initialization so `strtod` and `snprintf` do not inherit
-locale-dependent semantics.
+C numeric locale before module initialization as an additional defence against locale-dependent
+parsing.
 
 Generated modules cannot assume that policy when embedded in a host process. On the supported
 macOS and Linux shared-library targets, string-to-number conversion therefore uses an explicit C
-`locale_t` with `strtod_l`, and number formatting temporarily installs that locale only for the
-calling thread with `uselocale` before restoring it. Generated code never calls process-global
-`setlocale`. Locale creation failure is an ordinary conversion failure rather than permission to
-fall back to ambient host semantics. This isolates concurrent embedders while leaving the separate
-`%.17g` versus ECMAScript-shortest formatting gap visible for a future Ryu-style runtime.
+`locale_t` with `strtod_l`. Generated code never calls process-global `setlocale`, and locale
+creation failure is an ordinary conversion failure rather than permission to fall back to ambient
+host semantics. Number formatting no longer uses libc locale or `printf`: ADR 0013 delegates it
+to the separately versioned, Ryu-derived native number runtime.
 
 Embedding uses the same module entry ABI without linking the command-line runtime or launcher.
 `kiln-native-runtime` publishes a deterministic, self-contained C header for the versioned value
@@ -78,21 +77,21 @@ shared library, then reports both paths over the versioned protocol. Library out
 Each file publication is atomic, but the pair is not transactional; the library is the final ready
 signal until a future versioned package-directory design can swap a manifest for the pair.
 
-A shared-library build compiles the application unit as position-independent code and links only
-that unit (plus required system libraries). PIC objects and shared links have cache identities
-distinct from executable objects and links; an executable cache hit is never accepted as an
-embedding artifact. Shared-library linking is initially supported on macOS and Linux, where the
-toolchain flags, emitted header, and dynamic-loader behavior are exercised by real C-host
-integration tests.
+A shared-library build compiles the application unit and internal native number runtime as
+position-independent code, then links those units plus required system libraries. PIC objects and
+shared links have cache identities distinct from executable objects and links; an executable cache
+hit is never accepted as an embedding artifact. Shared-library linking is initially supported on
+macOS and Linux, where the toolchain flags, emitted header, and dynamic-loader behavior are
+exercised by real C-host integration tests.
 
 An acyclic module graph is embedded behind one topology-derived wrapper symbol with the same
 two-argument entry ABI as a scalar shared library. The graph's generated module entries keep their
 private import/export-array ABI. The wrapper allocates those arrays per invocation, evaluates
-modules in dependency-first order, and links only their PIC objects plus its own PIC object: it
-does not reuse the process-oriented CLI runtime or graph launcher. Module C and object cache keys
-remain independently reusable, while the wrapper source/object keys include graph wiring and the
-final shared-link key includes the ordered module objects, wrapper object, and platform library
-identity.
+modules in dependency-first order, and links their PIC objects, one shared native-number object,
+and its own PIC object: it does not reuse the process-oriented CLI runtime or graph launcher.
+Module C and object cache keys remain independently reusable, while the wrapper source/object keys
+include graph wiring and the final shared-link key includes the ordered module objects, wrapper
+object, and platform library identity.
 
 The private graph-module ABI is also private at dynamic-loader scope. Graph module objects compile
 with hidden symbol visibility while the public wrapper retains default visibility. Two loaded
@@ -131,10 +130,9 @@ caller ownership require a future versioned ownership/dispose or caller-buffer d
   symbol change cannot silently leave a hand-written declaration stale.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
-- The initial scalar C backend still uses `%.17g` for number-to-string conversion and retains
-  temporary concatenation allocations for a process lifetime. Those are explicit equivalence and
-  ownership gaps to close before claiming complete JavaScript number formatting or long-lived
-  native embedding; they are not accepted as silent conformance success.
+- Number-to-string conversion is shortest and ECMAScript-spelled through the versioned native
+  number runtime. Temporary concatenation allocations are still retained for a process lifetime;
+  that ownership gap remains before claiming leak-free long-lived native embedding.
 - A 128-bit deterministic module symbol is not the artifact integrity boundary. SHA-256 cache keys
   protect artifact reuse, and multi-module linking rejects any symbol collision before invoking
   the linker.

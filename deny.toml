@@ -29,7 +29,8 @@ ignore = []
 #   Apache-2.0     offered alongside MIT by most of the tree; required outright by a few.
 #   Apache-2.0 WITH LLVM-exception
 #                  dragonbox_ecma and wasi. The exception only widens what linking is allowed.
-#   BSL-1.0        dragonbox_ecma's other half. Permissive, no attribution in binaries.
+#   BSL-1.0        dragonbox_ecma's other half and the selected licence for the vendored Ryu
+#                  formatter in kiln-native-number. Permissive, no attribution in binaries.
 #   CC0-1.0        notify. A public-domain dedication.
 #   ISC            inotify / inotify-sys, reached through notify on Linux. BSD-equivalent.
 #   Unlicense      memchr, walkdir, same-file, winapi-util, each "Unlicense OR MIT".
