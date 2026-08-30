@@ -370,6 +370,10 @@ pub struct ModuleSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
+    /// Source module that owns the diagnostic when it differs from or is more precise than the
+    /// request entry. Older peers omit this and clients fall back to the entry display path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub message: String,
     pub start: Option<u32>,
     pub end: Option<u32>,
@@ -516,5 +520,26 @@ mod tests {
         };
         let encoded = serde_json::to_value(&summary).expect("resolved summary serializes");
         assert_eq!(encoded["resolved_exports"], serde_json::json!(["answer"]));
+    }
+
+    #[test]
+    fn diagnostic_provenance_is_additive() {
+        let old = serde_json::json!({
+            "message": "expected an identifier",
+            "start": 7,
+            "end": 8
+        });
+        let decoded: Diagnostic =
+            serde_json::from_value(old).expect("older diagnostic still decodes");
+        assert_eq!(decoded.path, None);
+
+        let diagnostic = Diagnostic {
+            path: Some("/src/dep.js".to_owned()),
+            message: "unresolved binding".to_owned(),
+            start: Some(1),
+            end: Some(4),
+        };
+        let encoded = serde_json::to_value(diagnostic).expect("diagnostic serializes");
+        assert_eq!(encoded["path"], "/src/dep.js");
     }
 }

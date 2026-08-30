@@ -1377,12 +1377,15 @@ fn production_check_reports_the_graph_resolved_star_surface() {
     let fixture = Fixture::empty();
     let left = fixture.dir.join("left.js");
     let right = fixture.dir.join("right.js");
+    let broken = fixture.dir.join("broken.js");
     let barrel = fixture.dir.join("barrel.js");
     std::fs::write(&left, "export const answer = 42;\n").expect("write left origin");
     std::fs::write(&right, "export const answer = 42;\n").expect("write right origin");
+    std::fs::write(&broken, "export { missing };\n").expect("write broken dependency");
     std::fs::write(&barrel, "export * from './left.js';\n").expect("write barrel");
     let left = std::fs::canonicalize(left).expect("canonical left origin");
     let right = std::fs::canonicalize(right).expect("canonical right origin");
+    let broken = std::fs::canonicalize(broken).expect("canonical broken dependency");
     let barrel = std::fs::canonicalize(barrel).expect("canonical barrel");
     let project_root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
 
@@ -1394,6 +1397,7 @@ fn production_check_reports_the_graph_resolved_star_surface() {
     for (path, text) in [
         (&left, "export const answer = 42;\n"),
         (&right, "export const answer = 42;\n"),
+        (&broken, "export { missing };\n"),
         (&barrel, "export * from './left.js';\n"),
     ] {
         client
@@ -1438,6 +1442,31 @@ fn production_check_reports_the_graph_resolved_star_surface() {
         (before.modules, before.exports)
     );
     assert_ne!(after.interface_hash, before.interface_hash);
+
+    client
+        .request(&Request::SetSource {
+            path: barrel.to_string_lossy().into_owned(),
+            text: "export * from './broken.js';\n".to_owned(),
+        })
+        .expect("point barrel at broken dependency");
+    let Response::Checked(failed) = client
+        .request(&Request::Check {
+            path: barrel.to_string_lossy().into_owned(),
+            project_root: project_root.to_string_lossy().into_owned(),
+        })
+        .expect("check broken dependency")
+    else {
+        panic!("expected checked response");
+    };
+    assert_eq!(failed.resolved_exports, None);
+    assert!(
+        failed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.path.as_deref() == broken.to_str()),
+        "dependency diagnostics must retain their module path: {:?}",
+        failed.diagnostics
+    );
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");

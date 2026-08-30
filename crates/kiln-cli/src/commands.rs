@@ -264,11 +264,12 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
 
     let work = Work::between(&before, &after);
     notes.extend(summary.diagnostics.iter().map(|diagnostic| {
+        let diagnostic_path = diagnostic.path.as_deref().unwrap_or(&display);
         match (diagnostic.start, diagnostic.end) {
             (Some(start), Some(end)) => {
-                format!("{display}:{start}..{end}: {}", diagnostic.message)
+                format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
             }
-            _ => format!("{display}: {}", diagnostic.message),
+            _ => format!("{diagnostic_path}: {}", diagnostic.message),
         }
     }));
     Ok(Output {
@@ -301,11 +302,14 @@ pub fn check_source(
     let notes = summary
         .diagnostics
         .iter()
-        .map(|diagnostic| match (diagnostic.start, diagnostic.end) {
-            (Some(start), Some(end)) => {
-                format!("{display}:{start}..{end}: {}", diagnostic.message)
+        .map(|diagnostic| {
+            let diagnostic_path = diagnostic.path.as_deref().unwrap_or(display);
+            match (diagnostic.start, diagnostic.end) {
+                (Some(start), Some(end)) => {
+                    format!("{diagnostic_path}:{start}..{end}: {}", diagnostic.message)
+                }
+                _ => format!("{diagnostic_path}: {}", diagnostic.message),
             }
-            _ => format!("{display}: {}", diagnostic.message),
         })
         .collect();
     Ok(Output {
@@ -1512,6 +1516,7 @@ mod tests {
     fn parser_diagnostics_become_user_visible_notes() {
         let mut fake = Fake::new();
         fake.diagnostics.push(Diagnostic {
+            path: None,
             message: "expected an identifier".to_string(),
             start: Some(7),
             end: Some(8),
@@ -1538,6 +1543,7 @@ mod tests {
     fn graph_diagnostics_make_check_unsuccessful() {
         let mut fake = Fake::new();
         fake.diagnostics.push(Diagnostic {
+            path: Some("/tmp/dep.js".to_owned()),
             message: "could not resolve ./missing.js".to_owned(),
             start: None,
             end: None,
@@ -1555,7 +1561,7 @@ mod tests {
         assert_eq!(out.exit_code, 1);
         assert_eq!(
             out.notes,
-            ["main.js: could not resolve ./missing.js".to_owned()]
+            ["/tmp/dep.js: could not resolve ./missing.js".to_owned()]
         );
     }
 

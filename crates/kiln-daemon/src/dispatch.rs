@@ -259,6 +259,7 @@ fn check<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> 
         .diagnostics
         .into_iter()
         .map(|diagnostic| Diagnostic {
+            path: None,
             message: diagnostic.message,
             start: diagnostic.span.map(|span| span.start),
             end: diagnostic.span.map(|span| span.end),
@@ -521,19 +522,43 @@ fn build_graph<E: QueryEngine>(
 
 fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<Diagnostic> {
     match error {
-        kiln_module_graph::ModuleGraphError::Compile { diagnostics, .. } => diagnostics
-            .into_iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message,
-                start: diagnostic.span.map(|span| span.start),
-                end: diagnostic.span.map(|span| span.end),
-            })
-            .collect(),
-        error => vec![Diagnostic {
-            message: error.to_string(),
-            start: None,
-            end: None,
-        }],
+        kiln_module_graph::ModuleGraphError::Compile { path, diagnostics } => {
+            let path = path.to_string_lossy().into_owned();
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| Diagnostic {
+                    path: Some(path.clone()),
+                    message: diagnostic.message,
+                    start: diagnostic.span.map(|span| span.start),
+                    end: diagnostic.span.map(|span| span.end),
+                })
+                .collect()
+        }
+        error => {
+            use kiln_module_graph::ModuleGraphError;
+            let path = match &error {
+                ModuleGraphError::NonAbsoluteEntry { path }
+                | ModuleGraphError::Entry { path, .. }
+                | ModuleGraphError::Source { path, .. }
+                | ModuleGraphError::FrontendPath { path }
+                | ModuleGraphError::InternalMissingModule { path } => Some(path),
+                ModuleGraphError::Resolve { importer, .. }
+                | ModuleGraphError::UnresolvedImport { importer, .. }
+                | ModuleGraphError::MissingExport { importer, .. }
+                | ModuleGraphError::AmbiguousExport { importer, .. } => Some(importer),
+                ModuleGraphError::Cycle { paths } => paths.first(),
+                ModuleGraphError::DuplicateExport { module, .. }
+                | ModuleGraphError::Execution { module, .. } => Some(module),
+                ModuleGraphError::Compile { .. } | ModuleGraphError::StepOverflow => None,
+            }
+            .map(|path| path.to_string_lossy().into_owned());
+            vec![Diagnostic {
+                path,
+                message: error.to_string(),
+                start: None,
+                end: None,
+            }]
+        }
     }
 }
 
@@ -573,6 +598,7 @@ fn execute_program(
                 diagnostics: diagnostics
                     .into_iter()
                     .map(|diagnostic| Diagnostic {
+                        path: None,
                         message: diagnostic.message,
                         start: diagnostic.span.map(|span| span.start),
                         end: diagnostic.span.map(|span| span.end),
@@ -608,6 +634,7 @@ fn execute_program(
             scalar_value: None,
             instructions: 0,
             diagnostics: vec![Diagnostic {
+                path: None,
                 message: error.to_string(),
                 start: None,
                 end: None,

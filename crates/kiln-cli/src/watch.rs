@@ -1144,6 +1144,7 @@ mod tests {
                         instructions: 1,
                         diagnostics: if failed {
                             vec![Diagnostic {
+                                path: None,
                                 message: "program failed".to_string(),
                                 start: None,
                                 end: None,
