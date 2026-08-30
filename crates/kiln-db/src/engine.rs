@@ -17,12 +17,12 @@
 
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::hash::content_hash;
 use crate::{
     Compiled, CompiledModule, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision,
     Stats,
 };
+#[cfg(test)]
+use crate::{Linkage, hash::content_hash};
 #[cfg(test)]
 use kiln_hir::{Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceKind, Span};
 
@@ -297,9 +297,8 @@ impl MemoEngine {
         let parsed = self.file(file).parse.as_ref().expect(FORCED);
 
         // Normalized, because equality of this value is what gates every dependent (adr/0003):
-        // a module's interface is a *set* of names, so reordering or duplicating declarations
-        // must not invalidate anything.
-        let interface = Interface::from_exports(parsed.value.exports.clone());
+        // declared names are a set, while runtime re-export wiring is a sorted descriptor list.
+        let interface = Interface::from_module(&parsed.value.module);
         (interface, vec![dep])
     }
 
@@ -526,6 +525,23 @@ fn panic_injecting_frontend(path: &str, text: &str) -> Module {
         panic!("injected frontend panic");
     }
     fixture_frontend(path, text)
+}
+
+#[cfg(test)]
+fn linkage_frontend(path: &str, text: &str) -> Module {
+    let mut module = fixture_frontend(path, text);
+    if let Some(source) = text.lines().find_map(|line| line.strip_prefix("star ")) {
+        module.exports.push(Export {
+            exported: None,
+            origin: ExportOrigin::Star {
+                source: source.trim().to_owned(),
+            },
+            type_only: false,
+            span: Span::default(),
+            statement_span: Span::default(),
+        });
+    }
+    module
 }
 
 impl QueryEngine for MemoEngine {
@@ -769,6 +785,83 @@ mod tests {
     }
 
     #[test]
+    fn same_declared_exports_with_different_star_targets_change_project_identity() {
+        let mut left = fixture_frontend("index.js", "export const value = 1;\n");
+        left.exports.push(Export {
+            exported: None,
+            origin: ExportOrigin::Star {
+                source: "./left.js".to_owned(),
+            },
+            type_only: false,
+            span: Span::default(),
+            statement_span: Span::default(),
+        });
+        let mut right = left.clone();
+        right.exports.last_mut().expect("star export").origin = ExportOrigin::Star {
+            source: "./right.js".to_owned(),
+        };
+
+        let left_parsed = Parsed::new("left", left);
+        let right_parsed = Parsed::new("right", right);
+        assert_eq!(left_parsed.exports, right_parsed.exports);
+        let left_linkage = Linkage::from_module(&left_parsed.module);
+        let right_linkage = Linkage::from_module(&right_parsed.module);
+        assert_ne!(left_linkage, right_linkage);
+
+        let left_interface =
+            Interface::from_exports_and_linkage(left_parsed.exports.clone(), left_linkage);
+        let right_interface =
+            Interface::from_exports_and_linkage(right_parsed.exports.clone(), right_linkage);
+        assert_ne!(
+            left_interface.interface_hash,
+            right_interface.interface_hash
+        );
+        let left_project = Project::from_interfaces([("index.js", &left_interface)]);
+        let right_project = Project::from_interfaces([("index.js", &right_interface)]);
+        assert_eq!(left_project.exports, right_project.exports);
+        assert_ne!(left_project.interface_hash, right_project.interface_hash);
+        assert_ne!(left_project.identity_digest, right_project.identity_digest);
+    }
+
+    #[test]
+    fn body_edit_keeps_project_identity_when_linkage_is_unchanged() {
+        let mut db = MemoEngine::new(linkage_frontend);
+        let file = db.intern("index.js");
+        db.set_source(file, "star ./dep.js\nexport const value = 1;\n".to_owned());
+        let before = db.project();
+        db.reset_stats();
+
+        db.set_source(file, "star ./dep.js\nexport const value = 2;\n".to_owned());
+        let after = db.project();
+
+        assert_eq!(after, before);
+        assert_eq!(db.stats().project_computed, 0);
+        assert_eq!(db.stats().early_cutoff, 1);
+    }
+
+    #[test]
+    fn changing_a_star_target_recomputes_project_without_changing_declared_exports() {
+        let mut db = MemoEngine::new(linkage_frontend);
+        let file = db.intern("index.js");
+        db.set_source(file, "star ./left.js\nexport const value = 1;\n".to_owned());
+        let before = db.project();
+        db.reset_stats();
+
+        db.set_source(
+            file,
+            "star ./right.js\nexport const value = 1;\n".to_owned(),
+        );
+        let after = db.project();
+
+        assert_eq!(after.exports, before.exports);
+        assert_eq!(after.modules, before.modules);
+        assert_ne!(after.interface_hash, before.interface_hash);
+        assert_ne!(after.identity_digest, before.identity_digest);
+        assert_eq!(db.stats().project_computed, 1);
+        assert_eq!(db.stats().early_cutoff, 0);
+    }
+
+    #[test]
     fn inactive_interned_paths_do_not_affect_project_identity() {
         let mut with_gap = MemoEngine::new(fixture_frontend);
         let a = with_gap.intern("a.js");
@@ -801,10 +894,12 @@ mod tests {
         let alpha = Interface {
             interface_hash: 7,
             exports: vec!["alpha".to_owned()],
+            linkage: Linkage::empty(),
         };
         let beta = Interface {
             interface_hash: 7,
             exports: vec!["beta".to_owned()],
+            linkage: Linkage::empty(),
         };
 
         let alpha_project = Project::from_interfaces([("same.js", &alpha)]);
@@ -886,8 +981,8 @@ mod tests {
     }
 
     /// The headline property: an edit that does not change the interface does not reach the
-    /// project. Parse must recompute (the text really did change), the interface recomputes but
-    /// produces an equal value and so cuts off, and the rollup is merely revalidated.
+    /// project. Parse must recompute (the text really did change), the interface and linkage
+    /// recompute but produce equal values and so cut off, and the rollup is merely revalidated.
     #[test]
     fn body_edit_cuts_off_at_the_interface() {
         let (mut db, files) = cold_project();

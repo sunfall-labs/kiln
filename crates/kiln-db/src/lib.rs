@@ -57,7 +57,135 @@ impl Parsed {
     }
 }
 
-/// The externally visible surface of a module.
+/// The kind of runtime export edge that can change how a module is linked without changing its
+/// declared export names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinkageKind {
+    ReExport,
+    Star,
+    NamespaceReExport,
+}
+
+/// One normalized runtime re-export edge in a module.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LinkageDescriptor {
+    pub kind: LinkageKind,
+    pub exported: Option<String>,
+    pub source: String,
+    pub imported: Option<String>,
+}
+
+/// Runtime export wiring included in a module's interface and project identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Linkage {
+    pub descriptors: Vec<LinkageDescriptor>,
+    pub digest: Digest,
+}
+
+impl Linkage {
+    /// The canonical empty runtime wiring value used for interfaces built from names alone.
+    pub fn empty() -> Self {
+        Self::from_descriptors(Vec::new())
+    }
+
+    /// Derive normalized runtime re-export wiring from parsed HIR.
+    pub fn from_module(module: &HirModule) -> Self {
+        let mut descriptors = module
+            .exports
+            .iter()
+            .filter(|export| !export.type_only)
+            .filter_map(|export| {
+                let exported = export
+                    .exported
+                    .as_ref()
+                    .map(|name| name.as_str().to_owned());
+                match &export.origin {
+                    kiln_hir::ExportOrigin::ReExport { source, imported } => {
+                        Some(LinkageDescriptor {
+                            kind: LinkageKind::ReExport,
+                            exported,
+                            source: source.clone(),
+                            imported: Some(import_name(imported)),
+                        })
+                    }
+                    kiln_hir::ExportOrigin::Star { source } => Some(LinkageDescriptor {
+                        kind: LinkageKind::Star,
+                        exported,
+                        source: source.clone(),
+                        imported: None,
+                    }),
+                    kiln_hir::ExportOrigin::NamespaceReExport { source } => {
+                        Some(LinkageDescriptor {
+                            kind: LinkageKind::NamespaceReExport,
+                            exported,
+                            source: source.clone(),
+                            imported: None,
+                        })
+                    }
+                    kiln_hir::ExportOrigin::Local { .. }
+                    | kiln_hir::ExportOrigin::DefaultExpression
+                    | kiln_hir::ExportOrigin::Unsupported { .. } => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        descriptors.sort();
+        descriptors.dedup();
+
+        Self::from_descriptors(descriptors)
+    }
+
+    fn from_descriptors(descriptors: Vec<LinkageDescriptor>) -> Self {
+        let digest = linkage_digest(&descriptors);
+        Self {
+            descriptors,
+            digest,
+        }
+    }
+}
+
+fn import_name(name: &kiln_hir::ImportName) -> String {
+    match name {
+        kiln_hir::ImportName::Name(name) => name.clone(),
+        kiln_hir::ImportName::Default => "default".to_owned(),
+        kiln_hir::ImportName::Namespace => "*".to_owned(),
+    }
+}
+
+fn linkage_digest(descriptors: &[LinkageDescriptor]) -> Digest {
+    fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
+        output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        output.extend_from_slice(bytes);
+    }
+
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"kiln-module-linkage-v1\0");
+    encoded.extend_from_slice(&(descriptors.len() as u64).to_le_bytes());
+    for descriptor in descriptors {
+        encoded.push(match descriptor.kind {
+            LinkageKind::ReExport => 1,
+            LinkageKind::Star => 2,
+            LinkageKind::NamespaceReExport => 3,
+        });
+        match &descriptor.exported {
+            Some(name) => {
+                encoded.push(1);
+                frame(&mut encoded, name.as_bytes());
+            }
+            None => encoded.push(0),
+        }
+        frame(&mut encoded, descriptor.source.as_bytes());
+        match &descriptor.imported {
+            Some(name) => {
+                encoded.push(1);
+                frame(&mut encoded, name.as_bytes());
+            }
+            None => encoded.push(0),
+        }
+    }
+    Digest::hash(&encoded)
+}
+
+/// The externally visible surface of a module, including runtime export wiring.
 ///
 /// This is the early-cutoff point. A dependent is recomputed only when this value *changes*,
 /// which is how design.md §3's "interface hash" is realised without maintaining a second hash
@@ -67,23 +195,47 @@ impl Parsed {
 pub struct Interface {
     pub interface_hash: u64,
     pub exports: Vec<String>,
+    pub linkage: Linkage,
 }
 
 impl Interface {
     /// Build the canonical set-like interface value used for early cutoff.
-    pub fn from_exports(mut exports: Vec<String>) -> Self {
+    pub fn from_exports(exports: Vec<String>) -> Self {
+        Self::from_exports_and_linkage(exports, Linkage::empty())
+    }
+
+    /// Build an interface from declared runtime exports and normalized runtime wiring.
+    pub fn from_exports_and_linkage(mut exports: Vec<String>, linkage: Linkage) -> Self {
         exports.sort();
         exports.dedup();
+        let names_hash = hash::hash_names(&exports);
+        let interface_hash = if linkage.descriptors.is_empty() {
+            // Preserve the long-standing wire spelling for modules without re-export wiring.
+            names_hash
+        } else {
+            let mut summary = hash::Fnv1a::new();
+            summary.write(b"kiln-interface-with-linkage-v1\0");
+            summary.write_u64(names_hash);
+            summary.write(linkage.digest.as_bytes());
+            summary.finish()
+        };
         Self {
-            interface_hash: hash::hash_names(&exports),
+            interface_hash,
             exports,
+            linkage,
         }
+    }
+
+    /// Build the complete interface value retained by the database from parsed HIR.
+    pub fn from_module(module: &HirModule) -> Self {
+        Self::from_exports_and_linkage(module.runtime_export_names(), Linkage::from_module(module))
     }
 }
 
-/// Whole-project rollup. Its identity includes every active module's logical path and interface,
-/// so a body-only edit that changes neither does not recompute it. The interface hash is an opaque
-/// deterministic summary for diagnostics and transport, not an artifact-cache authority.
+/// Whole-project rollup. Its identity includes every active module's logical path, interface, and
+/// runtime export wiring, so a body-only edit that changes none of those does not recompute it.
+/// The interface hash is an opaque deterministic summary for diagnostics and transport, not an
+/// artifact-cache authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Project {
@@ -105,6 +257,12 @@ impl Project {
     pub fn from_interfaces<'a>(
         interfaces: impl IntoIterator<Item = (&'a str, &'a Interface)>,
     ) -> Self {
+        Self::from_interfaces_impl(interfaces)
+    }
+
+    fn from_interfaces_impl<'a>(
+        interfaces: impl IntoIterator<Item = (&'a str, &'a Interface)>,
+    ) -> Self {
         const DOMAIN: &[u8] = b"kiln-project-interface-v1\0";
 
         fn write_len(output: &mut Vec<u8>, len: usize) {
@@ -122,6 +280,7 @@ impl Project {
                 .cmp(right_path)
                 .then_with(|| left.exports.cmp(&right.exports))
                 .then_with(|| left.interface_hash.cmp(&right.interface_hash))
+                .then_with(|| left.linkage.cmp(&right.linkage))
         });
 
         let mut summary = hash::Fnv1a::new();
@@ -134,11 +293,36 @@ impl Project {
             summary.write_u64(path.len() as u64);
             summary.write(path.as_bytes());
             summary.write_u64(interface.interface_hash);
+            summary.write(interface.linkage.digest.as_bytes());
 
             write_framed(&mut identity, path.as_bytes());
             write_len(&mut identity, interface.exports.len());
             for export in &interface.exports {
                 write_framed(&mut identity, export.as_bytes());
+            }
+            identity.extend_from_slice(interface.linkage.digest.as_bytes());
+            write_len(&mut identity, interface.linkage.descriptors.len());
+            for descriptor in &interface.linkage.descriptors {
+                identity.push(match descriptor.kind {
+                    LinkageKind::ReExport => 1,
+                    LinkageKind::Star => 2,
+                    LinkageKind::NamespaceReExport => 3,
+                });
+                match &descriptor.exported {
+                    Some(name) => {
+                        identity.push(1);
+                        write_framed(&mut identity, name.as_bytes());
+                    }
+                    None => identity.push(0),
+                }
+                write_framed(&mut identity, descriptor.source.as_bytes());
+                match &descriptor.imported {
+                    Some(name) => {
+                        identity.push(1);
+                        write_framed(&mut identity, name.as_bytes());
+                    }
+                    None => identity.push(0),
+                }
             }
             exports += interface.exports.len();
         }
