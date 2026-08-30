@@ -1,0 +1,90 @@
+[corpus]
+name = "node-v24.7.0-fs-promises-adapted"
+source_repo = "https://github.com/nodejs/node"
+source_tag = "v24.7.0"
+source_commit = "d795edb56765d4ec743bcda5a0c1452bed74de0c"
+adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertions remain intact."
+
+[[test]]
+id = "node-v24.7.0/fs-promises-readfile-empty/buffer"
+source = "upstream-adapted/fs-promises-readfile-empty-buffer.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-readfile-empty/utf8-string"
+source = "upstream-adapted/fs-promises-readfile-empty-utf8-string.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-readfile-empty/utf8-options"
+source = "upstream-adapted/fs-promises-readfile-empty-utf8-options.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8", "options-objects"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-writefile/string"
+source = "upstream-adapted/fs-promises-writefile-string.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "strings"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-writefile/uint8array"
+source = "upstream-adapted/fs-promises-writefile-uint8array.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-writefile/uint16array"
+source = "upstream-adapted/fs-promises-writefile-uint16array.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-writefile/uint32array"
+source = "upstream-adapted/fs-promises-writefile-uint32array.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-stat/file"
+source = "upstream-adapted/fs-promises-stat-file.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "stats"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-stat/directory"
+source = "upstream-adapted/fs-promises-stat-directory.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "stats"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises-errors/enoent"
+source = "upstream-adapted/fs-promises-errors-enoent.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "node-errors"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises/same-namespace"
+source = "upstream-adapted/fs-promises-same-namespace.js"
+status = "runnable"
+features = ["node-fs-promises", "builtin-modules"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/fs-promises/concurrent-read-order"
+source = "upstream-adapted/fs-promises-concurrent-read-order.js"
+status = "runnable"
+features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop", "concurrency"]
+expected_stdout = "pass\n"

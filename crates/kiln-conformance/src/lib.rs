@@ -44,6 +44,7 @@ pub use harness::{
     HOST_OBJECT_PRELUDE, Harness,
 };
 pub use manifest::{MANIFEST_FILE_NAME, Manifest, ManifestError, ManifestTest};
+pub use program::run_node_against_expected_stdout;
 pub use reasons::{ReasonGroup, ReasonReport};
 pub use test262::{
     run_case, run_case_variants, run_case_variants_with_harness, run_case_with_harness,
