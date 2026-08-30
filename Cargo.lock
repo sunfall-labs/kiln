@@ -86,6 +86,7 @@ name = "frontend-oxc"
 version = "0.0.0"
 dependencies = [
  "kiln-hir",
+ "num-bigint 0.4.8",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",

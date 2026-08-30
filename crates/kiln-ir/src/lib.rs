@@ -28,6 +28,11 @@ pub enum Constant {
     /// IEEE-754 `f64` bits; preserving bits makes program equality total (including NaN/-0).
     Number(u64),
     String(String),
+    /// A BigInt literal's decimal digits, with no sign: `-1n` is a negation of `1n`.
+    ///
+    /// Held as text because the value has no bound. Two programs are equal when their digits
+    /// are, which keeps program equality total without a numeric type in the IR.
+    BigInt(String),
 }
 
 /// Unary operations understood by the bytecode runtime.
@@ -2406,6 +2411,33 @@ impl Compiler {
                     }
                 }
             }
+            ExpressionKind::TemplateStrings { cooked, raw } => {
+                if cooked.len() > u32::MAX as usize {
+                    self.error(Some(expression.span), "template has too many segments");
+                    return;
+                }
+                for segment in cooked {
+                    match segment {
+                        Some(text) => self.push_constant(Constant::String(text.clone())),
+                        None => self.push_constant(Constant::Undefined),
+                    }
+                }
+                self.code.push(Instruction::NewArray {
+                    count: cooked.len() as u32,
+                });
+                // `SetProperty` leaves the value, not the target, so the object is duplicated
+                // first and the leftover raw array popped after.
+                self.code.push(Instruction::Dup);
+                for segment in raw {
+                    self.push_constant(Constant::String(segment.clone()));
+                }
+                self.code.push(Instruction::NewArray {
+                    count: raw.len() as u32,
+                });
+                let name = self.constant_index(Constant::String("raw".to_owned()));
+                self.code.push(Instruction::SetProperty(name));
+                self.code.push(Instruction::Pop);
+            }
             ExpressionKind::RegExp { pattern, flags } => {
                 let pattern = self.constant_index(Constant::String(pattern.clone()));
                 let flags = self.constant_index(Constant::String(flags.clone()));
@@ -3862,6 +3894,7 @@ impl Compiler {
             Literal::Boolean(value) => Constant::Boolean(*value),
             Literal::Number(value) => Constant::Number(*value),
             Literal::String(value) => Constant::String(value.clone()),
+            Literal::BigInt(digits) => Constant::BigInt(digits.clone()),
         });
     }
 
@@ -4339,6 +4372,8 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(key, names, collecting);
             }
         }
+        // A template object is built from constants; it names nothing.
+        ExpressionKind::TemplateStrings { .. } => {}
         ExpressionKind::Template { expressions, .. } => {
             for expression in expressions {
                 collect_identifiers(expression, names, collecting);
@@ -4481,7 +4516,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         }),
         ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
         ExpressionKind::Update { target, .. } => target == name,
-        ExpressionKind::Literal(_) => false,
+        ExpressionKind::Literal(_) | ExpressionKind::TemplateStrings { .. } => false,
     }
 }
 
