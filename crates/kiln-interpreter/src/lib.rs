@@ -651,6 +651,18 @@ impl Native {
         matches!(self, Self::ArrayReverse)
     }
 
+    /// Whether this method creates an iterator that must keep observing its original receiver.
+    ///
+    /// Most generic array methods can operate on a temporary dense copy. Iterators cannot: a
+    /// write after iterator creation but before `next()` has to be visible, especially for a
+    /// typed-array view whose whole purpose is sharing its backing bytes.
+    fn creates_array_iterator(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayEntries | Self::ArrayKeys | Self::ArrayValues
+        )
+    }
+
     /// Whether this built-in reads its receiver as an array, and so should accept an array-like
     /// one when it is redirected through `call` or `apply`.
     ///
@@ -9187,7 +9199,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => native.walks_an_array(),
             _ => false,
         };
-        if !walks_an_array || matches!(receiver, Value::Array(_)) {
+        let preserves_live_typed_array = matches!(
+            callee,
+            Value::Native(native) if native.creates_array_iterator()
+        ) && matches!(receiver, Value::TypedArray(_));
+        if !walks_an_array || matches!(receiver, Value::Array(_)) || preserves_live_typed_array {
             return Ok(receiver);
         }
         let items = match &receiver {
@@ -12272,39 +12288,6 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
-        Native::ArrayEntries | Native::ArrayKeys => match receiver {
-            Value::Array(items) => {
-                let entries = items
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        let index = Value::Number(index as f64);
-                        if matches!(native, Native::ArrayKeys) {
-                            index
-                        } else {
-                            Value::Array(ArrayData::new(vec![
-                                index,
-                                if matches!(item, Value::Native(Native::Hole)) {
-                                    Value::Undefined
-                                } else {
-                                    item.clone()
-                                },
-                            ]))
-                        }
-                    })
-                    .collect();
-                // The snapshot is walked by the ordinary array iterator, so `entries()` and
-                // `values()` share one `next`.
-                call_native(
-                    intrinsics,
-                    Native::ArrayValues,
-                    &Value::Array(ArrayData::new(entries)),
-                    &[],
-                )?
-            }
-            _ => Value::Undefined,
-        },
         Native::ArrayOf => Value::Array(ArrayData::new(arguments.to_vec())),
         Native::StringFromCharCode => Value::String(String::from_utf16_lossy(
             &arguments
@@ -13375,17 +13358,25 @@ fn call_native(
         // Present so `typeof` reports "function", which is what the corpus checks. Calling it
         // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
-        // `Array.prototype.values` should return an iterator object. Nothing consumes one yet
-        // -- for-of is a later step -- and the corpus only checks the function's identity and
-        // type, so returning undefined is the honest placeholder rather than a fake iterator
-        // that would break the moment anything called `.next()` on it.
-        // A real iterator object: state lives in reserved properties on the iterator itself,
-        // so it needs no special value kind and `next` is an ordinary method call.
-        Native::ArrayValues => match receiver {
-            Value::Array(_) => {
+        // Array and typed-array iterators retain their receiver rather than snapshotting it.
+        // State lives in reserved properties on the iterator itself, so `next` can observe a
+        // write that happened after iterator creation, as the language requires.
+        Native::ArrayEntries | Native::ArrayKeys | Native::ArrayValues => match receiver {
+            Value::Array(_) | Value::TypedArray(_) => {
                 let mut iterator = ObjectData::default();
                 iterator.set("@@iterated", receiver.clone());
                 iterator.set("@@index", Value::Number(0.0));
+                iterator.set(
+                    "@@part",
+                    Value::String(
+                        match native {
+                            Native::ArrayEntries => "entry",
+                            Native::ArrayKeys => "key",
+                            _ => "value",
+                        }
+                        .to_owned(),
+                    ),
+                );
                 iterator.set("next", Value::Native(Native::ArrayIteratorNext));
                 // An iterator is itself iterable, which is what lets one be passed straight to
                 // another `for-of` or to `Array.from`.
@@ -13958,19 +13949,28 @@ fn call_native(
             let Value::Object(state) = receiver else {
                 unreachable!("only an object carries the marker");
             };
-            let index = state
-                .borrow()
-                .get("@@index")
-                .unwrap_or(Value::Number(0.0))
-                .as_number();
-            let Value::Array(items) = &iterated else {
-                return Ok(iteration_result(Value::Undefined, true));
+            let (index, part) = {
+                let state = state.borrow();
+                (
+                    state
+                        .get("@@index")
+                        .unwrap_or(Value::Number(0.0))
+                        .as_number(),
+                    state
+                        .get("@@part")
+                        .unwrap_or(Value::String("value".to_owned()))
+                        .to_display_string(),
+                )
             };
             let index = index as usize;
             // Re-read the length every step. An array shortened during iteration must stop
             // early rather than read past its end, which is exactly what a cached length would
             // do -- and is the mutation-during-iteration case the corpus checks.
-            let item = items.borrow().get(index).cloned();
+            let item = match &iterated {
+                Value::Array(items) => items.borrow().get(index).cloned(),
+                Value::TypedArray(view) => view.get(index),
+                _ => None,
+            };
             match item {
                 Some(value) => {
                     state
@@ -13978,14 +13978,20 @@ fn call_native(
                         .set("@@index", Value::Number(index as f64 + 1.0));
                     // An iterator walks *indices*, so it visits a hole -- and what it yields
                     // there is what a read yields, which is undefined.
-                    iteration_result(
-                        if matches!(value, Value::Native(Native::Hole)) {
-                            Value::Undefined
-                        } else {
-                            value
-                        },
-                        false,
-                    )
+                    let value = if matches!(value, Value::Native(Native::Hole)) {
+                        Value::Undefined
+                    } else {
+                        value
+                    };
+                    let yielded = match part.as_str() {
+                        "key" => Value::Number(index as f64),
+                        "entry" => Value::Array(ArrayData::new(vec![
+                            Value::Number(index as f64),
+                            value,
+                        ])),
+                        _ => value,
+                    };
+                    iteration_result(yielded, false)
                 }
                 None => iteration_result(Value::Undefined, true),
             }
