@@ -175,6 +175,14 @@ pub enum Native {
     Math,
     MathAbs,
     MathFloor,
+    MathHypot,
+    MathAtan2,
+    MathSin,
+    MathCos,
+    MathTan,
+    MathAsin,
+    MathAcos,
+    MathAtan,
     MathCeil,
     MathRound,
     MathTrunc,
@@ -632,6 +640,17 @@ impl Native {
             (Self::Math, "LN2") => Some(Value::Number(std::f64::consts::LN_2)),
             (Self::Math, "LN10") => Some(Value::Number(std::f64::consts::LN_10)),
             (Self::Math, "SQRT2") => Some(Value::Number(std::f64::consts::SQRT_2)),
+            (Self::Math, "SQRT1_2") => Some(Value::Number(std::f64::consts::FRAC_1_SQRT_2)),
+            (Self::Math, "LOG2E") => Some(Value::Number(std::f64::consts::LOG2_E)),
+            (Self::Math, "LOG10E") => Some(Value::Number(std::f64::consts::LOG10_E)),
+            (Self::Math, "hypot") => Some(Value::Native(Self::MathHypot)),
+            (Self::Math, "atan2") => Some(Value::Native(Self::MathAtan2)),
+            (Self::Math, "sin") => Some(Value::Native(Self::MathSin)),
+            (Self::Math, "cos") => Some(Value::Native(Self::MathCos)),
+            (Self::Math, "tan") => Some(Value::Native(Self::MathTan)),
+            (Self::Math, "asin") => Some(Value::Native(Self::MathAsin)),
+            (Self::Math, "acos") => Some(Value::Native(Self::MathAcos)),
+            (Self::Math, "atan") => Some(Value::Native(Self::MathAtan)),
             (Self::NumberConstructor, "isInteger") => Some(Value::Native(Self::NumberIsInteger)),
             (Self::NumberConstructor, "isSafeInteger") => {
                 Some(Value::Native(Self::NumberIsSafeInteger))
@@ -1416,6 +1435,10 @@ impl Value {
             // function that does nothing.
             Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
             Self::Native(Native::PrototypeOf(_)) => "object",
+            // A namespace is an object holding functions, not a function: `Math` and `JSON`
+            // and `Reflect` cannot be called, and a library that feature-detects with
+            // `typeof Math === "object"` has to find one.
+            Self::Native(Native::Math | Native::Json | Native::Reflect) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
@@ -1446,6 +1469,10 @@ impl Value {
             Self::Object(_) => "object",
             Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
             Self::Native(Native::PrototypeOf(_)) => "object",
+            // A namespace is an object holding functions, not a function: `Math` and `JSON`
+            // and `Reflect` cannot be called, and a library that feature-detects with
+            // `typeof Math === "object"` has to find one.
+            Self::Native(Native::Math | Native::Json | Native::Reflect) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
@@ -8802,6 +8829,20 @@ fn call_native(
         }
         Native::MathSqrt => Value::Number(argument_number(arguments).sqrt()),
         Native::MathCbrt => Value::Number(argument_number(arguments).cbrt()),
+        // `hypot` is not `sqrt(x*x + y*y)`: squaring overflows for arguments whose result is
+        // perfectly representable, which is the whole reason it exists.
+        Native::MathHypot => Value::Number(arguments.iter().fold(0.0f64, |total, argument| {
+            total.hypot(argument.as_number())
+        })),
+        Native::MathAtan2 => Value::Number(
+            argument_number(arguments).atan2(arguments.get(1).map_or(f64::NAN, Value::as_number)),
+        ),
+        Native::MathSin => Value::Number(argument_number(arguments).sin()),
+        Native::MathCos => Value::Number(argument_number(arguments).cos()),
+        Native::MathTan => Value::Number(argument_number(arguments).tan()),
+        Native::MathAsin => Value::Number(argument_number(arguments).asin()),
+        Native::MathAcos => Value::Number(argument_number(arguments).acos()),
+        Native::MathAtan => Value::Number(argument_number(arguments).atan()),
         Native::MathPow => Value::Number(
             argument_number(arguments).powf(arguments.get(1).map_or(f64::NAN, Value::as_number)),
         ),

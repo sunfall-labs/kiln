@@ -2182,3 +2182,33 @@ surrogate at all, and a cut inside a pair yields U+FFFD where node yields the ha
 divergence, it is now the *only* one in the string surface, and ADR 0022 records it along with the
 escape route -- WTF-8, which keeps the common case free, versus `Vec<u16>`, which makes every
 byte-oriented boundary pay. Not a slice to take alongside string methods.
+
+### Measured what the native backend actually refuses, and it was not what I had listed
+
+**2026-08-30, Claude.** I had `LoadGlobal` at the head of my own queue. So I ran all 91
+differential probes through `--native` and recorded the first refusal each one hits, the way the
+backlog section near the top of this file was built. Observation, not inference:
+
+```
+ 21  (ran, and matched the interpreter)
+  7  the `Object` builtin        4  `New`
+  6  generator and async         4  `DefineAccessor`
+  6  `PushHandler` (try/catch)   3  the `Math` builtin
+  5  the `Date` builtin          3  `NaN` / `Infinity`
+```
+
+**`LoadGlobal` does not appear at all**, and four hand-written shapes that should have produced
+it all compiled without it -- the lowering boxes those bindings instead. It was top of my list
+and it is not reachable. Worth the ten minutes it took to find that out.
+
+So the order is: the builtin namespaces (`Object`, `Math`, `Number`, `NaN`/`Infinity`, `Array`),
+which are individually small and collectively unblock about sixteen probes; then `try`/`throw`;
+then `New` and accessors.
+
+**Two interpreter bugs fell out of looking at the builtins first**, which is why I looked:
+`typeof Math` answered `"function"`, and so did `JSON` and `Reflect`. They are namespace
+*objects* -- a library feature-detecting with `typeof Math === "object"` would have taken a
+polyfill path nobody tested. And `Math` was missing `hypot`, `atan2`, the trigonometric six,
+`SQRT1_2`, `LOG2E` and `LOG10E`. `hypot` is implemented as a fold of `f64::hypot` rather than
+`sqrt(x*x + y*y)`, because squaring overflows for arguments whose result is perfectly
+representable, which is the whole reason the function exists.
