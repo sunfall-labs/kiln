@@ -1020,7 +1020,7 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = graph_module_abi_identity();
-        let embedding_abi = shared_embedding_abi_identity();
+        let embedding_abi = shared_graph_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let link_toolchain = shared_link_toolchain(&self.toolchain)?;
@@ -1944,6 +1944,13 @@ fn shared_embedding_abi_identity() -> String {
     format!(
         "{};module-api-{EMBEDDING_MODULE_API_VERSION}",
         runtime_abi_identity()
+    )
+}
+
+fn shared_graph_embedding_abi_identity() -> String {
+    format!(
+        "{};graph-scheduler-abi-{GRAPH_SCHEDULER_ABI_VERSION}",
+        shared_embedding_abi_identity()
     )
 }
 
@@ -3873,6 +3880,13 @@ mod tests {
             [],
         );
         assert_ne!(scalar, graph);
+        assert!(shared_graph_embedding_abi_identity().contains(&format!(
+            "graph-scheduler-abi-{GRAPH_SCHEDULER_ABI_VERSION}"
+        )));
+        assert_ne!(
+            shared_embedding_abi_identity(),
+            shared_graph_embedding_abi_identity()
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -4356,6 +4370,194 @@ mod tests {
             imports: Vec::new(),
             exports: Vec::new(),
         }
+    }
+
+    fn first_realm_random_bits() -> u64 {
+        let mut state = RANDOM_REALM_SEED.wrapping_add(RANDOM_REALM_STEP);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+        ((state >> 11) as f64 / 9_007_199_254_740_992.0).to_bits()
+    }
+
+    const RANDOM_REALM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+    const RANDOM_REALM_STEP: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    fn random_realm_graph(project: &Path) -> ModuleGraph {
+        fs::create_dir_all(project).expect("create random realm project");
+        fs::write(project.join("main.js"), "").expect("write random realm entry");
+        fs::write(project.join("dep.js"), "").expect("write random realm dependency");
+        let dependency = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::String("random".into())],
+                code: vec![
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+                    Instruction::CallMethod { name: 0, argc: 0 },
+                    Instruction::StoreLocal(0),
+                    Instruction::LoadLocal(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "first".into(),
+                local_slot: 0,
+            }],
+        };
+        let entry = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("random".into()),
+                    Constant::Number(first_realm_random_bits()),
+                ],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::Const(1),
+                    Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+                    Instruction::CallMethod { name: 0, argc: 0 },
+                    Instruction::LoadLocal(0),
+                    Instruction::Binary(kiln_ir::BinaryOp::StrictEqual),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 2,
+                    },
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["./dep.js".into()],
+            imports: vec![ImportBinding {
+                source: "./dep.js".into(),
+                imported: "first".into(),
+                local: "first".into(),
+                local_slot: 0,
+            }],
+            exports: Vec::new(),
+        };
+        let dependency_path =
+            fs::canonicalize(project.join("dep.js")).expect("canonical random dependency");
+        ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
+            if path == dependency_path {
+                dependency.clone()
+            } else {
+                entry.clone()
+            }
+        })
+        .expect("construct random realm graph")
+    }
+
+    #[test]
+    fn native_graph_random_state_is_shared_across_translation_units() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native random realm integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-random-realm-test");
+        let graph = random_realm_graph(&root.path.join("project"));
+        let run = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("run random realm graph");
+        assert_eq!(run.stdout, b"true false\n");
+    }
+
+    #[test]
+    fn shared_graph_random_state_resets_for_each_public_invocation() {
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("skipping shared random realm integration on unsupported platform");
+            return;
+        }
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping shared random realm integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-shared-random-realm-test");
+        let graph = random_realm_graph(&root.path.join("project"));
+        let report = NativeBuilder::new(
+            ArtifactCache::new(root.path.join("cache")),
+            toolchain.clone(),
+        )
+        .build_shared_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join(shared_library_name()),
+                profile: NativeProfile::Dev,
+            },
+        )
+        .expect("build shared random realm graph");
+        let host_source = root.path.join("host.c");
+        fs::write(
+            &host_source,
+            format!(
+                r#"#include "{}"
+#include <stdio.h>
+static int call(void *context, unsigned short op, unsigned short argc,
+                const kiln_value *args, kiln_value *result) {{
+    unsigned short i; (void)context;
+    if (op != KILN_HOST_OP_WRITE_STDOUT || argc != 2 || args == NULL || result == NULL) return -1;
+    for (i = 0; i < argc; ++i) {{
+        if (args[i].tag != KILN_VALUE_BOOLEAN) return -2;
+        if (i != 0) fputc(' ', stdout);
+        fputs(args[i].bits ? "true" : "false", stdout);
+    }}
+    fputc('\n', stdout); result->tag = KILN_VALUE_UNDEFINED; result->reserved = 0;
+    result->bits = 0; result->ptr = NULL; result->len = 0; return 0;
+}}
+int main(void) {{ kiln_host host = {{ call, NULL }}; kiln_value result;
+    if ({}(&host, &result) != 0) return 1;
+    if ({}(&host, &result) != 0) return 2;
+    return 0;
+}}
+"#,
+                report.header.file_name().unwrap().to_string_lossy(),
+                report.module_symbol,
+                report.module_symbol
+            ),
+        )
+        .expect("write shared random realm host");
+        let host_object = root.path.join("host.o");
+        let mut compile_options = CompileOptions::default();
+        compile_options.include_dirs.push(root.path.clone());
+        toolchain
+            .compile_c(&host_source, &host_object, &compile_options)
+            .expect("compile shared random realm host");
+        let host_executable = root.path.join("host");
+        let mut link_options = LinkOptions::default();
+        link_options.runtime_libraries.push(report.output.clone());
+        link_options
+            .extra_args
+            .push(format!("-Wl,-rpath,{}", root.path.display()).into());
+        if let Some(loader_directory) = report.loader.parent() {
+            link_options
+                .extra_args
+                .push(format!("-Wl,-rpath,{}", loader_directory.display()).into());
+        }
+        toolchain
+            .link_executable(&[host_object], &host_executable, &link_options)
+            .expect("link shared random realm host");
+        let output = Command::new(host_executable)
+            .output()
+            .expect("run shared random realm host");
+        assert!(
+            output.status.success(),
+            "shared random realm host failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"true false\ntrue false\n");
     }
 
     #[test]

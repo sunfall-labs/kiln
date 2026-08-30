@@ -918,7 +918,12 @@ typedef struct kiln_timer {
  * can check anyway. The interpreter does exactly this, and the two agreeing about ordering is
  * what `conformance/native/timers.ts` is for. */
 #ifdef KILN_C99_GRAPH_RUNTIME
+/* Must match the private scheduler layout emitted by kiln-native-runtime. */
+typedef struct kiln_native_realm_state {
+    uint64_t random_state;
+} kiln_native_realm_state;
 struct kiln_native_scheduler {
+    kiln_native_realm_state realm;
     kiln_microtask *queue;
     size_t queue_head;
     size_t queue_count;
@@ -943,6 +948,7 @@ static _Thread_local kiln_native_scheduler *kiln_c99_scheduler;
 #define kiln_c99_now (kiln_c99_scheduler->now)
 #define kiln_c99_next_timer_id (kiln_c99_scheduler->next_timer_id)
 #define kiln_c99_next_sequence (kiln_c99_scheduler->next_sequence)
+#define kiln_c99_random_state (kiln_c99_scheduler->realm.random_state)
 extern int kiln_native_scheduler_graph_mode(const kiln_native_scheduler *scheduler);
 extern void kiln_native_scheduler_set_runner(kiln_native_scheduler *scheduler,
                                              kiln_scheduler_runner_fn runner);
@@ -1777,7 +1783,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
  * what a language builtin needs. Seeded from a constant rather than from the environment, so the
  * same program produces the same sequence in both engines and on every machine -- the same trade
  * the virtual clock makes, and the reason an artifact hash stays honest. See ADR 0026. */
+#ifndef KILN_C99_GRAPH_RUNTIME
 static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);
+#endif
 
 static double kiln_c99_random(void) {
     uint64_t mixed;
@@ -13384,6 +13392,37 @@ int32_t kiln_regexp_named_group(const void *handle, size_t index, unsigned char 
         );
         assert!(emitted.source.contains("const kiln_value *imports"));
         assert!(emitted.source.contains("size_t import_count"));
+    }
+
+    #[test]
+    fn graph_modules_store_random_state_in_the_invocation_scheduler() {
+        let module = module(
+            program(Vec::new(), vec![Instruction::Return], 0),
+            Vec::new(),
+            Vec::new(),
+        );
+        let scalar = emit_module_with_logical_path(&module, "main.js").expect("module emits");
+        let graph =
+            emit_graph_module_with_logical_path(&module, "main.js").expect("graph module emits");
+
+        assert!(!scalar.source.contains("#define KILN_C99_GRAPH_RUNTIME 1"));
+        assert!(
+            scalar
+                .source
+                .contains("static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);")
+        );
+        assert!(graph.source.contains("#define KILN_C99_GRAPH_RUNTIME 1"));
+        assert!(graph.source.contains("kiln_native_realm_state realm;"));
+        assert!(
+            graph
+                .source
+                .contains("#define kiln_c99_random_state (kiln_c99_scheduler->realm.random_state)")
+        );
+        assert!(
+            graph
+                .source
+                .contains("#ifndef KILN_C99_GRAPH_RUNTIME\nstatic uint64_t kiln_c99_random_state")
+        );
     }
 
     #[test]
