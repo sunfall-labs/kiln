@@ -19,7 +19,6 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 use crate::hash::content_hash;
-use crate::hash::{Fnv1a, hash_names};
 use crate::{
     Compiled, CompiledModule, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision,
     Stats,
@@ -95,9 +94,9 @@ struct FileState {
 
 /// An in-memory, single-threaded [`QueryEngine`].
 ///
-/// Deliberately free of third-party dependencies: this crate is on the rebuild path of
-/// everything else, and a slow `cargo check` here is a tax on every other workstream
-/// (docs/adr/0004, docs/adr/0006).
+/// Deliberately limited to small, concrete compiler-owned dependencies: this crate is on the
+/// rebuild path of everything else, and a slow `cargo check` here is a tax on every other
+/// workstream (docs/adr/0004, docs/adr/0006, docs/adr/0010).
 #[derive(Debug)]
 pub struct MemoEngine {
     frontend: Frontend,
@@ -292,14 +291,7 @@ impl MemoEngine {
         // Normalized, because equality of this value is what gates every dependent (adr/0003):
         // a module's interface is a *set* of names, so reordering or duplicating declarations
         // must not invalidate anything.
-        let mut exports = parsed.value.exports.clone();
-        exports.sort();
-        exports.dedup();
-
-        let interface = Interface {
-            interface_hash: hash_names(&exports),
-            exports,
-        };
+        let interface = Interface::from_exports(parsed.value.exports.clone());
         (interface, vec![dep])
     }
 
@@ -331,23 +323,13 @@ impl MemoEngine {
             deps.push(dep);
         }
 
-        let mut hasher = Fnv1a::new();
-        let mut exports = 0;
-        for file in &active_files {
+        let project = Project::from_interfaces(active_files.iter().map(|file| {
             let state = self.file(*file);
-            let interface = &state.interface.as_ref().expect(FORCED).value;
-            // Fixed-width length framing prevents path/interface boundaries from being ambiguous.
-            hasher.write_u64(state.path.len() as u64);
-            hasher.write(state.path.as_bytes());
-            hasher.write_u64(interface.interface_hash);
-            exports += interface.exports.len();
-        }
-
-        let project = Project {
-            modules: active_files.len(),
-            exports,
-            interface_hash: hasher.finish(),
-        };
+            (
+                state.path.as_str(),
+                &state.interface.as_ref().expect(FORCED).value,
+            )
+        }));
         (project, deps)
     }
 
@@ -744,6 +726,16 @@ mod tests {
     }
 
     #[test]
+    fn project_constructor_is_order_independent_even_for_duplicate_paths() {
+        let alpha = Interface::from_exports(vec!["alpha".to_owned()]);
+        let beta = Interface::from_exports(vec!["beta".to_owned()]);
+
+        let forward = Project::from_interfaces([("same.js", &alpha), ("same.js", &beta)]);
+        let reverse = Project::from_interfaces([("same.js", &beta), ("same.js", &alpha)]);
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
     fn inactive_interned_paths_do_not_affect_project_identity() {
         let mut with_gap = MemoEngine::new(fixture_frontend);
         let a = with_gap.intern("a.js");
@@ -769,6 +761,24 @@ mod tests {
             original.interface_hash, renamed.interface_hash,
             "renaming a module must change the project identity"
         );
+    }
+
+    #[test]
+    fn strong_project_identity_does_not_trust_weak_interface_summaries() {
+        let alpha = Interface {
+            interface_hash: 7,
+            exports: vec!["alpha".to_owned()],
+        };
+        let beta = Interface {
+            interface_hash: 7,
+            exports: vec!["beta".to_owned()],
+        };
+
+        let alpha_project = Project::from_interfaces([("same.js", &alpha)]);
+        let beta_project = Project::from_interfaces([("same.js", &beta)]);
+        assert_eq!(alpha_project.interface_hash, beta_project.interface_hash);
+        assert_ne!(alpha_project.identity_digest, beta_project.identity_digest);
+        assert_ne!(alpha_project, beta_project);
     }
 
     #[test]
@@ -1192,11 +1202,7 @@ mod tests {
         let mut db = MemoEngine::new(fixture_frontend);
         assert_eq!(
             db.project(),
-            Project {
-                modules: 0,
-                exports: 0,
-                interface_hash: Fnv1a::new().finish()
-            }
+            Project::from_interfaces(std::iter::empty::<(&str, &Interface)>())
         );
         assert_eq!(db.revision(), Revision(0));
     }

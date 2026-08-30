@@ -5,15 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Only the dependency-free, compiler-owned HIR types sit below the query database. Oxc remains
-# isolated in `frontend-oxc`; see ADR 0006.
+# Only compiler-owned concrete types sit below the query database. The small digest primitive is
+# used where equality has no full source value behind it; Oxc remains isolated in `frontend-oxc`.
+# See ADRs 0006 and 0010.
 [dependencies]
+kiln-digest = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-ir = { workspace = true }
 
-# A dev-dependency compiles only for this crate's own tests: it is not in the build graph of
-# anything that depends on kiln-db, so the zero-dependency rule above is intact. Buying a
-# property-based oracle for the memoization at no cost to the rebuild path is the trade adr/0004
-# would have us make anyway.
+# A dev-dependency compiles only for this crate's own tests, so the property-based memoization
+# oracle adds nothing to downstream rebuilds (ADR 0004).
 [dev-dependencies]
 proptest = { workspace = true }
