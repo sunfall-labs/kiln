@@ -946,28 +946,22 @@ mod regexp {
             .map_or(0, |found| found.groups().count())
     }
 
-    /// Read the `index`th unique named capture from the last match.
+    /// The name of capture group `index` from the last match, as UTF-8 without a terminator.
     ///
-    /// The provider ABI v2 deliberately indexes named entries rather than capture groups: the
-    /// `regress` API applies ECMAScript's duplicate-name collision rule (first participating
-    /// capture wins) and hides unnamed captures. Returns the UTF-8 byte length written, and writes
-    /// the selected UTF-16 range to `out_range`; 0 means there is no such named entry and -1 means
-    /// the buffer is too small or an argument is invalid. A caller may pass a heap buffer and retry
-    /// with a larger capacity after -1; names have no fixed ABI limit.
+    /// Returns the byte length written, 0 for a group with no name, and -1 when there is no last match
+    /// or the buffer is too small.
     ///
     /// # Safety
     ///
-    /// `handle` must be live, `buffer` must be writable for `capacity` bytes when non-null, and
-    /// `out_range` must be writable for two `i64` values.
+    /// `handle` must be live and `buffer` must be writable for `capacity` bytes.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_regexp_named_group(
+    pub unsafe extern "C" fn kiln_regexp_group_name(
         handle: *const KilnRegex,
         index: usize,
         buffer: *mut u8,
         capacity: usize,
-        out_range: *mut i64,
     ) -> i32 {
-        if handle.is_null() || out_range.is_null() {
+        if handle.is_null() {
             return INVALID_ARGUMENT;
         }
         // SAFETY: the caller contract guarantees the handle is live.
@@ -975,7 +969,12 @@ mod regexp {
         let Some(found) = state.last.as_ref() else {
             return INVALID_ARGUMENT;
         };
-        let Some((name, range)) = found.named_groups().nth(index) else {
+        // `named_groups` counts from the first capture group, where the caller counts from the whole
+        // match -- so group zero has no name by construction and the rest are shifted by one.
+        let Some(wanted) = index.checked_sub(1) else {
+            return 0;
+        };
+        let Some((name, _)) = found.named_groups().nth(wanted) else {
             return 0;
         };
         let bytes = name.as_bytes();
@@ -988,14 +987,6 @@ mod regexp {
         // SAFETY: the length is within the capacity the caller promised, and `name` is disjoint from
         // the caller's buffer.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
-        let (start, end) = range.map_or((-1, -1), |range| {
-            (as_offset(range.start), as_offset(range.end))
-        });
-        // SAFETY: `out_range` is a writable pair by the caller contract.
-        unsafe {
-            out_range.write(start);
-            out_range.add(1).write(end);
-        }
         length
     }
 
@@ -1309,175 +1300,6 @@ mod bigint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "regexp")]
-    use crate::regexp::{
-        kiln_regexp_compile, kiln_regexp_free, kiln_regexp_named_group, kiln_regexp_search,
-    };
-    #[cfg(feature = "regexp")]
-    use alloc::vec::Vec;
-
-    #[cfg(feature = "regexp")]
-    #[test]
-    fn named_group_v2_enumerates_collisions_and_unmatched_ranges() {
-        let pattern = b"(?<first>a)(?<optional>b)?(?<last>c)";
-        let flags = b"";
-        let mut handle = core::ptr::null_mut();
-        // SAFETY: all pointers name readable spans and `handle` is a writable output slot.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_compile(
-                    pattern.as_ptr(),
-                    pattern.len(),
-                    flags.as_ptr(),
-                    flags.len(),
-                    &mut handle,
-                )
-            },
-            0
-        );
-        let subject: Vec<u16> = "ac".encode_utf16().collect();
-        let mut ranges = [0_i64; 6];
-        // SAFETY: the handle and subject are live and `ranges` has room for all groups.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_search(
-                    handle,
-                    subject.as_ptr(),
-                    subject.len(),
-                    0,
-                    ranges.as_mut_ptr(),
-                    3,
-                )
-            },
-            1
-        );
-        let mut short = [0_u8; 1];
-        let mut selected = [-1_i64; 2];
-        // SAFETY: the provider writes only within the supplied one-byte name buffer and range.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_named_group(
-                    handle,
-                    0,
-                    short.as_mut_ptr(),
-                    short.len(),
-                    selected.as_mut_ptr(),
-                )
-            },
-            -1
-        );
-        let mut name = [0_u8; 16];
-        // SAFETY: `name` and `selected` are writable for their advertised capacities.
-        let written = unsafe {
-            kiln_regexp_named_group(
-                handle,
-                0,
-                name.as_mut_ptr(),
-                name.len(),
-                selected.as_mut_ptr(),
-            )
-        };
-        assert!(
-            name.get(..written as usize)
-                .is_some_and(|bytes| bytes == b"first")
-        );
-        assert_eq!(selected, [0, 1]);
-        // SAFETY: same valid buffers for the second named entry, whose optional capture did not
-        // participate and therefore reports undefined as (-1,-1).
-        let written = unsafe {
-            kiln_regexp_named_group(
-                handle,
-                1,
-                name.as_mut_ptr(),
-                name.len(),
-                selected.as_mut_ptr(),
-            )
-        };
-        assert!(
-            name.get(..written as usize)
-                .is_some_and(|bytes| bytes == b"optional")
-        );
-        assert_eq!(selected, [-1, -1]);
-        // SAFETY: same valid buffers for the participating final entry.
-        let written = unsafe {
-            kiln_regexp_named_group(
-                handle,
-                2,
-                name.as_mut_ptr(),
-                name.len(),
-                selected.as_mut_ptr(),
-            )
-        };
-        assert!(
-            name.get(..written as usize)
-                .is_some_and(|bytes| bytes == b"last")
-        );
-        assert_eq!(selected, [1, 2]);
-        // SAFETY: the handle came from the successful compile and is released exactly once.
-        unsafe { kiln_regexp_free(handle) };
-
-        let pattern = b"(?:(?<which>a)|(?<which>b))";
-        let mut handle = core::ptr::null_mut();
-        // SAFETY: all pointers name readable spans and `handle` is a writable output slot.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_compile(
-                    pattern.as_ptr(),
-                    pattern.len(),
-                    flags.as_ptr(),
-                    flags.len(),
-                    &mut handle,
-                )
-            },
-            0
-        );
-        let subject: Vec<u16> = "b".encode_utf16().collect();
-        let mut ranges = [0_i64; 6];
-        // SAFETY: the handle and subject are live and `ranges` has room for all groups.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_search(
-                    handle,
-                    subject.as_ptr(),
-                    subject.len(),
-                    0,
-                    ranges.as_mut_ptr(),
-                    3,
-                )
-            },
-            1
-        );
-        // SAFETY: the output buffers are writable and the handle has a live last match.
-        let written = unsafe {
-            kiln_regexp_named_group(
-                handle,
-                0,
-                name.as_mut_ptr(),
-                name.len(),
-                selected.as_mut_ptr(),
-            )
-        };
-        assert!(
-            name.get(..written as usize)
-                .is_some_and(|bytes| bytes == b"which")
-        );
-        assert_eq!(selected, [0, 1]);
-        // SAFETY: the second duplicate is collapsed by the provider's ECMAScript collision rule.
-        assert_eq!(
-            unsafe {
-                kiln_regexp_named_group(
-                    handle,
-                    1,
-                    name.as_mut_ptr(),
-                    name.len(),
-                    selected.as_mut_ptr(),
-                )
-            },
-            0
-        );
-        // SAFETY: release the second handle exactly once.
-        unsafe { kiln_regexp_free(handle) };
-    }
 
     #[test]
     fn formatter_translates_capacity_and_nul_contracts_without_partial_writes() {

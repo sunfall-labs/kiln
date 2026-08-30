@@ -39,7 +39,7 @@ use crate::error::{Error, Result};
 use crate::sources;
 use kiln_host_abi::HostValue;
 use kiln_native_runtime::{NATIVE_RESULT_PATH_ENV, decode_native_result};
-use kiln_proto::{NativeProfile, ResolutionMap, ScalarValueSummary, SourceView};
+use kiln_proto::{NativeProfile, ScalarValueSummary, SourceView};
 
 pub fn run(
     backend: &mut dyn Backend,
@@ -84,8 +84,6 @@ pub fn run(
     let mut project_synced = false;
     let mut project_truncated = false;
     let mut source_manifest = commands::SourceManifest::new();
-    let mut resolutions = ResolutionMap::new(project_dir.to_string_lossy(), Vec::new())
-        .map_err(|error| Error::Protocol(error.to_string()))?;
     let mut source_view = SourceView(0);
     let peer = match backend.peer() {
         Ok(peer) => Some(peer),
@@ -107,7 +105,6 @@ pub fn run(
                 },
                 SourceSync::Authoritative {
                     manifest: &mut source_manifest,
-                    resolutions: &mut resolutions,
                     truncated: &mut project_truncated,
                 },
                 out,
@@ -169,24 +166,15 @@ pub fn run(
                             .keys()
                             .any(|source| Path::new(source).starts_with(event_path))
                     });
-                let package_metadata_changed = batch
-                    .iter()
-                    .flat_map(|event| event.paths.iter())
-                    .any(|event_path| is_pinned_package_manifest(&resolutions, event_path));
-                if !target_changed
-                    && dependency_paths.is_empty()
-                    && !source_tree_removed
-                    && !package_metadata_changed
-                {
+                if !target_changed && dependency_paths.is_empty() && !source_tree_removed {
                     continue;
                 }
 
                 // Existing dependencies can be updated directly from the event batch. A removal
                 // needs an authoritative sync because Sync omission is the protocol's deletion
                 // operation; this is deliberately the uncommon slow path.
-                let mut dependency_changed = source_tree_removed || package_metadata_changed;
-                let mut authoritative_sync =
-                    !project_synced || source_tree_removed || package_metadata_changed;
+                let mut dependency_changed = source_tree_removed;
+                let mut authoritative_sync = !project_synced || source_tree_removed;
                 let mut dependency_updates = Vec::new();
                 for dependency in dependency_paths {
                     match commands::read_source(&dependency) {
@@ -194,9 +182,6 @@ pub fn run(
                             let canonical = commands::canonical_path(&dependency)?;
                             let hash = kiln_proto::source_digest(&source);
                             if source_manifest.get(&canonical) != Some(&hash) {
-                                if !package_requests_are_pinned(&resolutions, &canonical, &source) {
-                                    authoritative_sync = true;
-                                }
                                 if needs_authoritative_membership_check(
                                     project_truncated,
                                     &source_manifest,
@@ -244,19 +229,9 @@ pub fn run(
                             missing = false;
                         }
                         if dependency_changed || text.as_deref() != Some(current.as_str()) {
-                            if text.as_deref() != Some(current.as_str())
-                                && !package_requests_are_pinned(
-                                    &resolutions,
-                                    &target.canonical,
-                                    &current,
-                                )
-                            {
-                                authoritative_sync = true;
-                            }
                             let sync = if authoritative_sync {
                                 SourceSync::Authoritative {
                                     manifest: &mut source_manifest,
-                                    resolutions: &mut resolutions,
                                     truncated: &mut project_truncated,
                                 }
                             } else {
@@ -290,7 +265,6 @@ pub fn run(
                                         },
                                         SourceSync::Authoritative {
                                             manifest: &mut source_manifest,
-                                            resolutions: &mut resolutions,
                                             truncated: &mut project_truncated,
                                         },
                                         out,
@@ -408,7 +382,6 @@ struct SourceSnapshot<'a> {
 enum SourceSync<'a> {
     Authoritative {
         manifest: &'a mut commands::SourceManifest,
-        resolutions: &'a mut ResolutionMap,
         truncated: &'a mut bool,
     },
     Incremental,
@@ -442,10 +415,9 @@ fn run_once(
     let output = match sync {
         SourceSync::Authoritative {
             manifest,
-            resolutions,
             truncated,
         } => {
-            let (output, current_manifest, current_resolutions, current_truncated, view) =
+            let (output, current_manifest, current_truncated, view) =
                 commands::run_source_with_manifest(
                     backend,
                     path,
@@ -454,7 +426,6 @@ fn run_once(
                     source.text,
                 )?;
             *manifest = current_manifest;
-            *resolutions = current_resolutions;
             *truncated = current_truncated;
             *source_view = view;
             output

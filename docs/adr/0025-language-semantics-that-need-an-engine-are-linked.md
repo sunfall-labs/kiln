@@ -8,8 +8,8 @@ archive into the complete shipped Rust runtime.
 
 ## Context
 
-When this decision was proposed, the native backend refused `NewRegExp`. Five differential probes
-stopped there, and it was the largest single entry left in the refusal tally.
+The native backend refuses `NewRegExp`. Five differential probes stop there, and it is the largest
+single entry left in the refusal tally.
 
 A regular expression is not a small function. The interpreter uses `regress`, which targets
 ECMAScript semantics specifically rather than the linear-time subset: backreferences, lookahead
@@ -62,11 +62,8 @@ size_t  kiln_regexp_group_count(void *handle);
  * units -- start and end per group, (-1, -1) for a group that did not participate. */
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len,
                            size_t start, int64_t *out_ranges, size_t out_capacity);
-/* ABI v2: the `index`th unique named group from the last match. Returns its UTF-8 byte length,
- * 0 when there is no such group, and -1 when the buffer is too small. Writes (-1,-1) for an
- * unmatched group; callers retry with a larger buffer after -1. */
-int32_t kiln_regexp_named_group(void *handle, size_t index, uint8_t *buffer, size_t capacity,
-                                int64_t *out_range);
+/* The name of group `index` as UTF-8, or -1 when it has none. */
+int32_t kiln_regexp_group_name(void *handle, size_t index, uint8_t *buffer, size_t capacity);
 void    kiln_regexp_free(void *handle);
 ```
 
@@ -89,13 +86,6 @@ cheap now and expensive later.
 a `#[global_allocator]` over `malloc`/`free`. The crate can no longer describe itself as
 allocation-free; the number core it wraps still is, and that distinction is worth keeping in the
 doc comment rather than losing.
-
-**Native Dev carries two private provider copies.** The CLI runtime DSO needs the provider's
-number-formatting entry points, but deliberately exports only its three stable CLI symbols.
-Generated application objects need the full provider ABI, including RegExp, so the same archive
-is also linked into the executable. This modest duplication keeps the provider private instead of
-turning it into another shipped dynamic ABI. Stateful provider APIs must remain on the application
-side unless their cross-copy ownership and identity are designed explicitly.
 
 **The vendored C in `kiln-native-number` is a test fixture, not a fallback.** It defines
 `kiln_number_to_js_string` and `kiln_string_to_number` and is linked only by unit tests in

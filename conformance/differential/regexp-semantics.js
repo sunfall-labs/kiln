@@ -6,18 +6,6 @@ console.log(/foo(?=bar)/.test('foobar'), /foo(?!bar)/.test('foobar'));
 console.log('a@example'.match(/(?<=@)\w+/)[0]);
 console.log(/(?<year>\d{4})-(?<month>\d{2})/.exec('2026-08')[1]);
 
-// Named captures are exposed through a null-prototype object. Optional and unknown names read as
-// undefined/empty, while replacement callbacks receive the object after offset and input.
-const namedRe = /(?<first>a)(?<optional>b)?(?<last>c)/;
-const named = namedRe.exec('ac');
-console.log(named.groups.first, named.groups.optional === undefined, named.groups.last,
-  Object.keys(named.groups).join(','), Object.getPrototypeOf(named.groups) === null);
-console.log('ac'.replace(namedRe, '$<last>/$<missing>/$<first>'));
-console.log('ac'.replace(namedRe, function (match, first, optional, last, offset, input, groups) {
-  return [match, first, optional, last, offset, input, groups.first, groups.optional].join('|');
-}));
-console.log(/(?:(?<which>a)|(?<which>b))/.exec('b').groups.which);
-
 // `exec` returns an array carrying `index` and `input`, which is why an array needs somewhere to
 // put a property that is not an element.
 const found = /(\d+)-(\d+)/.exec('x 12-34 y');

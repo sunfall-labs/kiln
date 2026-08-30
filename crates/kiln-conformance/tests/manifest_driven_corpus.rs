@@ -308,7 +308,7 @@ fn the_repositorys_guard_corpus_is_measured_rather_than_assumed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/guard");
     let results = run_all(&root);
 
-    assert_eq!(results.len(), 21);
+    assert_eq!(results.len(), 20);
     assert!(
         results
             .iter()

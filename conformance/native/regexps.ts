@@ -16,21 +16,6 @@ console.log(plain.exec("zzz"), plain.test("xabc"), plain.test("xxx"), plain.last
 const optional = /(a)?(b)/.exec("b");
 console.log(optional![0], optional![1], optional![2], optional!.length);
 
-// Named groups are an object on every full match, including undefined for an optional group. The
-// object has no Object.prototype, so names such as `constructor` and `__proto__` are data keys.
-const named = /(?<first>a)(b)?(?<constructor>c)(?<__proto__>d)/;
-const namedFound = named.exec("acd");
-console.log(namedFound!.groups, namedFound!.groups!.first, namedFound!.groups!.b,
-  namedFound!.groups!.constructor, namedFound!.groups!.__proto__,
-  Object.getPrototypeOf(namedFound!.groups), namedFound!.groups!.toString);
-console.log("acd".replace(named, "$<constructor>/$<missing>/$<first>"));
-console.log("acd".replace(named, (match, first, optionalGroup, constructorGroup, protoGroup,
-  index, input, groups) => `${match}|${first}|${optionalGroup}|${constructorGroup}|${protoGroup}|${index}|${input}|${groups.constructor}`));
-console.log([..."acac".matchAll(/(?<first>a)(?<last>c)/g)].map((match) =>
-  `${match[0]}:${match.groups!.first}:${match.groups!.last}:${Object.getPrototypeOf(match.groups)}`).join(","));
-const duplicate = /(?:(?<which>a)|(?<which>b))/;
-console.log(duplicate.exec("b")!.groups!.which);
-
 // Only a `g` or `y` pattern has a cursor, and a miss resets it -- which is what makes a
 // `while (re.exec(s))` loop terminate rather than repeat its last match forever.
 const global = /a/g;
