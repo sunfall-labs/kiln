@@ -27,6 +27,11 @@ than a missing feature:
   worth chasing: a flat one and a sequence both parsed.
 All six pass. What each found is kept because it is the record of what only real code finds:
 
+- **marked** found that `encodeURI` and its three siblings did not exist. It sanitises every href
+  through `encodeURI` inside a `try`, so the `ReferenceError` was swallowed and every link in a
+  document silently rendered as plain text -- the worst shape a missing global can take. It also
+  found that `String.replace` with a *string* pattern ignored `$&`, `` $` ``, `$'` and `$$` in the
+  replacement, where the regexp path handled them.
 - **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
   instead of defining an own property, that a named function expression could not call itself,
   and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
