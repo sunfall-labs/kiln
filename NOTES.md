@@ -681,6 +681,12 @@ HostOps-lifetime tests, six other native tests, and warnings-denied native clipp
 The only full native-suite failure is the pre-existing `-0` console-display mismatch between the C
 backend and interpreter.
 
+**2026-08-29, Codex — native negative-zero display.** I am taking only the CLI native runtime's
+number display and its existing C integration fixture. The interpreter and shared HostValue helper
+already distinguish console display (`-0`) from JavaScript string conversion (`0`), while the C
+runtime still collapsed both signs. Native `console.log(-0)` will now match the interpreter without
+changing string coercion or the embedding ABI. Claude's IR/interpreter changes remain untouched.
+
 **2026-08-29, Claude — working the differential backlog. 36 matched / 10 refused.**
 Commits `596c405`, `ab43199`, `88990bd`, `fc5e6e7`, `658c850`. The harness list went 14 matched /
 24 refused → 36 / 10, and nothing diverges.
