@@ -11,11 +11,114 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
 
+pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AsyncHostError, AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, FileStat, HostError,
     HostOp, HostOps, HostValue, RequestId,
 };
 use tokio::sync::mpsc;
+
+/// Default deterministic entropy seed from ADR 0026.
+pub const DEFAULT_ENTROPY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// How one realm obtains its observable clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClockCapability {
+    /// Virtual time beginning at the Unix epoch and advancing only for scheduled work.
+    #[default]
+    Virtual,
+    /// Time supplied explicitly through [`HostOp::ClockNow`].
+    Host,
+}
+
+/// How one realm obtains entropy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyCapability {
+    /// SplitMix64 with ADR 0026's fixed seed.
+    Deterministic,
+    /// SplitMix64 with a caller-selected seed.
+    Seeded(u64),
+    /// Entropy supplied explicitly through [`HostOp::EntropyU64`].
+    Host,
+}
+
+impl Default for EntropyCapability {
+    fn default() -> Self {
+        Self::Deterministic
+    }
+}
+
+/// How one realm selects local civil time.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TimeZoneCapability {
+    /// UTC, preserving ADR 0015.
+    #[default]
+    Utc,
+    /// A caller-selected IANA zone name.
+    Named(String),
+    /// A zone name supplied explicitly through [`HostOp::TimeZone`].
+    Host,
+}
+
+/// How one realm selects its default locale.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LocaleCapability {
+    /// `kiln-intl`'s deterministic default locale.
+    #[default]
+    Deterministic,
+    /// A caller-selected Unicode locale identifier.
+    Named(String),
+    /// A locale tag supplied explicitly through [`HostOp::Locale`].
+    Host,
+}
+
+/// Explicit environmental inputs for one realm.
+///
+/// `Default` is intentionally the pre-ADR-0031 realm: virtual epoch clock, fixed entropy, UTC,
+/// and the deterministic `kiln-intl` locale. Runtime values for host-backed variants still arrive
+/// through HostOps; this value records policy, never ambient state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RealmCapabilities {
+    pub clock: ClockCapability,
+    pub entropy: EntropyCapability,
+    pub timezone: TimeZoneCapability,
+    pub locale: LocaleCapability,
+}
+
+impl RealmCapabilities {
+    /// Typed policy identity for artifact keys. Host *values* are deliberately absent.
+    pub fn artifact_identity(&self) -> RealmCapabilityIdentity {
+        RealmCapabilityIdentity {
+            clock: match self.clock {
+                ClockCapability::Virtual => CapabilityIdentity::Virtual,
+                ClockCapability::Host => CapabilityIdentity::Host,
+            },
+            entropy: match self.entropy {
+                EntropyCapability::Deterministic => CapabilityIdentity::Fixed,
+                EntropyCapability::Seeded(seed) => CapabilityIdentity::Seeded(seed),
+                EntropyCapability::Host => CapabilityIdentity::Host,
+            },
+            timezone: match &self.timezone {
+                TimeZoneCapability::Utc => CapabilityIdentity::Utc,
+                TimeZoneCapability::Named(name) => CapabilityIdentity::Named(name.clone()),
+                TimeZoneCapability::Host => CapabilityIdentity::Host,
+            },
+            locale: match &self.locale {
+                LocaleCapability::Deterministic => CapabilityIdentity::Default,
+                LocaleCapability::Named(tag) => CapabilityIdentity::Named(tag.clone()),
+                LocaleCapability::Host => CapabilityIdentity::Host,
+            },
+        }
+    }
+
+    pub fn entropy_seed(&self) -> Option<u64> {
+        match self.entropy {
+            EntropyCapability::Deterministic => Some(DEFAULT_ENTROPY_SEED),
+            EntropyCapability::Seeded(seed) => Some(seed),
+            EntropyCapability::Host => None,
+        }
+    }
+}
 
 /// An opaque identity returned by [`Realm::set_timeout`] or [`Realm::set_interval`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,6 +196,7 @@ pub struct RealmRuntime {
     runtime: tokio::runtime::Runtime,
     time_paused: bool,
     host: TokioHost,
+    capabilities: RealmCapabilities,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
     _not_send: PhantomData<Rc<()>>,
@@ -110,6 +214,11 @@ impl std::fmt::Debug for RealmRuntime {
 impl RealmRuntime {
     /// Builds a current-thread runtime with Tokio's timer driver enabled.
     pub fn new() -> Result<Self, RuntimeBuildError> {
+        Self::with_capabilities(RealmCapabilities::default())
+    }
+
+    /// Builds a current-thread runtime with explicit environmental capabilities.
+    pub fn with_capabilities(capabilities: RealmCapabilities) -> Result<Self, RuntimeBuildError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -118,8 +227,13 @@ impl RealmRuntime {
             runtime,
             time_paused: false,
             host: TokioHost::new(),
+            capabilities,
             _not_send: PhantomData,
         })
+    }
+
+    pub fn capabilities(&self) -> &RealmCapabilities {
+        &self.capabilities
     }
 
     /// Returns the asynchronous host owned by this realm runtime.
@@ -673,6 +787,9 @@ impl HostOps for CaptureHost {
                 self.stdout.push('\n');
                 Ok(HostValue::Undefined)
             }
+            HostOp::ClockNow | HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(
+                HostError::new(format!("deterministic host does not provide {operation:?}")),
+            ),
         }
     }
 }
@@ -722,6 +839,54 @@ mod tests {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         assert!(tokio::runtime::Handle::try_current().is_err());
         assert!(runtime.enter(|| tokio::runtime::Handle::try_current().is_ok()));
+    }
+
+    #[test]
+    fn default_capabilities_preserve_the_deterministic_realm() {
+        let runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let capabilities = runtime.capabilities();
+        assert_eq!(capabilities, &RealmCapabilities::default());
+        assert_eq!(capabilities.entropy_seed(), Some(DEFAULT_ENTROPY_SEED));
+        assert_eq!(
+            capabilities.artifact_identity(),
+            RealmCapabilityIdentity::default()
+        );
+    }
+
+    #[test]
+    fn capability_identity_is_unambiguous_and_excludes_host_values() {
+        let host = RealmCapabilities {
+            clock: ClockCapability::Host,
+            entropy: EntropyCapability::Host,
+            timezone: TimeZoneCapability::Host,
+            locale: LocaleCapability::Host,
+        };
+        assert_eq!(
+            host.artifact_identity(),
+            RealmCapabilityIdentity {
+                clock: CapabilityIdentity::Host,
+                entropy: CapabilityIdentity::Host,
+                timezone: CapabilityIdentity::Host,
+                locale: CapabilityIdentity::Host,
+            }
+        );
+        assert_eq!(host.entropy_seed(), None);
+
+        let named = RealmCapabilities {
+            entropy: EntropyCapability::Seeded(7),
+            timezone: TimeZoneCapability::Named("UTC;locale=host".into()),
+            locale: LocaleCapability::Named("en-US".into()),
+            ..RealmCapabilities::default()
+        };
+        assert_eq!(
+            named.artifact_identity(),
+            RealmCapabilityIdentity {
+                clock: CapabilityIdentity::Virtual,
+                entropy: CapabilityIdentity::Seeded(7),
+                timezone: CapabilityIdentity::Named("UTC;locale=host".into()),
+                locale: CapabilityIdentity::Named("en-US".into()),
+            }
+        );
     }
 
     #[test]
