@@ -1035,6 +1035,8 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const void *identity);
 static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_t display_len,
                                   int writing);
+static int kiln_c99_private_accessor_error(kiln_value *thrown, const char *display,
+                                           size_t display_len, int writing);
 static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
                                size_t display_len, kiln_value *out, kiln_value *thrown);
 static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *identity,
@@ -9443,6 +9445,42 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_
     return KILN_C99_THROWN;
 }
 
+/* Accessing the missing half of a private accessor is a language TypeError. Keep this distinct
+ * from a brand miss: a branded object can still legitimately lack one half of its descriptor. */
+static int kiln_c99_private_accessor_error(kiln_value *thrown, const char *display,
+                                           size_t display_len, int writing) {
+    kiln_text text = {NULL, 0, 0};
+    kiln_value error;
+    size_t shown_at = 0;
+    size_t colons = 0;
+    size_t index;
+    int status;
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
+            colons += 1;
+        }
+    }
+    if (colons == 2) {
+        shown_at = index;
+    }
+    if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
+                                              : "Cannot read private member #") != KILN_C99_OK ||
+        kiln_c99_text_append(&text, display + shown_at, display_len - shown_at) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text,
+                               writing ? " which has no setter" : " which has no getter") !=
+            KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len));
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *thrown = error;
+    return KILN_C99_THROWN;
+}
+
 static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
                                size_t display_len, kiln_value *out, kiln_value *thrown) {
     static const char primitive[] = "right-hand side of `#";
@@ -9503,8 +9541,7 @@ static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *
         return KILN_C99_OK;
     }
     if (slot->getter.tag == KILN_VALUE_UNDEFINED) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        return kiln_c99_private_accessor_error(thrown, display, display_len, 0);
     }
     return kiln_c99_call(host, out, slot->getter, target, NULL, 0, depth, thrown);
 }
@@ -9521,7 +9558,7 @@ static int kiln_c99_private_set(kiln_host *host, kiln_value target, const void *
         return KILN_C99_OK;
     }
     if (slot->setter.tag == KILN_VALUE_UNDEFINED) {
-        return KILN_C99_OK;
+        return kiln_c99_private_accessor_error(thrown, display, display_len, 1);
     }
     {
         kiln_value ignored;
@@ -14051,6 +14088,59 @@ int main(void) {{
             .expect("generated private executable runs");
         let _ = std::fs::remove_file(&executable);
         assert!(run.status.success(), "private init/get failed");
+    }
+
+    #[test]
+    fn executable_private_set_without_setter_throws_a_catchable_type_error() {
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("@@private:8:value".into()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::Boolean(true),
+                Constant::Boolean(false),
+            ],
+            code: vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::Dup,
+                Instruction::MakeFunction(0),
+                Instruction::DefinePrivateAccessor {
+                    name: 0,
+                    setter: false,
+                },
+                Instruction::Pop,
+                Instruction::PushHandler(13),
+                Instruction::Const(1),
+                Instruction::SetPrivate(0),
+                Instruction::Pop,
+                Instruction::PopHandler,
+                Instruction::Const(3),
+                Instruction::Return,
+                Instruction::Const(3),
+                Instruction::StoreLocal(0),
+                Instruction::Pop,
+                Instruction::Const(2),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![function(vec![Instruction::Const(1), Instruction::Return])],
+        })
+        .expect("private accessor program emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 1;
+    return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 2;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "private-no-setter");
+        assert!(
+            run.status.success(),
+            "private missing-setter TypeError was not caught"
+        );
     }
 
     #[test]
