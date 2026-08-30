@@ -16,6 +16,8 @@ use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
+/// ABI version of the private seven-argument graph module entry point.
+pub const GRAPH_MODULE_C_ABI_VERSION: u32 = 1;
 
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 const _: () = assert!(NUMBER_PARSE_VERSION == 1);
@@ -100,7 +102,7 @@ pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair(module);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, false);
     Ok(CModule {
         symbol,
         source,
@@ -125,7 +127,27 @@ pub fn emit_module_with_logical_path(
     let (program_hash, _) = hash_module_pair(module);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, false);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
+}
+
+/// Emit a module for the private graph launcher ABI. The extra scheduler argument is deliberately
+/// separate from [`emit_module_with_logical_path`] so existing embedders retain the six-argument
+/// module contract.
+pub fn emit_graph_module_with_logical_path(
+    module: &ModuleProgram,
+    logical_path: &str,
+) -> Result<CModule, EmitError> {
+    validate_logical_path(logical_path)?;
+    validate_module(module)?;
+    let (program_hash, _) = hash_module_pair(module);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let source = render_module(module, program_hash, &symbol, true);
     Ok(CModule {
         symbol,
         source,
@@ -558,6 +580,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF 148
 #define KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF 149
 #define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES 150
+#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS 155
 #define KILN_C99_METHOD_OBJECT_FROM_ENTRIES 151
 #define KILN_C99_METHOD_ARRAY_FROM 152
 #define KILN_C99_METHOD_IS_PROTOTYPE_OF 153
@@ -613,6 +636,12 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+/* Private graph ABI. A graph invocation owns this scheduler; it is never process-global. */
+typedef struct kiln_native_scheduler kiln_native_scheduler;
+typedef kiln_native_scheduler *(*kiln_scheduler_switch_fn)(kiln_native_scheduler *next);
+typedef int (*kiln_scheduler_runner_fn)(kiln_native_scheduler *scheduler, kiln_host *host,
+                                       int depth, kiln_value *thrown);
+
 /* A closure is its body plus the boxes it captured.
  *
  * The body is a function pointer rather than an index into the emitting program's table,
@@ -623,8 +652,9 @@ typedef struct kiln_host {
 struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                            kiln_value *thrown, struct kiln_generator *frame);
+                            kiln_value receiver, kiln_value new_target, const kiln_value *args,
+                            size_t argc, int depth, kiln_value *thrown,
+                            struct kiln_generator *frame);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
@@ -671,11 +701,26 @@ typedef struct kiln_closure {
 /* A property is a value, or a pair of functions.  Reading an accessor *calls* one, which is why
  * every program-visible read has to go through the runtime rather than being a struct field
  * access -- and why `kiln_c99_get` takes a host and a depth. */
+enum {
+    KILN_PROPERTY_STRING = 0,
+    KILN_PROPERTY_SYMBOL = 1,
+    KILN_PROPERTY_INTERNAL = 2
+};
+
 typedef struct kiln_property {
     const char *key;
     size_t key_len;
-    /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
-     * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
+    /* A symbol retains its original value, so equal-looking reserved strings cannot alias it. */
+    int kind;
+    kiln_value symbol_value;
+    /* Internal properties normally use their reserved spelling (runtime bookkeeping), but
+     * private names use a translation-unit-local token instead.  Keeping the identity separate
+     * from `key` is what prevents a forged string or an unrelated class's same spelling from
+     * acquiring the brand. */
+    const void *internal_identity;
+    /* The enumerable bit is shared by string enumeration, spread and JSON; symbol properties are
+     * additionally filtered from the string-only walks below. Every own property of an error is
+     * readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
     int accessor;
     kiln_value value;
@@ -732,6 +777,7 @@ typedef struct kiln_array {
 typedef struct kiln_generator {
     kiln_value function;
     kiln_value receiver;
+    kiln_value new_target;
     /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --
      * and this is the promise its eventual return value settles. Undefined for a plain one. */
     kiln_value promise;
@@ -988,10 +1034,20 @@ static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
+static int kiln_c99_same_symbol_key(const kiln_property *property, kiln_value symbol,
+                                    const char *key, size_t key_len);
+static int kiln_c99_is_well_known_symbol(kiln_value symbol, const char *key, size_t key_len);
+static int kiln_c99_same_internal_key(const kiln_property *property, const char *key,
+                                      size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_array(kiln_value *out);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_put_symbol(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                               kiln_value symbol, kiln_value value, int depth,
+                               kiln_value *thrown);
+static int kiln_c99_put_internal(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                                 kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
@@ -1014,11 +1070,16 @@ static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len
                                     kiln_value *out);
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
-                                       size_t subject_count, const int64_t *ranges, size_t groups);
+                                       size_t subject_count, const int64_t *ranges, size_t groups,
+                                       kiln_regexp *regexp);
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value);
 static int kiln_c99_global_object(kiln_value *out);
 static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
                                const char *flags, size_t flags_len, kiln_value *thrown);
+static int kiln_c99_named_group(kiln_regexp *regexp, size_t index, char **name, size_t *name_len,
+                                int64_t range[2]);
+static int kiln_c99_named_groups_object(kiln_host *host, kiln_value *out, kiln_regexp *regexp,
+                                        const uint16_t *units, int depth, kiln_value *thrown);
 static int kiln_c99_string_compare(kiln_value left, kiln_value right);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len);
@@ -1043,9 +1104,24 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
-static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
-static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+static kiln_property *kiln_c99_own_private(kiln_value target, const void *identity);
+static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_t display_len,
                                   int writing);
+static int kiln_c99_private_accessor_error(kiln_value *thrown, const char *display,
+                                           size_t display_len, int writing);
+static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
+                               size_t display_len, kiln_value *out, kiln_value *thrown);
+static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value *out,
+                                int depth, kiln_value *thrown);
+static int kiln_c99_private_set(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value value,
+                                int depth, kiln_value *thrown);
+static int kiln_c99_private_init(kiln_value target, const void *identity, const char *display,
+                                 size_t display_len, kiln_value value);
+static int kiln_c99_define_private_accessor(kiln_value target, const void *identity,
+                                             const char *display, size_t display_len,
+                                             kiln_value getter, kiln_value setter);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);
@@ -1070,7 +1146,7 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
                                            int finished, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
-                                  const kiln_value *args, size_t argc);
+                                  kiln_value new_target, const kiln_value *args, size_t argc);
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
@@ -1082,6 +1158,7 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
+static int kiln_c99_new_string_iterator(kiln_value *out, kiln_value source);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
@@ -1090,6 +1167,12 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
 static kiln_value kiln_c99_hole(void);
 static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
+static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t key_len,
+                                      kiln_value symbol, int kind, int *answer);
+static int kiln_c99_array_own_kind(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value symbol, int kind, int *found, int *enumerable);
+static int kiln_c99_delete_kind(kiln_value target, const char *key, size_t key_len,
+                                kiln_value symbol, int kind, int *answer);
 static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
@@ -1099,6 +1182,10 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                kiln_value *thrown);
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
+static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_value callee,
+                                     kiln_value receiver, kiln_value new_target,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown);
@@ -1205,14 +1292,39 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 }
 
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-    return property->key_len == key_len &&
+    return property->kind == KILN_PROPERTY_STRING && property->key_len == key_len &&
            (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+}
+
+static int kiln_c99_same_symbol_key(const kiln_property *property, kiln_value symbol,
+                                    const char *key, size_t key_len) {
+    return property->kind == KILN_PROPERTY_SYMBOL && property->symbol_value.tag == KILN_VALUE_SYMBOL &&
+           symbol.tag == KILN_VALUE_SYMBOL &&
+           (property->symbol_value.bits == symbol.bits ||
+            (kiln_c99_is_well_known_symbol(property->symbol_value, key, key_len) &&
+             kiln_c99_is_well_known_symbol(symbol, key, key_len))) &&
+           property->key_len == key_len && (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+}
+
+static int kiln_c99_same_internal_key(const kiln_property *property, const char *key,
+                                      size_t key_len) {
+    /* A private slot has the same physical kind but a non-null identity token.  Runtime
+     * bookkeeping is the only user of this spelling-based helper; keeping the namespaces
+     * disjoint prevents an internal lookup from accidentally finding a private member. */
+    return property->kind == KILN_PROPERTY_INTERNAL && property->internal_identity == NULL &&
+           property->key_len == key_len &&
+           (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+}
+
+static int kiln_c99_same_private_key(const kiln_property *property, const void *identity) {
+    return property->kind == KILN_PROPERTY_INTERNAL && property->internal_identity == identity;
 }
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
-static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                        kiln_value value, int depth, kiln_value *thrown) {
+static int kiln_c99_put_kind(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value symbol, kiln_value value, int depth, kiln_value *thrown,
+                             int kind) {
     kiln_object *object;
     size_t index;
     int status;
@@ -1221,7 +1333,7 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "prototype")) {
             closure->prototype = value;
             return KILN_C99_OK;
         }
@@ -1231,9 +1343,11 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 return status;
             }
         }
-        return kiln_c99_put(host, closure->properties, key, key_len, value, depth, thrown);
+        return kiln_c99_put_kind(host, closure->properties, key, key_len, symbol, value, depth,
+                                 thrown, kind);
     }
-    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex")) {
+    if (target.tag == KILN_VALUE_REGEXP && kind == KILN_PROPERTY_STRING &&
+        kiln_c99_same_name(key, key_len, "lastIndex")) {
         /* The one property of a regexp a program may write, and the reason two evaluations of one
          * literal must not share a `kiln_regexp`. */
         kiln_c99_regexp_of(target)->last_index = kiln_c99_as_number(value);
@@ -1277,7 +1391,8 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 return status;
             }
         }
-        return kiln_c99_put(host, array->properties, key, key_len, value, depth, thrown);
+        return kiln_c99_put_kind(host, array->properties, key, key_len, symbol, value, depth,
+                                 thrown, kind);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
@@ -1300,7 +1415,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
             }
             walked = kiln_c99_object_of(current);
             for (index = 0; index < walked->count; ++index) {
-                if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
+                int matches = kind == KILN_PROPERTY_SYMBOL
+                                  ? kiln_c99_same_symbol_key(&walked->properties[index], symbol, key,
+                                                             key_len)
+                              : kind == KILN_PROPERTY_INTERNAL
+                                  ? kiln_c99_same_internal_key(&walked->properties[index], key, key_len)
+                                  : kiln_c99_same_key(&walked->properties[index], key, key_len);
+                if (!matches) {
                     continue;
                 }
                 if (!walked->properties[index].accessor) {
@@ -1357,13 +1478,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         }
         object->properties[position].key = key;
         object->properties[position].key_len = key_len;
-        /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
-         * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
-         * marking it here is one place rather than at each of the seven walks. The program cannot
-         * spell such a key -- `obj["@@x"]` is a different property only because nothing in the
-         * language produces this prefix. */
+        object->properties[position].kind = kind;
+        object->properties[position].symbol_value = symbol;
+        object->properties[position].internal_identity = NULL;
+        /* Internal slots are hidden; ordinary strings beginning with `@@` remain ordinary user
+         * properties, and symbols are enumerable even though their storage spelling is reserved. */
         object->properties[position].enumerable =
-            !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+            kind != KILN_PROPERTY_INTERNAL;
         object->properties[position].accessor = 0;
         object->properties[position].value = value;
         object->properties[position].getter = kiln_c99_undefined();
@@ -1371,6 +1492,25 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
     }
     object->count += 1;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown) {
+    return kiln_c99_put_kind(host, target, key, key_len, kiln_c99_undefined(), value, depth, thrown,
+                             KILN_PROPERTY_STRING);
+}
+
+static int kiln_c99_put_symbol(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                               kiln_value symbol, kiln_value value, int depth,
+                               kiln_value *thrown) {
+    return kiln_c99_put_kind(host, target, key, key_len, symbol, value, depth, thrown,
+                             KILN_PROPERTY_SYMBOL);
+}
+
+static int kiln_c99_put_internal(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                                 kiln_value value, int depth, kiln_value *thrown) {
+    return kiln_c99_put_kind(host, target, key, key_len, kiln_c99_undefined(), value, depth, thrown,
+                             KILN_PROPERTY_INTERNAL);
 }
 
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
@@ -1382,7 +1522,7 @@ static kiln_generator *kiln_c99_generator_of(kiln_value value) {
  * Both arrays are sized from the body's own counts, so a suspension has somewhere to put every
  * local and every operand the verifier proved it can hold. */
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
-                                  const kiln_value *args, size_t argc) {
+                                  kiln_value new_target, const kiln_value *args, size_t argc) {
     kiln_closure *closure = kiln_c99_closure_of(function);
     kiln_generator *frame = (kiln_generator *)malloc(sizeof *frame);
     size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
@@ -1418,6 +1558,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     }
     frame->function = function;
     frame->receiver = receiver;
+    frame->new_target = new_target;
     frame->sp = 0;
     frame->resume = 0;
     frame->sent = kiln_c99_undefined();
@@ -1662,6 +1803,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REGEXP_TEST: return "test";
     case KILN_C99_METHOD_REGEXP_EXEC: return "exec";
     case KILN_C99_METHOD_REGEXP_TO_STRING: return "toString";
+    case KILN_C99_METHOD_STRING_ITERATOR: return "@@iterator";
     case KILN_C99_METHOD_MATH_RANDOM: return "random";
     case KILN_C99_METHOD_MATH_SINH: return "sinh";
     case KILN_C99_METHOD_MATH_COSH: return "cosh";
@@ -1677,6 +1819,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: return "getPrototypeOf";
     case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: return "setPrototypeOf";
     case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: return "getOwnPropertyNames";
+    case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS: return "getOwnPropertySymbols";
     case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: return "fromEntries";
     case KILN_C99_METHOD_ARRAY_FROM: return "from";
     case KILN_C99_METHOD_IS_PROTOTYPE_OF: return "isPrototypeOf";
@@ -1696,7 +1839,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
  * what a language builtin needs. Seeded from a constant rather than from the environment, so the
  * same program produces the same sequence in both engines and on every machine -- the same trade
  * the virtual clock makes, and the reason an artifact hash stays honest. See ADR 0026. */
+#ifndef KILN_C99_GRAPH_RUNTIME
 static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);
+#endif
 
 static double kiln_c99_random(void) {
     uint64_t mixed;
@@ -2038,7 +2183,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
                                        size_t subject_count, const int64_t *ranges,
-                                       size_t groups) {
+                                       size_t groups, kiln_regexp *regexp) {
     size_t at = 0;
     while (at < pattern_count) {
         uint16_t unit = pattern[at];
@@ -2062,6 +2207,53 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                 piece = subject + (size_t)ranges[1];
                 piece_count = subject_count - (size_t)ranges[1];
                 taken = 2;
+            } else if (next == (uint16_t)'<' && regexp != NULL) {
+                size_t close = at + 2;
+                while (close < pattern_count && pattern[close] != (uint16_t)'>') {
+                    close += 1;
+                }
+                if (close < pattern_count) {
+                    kiln_value wanted = kiln_c99_from_units(pattern + at + 2, close - at - 2);
+                    size_t named_index = 0;
+                    int has_named = 0;
+                    int found_named = 0;
+                    int64_t named_range[2] = {-1, -1};
+                    if (wanted.tag != KILN_VALUE_STRING) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    for (;;) {
+                        char *name = NULL;
+                        size_t name_len = 0;
+                        int64_t range[2] = {-1, -1};
+                        int named_status = kiln_c99_named_group(regexp, named_index, &name,
+                                                                  &name_len, range);
+                        if (named_status == 1) {
+                            break;
+                        }
+                        if (named_status != KILN_C99_OK) {
+                            return named_status;
+                        }
+                        has_named = 1;
+                        if (name_len == wanted.len && memcmp(name, wanted.ptr, name_len) == 0) {
+                            named_range[0] = range[0];
+                            named_range[1] = range[1];
+                            found_named = 1;
+                        }
+                        free(name);
+                        named_index += 1;
+                    }
+                    if (!has_named) {
+                        taken = 1;
+                    } else {
+                        piece = subject;
+                        piece_count = 0;
+                        if (found_named && named_range[0] >= 0) {
+                            piece = subject + (size_t)named_range[0];
+                            piece_count = (size_t)(named_range[1] - named_range[0]);
+                        }
+                        taken = close - at + 1;
+                    }
+                }
             } else if (next >= (uint16_t)'0' && next <= (uint16_t)'9') {
                 /* Two digits when two would name a group that exists, one otherwise -- so `$12`
                  * is group 12 in a pattern with twelve and group 1 followed by a `2` in one
@@ -2398,6 +2590,42 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
     return KILN_C99_OK;
 }
 
+/* Read one unique named entry from the provider. Names are unbounded by the ABI: begin with a
+ * modest heap buffer and retry until the provider accepts it. On success ownership of `*name`
+ * transfers to the caller (property keys retain their storage); a return of 1 means there is no
+ * entry at `index`, while the normal runtime statuses report allocation/provider failures. */
+static int kiln_c99_named_group(kiln_regexp *regexp, size_t index, char **name, size_t *name_len,
+                                int64_t range[2]) {
+    size_t capacity = 32;
+    char *buffer = (char *)malloc(capacity);
+    int32_t written;
+    if (buffer == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (;;) {
+        written = kiln_regexp_named_group(regexp->handle, index, (unsigned char *)buffer, capacity,
+                                          range);
+        if (written >= 0) {
+            if (written == 0) {
+                free(buffer);
+                return 1;
+            }
+            *name = buffer;
+            *name_len = (size_t)written;
+            return KILN_C99_OK;
+        }
+        free(buffer);
+        if (capacity > (size_t)-1 / 2) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        capacity *= 2;
+        buffer = (char *)malloc(capacity);
+        if (buffer == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+}
+
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
     return (kiln_symbol *)(uintptr_t)value.bits;
 }
@@ -2411,11 +2639,39 @@ static const kiln_symbol kiln_c99_well_known[] = {
     {"@@toStringTag", 13, "Symbol.toStringTag", 18},
     {"@@toPrimitive", 13, "Symbol.toPrimitive", 18}};
 
+static kiln_value kiln_c99_well_known_value(const char *key, size_t key_len) {
+    size_t index;
+    for (index = 0; index < sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known; ++index) {
+        if (kiln_c99_well_known[index].key_len == key_len &&
+            memcmp(kiln_c99_well_known[index].key, key, key_len) == 0) {
+            return kiln_c99_value(KILN_VALUE_SYMBOL,
+                                  (uint64_t)(uintptr_t)&kiln_c99_well_known[index], NULL, 0);
+        }
+    }
+    return kiln_c99_undefined();
+}
+
+/* Well-known symbols are realm values, not translation-unit values.  The generated units each
+ * carry a private static table, so pointer identity alone would make an imported Symbol.iterator
+ * differ from the importing unit's Symbol.iterator.  Their reserved spelling is private to this
+ * runtime (user Symbol() values use @@symbol:<serial>), making it a stable ABI identity for the
+ * specification-provided symbols. */
+static int kiln_c99_is_well_known_symbol(kiln_value symbol, const char *key, size_t key_len) {
+    kiln_symbol *value;
+    if (symbol.tag != KILN_VALUE_SYMBOL) {
+        return 0;
+    }
+    value = kiln_c99_symbol_of(symbol);
+    return value != NULL && value->key_len == key_len &&
+           (key_len == 0 || memcmp(value->key, key, key_len) == 0) &&
+           kiln_c99_well_known_value(key, key_len).tag == KILN_VALUE_SYMBOL;
+}
+
 /* The string a value names a property under.
  *
  * Distinct from `kiln_c99_text`: a symbol keys a property under its reserved slot, not under its
- * description, and conflating the two would make `obj[Symbol.iterator]` and
- * `obj["Symbol(Symbol.iterator)"]` the same property. */
+ * description, while the property kind keeps `obj[Symbol.iterator]` distinct from
+ * `obj["@@iterator"]`. */
 static kiln_value kiln_c99_property_key(kiln_value key) {
     if (key.tag == KILN_VALUE_SYMBOL) {
         kiln_symbol *symbol = kiln_c99_symbol_of(key);
@@ -2581,6 +2837,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         }
         if (kiln_c99_same_name(key, key_len, "getOwnPropertyNames")) {
             return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES;
+        }
+        if (kiln_c99_same_name(key, key_len, "getOwnPropertySymbols")) {
+            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS;
         }
         if (kiln_c99_same_name(key, key_len, "fromEntries")) {
             return KILN_C99_METHOD_OBJECT_FROM_ENTRIES;
@@ -2761,6 +3020,14 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
         }
     }
     closure->body = body;
+#ifdef KILN_C99_GRAPH_RUNTIME
+    closure->scheduler_switch = kiln_c99_switch_scheduler;
+#else
+    closure->scheduler_switch = NULL;
+#endif
+    closure->arrow = arrow;
+    closure->captured_this = arrow ? receiver : kiln_c99_undefined();
+    closure->captured_new_target = new_target;
     closure->generator = generator;
     closure->asynchronous = asynchronous;
     closure->local_count = local_count;
@@ -2792,13 +3059,35 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     return KILN_C99_OK;
 }
 
+static int kiln_c99_invoke_body(kiln_closure *closure, kiln_host *host, kiln_value *result,
+                                kiln_value receiver, kiln_value new_target,
+                                const kiln_value *args, size_t argc, int depth,
+                                kiln_value *thrown, kiln_generator *frame) {
+    int status;
+#ifdef KILN_C99_GRAPH_RUNTIME
+    kiln_native_scheduler *previous = NULL;
+    if (closure->scheduler_switch != NULL) {
+        previous = closure->scheduler_switch(kiln_c99_scheduler);
+    }
+#endif
+    status = closure->body(host, result, closure->upvalues, receiver, new_target, args, argc,
+                           depth, thrown, frame);
+#ifdef KILN_C99_GRAPH_RUNTIME
+    if (closure->scheduler_switch != NULL) {
+        (void)closure->scheduler_switch(previous);
+    }
+#endif
+    return status;
+}
+
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
 /* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`
  * is in a module: modules are strict, and strict mode does not substitute the global object. */
-static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                         kiln_value *thrown) {
+static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_value callee,
+                                     kiln_value receiver, kiln_value new_target,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown) {
     kiln_closure *closure;
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "is not a function");
@@ -2817,8 +3106,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         kiln_value *joined;
         int status;
         if (bound->count == 0) {
-            return kiln_c99_call(host, result, bound->target, bound->receiver, args, argc, depth,
-                                 thrown);
+            return kiln_c99_call_with_target(host, result, bound->target, bound->receiver,
+                                             new_target, args, argc, depth, thrown);
         }
         joined = (kiln_value *)malloc((bound->count + argc) * sizeof *joined);
         if (joined == NULL) {
@@ -2828,8 +3117,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         if (argc != 0) {
             memcpy(joined + bound->count, args, argc * sizeof *joined);
         }
-        status = kiln_c99_call(host, result, bound->target, bound->receiver, joined,
-                               bound->count + argc, depth, thrown);
+        status = kiln_c99_call_with_target(host, result, bound->target, bound->receiver,
+                                           new_target, joined, bound->count + argc, depth, thrown);
         free(joined);
         return status;
     }
@@ -2948,12 +3237,16 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
+    if (closure->arrow) {
+        receiver = closure->captured_this;
+        new_target = closure->captured_new_target;
+    }
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
-         * differs only in who drives it, which is this rather than the program. */
+        * differs only in who drives it, which is this rather than the program. */
         kiln_value built;
-        int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
+        int status = kiln_c99_new_generator(&built, callee, receiver, new_target, args, argc);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -3145,7 +3438,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
         kiln_value shown;
         /* An error converts to `Name: message`, not `[object Object]`: it is the one object with
          * a text form of its own, and every log line that prints one depends on it. */
-        if (kiln_c99_get(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
+        if (kiln_c99_get_internal(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
             kind.tag == KILN_VALUE_NUMBER &&
             kiln_c99_get(NULL, value, "stack", 5, &shown, 0, NULL) == KILN_C99_OK &&
             shown.tag == KILN_VALUE_STRING) {
@@ -3304,6 +3597,19 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
         return left.len == right.len &&
                (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
                                   memcmp(left.ptr, right.ptr, left.len) == 0));
+    }
+    if (left.tag == KILN_VALUE_SYMBOL) {
+        return left.bits == right.bits ||
+               (kiln_c99_is_well_known_symbol(left, "@@iterator", 10) &&
+                kiln_c99_is_well_known_symbol(right, "@@iterator", 10)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@asyncIterator", 15) &&
+                kiln_c99_is_well_known_symbol(right, "@@asyncIterator", 15)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@hasInstance", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@hasInstance", 13)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@toStringTag", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@toStringTag", 13)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@toPrimitive", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@toPrimitive", 13));
     }
     return left.bits == right.bits;
 }
@@ -3555,7 +3861,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             object = kiln_c99_object_of(current);
             for (index = 0; index < object->count; ++index) {
-                if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                int matches = kind == KILN_PROPERTY_SYMBOL
+                                  ? kiln_c99_same_symbol_key(&object->properties[index], symbol, key,
+                                                             key_len)
+                              : kind == KILN_PROPERTY_INTERNAL
+                                  ? kiln_c99_same_internal_key(&object->properties[index], key, key_len)
+                                  : kiln_c99_same_key(&object->properties[index], key, key_len);
+                if (!matches) {
                     continue;
                 }
                 if (!object->properties[index].accessor) {
@@ -3576,7 +3888,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         /* The chain ends at `Object.prototype`, whose members every object has -- unless the
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
          * that asks for. */
-        if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
             uint64_t inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
@@ -3596,7 +3908,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 size_t slot;
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT);
                 for (slot = 0; slot < own->count; ++slot) {
-                    if (kiln_c99_same_key(&own->properties[slot], "@@error", 7)) {
+                    if (kiln_c99_same_internal_key(&own->properties[slot], "@@error", 7)) {
                         *out = kiln_c99_builtin(
                             (uint64_t)kiln_c99_as_number(own->properties[slot].value));
                         break;
@@ -3610,10 +3922,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "prototype")) {
             return kiln_c99_prototype_object(target, out);
         }
-        if (kiln_c99_same_name(key, key_len, "name")) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "name")) {
             *out = closure->name == NULL ? kiln_c99_from_units(NULL, 0)
                                          : kiln_c99_copy_text(closure->name, closure->name_len);
             return KILN_C99_OK;
@@ -3622,16 +3934,23 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             kiln_object *store = kiln_c99_object_of(closure->properties);
             size_t index;
             for (index = 0; index < store->count; ++index) {
-                if (kiln_c99_same_key(&store->properties[index], key, key_len)) {
+                int matches = kind == KILN_PROPERTY_SYMBOL
+                                  ? kiln_c99_same_symbol_key(&store->properties[index], symbol, key,
+                                                             key_len)
+                              : kind == KILN_PROPERTY_INTERNAL
+                                  ? kiln_c99_same_internal_key(&store->properties[index], key, key_len)
+                                  : kiln_c99_same_key(&store->properties[index], key, key_len);
+                if (matches) {
                     /* An assigned property wins, exactly as an own property shadows an
                      * inherited one -- which is what `Function.prototype.call` is. */
-                    return kiln_c99_get(host, closure->properties, key, key_len, out, depth,
-                                        thrown);
+                    return kiln_c99_get_kind(host, closure->properties, key, key_len, symbol, out,
+                                             depth, thrown, kind);
                 }
             }
         }
         {
-            uint64_t callable = kiln_c99_callable_method(key, key_len);
+            uint64_t callable = kind == KILN_PROPERTY_STRING ? kiln_c99_callable_method(key, key_len)
+                                                             : 0;
             if (callable != 0) {
                 *out = kiln_c99_method(callable);
                 return KILN_C99_OK;
@@ -3641,11 +3960,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
+        return kiln_c99_get_kind(host, closure->properties, key, key_len, symbol, out, depth,
+                                 thrown, kind);
     }
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         size_t index;
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         /* The flag letters, in the order the specification lists their accessors. */
         static const char known[] = "dgimsuvy";
         static const char *const names[] = {"hasIndices", "global",  "ignoreCase", "multiline",
@@ -3692,6 +4016,43 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
+        kiln_array *self_array = kiln_c99_array_of(target);
+        if (self_array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_object *store = kiln_c99_object_of(self_array->properties);
+            for (index = 0; index < store->count; ++index) {
+                int matches = kind == KILN_PROPERTY_SYMBOL
+                                  ? kiln_c99_same_symbol_key(&store->properties[index], symbol, key,
+                                                             key_len)
+                              : kind == KILN_PROPERTY_INTERNAL
+                                  ? kiln_c99_same_internal_key(&store->properties[index], key, key_len)
+                                  : kiln_c99_same_key(&store->properties[index], key, key_len);
+                if (!matches) {
+                    continue;
+                }
+                if (!store->properties[index].accessor) {
+                    *out = store->properties[index].value;
+                    return KILN_C99_OK;
+                }
+                if (store->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    *out = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_call(host, out, store->properties[index].getter, target, NULL, 0,
+                                     depth, thrown);
+            }
+        }
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
@@ -3703,9 +4064,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         /* `for...of` asks for this and then drives `next`, where spread walks the array
          * directly. Both have to work, and they are different code paths, so an array needs the
          * protocol spelled out even though nothing else about it is unusual. */
-        if (kiln_c99_same_name(key, key_len, "@@iterator") ||
-            kiln_c99_same_name(key, key_len, "values")) {
+        if (kiln_c99_same_name(key, key_len, "values")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
         code = kiln_c99_array_method(key, key_len);
@@ -3722,7 +4086,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 kiln_object *store = kiln_c99_object_of(self_array->properties);
                 size_t slot;
                 for (slot = 0; slot < store->count; ++slot) {
-                    if (kiln_c99_same_key(&store->properties[slot], key, key_len)) {
+                    int matches = kind == KILN_PROPERTY_SYMBOL
+                                      ? kiln_c99_same_symbol_key(&store->properties[slot], symbol, key,
+                                                                 key_len)
+                                  : kind == KILN_PROPERTY_INTERNAL
+                                      ? kiln_c99_same_internal_key(&store->properties[slot], key, key_len)
+                                      : kiln_c99_same_key(&store->properties[slot], key, key_len);
+                    if (matches) {
                         *out = store->properties[slot].value;
                         return KILN_C99_OK;
                     }
@@ -3750,6 +4120,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     case KILN_VALUE_STRING: {
         uint64_t code;
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_STRING_ITERATOR);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
             return KILN_C99_OK;
@@ -3771,6 +4153,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_PROMISE: {
@@ -3790,8 +4176,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_COLLECTION: {
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_COLLECTION_SELF);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "size")) {
             *out = kiln_c99_number((double)collection->live);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
         code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
@@ -3808,6 +4210,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_OK;
     }
     case KILN_VALUE_DATE: {
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         static const struct {
             const char *name;
             uint64_t code;
@@ -3892,6 +4298,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_BUILTIN: {
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10) &&
+                (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+                 target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE)) {
+                *out = kiln_c99_method(target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE
+                                           ? KILN_C99_METHOD_ARRAY_VALUES
+                                           : KILN_C99_METHOD_STRING_ITERATOR);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
         if (code == 0 && !kiln_c99_is_namespace(target.bits)) {
             /* A constructor is a function, so it answers to these too. A namespace is not. */
@@ -4058,6 +4480,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         return KILN_C99_CONTROL_ERROR;
     case KILN_VALUE_NUMBER:
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
             return KILN_C99_OK;
@@ -4104,8 +4530,13 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (index < 0.0) {
-            return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
-                                key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
+            kiln_value text = kiln_c99_property_key(key);
+            return text.tag == KILN_VALUE_STRING
+                       ? kiln_c99_get_kind(host, target, text.ptr, text.len, key, out, depth,
+                                           thrown, key.tag == KILN_VALUE_SYMBOL
+                                                       ? KILN_PROPERTY_SYMBOL
+                                                       : KILN_PROPERTY_STRING)
+                       : KILN_C99_CONTROL_ERROR;
         }
         *out = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index])
                    ? array->elements[(size_t)index]
@@ -4145,7 +4576,9 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
-        return kiln_c99_get(host, target, text.ptr, text.len, out, depth, thrown);
+        return kiln_c99_get_kind(host, target, text.ptr, text.len, key, out, depth, thrown,
+                                 key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL
+                                                              : KILN_PROPERTY_STRING);
     }
 }
 
@@ -4188,7 +4621,9 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
-        return kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
+        return key.tag == KILN_VALUE_SYMBOL
+                   ? kiln_c99_put_symbol(host, target, text.ptr, text.len, key, value, depth, thrown)
+                   : kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
     }
 }
 
@@ -4307,14 +4742,22 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         kiln_object *extra = array->properties.tag == KILN_VALUE_OBJECT
                                  ? kiln_c99_object_of(array->properties)
                                  : NULL;
-        if (array->count == 0 && (extra == NULL || extra->count == 0)) {
+        size_t visible_extra = 0;
+        size_t emitted = 0;
+        if (extra != NULL) {
+            for (index = 0; index < extra->count; ++index) {
+                visible_extra += extra->properties[index].enumerable &&
+                                 extra->properties[index].kind == KILN_PROPERTY_STRING;
+            }
+        }
+        if (array->count == 0 && visible_extra == 0) {
             return kiln_c99_text_append_c(text, "[]");
         }
         if (kiln_c99_text_append_c(text, "[ ") != KILN_C99_OK) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < array->count; ++index) {
-            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+            if (emitted != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_is_hole(array->elements[index])) {
@@ -4332,19 +4775,22 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 index += run - 1;
+                emitted += 1;
                 continue;
             }
             if (kiln_c99_inspect_into(text, array->elements[index], depth + 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         /* A property that is not an element is shown after the elements, which is where a console
          * puts the `index` and `input` a match result carries. */
         for (index = 0; extra != NULL && index < extra->count; ++index) {
-            if (!extra->properties[index].enumerable) {
+            if (!extra->properties[index].enumerable ||
+                extra->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
-            if ((array->count != 0 || index != 0) &&
+            if (emitted != 0 &&
                 kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -4355,6 +4801,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                     KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         return kiln_c99_text_append_c(text, " ]");
     }
@@ -4398,10 +4845,11 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < object->count; ++index) {
-            if (!object->properties[index].enumerable) {
+            if (!object->properties[index].enumerable ||
+                object->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
-            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+            if (emitted != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_inspect_key(text, object->properties[index].key,
@@ -4421,12 +4869,14 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                 if (kiln_c99_text_append_c(text, shown) != KILN_C99_OK) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
+                emitted += 1;
                 continue;
             }
             if (kiln_c99_inspect_into(text, object->properties[index].value, depth + 1) !=
                 KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            emitted += 1;
         }
         return kiln_c99_text_append_c(text, " }");
     }
@@ -5058,7 +5508,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             ranges[1] = (int64_t)at + (int64_t)needle_count;
             if (kiln_c99_text_append(&built, head.ptr, head.len) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
-                                            ranges, 1) != KILN_C99_OK) {
+                                            ranges, 1, NULL) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
                 break;
             }
@@ -5120,11 +5570,54 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
     return status;
 }
 
+/* Build the null-prototype groups object. It remains undefined when the pattern has no named
+ * captures, as required by the replacer and match result contracts. */
+static int kiln_c99_named_groups_object(kiln_host *host, kiln_value *out, kiln_regexp *regexp,
+                                        const uint16_t *units, int depth, kiln_value *thrown) {
+    size_t named_index = 0;
+    *out = kiln_c99_undefined();
+    for (;;) {
+        char *name = NULL;
+        size_t name_len = 0;
+        int64_t range[2] = {-1, -1};
+        int named_status = kiln_c99_named_group(regexp, named_index, &name, &name_len, range);
+        if (named_status == 1) {
+            break;
+        }
+        if (named_status != KILN_C99_OK) {
+            return named_status;
+        }
+        if (out->tag == KILN_VALUE_UNDEFINED) {
+            int status = kiln_c99_new_object(out);
+            if (status != KILN_C99_OK) {
+                free(name);
+                return status;
+            }
+            kiln_c99_object_of(*out)->prototype = kiln_c99_null();
+        }
+        {
+            kiln_value value = range[0] < 0
+                                   ? kiln_c99_undefined()
+                                   : kiln_c99_from_units(units + (size_t)range[0],
+                                                         (size_t)(range[1] - range[0]));
+            int status = kiln_c99_put(host, *out, name, name_len, value, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(name);
+                return status;
+            }
+        }
+        /* The object retains this allocation as its property key. */
+        named_index += 1;
+    }
+    return KILN_C99_OK;
+}
+
 /* One `exec`-shaped array: the match, then each group, with `index`, `input` and `groups`. */
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
-                                 size_t count, const int64_t *ranges, size_t groups, int depth,
-                                 kiln_value *thrown) {
+                                 size_t count, const int64_t *ranges, size_t groups,
+                                 kiln_regexp *regexp, int depth, kiln_value *thrown) {
     kiln_value built;
+    kiln_value named_object = kiln_c99_undefined();
     size_t group;
     int status = kiln_c99_new_array(&built);
     for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
@@ -5142,8 +5635,11 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
         status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count), depth,
                               thrown);
     }
+    if (status == KILN_C99_OK && regexp != NULL) {
+        status = kiln_c99_named_groups_object(host, &named_object, regexp, units, depth, thrown);
+    }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth, thrown);
+        status = kiln_c99_put(host, built, "groups", 6, named_object, depth, thrown);
     }
     *out = built;
     return status;
@@ -5247,8 +5743,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             return KILN_C99_OK;
         }
         if (code == KILN_C99_METHOD_STRING_MATCH && !regexp->global) {
-            status = kiln_c99_match_result(host, result, units, count, ranges, groups, depth,
-                                           thrown);
+            status = kiln_c99_match_result(host, result, units, count, ranges, groups, regexp,
+                                           depth, thrown);
             free(units);
             free(replacement);
             return status;
@@ -5261,8 +5757,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                                                              (size_t)(ranges[1] - ranges[0])));
         } else if (code == KILN_C99_METHOD_STRING_MATCH_ALL) {
             kiln_value entry;
-            status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, depth,
-                                           thrown);
+            status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, regexp,
+                                           depth, thrown);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_array_push(collected, entry);
             }
@@ -5302,20 +5798,48 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 /* The callback is handed the match, then each group, then the index and the whole
                  * subject -- which is why it cannot live in the string block. */
                 kiln_value produced;
-                kiln_value handed[64];
+                kiln_value callback_groups = kiln_c99_undefined();
+                kiln_value *handed;
                 size_t group;
-                size_t handed_count = groups + 2 > 64 ? 64 : groups + 2;
-                for (group = 0; group + 2 < handed_count; ++group) {
+                size_t handed_count = groups + 2;
+                if (regexp != NULL) {
+                    status = kiln_c99_named_groups_object(host, &callback_groups, regexp, units,
+                                                          depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        break;
+                    }
+                    if (callback_groups.tag != KILN_VALUE_UNDEFINED) {
+                        if (handed_count == (size_t)-1) {
+                            status = KILN_C99_OUT_OF_MEMORY;
+                            break;
+                        }
+                        handed_count += 1;
+                    }
+                }
+                if (handed_count > (size_t)-1 / sizeof *handed) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                handed = (kiln_value *)malloc(handed_count * sizeof *handed);
+                if (handed == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                for (group = 0; group < groups; ++group) {
                     handed[group] = ranges[group * 2] < 0
                                         ? kiln_c99_undefined()
                                         : kiln_c99_from_units(units + (size_t)ranges[group * 2],
                                                               (size_t)(ranges[group * 2 + 1] -
                                                                        ranges[group * 2]));
                 }
-                handed[handed_count - 2] = kiln_c99_number((double)ranges[0]);
-                handed[handed_count - 1] = kiln_c99_from_units(units, count);
+                handed[groups] = kiln_c99_number((double)ranges[0]);
+                handed[groups + 1] = kiln_c99_from_units(units, count);
+                if (callback_groups.tag != KILN_VALUE_UNDEFINED) {
+                    handed[groups + 2] = callback_groups;
+                }
                 status = kiln_c99_call(host, &produced, with, kiln_c99_undefined(), handed,
                                        handed_count, depth, thrown);
+                free(handed);
                 if (status == KILN_C99_OK) {
                     kiln_value text = kiln_c99_text(produced);
                     status = text.tag == KILN_VALUE_STRING &&
@@ -5326,7 +5850,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 }
             } else {
                 status = kiln_c99_expand_replacement(&built, replacement, replacement_count, units,
-                                                     count, ranges, groups);
+                                                     count, ranges, groups, regexp);
             }
             from = (size_t)ranges[1];
         }
@@ -6009,36 +6533,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_OK;
             }
             {
-                /* The array `exec` produces: the whole match, then each group, with `index`,
-                 * `input` and `groups` alongside -- properties *of the array*, which is why an
-                 * array needs somewhere to keep something that is not an element. */
                 kiln_value built;
-                size_t group;
-                status = kiln_c99_new_array(&built);
-                for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
-                    int64_t from = ranges[group * 2];
-                    int64_t to = ranges[group * 2 + 1];
-                    /* A group that did not participate is undefined rather than empty. */
-                    status = kiln_c99_array_push(
-                        built, from < 0 ? kiln_c99_undefined()
-                                        : kiln_c99_from_units(units + (size_t)from,
-                                                              (size_t)(to - from)));
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "index", 5,
-                                          kiln_c99_number((double)ranges[0]), depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count),
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    /* Present and undefined rather than absent: a program reads `m.groups?.name`,
-                     * and the key being there is what stops that from looking like a different
-                     * shape. Named groups themselves are not collected on either side yet. */
-                    status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth,
-                                          thrown);
-                }
+                status = kiln_c99_match_result(host, &built, units, count, ranges, groups, regexp,
+                                               depth, thrown);
                 free(units);
                 *result = built;
                 return status;
@@ -6151,6 +6648,42 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                         }
                     }
                 }
+                if (array->properties.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *properties = kiln_c99_object_of(array->properties);
+                    for (index = 0; index < properties->count && status == KILN_C99_OK; ++index) {
+                        kiln_property *property = &properties->properties[index];
+                        kiln_value key;
+                        if (!property->enumerable || property->kind != KILN_PROPERTY_STRING) {
+                            continue;
+                        }
+                        key = kiln_c99_copy_text(property->key, property->key_len);
+                        kiln_value value;
+                        if (property->accessor) {
+                            if (property->getter.tag == KILN_VALUE_UNDEFINED) {
+                                value = kiln_c99_undefined();
+                            } else {
+                                status = kiln_c99_call(host, &value, property->getter, args[0],
+                                                       NULL, 0, depth, thrown);
+                                if (status != KILN_C99_OK) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            value = property->value;
+                        }
+                        if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                            status = kiln_c99_array_push(built, key);
+                        } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                            status = kiln_c99_array_push(built, value);
+                        } else {
+                            kiln_value pair;
+                            status = kiln_c99_new_array(&pair);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, value);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                }
                 *result = built;
                 return status;
             }
@@ -6161,7 +6694,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             status = kiln_c99_new_array(&built);
             for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
                 kiln_value key;
-                if (!object->properties[index].enumerable) {
+                if (!object->properties[index].enumerable ||
+                    object->properties[index].kind != KILN_PROPERTY_STRING) {
                     continue;
                 }
                 key = kiln_c99_copy_text(object->properties[index].key,
@@ -6205,12 +6739,30 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 }
                 source = kiln_c99_object_of(args[argument]);
                 for (index = 0; index < source->count; ++index) {
+                    kiln_value copied;
                     if (!source->properties[index].enumerable) {
                         continue;
                     }
-                    status = kiln_c99_put(host, target, source->properties[index].key,
-                                          source->properties[index].key_len,
-                                          source->properties[index].value, depth, thrown);
+                    if (source->properties[index].accessor) {
+                        if (source->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                            continue;
+                        }
+                        status = kiln_c99_call(host, &copied, source->properties[index].getter,
+                                               args[argument], NULL, 0, depth, thrown);
+                        if (status != KILN_C99_OK) {
+                            return status;
+                        }
+                    } else {
+                        copied = source->properties[index].value;
+                    }
+                    status = source->properties[index].kind == KILN_PROPERTY_SYMBOL
+                                 ? kiln_c99_put_symbol(host, target, source->properties[index].key,
+                                                       source->properties[index].key_len,
+                                                       source->properties[index].symbol_value, copied,
+                                                       depth, thrown)
+                                 : kiln_c99_put(host, target, source->properties[index].key,
+                                                source->properties[index].key_len,
+                                                copied, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -6456,17 +7008,17 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     status = kiln_c99_array_push(results, kiln_c99_undefined());
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, state, "@@results", 9, results, 0, NULL);
+                    status = kiln_c99_put_internal(NULL, state, "@@results", 9, results, 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, state, "@@remaining", 11,
+                    status = kiln_c99_put_internal(NULL, state, "@@remaining", 11,
                                           kiln_c99_number((double)given->count), 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, state, "@@derived", 9, derived, 0, NULL);
+                    status = kiln_c99_put_internal(NULL, state, "@@derived", 9, derived, 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, state, "@@mode", 6, kiln_c99_number(mode), 0,
+                    status = kiln_c99_put_internal(NULL, state, "@@mode", 6, kiln_c99_number(mode), 0,
                                           NULL);
                 }
                 for (index = 0; index < given->count && status == KILN_C99_OK; ++index) {
@@ -6477,10 +7029,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     kiln_value ignored;
                     status = kiln_c99_new_object(&slot);
                     if (status == KILN_C99_OK) {
-                        status = kiln_c99_put(NULL, slot, "@@state", 7, state, 0, NULL);
+                        status = kiln_c99_put_internal(NULL, slot, "@@state", 7, state, 0, NULL);
                     }
                     if (status == KILN_C99_OK) {
-                        status = kiln_c99_put(NULL, slot, "@@index", 7,
+                        status = kiln_c99_put_internal(NULL, slot, "@@index", 7,
                                               kiln_c99_number((double)index), 0, NULL);
                     }
                     if (status != KILN_C99_OK) {
@@ -6611,21 +7163,21 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
-            status = kiln_c99_get(host, receiver, "@@state", 7, &state, depth, thrown);
+            status = kiln_c99_get_internal(host, receiver, "@@state", 7, &state, depth, thrown);
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
+                status = kiln_c99_get_internal(host, receiver, "@@index", 7, &at, depth, thrown);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@results", 9, &results, depth, thrown);
+                status = kiln_c99_get_internal(host, state, "@@results", 9, &results, depth, thrown);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@remaining", 11, &remaining, depth, thrown);
+                status = kiln_c99_get_internal(host, state, "@@remaining", 11, &remaining, depth, thrown);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@derived", 9, &derived, depth, thrown);
+                status = kiln_c99_get_internal(host, state, "@@derived", 9, &derived, depth, thrown);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@mode", 6, &mode, depth, thrown);
+                status = kiln_c99_get_internal(host, state, "@@mode", 6, &mode, depth, thrown);
             }
             if (status != KILN_C99_OK) {
                 return status;
@@ -6667,7 +7219,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             {
                 double left = kiln_c99_as_number(remaining) - 1.0;
-                status = kiln_c99_put(host, state, "@@remaining", 11, kiln_c99_number(left), depth,
+                status = kiln_c99_put_internal(host, state, "@@remaining", 11, kiln_c99_number(left), depth,
                                       thrown);
                 if (status != KILN_C99_OK) {
                     return status;
@@ -6783,11 +7335,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
-            status = kiln_c99_get(host, receiver, "@@iterated", 10, &items, depth, thrown);
+            status = kiln_c99_get_internal(host, receiver, "@@iterated", 10, &items, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
+            status = kiln_c99_get_internal(host, receiver, "@@index", 7, &at, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -6798,7 +7350,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             position = (size_t)kiln_c99_as_number(at);
             finished = position >= array->count;
             if (!finished) {
-                status = kiln_c99_put(host, receiver, "@@index", 7,
+                status = kiln_c99_put_internal(host, receiver, "@@index", 7,
                                       kiln_c99_number((double)(position + 1)), depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
@@ -6823,15 +7375,35 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_HAS_OWN_PROPERTY: {
-            kiln_value key = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
+            kiln_value raw_key = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value key = kiln_c99_property_key(raw_key);
             kiln_object *object;
             int found = 0;
-            if (receiver.tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+            if (key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    receiver, key.ptr, key.len, raw_key,
+                    raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                (void)enumerable;
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
+            if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(receiver);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+                found = raw_key.tag == KILN_VALUE_SYMBOL
+                            ? kiln_c99_same_symbol_key(&object->properties[index], raw_key, key.ptr,
+                                                       key.len)
+                            : kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -6979,6 +7551,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_ITERATOR_SELF:
             *result = receiver;
             return KILN_C99_OK;
+        case KILN_C99_METHOD_STRING_ITERATOR:
+            return kiln_c99_new_string_iterator(result, receiver);
         case KILN_C99_METHOD_ARRAY_VALUES: {
             /* Over a snapshot, so a `for...of` that appends to the array it is walking
              * terminates -- which is what the length being read once means. */
@@ -7037,8 +7611,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
-                status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL,
-                                       0, depth + 1, thrown, frame);
+                status = kiln_c99_invoke_body(closure, host, &produced, frame->receiver,
+                                              frame->new_target, NULL, 0, depth + 1, thrown,
+                                              frame);
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
                     finished = 0;
@@ -7219,22 +7794,58 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            if (subject.tag != KILN_VALUE_OBJECT) {
+            if (subject.tag == KILN_VALUE_ARRAY) {
+                kiln_array *array = kiln_c99_array_of(subject);
+                if (array->properties.tag != KILN_VALUE_OBJECT) {
+                    *result = built;
+                    return KILN_C99_OK;
+                }
+                object = kiln_c99_object_of(array->properties);
+            } else if (subject.tag == KILN_VALUE_OBJECT) {
+                object = kiln_c99_object_of(subject);
+            } else {
                 *result = built;
                 return KILN_C99_OK;
             }
-            object = kiln_c99_object_of(subject);
             for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-                /* A `@@` key is the machine's own and is not a property of the program's object,
-                 * however un-enumerable the rest of them are. */
-                if (object->properties[index].key_len >= 2 &&
-                    object->properties[index].key[0] == '@' &&
-                    object->properties[index].key[1] == '@') {
+                if (object->properties[index].kind != KILN_PROPERTY_STRING) {
                     continue;
                 }
                 status = kiln_c99_array_push(built,
                                              kiln_c99_copy_text(object->properties[index].key,
                                                                 object->properties[index].key_len));
+            }
+            *result = built;
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS: {
+            kiln_value built;
+            kiln_object *object;
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (subject.tag == KILN_VALUE_FUNCTION) {
+                subject = kiln_c99_closure_of(subject)->properties;
+            }
+            status = kiln_c99_new_array(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (subject.tag == KILN_VALUE_ARRAY) {
+                kiln_array *array = kiln_c99_array_of(subject);
+                if (array->properties.tag != KILN_VALUE_OBJECT) {
+                    *result = built;
+                    return KILN_C99_OK;
+                }
+                object = kiln_c99_object_of(array->properties);
+            } else if (subject.tag == KILN_VALUE_OBJECT) {
+                object = kiln_c99_object_of(subject);
+            } else {
+                *result = built;
+                return KILN_C99_OK;
+            }
+            for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
+                if (object->properties[index].kind == KILN_PROPERTY_SYMBOL) {
+                    status = kiln_c99_array_push(built, object->properties[index].symbol_value);
+                }
             }
             *result = built;
             return status;
@@ -7304,16 +7915,36 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE: {
             /* Own *and* enumerable, which is the pair `Object.keys` reports and `hasOwnProperty`
              * only half of. */
-            kiln_value name = kiln_c99_property_key(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value raw_name = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value name = kiln_c99_property_key(raw_name);
             kiln_object *object;
             size_t slot;
             *result = kiln_c99_boolean(0);
-            if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
+            if (name.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OK;
+            }
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                int found;
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    receiver, name.ptr, name.len, raw_name,
+                    raw_name.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                *result = kiln_c99_boolean(found && enumerable);
+                return KILN_C99_OK;
+            }
+            if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_OK;
             }
             object = kiln_c99_object_of(receiver);
             for (slot = 0; slot < object->count; ++slot) {
-                if (kiln_c99_same_key(&object->properties[slot], name.ptr, name.len)) {
+                if (raw_name.tag == KILN_VALUE_SYMBOL
+                        ? kiln_c99_same_symbol_key(&object->properties[slot], raw_name, name.ptr,
+                                                   name.len)
+                        : kiln_c99_same_key(&object->properties[slot], name.ptr, name.len)) {
                     *result = kiln_c99_boolean(object->properties[slot].enumerable);
                     break;
                 }
@@ -7399,15 +8030,35 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_HAS_OWN: {
-            kiln_value key = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
+            kiln_value raw_key = argc > 1 ? args[1] : kiln_c99_undefined();
+            kiln_value key = kiln_c99_property_key(raw_key);
             kiln_object *object;
             int found = 0;
-            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+            if (argc == 0 || key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (args[0].tag == KILN_VALUE_ARRAY) {
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    args[0], key.ptr, key.len, raw_key,
+                    raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                (void)enumerable;
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
+            if (args[0].tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(args[0]);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+                found = raw_key.tag == KILN_VALUE_SYMBOL
+                            ? kiln_c99_same_symbol_key(&object->properties[index], raw_key, key.ptr,
+                                                       key.len)
+                            : kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -8067,10 +8718,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
 /* Append everything `source` yields to `target`, which is what array spread, `for...of` and
  * destructuring all reduce to.
  *
- * An array and a string are walked directly rather than through their iterators. That is a
- * shortcut the specification does not take, and it is visible to a program that replaces
- * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
- * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+ * An array and a string are walked directly rather than through their iterators only while their
+ * intrinsic protocol is intact. An own Symbol.iterator override is observable and must go through
+ * the protocol below; this also keeps hand-written IR fixtures honest. Anything else must hand
+ * back an iterator and is driven by `next`. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
@@ -8078,6 +8729,18 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
     int status;
     if (source.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(source);
+        int overridden;
+        int enumerable;
+        status = kiln_c99_array_own_kind(source, "@@iterator", 10,
+                                         kiln_c99_well_known_value("@@iterator", 10),
+                                         KILN_PROPERTY_SYMBOL, &overridden, &enumerable);
+        (void)enumerable;
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (overridden) {
+            goto protocol;
+        }
         size_t length = array->count;
         for (index = 0; index < length && index < array->count; ++index) {
             /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
@@ -8147,12 +8810,15 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         free(units);
         return KILN_C99_OK;
     }
-    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
+protocol:
+    /* Everything else (including an array with an own override) goes through the protocol: ask
+     * for an iterator, then drive it. */
     if (source.tag == KILN_VALUE_GENERATOR) {
         iterator = source;
     } else {
         kiln_value method;
-        status = kiln_c99_get(host, source, "@@iterator", 10, &method, depth, thrown);
+        status = kiln_c99_get_symbol(host, source, kiln_c99_well_known_value("@@iterator", 10),
+                                     "@@iterator", 10, &method, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -8202,14 +8868,26 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
 
 /* `key in target`: whether the name is reachable, own or inherited. Unlike a read this does not
  * call an accessor -- the question is whether the property exists, not what it produces. */
-static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer) {
+static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t key_len,
+                                      kiln_value symbol, int kind, int *answer) {
     kiln_value current = target;
     size_t steps;
     *answer = 0;
+    if (kind == KILN_PROPERTY_SYMBOL &&
+        kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+        if (target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_COLLECTION ||
+            target.tag == KILN_VALUE_GENERATOR ||
+            (target.tag == KILN_VALUE_BUILTIN &&
+             (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+              target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE))) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An index is present when it is in range, and `length` always is. */
-        double index = kiln_c99_key_index(key, key_len);
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        double index = kind == KILN_PROPERTY_STRING ? kiln_c99_key_index(key, key_len) : -1.0;
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "length")) {
             *answer = 1;
             return KILN_C99_OK;
         }
@@ -8218,7 +8896,35 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
             *answer = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
             return KILN_C99_OK;
         }
-        *answer = kiln_c99_array_method(key, key_len) != 0;
+        {
+            kiln_array *array = kiln_c99_array_of(target);
+            if (array->properties.tag == KILN_VALUE_OBJECT) {
+                kiln_object *object = kiln_c99_object_of(array->properties);
+                size_t property;
+                for (property = 0; property < object->count; ++property) {
+                    int matches = kind == KILN_PROPERTY_SYMBOL
+                                      ? kiln_c99_same_symbol_key(&object->properties[property], symbol,
+                                                                 key, key_len)
+                                  : kind == KILN_PROPERTY_INTERNAL
+                                      ? kiln_c99_same_internal_key(&object->properties[property], key,
+                                                                   key_len)
+                                      : kiln_c99_same_key(&object->properties[property], key, key_len);
+                    if (matches) {
+                        *answer = 1;
+                        return KILN_C99_OK;
+                    }
+                }
+            }
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            if (kind == KILN_PROPERTY_SYMBOL &&
+                kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *answer = 1;
+            }
+            return KILN_C99_OK;
+        }
+        *answer = kiln_c99_same_name(key, key_len, "constructor") ||
+                  kiln_c99_array_method(key, key_len) != 0;
         return KILN_C99_OK;
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
@@ -8229,7 +8935,13 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
         }
         object = kiln_c99_object_of(current);
         for (index = 0; index < object->count; ++index) {
-            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            int matches = kind == KILN_PROPERTY_SYMBOL
+                              ? kiln_c99_same_symbol_key(&object->properties[index], symbol, key,
+                                                         key_len)
+                          : kind == KILN_PROPERTY_INTERNAL
+                              ? kiln_c99_same_internal_key(&object->properties[index], key, key_len)
+                              : kiln_c99_same_key(&object->properties[index], key, key_len);
+            if (matches) {
                 *answer = 1;
                 return KILN_C99_OK;
             }
@@ -8237,7 +8949,7 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
         current = object->prototype;
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
-    if (target.tag == KILN_VALUE_OBJECT &&
+    if (kind == KILN_PROPERTY_STRING && target.tag == KILN_VALUE_OBJECT &&
         kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
         *answer = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                          KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
@@ -8246,11 +8958,57 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
     return KILN_C99_OK;
 }
 
+static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer) {
+    return kiln_c99_has_property_kind(target, key, key_len, kiln_c99_undefined(),
+                                      KILN_PROPERTY_STRING, answer);
+}
+
+/* Array elements and the array's named-property side store are both own properties.  Keeping this
+ * walk in one place makes the reflective APIs agree with computed get/set/delete. */
+static int kiln_c99_array_own_kind(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value symbol, int kind, int *found, int *enumerable) {
+    kiln_array *array = kiln_c99_array_of(target);
+    double index = kind == KILN_PROPERTY_STRING ? kiln_c99_key_index(key, key_len) : -1.0;
+    size_t slot;
+    *found = 0;
+    *enumerable = 0;
+    if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "length")) {
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    if (index >= 0.0) {
+        *found = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
+        *enumerable = *found;
+        return KILN_C99_OK;
+    }
+    if (array->properties.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_OK;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(array->properties);
+        for (slot = 0; slot < object->count; ++slot) {
+            int matches = kind == KILN_PROPERTY_SYMBOL
+                              ? kiln_c99_same_symbol_key(&object->properties[slot], symbol, key,
+                                                         key_len)
+                          : kind == KILN_PROPERTY_INTERNAL
+                              ? kiln_c99_same_internal_key(&object->properties[slot], key, key_len)
+                              : kiln_c99_same_key(&object->properties[slot], key, key_len);
+            if (matches) {
+                *found = 1;
+                *enumerable = object->properties[slot].enumerable;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return KILN_C99_OK;
+}
+
 /* `delete target[key]`: remove an own property, answering whether the name is gone afterwards.
  *
  * A name that was never there deletes successfully, which is what makes `delete` almost always
  * true and why the answer is about the *end state* rather than about work done. */
-static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer) {
+static int kiln_c99_delete_kind(kiln_value target, const char *key, size_t key_len,
+                                kiln_value symbol, int kind, int *answer) {
     kiln_object *object;
     size_t index;
     *answer = 1;
@@ -8271,6 +9029,26 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         }
         if (slot >= 0.0 && (size_t)slot < array->count) {
             array->elements[(size_t)slot] = kiln_c99_hole();
+            return KILN_C99_OK;
+        }
+        if (slot < 0.0 && array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(array->properties);
+            size_t property;
+            for (property = 0; property < properties->count; ++property) {
+                if (kind == KILN_PROPERTY_STRING
+                        ? kiln_c99_same_key(&properties->properties[property], key, key_len)
+                        : kind == KILN_PROPERTY_SYMBOL
+                            ? kiln_c99_same_symbol_key(&properties->properties[property], symbol, key,
+                                                       key_len)
+                            : kiln_c99_same_internal_key(&properties->properties[property], key,
+                                                         key_len)) {
+                    for (; property + 1 < properties->count; ++property) {
+                        properties->properties[property] = properties->properties[property + 1];
+                    }
+                    properties->count -= 1;
+                    return KILN_C99_OK;
+                }
+            }
         }
         return KILN_C99_OK;
     }
@@ -8283,7 +9061,12 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         return KILN_C99_OK;
     }
     for (index = 0; index < object->count; ++index) {
-        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        int matches = kind == KILN_PROPERTY_SYMBOL
+                          ? kiln_c99_same_symbol_key(&object->properties[index], symbol, key, key_len)
+                      : kind == KILN_PROPERTY_INTERNAL
+                          ? kiln_c99_same_internal_key(&object->properties[index], key, key_len)
+                          : kiln_c99_same_key(&object->properties[index], key, key_len);
+        if (!matches) {
             continue;
         }
         /* Shifted rather than swapped with the last: property order is observable, and a
@@ -8295,6 +9078,11 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         return KILN_C99_OK;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer) {
+    return kiln_c99_delete_kind(target, key, key_len, kiln_c99_undefined(), KILN_PROPERTY_STRING,
+                                answer);
 }
 
 /* An array of a value's own enumerable string keys, in enumeration order: what `for...in` walks
@@ -8310,7 +9098,8 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
         for (index = 0; index < object->count; ++index) {
-            if (!object->properties[index].enumerable) {
+            if (!object->properties[index].enumerable ||
+                object->properties[index].kind != KILN_PROPERTY_STRING) {
                 continue;
             }
             status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
@@ -8321,7 +9110,8 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
         }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
-         * gives "0" and "1", not 0 and 1. */
+         * gives "0" and "1", not 0 and 1. Named enumerable string properties follow the
+         * indices; symbol and internal properties never enter this string-only walk. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
             if (kiln_c99_is_hole(array->elements[index])) {
@@ -8330,6 +9120,21 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
             if (status != KILN_C99_OK) {
                 return status;
+            }
+        }
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(array->properties);
+            for (index = 0; index < properties->count; ++index) {
+                if (!properties->properties[index].enumerable ||
+                    properties->properties[index].kind != KILN_PROPERTY_STRING) {
+                    continue;
+                }
+                status = kiln_c99_array_push(
+                    built, kiln_c99_copy_text(properties->properties[index].key,
+                                               properties->properties[index].key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
         }
     }
@@ -8377,8 +9182,13 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             } else {
                 copied = object->properties[index].value;
             }
-            status = kiln_c99_put(host, target, object->properties[index].key,
-                                  object->properties[index].key_len, copied, depth, thrown);
+            status = object->properties[index].kind == KILN_PROPERTY_SYMBOL
+                         ? kiln_c99_put_symbol(host, target, object->properties[index].key,
+                                               object->properties[index].key_len,
+                                               object->properties[index].symbol_value, copied, depth,
+                                               thrown)
+                         : kiln_c99_put(host, target, object->properties[index].key,
+                                        object->properties[index].key_len, copied, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -8412,7 +9222,12 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     }
     object = kiln_c99_object_of(target);
     for (index = 0; index < object->count; ++index) {
-        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        int matches = kind == KILN_PROPERTY_SYMBOL
+                          ? kiln_c99_same_symbol_key(&object->properties[index], symbol, key, key_len)
+                      : kind == KILN_PROPERTY_INTERNAL
+                          ? kiln_c99_same_internal_key(&object->properties[index], key, key_len)
+                          : kiln_c99_same_key(&object->properties[index], key, key_len);
+        if (!matches) {
             continue;
         }
         if (!object->properties[index].accessor) {
@@ -8431,12 +9246,22 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         }
         return KILN_C99_OK;
     }
-    status = kiln_c99_put(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL);
+    status = kind == KILN_PROPERTY_SYMBOL
+                 ? kiln_c99_put_symbol(NULL, target, key, key_len, symbol, kiln_c99_undefined(), 0,
+                                       NULL)
+             : kind == KILN_PROPERTY_INTERNAL
+                 ? kiln_c99_put_internal(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL)
+                 : kiln_c99_put(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
     for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        int matches = kind == KILN_PROPERTY_SYMBOL
+                          ? kiln_c99_same_symbol_key(&object->properties[index], symbol, key, key_len)
+                      : kind == KILN_PROPERTY_INTERNAL
+                          ? kiln_c99_same_internal_key(&object->properties[index], key, key_len)
+                          : kiln_c99_same_key(&object->properties[index], key, key_len);
+        if (matches) {
             object->properties[index].accessor = 1;
             object->properties[index].getter = getter;
             object->properties[index].setter = setter;
@@ -8672,7 +9497,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             kiln_value member;
             kiln_text member_text = {NULL, 0, 0};
             int wrote;
-            if (!object->properties[index].enumerable) {
+            if (!object->properties[index].enumerable ||
+                object->properties[index].kind == KILN_PROPERTY_SYMBOL) {
                 continue;
             }
             if (object->properties[index].accessor) {
@@ -9287,11 +10113,11 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
     if (status != KILN_C99_OK) {
         return status;
     }
-    status = kiln_c99_put(NULL, iterator, "@@iterated", 10, items, 0, NULL);
+    status = kiln_c99_put_internal(NULL, iterator, "@@iterated", 10, items, 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
-    status = kiln_c99_put(NULL, iterator, "@@index", 7, kiln_c99_number(0.0), 0, NULL);
+    status = kiln_c99_put_internal(NULL, iterator, "@@index", 7, kiln_c99_number(0.0), 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -9302,13 +10128,40 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
     }
     /* An iterator is its own iterable, which is what lets `[...m.keys()]` work: spread asks for
      * an iterator, and asking one for another has to answer with itself. */
-    status = kiln_c99_put(NULL, iterator, "@@iterator", 10,
-                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), 0, NULL);
+    status = kiln_c99_put_symbol(NULL, iterator, "@@iterator", 10,
+                                 kiln_c99_well_known_value("@@iterator", 10),
+                                 kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
     *out = iterator;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_new_string_iterator(kiln_value *out, kiln_value source) {
+    kiln_value items;
+    uint16_t *units = NULL;
+    size_t count = 0;
+    size_t index;
+    int status;
+    if (source.tag != KILN_VALUE_STRING || kiln_c99_to_units(source, &units, &count) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_array(&items);
+    for (index = 0; index < count && status == KILN_C99_OK; ++index) {
+        size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                        index + 1 < count && units[index + 1] >= 0xDC00 &&
+                        units[index + 1] <= 0xDFFF)
+                           ? 2
+                           : 1;
+        status = kiln_c99_array_push(items, kiln_c99_from_units(units + index, width));
+        index += width - 1;
+    }
+    free(units);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_new_iterator(out, items);
 }
 
 static const char *kiln_c99_error_name(uint64_t builtin) {
@@ -9357,7 +10210,8 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
                               NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, error, "@@error", 7, kiln_c99_number((double)kind), 0, NULL);
+        status = kiln_c99_put_internal(NULL, error, "@@error", 7, kiln_c99_number((double)kind), 0,
+                                       NULL);
     }
     if (status != KILN_C99_OK) {
         return status;
@@ -9402,59 +10256,84 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
     return KILN_C99_OK;
 }
 
+/* Return the backing object store for values that can carry an internal/private property.  Arrays
+ * use their named-property side store; this is useful for direct IR fixtures and keeps all
+ * object-like values on one descriptor path. */
+static int kiln_c99_private_store(kiln_value target, int create, kiln_value *store) {
+    int status;
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        if (!create && kiln_c99_closure_of(target)->properties.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        return kiln_c99_function_store(target, store);
+    }
+    if (target.tag == KILN_VALUE_OBJECT) {
+        *store = target;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        if (array->properties.tag != KILN_VALUE_OBJECT) {
+            if (!create) {
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_new_object(&array->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        *store = array->properties;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
 /* The own slot a private name occupies, or NULL.
  *
  * Own-only, and that own-only rule *is* the brand check: an object of another class does not carry
- * the name, however much of the rest of the shape it shares. Nothing walks the prototype chain
- * here for the same reason -- inheriting a private name would be inheriting somebody else's
+ * the identity, however much of the rest of the shape it shares. Nothing walks the prototype
+ * chain here for the same reason -- inheriting a private name would be inheriting somebody else's
  * identity. A static private member lives on the constructor, whose properties are in its own
  * store rather than in an object. */
-static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
+static kiln_property *kiln_c99_own_private(kiln_value target, const void *identity) {
+    kiln_value store = kiln_c99_undefined();
     kiln_object *object;
     size_t index;
-    if (target.tag == KILN_VALUE_FUNCTION) {
-        kiln_value store = kiln_c99_closure_of(target)->properties;
-        if (store.tag != KILN_VALUE_OBJECT) {
-            return NULL;
-        }
-        object = kiln_c99_object_of(store);
-    } else if (target.tag == KILN_VALUE_OBJECT) {
-        object = kiln_c99_object_of(target);
-    } else {
+    if (kiln_c99_private_store(target, 0, &store) != KILN_C99_OK ||
+        store.tag != KILN_VALUE_OBJECT) {
         return NULL;
     }
+    object = kiln_c99_object_of(store);
     for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+        if (kiln_c99_same_private_key(&object->properties[index], identity)) {
             return &object->properties[index];
         }
     }
     return NULL;
 }
 
-/* A private name on an object that does not carry it: a TypeError naming the member.
- *
- * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
- * properties can see it and no computed access can spell it -- and the message wants the `<name>`
- * half, spelled the way the program spells it. */
-static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+/* A private name on an object that does not carry it: a TypeError naming the member. The display
+ * spelling is deliberately passed separately from the identity token, so diagnostics never become
+ * part of storage lookup. */
+static int kiln_c99_private_error(kiln_value *thrown, const char *display, size_t display_len,
                                   int writing) {
     kiln_text text = {NULL, 0, 0};
     kiln_value error;
-    size_t at = 0;
+    size_t shown_at = 0;
     size_t colons = 0;
+    size_t index;
     int status;
-    while (at < key_len && colons < 2) {
-        if (key[at] == ':') {
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
             colons += 1;
         }
-        at += 1;
     }
-    if (colons < 2) {
-        at = 0;
+    if (colons == 2) {
+        shown_at = index;
     }
     if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
                                               : "Cannot read private member #") != KILN_C99_OK ||
-        kiln_c99_text_append(&text, key + at, key_len - at) != KILN_C99_OK ||
+        kiln_c99_text_append(&text, display + shown_at, display_len - shown_at) != KILN_C99_OK ||
         kiln_c99_text_append_c(&text,
                                writing ? " to an object whose class did not declare it"
                                        : " from an object whose class did not declare it") !=
@@ -9469,6 +10348,222 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
     }
     *thrown = error;
     return KILN_C99_THROWN;
+}
+
+/* Accessing the missing half of a private accessor is a language TypeError. Keep this distinct
+ * from a brand miss: a branded object can still legitimately lack one half of its descriptor. */
+static int kiln_c99_private_accessor_error(kiln_value *thrown, const char *display,
+                                           size_t display_len, int writing) {
+    kiln_text text = {NULL, 0, 0};
+    kiln_value error;
+    size_t shown_at = 0;
+    size_t colons = 0;
+    size_t index;
+    int status;
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
+            colons += 1;
+        }
+    }
+    if (colons == 2) {
+        shown_at = index;
+    }
+    if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
+                                              : "Cannot read private member #") != KILN_C99_OK ||
+        kiln_c99_text_append(&text, display + shown_at, display_len - shown_at) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&text,
+                               writing ? " which has no setter" : " which has no getter") !=
+            KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len));
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *thrown = error;
+    return KILN_C99_THROWN;
+}
+
+static int kiln_c99_private_in(kiln_value target, const void *identity, const char *display,
+                               size_t display_len, kiln_value *out, kiln_value *thrown) {
+    static const char primitive[] = "right-hand side of `#";
+    kiln_property *slot;
+    size_t shown_at = 0;
+    size_t colons = 0;
+    size_t index;
+    for (index = 0; index < display_len && colons < 2; ++index) {
+        if (display[index] == ':') {
+            colons += 1;
+        }
+    }
+    if (colons == 2) {
+        shown_at = index;
+    }
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
+        target.tag != KILN_VALUE_ARRAY) {
+        kiln_text message = {NULL, 0, 0};
+        const char *type = target.tag == KILN_VALUE_NULL       ? "null"
+                           : target.tag == KILN_VALUE_UNDEFINED ? "undefined"
+                           : target.tag == KILN_VALUE_BOOLEAN   ? "boolean"
+                           : target.tag == KILN_VALUE_NUMBER    ? "number"
+                           : target.tag == KILN_VALUE_STRING    ? "string"
+                                                                  : "value";
+        int status = kiln_c99_text_append_c(&message, primitive);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append(&message, display + shown_at,
+                                          display_len - shown_at);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append_c(&message, " in must be an object, got ");
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append_c(&message, type);
+        }
+        if (status != KILN_C99_OK) {
+            free(message.bytes);
+            return status;
+        }
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, message.bytes);
+        free(message.bytes);
+        return status;
+    }
+    slot = kiln_c99_own_private(target, identity);
+    *out = kiln_c99_boolean(slot != NULL);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_private_get(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value *out,
+                                int depth, kiln_value *thrown) {
+    kiln_property *slot = kiln_c99_own_private(target, identity);
+    if (slot == NULL) {
+        return kiln_c99_private_error(thrown, display, display_len, 0);
+    }
+    if (!slot->accessor) {
+        *out = slot->value;
+        return KILN_C99_OK;
+    }
+    if (slot->getter.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_private_accessor_error(thrown, display, display_len, 0);
+    }
+    return kiln_c99_call(host, out, slot->getter, target, NULL, 0, depth, thrown);
+}
+
+static int kiln_c99_private_set(kiln_host *host, kiln_value target, const void *identity,
+                                const char *display, size_t display_len, kiln_value value,
+                                int depth, kiln_value *thrown) {
+    kiln_property *slot = kiln_c99_own_private(target, identity);
+    if (slot == NULL) {
+        return kiln_c99_private_error(thrown, display, display_len, 1);
+    }
+    if (!slot->accessor) {
+        slot->value = value;
+        return KILN_C99_OK;
+    }
+    if (slot->setter.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_private_accessor_error(thrown, display, display_len, 1);
+    }
+    {
+        kiln_value ignored;
+        return kiln_c99_call(host, &ignored, slot->setter, target, &value, 1, depth, thrown);
+    }
+}
+
+/* Private initialization is define-like: it creates/replaces an own data slot and never walks a
+ * prototype or invokes a setter. */
+static int kiln_c99_private_init(kiln_value target, const void *identity, const char *display,
+                                 size_t display_len, kiln_value value) {
+    kiln_value store = kiln_c99_undefined();
+    kiln_object *object;
+    size_t index;
+    int status = kiln_c99_private_store(target, 1, &store);
+    (void)display;
+    (void)display_len;
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(store);
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_private_key(&object->properties[index], identity)) {
+            object->properties[index].accessor = 0;
+            object->properties[index].value = value;
+            object->properties[index].getter = kiln_c99_undefined();
+            object->properties[index].setter = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
+                              sizeof *object->properties);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object->properties[object->count].key = display;
+    object->properties[object->count].key_len = display_len;
+    object->properties[object->count].kind = KILN_PROPERTY_INTERNAL;
+    object->properties[object->count].symbol_value = kiln_c99_undefined();
+    object->properties[object->count].internal_identity = identity;
+    object->properties[object->count].enumerable = 0;
+    object->properties[object->count].accessor = 0;
+    object->properties[object->count].value = value;
+    object->properties[object->count].getter = kiln_c99_undefined();
+    object->properties[object->count].setter = kiln_c99_undefined();
+    object->count += 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_define_private_accessor(kiln_value target, const void *identity,
+                                             const char *display, size_t display_len,
+                                             kiln_value getter, kiln_value setter) {
+    kiln_value store = kiln_c99_undefined();
+    kiln_object *object;
+    size_t index;
+    int status = kiln_c99_private_store(target, 1, &store);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(store);
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_private_key(&object->properties[index], identity)) {
+            continue;
+        }
+        if (!object->properties[index].accessor) {
+            object->properties[index].accessor = 1;
+            object->properties[index].getter = kiln_c99_undefined();
+            object->properties[index].setter = kiln_c99_undefined();
+        }
+        if (getter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].getter = getter;
+        }
+        if (setter.tag != KILN_VALUE_UNDEFINED) {
+            object->properties[index].setter = setter;
+        }
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
+                              sizeof *object->properties);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object->properties[object->count].key = display;
+    object->properties[object->count].key_len = display_len;
+    object->properties[object->count].kind = KILN_PROPERTY_INTERNAL;
+    object->properties[object->count].symbol_value = kiln_c99_undefined();
+    object->properties[object->count].internal_identity = identity;
+    object->properties[object->count].enumerable = 0;
+    object->properties[object->count].accessor = 1;
+    object->properties[object->count].value = kiln_c99_undefined();
+    object->properties[object->count].getter = getter;
+    object->properties[object->count].setter = setter;
+    object->count += 1;
+    return KILN_C99_OK;
 }
 
 /* Raise a language-level error: build it, hand it to the caller as the thrown value, and report
@@ -9800,8 +10895,8 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0, depth + 1,
-                           thrown, frame);
+    status = kiln_c99_invoke_body(closure, host, &produced, frame->receiver, frame->new_target,
+                                  NULL, 0, depth + 1, thrown, frame);
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -10092,7 +11187,7 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
             kiln_value kind;
             *answer = 0;
             if (value.tag == KILN_VALUE_OBJECT &&
-                kiln_c99_get(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
+                kiln_c99_get_internal(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
                 kind.tag == KILN_VALUE_NUMBER) {
                 *answer = constructor.bits == KILN_C99_BUILTIN_ERROR ||
                           (uint64_t)kiln_c99_as_number(kind) == constructor.bits;
@@ -10630,6 +11725,27 @@ fn validate_code(
                     ));
                 }
             },
+            Instruction::PrivateIn(name)
+            | Instruction::GetPrivate(name)
+            | Instruction::SetPrivate(name)
+            | Instruction::InitPrivate(name)
+            | Instruction::DefinePrivateAccessor { name, .. } => {
+                match program.constants.get(*name as usize) {
+                    Some(Constant::String(_)) => {}
+                    Some(_) => {
+                        return Err(invalid(
+                            index,
+                            format!("private name constant {name} is not a string"),
+                        ));
+                    }
+                    None => {
+                        return Err(invalid(
+                            index,
+                            format!("private name constant {name} is out of bounds"),
+                        ));
+                    }
+                }
+            }
             Instruction::LoadLocal(local)
             | Instruction::StoreLocal(local)
             | Instruction::NewCell(local)
@@ -10815,6 +11931,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             feature: "a direct `eval` call in the native backend".to_owned(),
         }),
         Instruction::Const(_)
+        | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
         | Instruction::StoreLocal(_)
         | Instruction::NewCell(_)
@@ -10837,8 +11954,6 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::ThrowReference(_)
-        | Instruction::GetPrivate(_)
-        | Instruction::SetPrivate(_)
         | Instruction::Dup2
         | Instruction::CallComputed { .. }
         | Instruction::NewRegExp { .. }
@@ -10936,6 +12051,7 @@ fn stack_effect(
         // and refusing here is what keeps the two backends from silently disagreeing about
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Const(_)
+        | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)
@@ -10944,7 +12060,8 @@ fn stack_effect(
         | Instruction::RestArguments(_)
         | Instruction::PushHole
         | Instruction::LoadArguments
-        | Instruction::MakeFunction(_) => Ok((height + 1, false)),
+        | Instruction::MakeFunction(_)
+        | Instruction::LoadWellKnown(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
             let needed = usize::try_from(*count)
@@ -11035,7 +12152,7 @@ fn stack_effect(
             }
         }
         // Replaces the value with an array of its own enumerable keys.
-        Instruction::EnumerateKeys | Instruction::DeleteProperty(_) => {
+        Instruction::EnumerateKeys | Instruction::DeleteProperty(_) | Instruction::PrivateIn(_) => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -11178,6 +12295,20 @@ fn stack_effect(
         // ...and the value replaces both, exactly as `SetProperty` does: an assignment is an
         // expression and its value is what was assigned.
         Instruction::SetPrivate(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::InitPrivate(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::DefinePrivateAccessor { .. } => {
             if height < 2 {
                 Err(underflow(2))
             } else {
@@ -11423,13 +12554,53 @@ fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
         .collect()
 }
 
+/// Constant operands used by private instructions get a TU-local identity object.  The text
+/// remains available for diagnostics, but it is never consulted to decide whether a brand is
+/// present.  Sorting keeps generated source stable regardless of traversal details.
+fn private_constant_indices(program: &Program) -> Vec<u32> {
+    let mut indices = HashSet::new();
+    let mut collect = |code: &[Instruction]| {
+        for instruction in code {
+            match instruction {
+                Instruction::PrivateIn(index)
+                | Instruction::GetPrivate(index)
+                | Instruction::SetPrivate(index)
+                | Instruction::InitPrivate(index) => {
+                    indices.insert(*index);
+                }
+                Instruction::DefinePrivateAccessor { name, .. } => {
+                    indices.insert(*name);
+                }
+                _ => {}
+            }
+        }
+    };
+    collect(&program.code);
+    for function in &program.functions {
+        collect(&function.code);
+    }
+    let mut indices: Vec<_> = indices.into_iter().collect();
+    indices.sort_unstable();
+    indices
+}
+
+fn render_private_tokens(output: &mut String, program: &Program, symbol: &str) {
+    for index in private_constant_indices(program) {
+        writeln!(
+            output,
+            "static const unsigned char {symbol}_private_token_{index} = 0;"
+        )
+        .unwrap();
+    }
+}
+
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
 fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, kiln_value new_target, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
         )
         .unwrap();
     }
@@ -11528,7 +12699,7 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {{"
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, kiln_value new_target, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
@@ -11551,7 +12722,9 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        output.push_str(
+            "    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n",
+        );
         output.push_str("    (void)args; (void)argc; (void)slot;\n");
         // Re-entry. A generator that has not started begins at its first instruction; one that
         // has jumps back to just after the `Yield` that suspended it, with the operand stack
@@ -11585,7 +12758,9 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        output.push_str(
+            "    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n",
+        );
         writeln!(
             output,
             "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
@@ -11613,6 +12788,7 @@ fn render_function(
         handlers,
         site: ReturnSite::Body,
         guarded: dead_zone_slots(&proto.code),
+        shared_scheduler: false,
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
@@ -11780,6 +12956,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    output.push_str("    kiln_value new_target = kiln_c99_undefined();\n");
+    output.push_str("    (void)new_target;\n");
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -11823,6 +13001,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry { exports: None },
         guarded: dead_zone_slots(&program.code),
+        shared_scheduler: false,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -11837,7 +13016,12 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     output
 }
 
-fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> String {
+fn render_module(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    private_graph_abi: bool,
+) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
@@ -11848,6 +13032,9 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     };
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
+    if private_graph_abi {
+        output.push_str("#define KILN_C99_GRAPH_RUNTIME 1\n");
+    }
     output.push_str(HEADER);
     writeln!(
         output,
@@ -11873,6 +13060,8 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    output.push_str("    kiln_value new_target = kiln_c99_undefined();\n");
+    output.push_str("    (void)new_target;\n");
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -11946,6 +13135,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
             exports: Some(&module.exports),
         },
         guarded: dead_zone_slots(&program.code),
+        shared_scheduler: private_graph_abi,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -11982,6 +13172,7 @@ struct Emitter<'a> {
     /// The local slots this body puts into the temporal dead zone, so a read of one is checked
     /// and every other read is not.
     guarded: HashSet<u32>,
+    shared_scheduler: bool,
 }
 
 enum ReturnSite<'a> {
@@ -12006,6 +13197,7 @@ fn emit_instruction(
         handlers,
         site,
         guarded,
+        shared_scheduler,
     } = emitter;
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
@@ -12064,6 +13256,29 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::LoadWellKnown(well_known) => {
+            let (name, length) = match well_known {
+                kiln_ir::WellKnownSymbol::Iterator => ("@@iterator", 10),
+                kiln_ir::WellKnownSymbol::AsyncIterator => ("@@asyncIterator", 15),
+            };
+            writeln!(
+                output,
+                "    stack[sp++] = kiln_c99_well_known_value(\"{name}\", {length});"
+            )
+            .unwrap();
+        }
+        Instruction::PrivateIn(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value brand; int status = kiln_c99_private_in(stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, &brand, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = brand; }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::GetPrivate(name) => {
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string private name before emission")
@@ -12071,9 +13286,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 0); {unwind} }} stack[sp - 1] = slot->value; }}",
+                "    {{ kiln_value read; int status = kiln_c99_private_get(host, stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len(),
-                text.len()
             )
             .unwrap();
         }
@@ -12084,8 +13298,34 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 1); {unwind} }} slot->value = member; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_private_set(host, stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len(),
+            )
+            .unwrap();
+        }
+        Instruction::InitPrivate(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_private_init(stack[sp - 1], &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, member); if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::DefinePrivateAccessor { name, setter } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let (getter, setter_value) = if *setter {
+                ("kiln_c99_undefined()", "function")
+            } else {
+                ("function", "kiln_c99_undefined()")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value function = stack[--sp]; kiln_value target = stack[sp - 1]; int status = kiln_c99_define_private_accessor(target, &{symbol}_private_token_{name}, {symbol}_constant_{name}, {}, {getter}, {setter_value}); if (status != KILN_C99_OK) return status; stack[sp - 1] = target; }}",
                 text.len()
             )
             .unwrap();
@@ -12174,6 +13414,7 @@ fn emit_instruction(
             };
             // A generator's frame is sized here rather than at the call, because this is where
             // the body's own counts are in scope.
+            let arrow = i32::from(target.arrow);
             let generator = i32::from(target.generator || target.asynchronous);
             let asynchronous = i32::from(target.asynchronous);
             let arrow = i32::from(target.arrow);
@@ -12183,6 +13424,14 @@ fn emit_instruction(
             // One handler slot per instruction: a body cannot register more handlers than it has
             // instructions, which is the same bound an automatic frame uses.
             let frame_handlers = target.code.len().max(1);
+            // Every function body receives its effective receiver. An arrow snapshots that
+            // value now; an ordinary closure carries the same field but never consults it.
+            // Module entry has no receiver and therefore captures `undefined` explicitly.
+            let defining_receiver = if target.arrow && matches!(site, ReturnSite::Body) {
+                "receiver"
+            } else {
+                "kiln_c99_undefined()"
+            };
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
@@ -12393,7 +13642,7 @@ fn emit_instruction(
         // not call an accessor.
         Instruction::Binary(BinaryOp::In) => {
             output.push_str(
-                "    { kiln_value container = stack[--sp]; kiln_value key = kiln_c99_text(stack[sp - 1]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property(container, key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+                "    { kiln_value container = stack[--sp]; kiln_value raw_key = stack[sp - 1]; kiln_value key = kiln_c99_property_key(raw_key); int answer; int kind = raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property_kind(container, key.ptr, key.len, raw_key, kind, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
         Instruction::DeleteProperty(name) => {
@@ -12409,7 +13658,7 @@ fn emit_instruction(
         }
         Instruction::DeleteComputed => {
             output.push_str(
-                "    { kiln_value key = kiln_c99_text(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+                "    { kiln_value raw_key = stack[--sp]; kiln_value key = kiln_c99_property_key(raw_key); int answer; int kind = raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete_kind(stack[sp - 1], key.ptr, key.len, raw_key, kind, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
         // `arguments` is every argument this frame was given, as an array. A real one is an
@@ -12897,6 +14146,16 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::GetComputed => byte(&mut hash, 29),
             Instruction::SetComputed => byte(&mut hash, 30),
+            Instruction::LoadWellKnown(symbol) => {
+                byte(&mut hash, 61);
+                byte(
+                    &mut hash,
+                    match symbol {
+                        kiln_ir::WellKnownSymbol::Iterator => 0,
+                        kiln_ir::WellKnownSymbol::AsyncIterator => 1,
+                    },
+                );
+            }
             Instruction::LoadBuiltin(builtin) => {
                 byte(&mut hash, 25);
                 word(&mut hash, *builtin as u64);
@@ -13201,9 +14460,9 @@ int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject
     return -1;
 }
 size_t kiln_regexp_group_count(const void *handle) { (void)handle; return 0; }
-int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
-                               size_t capacity) {
-    (void)handle; (void)index; (void)buffer; (void)capacity;
+int32_t kiln_regexp_named_group(const void *handle, size_t index, unsigned char *buffer,
+                                size_t capacity, int64_t *out_range) {
+    (void)handle; (void)index; (void)buffer; (void)capacity; (void)out_range;
     return -1;
 }
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out) {
@@ -13471,6 +14730,37 @@ int kiln_realm_clear_timer(uint64_t id) {
         );
         assert!(emitted.source.contains("const kiln_value *imports"));
         assert!(emitted.source.contains("size_t import_count"));
+    }
+
+    #[test]
+    fn graph_modules_store_random_state_in_the_invocation_scheduler() {
+        let module = module(
+            program(Vec::new(), vec![Instruction::Return], 0),
+            Vec::new(),
+            Vec::new(),
+        );
+        let scalar = emit_module_with_logical_path(&module, "main.js").expect("module emits");
+        let graph =
+            emit_graph_module_with_logical_path(&module, "main.js").expect("graph module emits");
+
+        assert!(!scalar.source.contains("#define KILN_C99_GRAPH_RUNTIME 1"));
+        assert!(
+            scalar
+                .source
+                .contains("static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);")
+        );
+        assert!(graph.source.contains("#define KILN_C99_GRAPH_RUNTIME 1"));
+        assert!(graph.source.contains("kiln_native_realm_state realm;"));
+        assert!(
+            graph
+                .source
+                .contains("#define kiln_c99_random_state (kiln_c99_scheduler->realm.random_state)")
+        );
+        assert!(
+            graph
+                .source
+                .contains("#ifndef KILN_C99_GRAPH_RUNTIME\nstatic uint64_t kiln_c99_random_state")
+        );
     }
 
     #[test]
@@ -14229,6 +15519,268 @@ int main(void) {{
         );
     }
 
+    #[test]
+    fn private_operands_must_be_string_constants() {
+        let result = emit(&program(
+            vec![Constant::Number(1.0f64.to_bits())],
+            vec![
+                Instruction::Const(0),
+                Instruction::GetPrivate(0),
+                Instruction::Return,
+            ],
+            0,
+        ));
+        assert!(
+            matches!(result, Err(EmitError::InvalidProgram { message }) if message.contains("private name constant 0") && message.contains("not a string")),
+            "private instructions must validate their typed operand"
+        );
+    }
+
+    #[test]
+    fn executable_private_init_and_get_use_a_hidden_brand_slot() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("@@private:7:secret".into()),
+                Constant::Number(42.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::Dup,
+                Instruction::Const(1),
+                Instruction::InitPrivate(0),
+                Instruction::Pop,
+                Instruction::GetPrivate(0),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("private instructions emit");
+        let executable = std::env::temp_dir().join(format!("kiln-private-{}", std::process::id()));
+        let wrapper = format!(
+            r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    double number;
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_NUMBER) return 1;
+    memcpy(&number, &arguments[0].bits, sizeof number);
+    if (number != 42.0) return 2;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 3;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let mut child = Command::new("cc")
+            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .arg(&executable)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("a C compiler is available for backend tests");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+            .expect("private source is accepted by cc stdin");
+        let compile = child.wait_with_output().expect("cc exits");
+        assert!(
+            compile.status.success(),
+            "generated private C did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&executable)
+            .output()
+            .expect("generated private executable runs");
+        let _ = std::fs::remove_file(&executable);
+        assert!(run.status.success(), "private init/get failed");
+    }
+
+    #[test]
+    fn executable_private_set_without_setter_throws_a_catchable_type_error() {
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("@@private:8:value".into()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::Boolean(true),
+                Constant::Boolean(false),
+            ],
+            code: vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::Dup,
+                Instruction::MakeFunction(0),
+                Instruction::DefinePrivateAccessor {
+                    name: 0,
+                    setter: false,
+                },
+                Instruction::Pop,
+                Instruction::PushHandler(13),
+                Instruction::Const(1),
+                Instruction::SetPrivate(0),
+                Instruction::Pop,
+                Instruction::PopHandler,
+                Instruction::Const(3),
+                Instruction::Return,
+                Instruction::Const(3),
+                Instruction::StoreLocal(0),
+                Instruction::Pop,
+                Instruction::Const(2),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![function(vec![Instruction::Const(1), Instruction::Return])],
+        })
+        .expect("private accessor program emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 1;
+    return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 2;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "private-no-setter");
+        assert!(
+            run.status.success(),
+            "private missing-setter TypeError was not caught"
+        );
+    }
+
+    #[test]
+    fn executable_well_known_symbols_are_canonical_and_not_strings() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("iterator".into()),
+                Constant::String("asyncIterator".into()),
+                Constant::String("@@iterator".into()),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(0),
+                Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(1),
+                Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::AsyncIterator),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Pop,
+                Instruction::NewArray { count: 0 },
+                Instruction::Const(2),
+                Instruction::GetComputed,
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("well-known symbol program emits");
+        let wrapper = format!(
+            r#"
+static int calls;
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL) return 1;
+    if (calls < 2) {{
+        if (arguments[0].tag != KILN_VALUE_BOOLEAN || !arguments[0].bits) return 2;
+    }} else if (arguments[0].tag != KILN_VALUE_UNDEFINED) {{
+        return 3;
+    }}
+    calls += 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    if ({symbol}(&host, &result) != KILN_C99_OK || calls != 3) return 4;
+    return 0;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "well-known-symbols");
+        assert!(
+            run.status.success(),
+            "well-known symbols lost identity or string separation"
+        );
+    }
+
+    #[test]
+    fn executable_new_target_is_the_constructing_callee() {
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("target".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::New { argc: 0 },
+                Instruction::GetProperty(0),
+                Instruction::Unary(UnaryOp::TypeOf),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![FunctionProto {
+                code: vec![
+                    Instruction::LoadThis,
+                    Instruction::LoadNewTarget,
+                    Instruction::SetProperty(0),
+                    Instruction::Return,
+                ],
+                ..function(Vec::new())
+            }],
+        })
+        .expect("new.target program emits");
+        let wrapper = r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {
+    (void)context;
+    if (operation != 1 || argc != 1 || arguments[0].tag != KILN_VALUE_STRING ||
+        arguments[0].len != 8 || memcmp(arguments[0].ptr, "function", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}
+int main(void) {
+    kiln_host host = {host_call, NULL};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}
+"#;
+        let wrapper = wrapper.replace("{symbol}", &generated.symbol);
+        let run = run_with_main(&generated, &wrapper, "new-target");
+        assert!(run.status.success(), "new.target runtime probe failed");
+    }
+
     /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
     fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::process::Output {
         let executable = std::env::temp_dir().join(format!(
@@ -14314,6 +15866,56 @@ int main(void) {{
         assert!(
             run.status.success(),
             "a closure and its module body did not share one cell (exit {:?})",
+            run.status.code()
+        );
+    }
+
+    /// An arrow has no call-time receiver. It snapshots the receiver of the frame that creates
+    /// it, even when a later plain call supplies `undefined` as `this`.
+    #[test]
+    fn executable_arrow_captures_its_defining_receiver() {
+        let arrow = FunctionProto {
+            arrow: true,
+            code: vec![Instruction::LoadThis, Instruction::Return],
+            ..function(Vec::new())
+        };
+        let maker = FunctionProto {
+            code: vec![Instruction::MakeFunction(1), Instruction::Return],
+            ..function(Vec::new())
+        };
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("make".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::NewObject { count: 0 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::SetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::StoreLocal(2),
+                Instruction::LoadLocal(2),
+                Instruction::Call { argc: 0 },
+                Instruction::LoadLocal(1),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: vec![maker, arrow],
+        })
+        .expect("arrow receiver program emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits == 1 ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "arrow-receiver");
+        assert!(
+            run.status.success(),
+            "an arrow observed its call-time receiver instead of its defining receiver (exit {:?})",
             run.status.code()
         );
     }
@@ -14425,6 +16027,173 @@ int main(void) {{
         assert!(
             run.status.success(),
             "UTF-16 relational comparison returned the wrong result"
+        );
+    }
+
+    #[test]
+    fn executable_array_string_iterator_and_named_enumeration_are_distinct() {
+        let generated = emit(&program(
+            vec![Constant::String("@@iterator".into())],
+            vec![
+                Instruction::NewArray { count: 0 },
+                Instruction::Const(0),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("array string iterator probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_UNDEFINED ? 0 : 1;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-string-iterator");
+        assert!(
+            run.status.success(),
+            "an absent ordinary @@iterator key must not expose Symbol.iterator"
+        );
+
+        let constants = vec![
+            Constant::Number(0.0f64.to_bits()),
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+            Constant::Number(3.0f64.to_bits()),
+            Constant::String("a".into()),
+            Constant::String("b".into()),
+            Constant::String("keys".into()),
+            Constant::String("values".into()),
+            Constant::String("entries".into()),
+        ];
+        let array = |code: &mut Vec<Instruction>| {
+            code.extend([
+                Instruction::Const(1),
+                Instruction::NewArray { count: 1 },
+                Instruction::Dup,
+                Instruction::Const(5),
+                Instruction::Const(2),
+                Instruction::SetComputed,
+                Instruction::Pop,
+                Instruction::Dup,
+                Instruction::Const(4),
+                Instruction::Const(3),
+                Instruction::SetComputed,
+                Instruction::Pop,
+            ]);
+        };
+        let probes = [
+            (6, 2, 4, "keys"),    // Object.keys(array)[2] == "a".
+            (7, 2, 3, "values"),  // Object.values(array)[2] == 3.
+            (8, 1, 5, "entries"), // Object.entries(array)[1][0] == "b".
+        ];
+        for (method, index, expected, label) in probes {
+            let mut code = vec![Instruction::LoadBuiltin(kiln_ir::Builtin::Object)];
+            array(&mut code);
+            code.push(Instruction::CallMethod {
+                name: method,
+                argc: 1,
+            });
+            code.push(Instruction::Const(index));
+            code.push(Instruction::GetComputed);
+            if method == 8 {
+                code.push(Instruction::Const(0));
+                code.push(Instruction::GetComputed);
+                code.push(Instruction::Const(5));
+            } else {
+                code.push(Instruction::Const(expected));
+            }
+            code.extend([
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ]);
+            let generated =
+                emit(&program(constants.clone(), code, 0)).expect("array enumeration probe emits");
+            let wrapper = format!(
+                "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+                generated.symbol
+            );
+            let run = run_with_main(&generated, &wrapper, label);
+            assert!(
+                run.status.success(),
+                "array {label} omitted named string properties"
+            );
+        }
+
+        let mut code = Vec::new();
+        array(&mut code);
+        code.push(Instruction::EnumerateKeys);
+        code.push(Instruction::Const(2));
+        code.push(Instruction::GetComputed);
+        code.push(Instruction::Const(4));
+        code.extend([
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::Return,
+        ]);
+        let generated = emit(&program(constants, code, 0)).expect("for-in probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-for-in");
+        assert!(
+            run.status.success(),
+            "for-in omitted named string properties"
+        );
+    }
+
+    #[test]
+    fn executable_inspection_skips_symbol_properties_without_separators() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("iterator".into()),
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("a".into()),
+                Constant::Number(2.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Symbol),
+                Instruction::GetProperty(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::Const(3),
+                Instruction::NewObject { count: 2 },
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .expect("symbol inspection probe emits");
+        let wrapper = format!(
+            r#"
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 8 ||
+        memcmp(arguments[0].ptr, "{{ a: 2 }}", 8) != 0) return 1;
+    *result = kiln_c99_undefined();
+    return 0;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "symbol-inspection");
+        assert!(
+            run.status.success(),
+            "symbol-only properties must not leave malformed inspection separators"
         );
     }
 }

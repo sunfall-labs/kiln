@@ -9,8 +9,8 @@ use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 use kiln_proto::{
-    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, SyncId, TestMode,
-    TestOutcome,
+    NativeProfile, PROTOCOL_VERSION, PackageResolution, Request, ResolutionMap, Response,
+    SourceHash, SourceView, SyncId, TestMode, TestOutcome,
 };
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -35,6 +35,8 @@ struct StubEngine {
     source_revisions: HashMap<u32, Revision>,
     revision: u64,
     stats: Stats,
+    set_source_calls: usize,
+    panic_on_set_source_call: Option<usize>,
 }
 
 impl StubEngine {
@@ -57,7 +59,7 @@ fn exports_of(text: &str) -> Vec<String> {
 }
 
 /// Test clients keep the current protocol source view automatically. This lets the older daemon
-/// tests focus on query behavior while still exercising the v16 CAS contract.
+/// tests focus on query behavior while still exercising the v18 CAS contract.
 struct Client {
     raw: RawClient,
     source_view: SourceView,
@@ -162,6 +164,10 @@ impl QueryEngine for StubEngine {
     }
 
     fn set_source(&mut self, file: FileId, text: String) {
+        self.set_source_calls += 1;
+        if self.panic_on_set_source_call == Some(self.set_source_calls) {
+            panic!("stub engine set_source panic");
+        }
         if self.sources.get(&file.0) == Some(&text) {
             return;
         }
@@ -341,6 +347,18 @@ fn empty_resolutions() -> kiln_proto::ResolutionMap {
 }
 
 fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<String>) {
+    begin_sync_with_resolutions(
+        client,
+        files,
+        ResolutionMap::new("/", Vec::new()).expect("empty resolution map"),
+    )
+}
+
+fn begin_sync_with_resolutions(
+    client: &mut Client,
+    files: &[(&str, &str)],
+    resolutions: ResolutionMap,
+) -> (SyncId, Vec<String>) {
     let response = client
         .raw_request(&Request::Sync {
             files: files
@@ -357,6 +375,146 @@ fn begin_sync(client: &mut Client, files: &[(&str, &str)]) -> (SyncId, Vec<Strin
         panic!("expected Needed response, got {response:?}");
     };
     (sync_id, paths)
+}
+
+#[test]
+fn package_resolution_is_pinned_to_the_committed_source_view() {
+    let fixture = Fixture::empty();
+    let package_dir = fixture.dir.join("node_modules/pkg");
+    std::fs::create_dir_all(&package_dir).expect("create package directory");
+    let entry = fixture.dir.join("entry.js");
+    let first = package_dir.join("first.js");
+    let second = package_dir.join("second.js");
+    let package_json = package_dir.join("package.json");
+    let entry_source = "import { value } from 'pkg'; console.log(value);\n";
+    let first_source = "export const value = 'first';\n";
+    let second_source = "export const value = 'second';\n";
+    let first_manifest = r#"{"exports":"./first.js"}"#;
+    let second_manifest = r#"{"exports":"./second.js"}"#;
+    for (path, source) in [
+        (&entry, entry_source),
+        (&first, first_source),
+        (&second, second_source),
+        (&package_json, first_manifest),
+    ] {
+        std::fs::write(path, source).expect("write package fixture");
+    }
+
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    let first = std::fs::canonicalize(first).expect("canonical first target");
+    let second = std::fs::canonicalize(second).expect("canonical second target");
+    let package_json = std::fs::canonicalize(package_json).expect("canonical manifest");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let entry_path = entry.to_string_lossy().into_owned();
+    let first_path = first.to_string_lossy().into_owned();
+    let second_path = second.to_string_lossy().into_owned();
+    let manifest_path = package_json.to_string_lossy().into_owned();
+    let root_path = root.to_string_lossy().into_owned();
+    let files = [
+        (entry_path.as_str(), entry_source),
+        (first_path.as_str(), first_source),
+        (second_path.as_str(), second_source),
+    ];
+    let resolution = |target: &str, manifest: &str| {
+        ResolutionMap::new(
+            root_path.clone(),
+            vec![PackageResolution {
+                importer: entry_path.clone(),
+                specifier: "pkg".to_owned(),
+                target: target.to_owned(),
+                package_json: manifest_path.clone(),
+                package_json_hash: kiln_proto::source_digest(manifest),
+            }],
+        )
+        .expect("valid resolution map")
+    };
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut stale = Client::connect(&fixture.socket).expect("connect stale client");
+    let mut writer = Client::connect(&fixture.socket).expect("connect writer");
+    stale.handshake().expect("stale handshake");
+    writer.handshake().expect("writer handshake");
+
+    let (stale_sync, stale_needed) =
+        begin_sync_with_resolutions(&mut stale, &files, resolution(&first_path, first_manifest));
+    for (path, source) in &files {
+        if stale_needed.iter().any(|needed| needed == path) {
+            assert!(matches!(
+                stage_sync(&mut stale, stale_sync, path, source),
+                Response::Ok
+            ));
+        }
+    }
+    std::fs::write(&package_json, second_manifest).expect("select second package target");
+    let (writer_sync, writer_needed) = begin_sync_with_resolutions(
+        &mut writer,
+        &files,
+        resolution(&second_path, second_manifest),
+    );
+    for (path, source) in &files {
+        if writer_needed.iter().any(|needed| needed == path) {
+            assert!(matches!(
+                stage_sync(&mut writer, writer_sync, path, source),
+                Response::Ok
+            ));
+        }
+    }
+    assert!(matches!(
+        commit_sync(&mut writer, writer_sync),
+        Response::Synced {
+            source_view: SourceView(1)
+        }
+    ));
+    assert!(matches!(
+        commit_sync(&mut stale, stale_sync),
+        Response::StaleSourceView {
+            current: SourceView(1)
+        }
+    ));
+
+    // The filesystem now claims the other target, but the committed source view must continue
+    // using the exact resolution table uploaded by the winning transaction.
+    std::fs::write(&package_json, first_manifest).expect("mutate live package manifest");
+    std::fs::remove_file(&second).expect("remove pinned target after staging its bytes");
+    let Response::Ran(pinned) = writer
+        .request(&Request::Run {
+            path: entry_path.clone(),
+            project_root: root_path.clone(),
+            source_view: SourceView(0),
+        })
+        .expect("run pinned package graph")
+    else {
+        panic!("expected run response");
+    };
+    assert!(pinned.succeeded, "{:?}", pinned.diagnostics);
+    assert_eq!(pinned.stdout, "second\n");
+
+    let (next_sync, needed) =
+        begin_sync_with_resolutions(&mut writer, &files, resolution(&first_path, first_manifest));
+    assert!(needed.is_empty(), "source bytes should remain warm");
+    assert!(matches!(
+        commit_sync(&mut writer, next_sync),
+        Response::Synced {
+            source_view: SourceView(2)
+        }
+    ));
+    let Response::Ran(re_resolved) = writer
+        .request(&Request::Run {
+            path: entry_path,
+            project_root: root_path,
+            source_view: SourceView(0),
+        })
+        .expect("run re-resolved package graph")
+    else {
+        panic!("expected run response");
+    };
+    assert!(re_resolved.succeeded, "{:?}", re_resolved.diagnostics);
+    assert_eq!(re_resolved.stdout, "first\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 fn stage_sync(client: &mut Client, sync_id: SyncId, path: &str, text: &str) -> Response {
@@ -533,6 +691,271 @@ fn warm_noop_sync_still_advances_the_source_view() {
 }
 
 #[test]
+fn warm_noop_sync_reuses_the_content_identical_graph_snapshot() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("dependency.js");
+    let entry = fixture.dir.join("entry.js");
+    let dependency_source = "export const answer = 42;\n";
+    let entry_source = "import { answer } from './dependency.js'; console.log(answer);\n";
+    std::fs::write(&dependency, dependency_source).expect("write dependency");
+    std::fs::write(&entry, entry_source).expect("write entry");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let dependency = std::fs::canonicalize(dependency).expect("canonical dependency");
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    let root_text = root.to_string_lossy().into_owned();
+    let dependency_text = dependency.to_string_lossy().into_owned();
+    let entry_text = entry.to_string_lossy().into_owned();
+    let files = [
+        (dependency_text.as_str(), dependency_source),
+        (entry_text.as_str(), entry_source),
+    ];
+    let resolutions =
+        || ResolutionMap::new(root_text.clone(), Vec::new()).expect("empty project resolution map");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let (first_sync, first_needed) =
+        begin_sync_with_resolutions(&mut client, &files, resolutions());
+    assert_eq!(first_needed.len(), files.len());
+    for (path, source) in files {
+        assert!(matches!(
+            stage_sync(&mut client, first_sync, path, source),
+            Response::Ok
+        ));
+    }
+    assert!(matches!(
+        commit_sync(&mut client, first_sync),
+        Response::Synced { .. }
+    ));
+    assert!(matches!(
+        client
+            .request(&Request::Check {
+                source_view: SourceView(0),
+                path: entry_text.clone(),
+                project_root: root_text.clone(),
+            })
+            .expect("prime graph cache"),
+        Response::Checked(_)
+    ));
+    client.request(&Request::ResetStats).expect("reset stats");
+
+    let (second_sync, second_needed) =
+        begin_sync_with_resolutions(&mut client, &files, resolutions());
+    assert!(second_needed.is_empty());
+    assert!(matches!(
+        commit_sync(&mut client, second_sync),
+        Response::Synced { .. }
+    ));
+    let Response::Ran(run) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: entry_text.clone(),
+            project_root: root_text.clone(),
+        })
+        .expect("run after warm no-op sync")
+    else {
+        panic!("expected run response");
+    };
+    assert!(run.succeeded, "{:?}", run.diagnostics);
+    assert_eq!(run.stdout, "42\n");
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_invalidations, 0);
+
+    client.request(&Request::ResetStats).expect("reset stats");
+    assert!(matches!(
+        client
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: entry_text.clone(),
+                text: entry_source.to_owned(),
+            })
+            .expect("repeat identical direct update"),
+        Response::Ok
+    ));
+    assert!(matches!(
+        client
+            .request(&Request::Run {
+                source_view: SourceView(0),
+                path: entry_text,
+                project_root: root_text,
+            })
+            .expect("run after identical direct update"),
+        Response::Ran(summary) if summary.succeeded && summary.stdout == "42\n"
+    ));
+    let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_invalidations, 0);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn alternating_entries_and_unrelated_edits_reuse_reachable_graph_snapshots() {
+    let fixture = Fixture::empty();
+    let first = fixture.dir.join("first.js");
+    let second = fixture.dir.join("second.js");
+    let unrelated = fixture.dir.join("unrelated.js");
+    std::fs::write(&first, "console.log('first');\n").expect("write first entry");
+    std::fs::write(&second, "console.log('second');\n").expect("write second entry");
+    std::fs::write(&unrelated, "export const value = 1;\n").expect("write unrelated source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let root_text = root.to_string_lossy().into_owned();
+    let first = std::fs::canonicalize(first).expect("canonical first entry");
+    let second = std::fs::canonicalize(second).expect("canonical second entry");
+    let unrelated = std::fs::canonicalize(unrelated).expect("canonical unrelated source");
+    let first_text = first.to_string_lossy().into_owned();
+    let second_text = second.to_string_lossy().into_owned();
+    let unrelated_text = unrelated.to_string_lossy().into_owned();
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    for (path, text) in [
+        (&first_text, "console.log('first');\n"),
+        (&second_text, "console.log('second');\n"),
+        (&unrelated_text, "export const value = 1;\n"),
+    ] {
+        assert!(matches!(
+            client
+                .request(&Request::SetSource {
+                    source_view: SourceView(0),
+                    path: path.clone(),
+                    text: text.to_owned(),
+                })
+                .expect("synchronize source"),
+            Response::Ok
+        ));
+    }
+
+    for (path, output) in [(&first_text, "first\n"), (&second_text, "second\n")] {
+        let Response::Ran(summary) = client
+            .request(&Request::Run {
+                source_view: SourceView(0),
+                path: path.clone(),
+                project_root: root_text.clone(),
+            })
+            .expect("prime entry graph")
+        else {
+            panic!("expected run response");
+        };
+        assert!(summary.succeeded, "{:?}", summary.diagnostics);
+        assert_eq!(summary.stdout, output);
+    }
+    client.request(&Request::ResetStats).expect("reset stats");
+
+    let Response::Ran(first_again) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: first_text.clone(),
+            project_root: root_text.clone(),
+        })
+        .expect("reuse first entry graph")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(first_again.stdout, "first\n");
+    let Response::Stats(after_alternating) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_alternating.graph_cache_hits, 1);
+    assert_eq!(after_alternating.graph_cache_misses, 0);
+    assert_eq!(after_alternating.graph_cache_entries, 2);
+    assert_eq!(after_alternating.graph_cache_modules, 2);
+
+    assert!(matches!(
+        client
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: unrelated_text,
+                text: "export const value = 2;\n".to_owned(),
+            })
+            .expect("edit unrelated source"),
+        Response::Ok
+    ));
+    client.request(&Request::ResetStats).expect("reset stats");
+    let Response::Ran(after_unrelated_edit) = client
+        .request(&Request::Run {
+            source_view: SourceView(0),
+            path: first_text,
+            project_root: root_text,
+        })
+        .expect("reuse graph after unrelated edit")
+    else {
+        panic!("expected run response");
+    };
+    assert_eq!(after_unrelated_edit.stdout, "first\n");
+    let Response::Stats(after_unrelated) = client.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_unrelated.graph_cache_hits, 1);
+    assert_eq!(after_unrelated.graph_cache_misses, 0);
+    assert_eq!(after_unrelated.graph_cache_invalidations, 0);
+    assert_eq!(after_unrelated.graph_cache_entries, 2);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn sync_rejects_noncanonical_resolution_paths() {
+    let fixture = Fixture::started();
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical project root");
+    let importer = root.join("entry.js").to_string_lossy().into_owned();
+    let target = root
+        .join("node_modules/pkg/../pkg/index.js")
+        .to_string_lossy()
+        .into_owned();
+    let response = client
+        .raw_request(&Request::Sync {
+            files: vec![
+                SourceHash {
+                    path: importer.clone(),
+                    hash: kiln_proto::source_digest("import 'pkg';"),
+                },
+                SourceHash {
+                    path: target.clone(),
+                    hash: kiln_proto::source_digest("export const value = 1;"),
+                },
+            ],
+            resolutions: ResolutionMap::new(
+                root.to_string_lossy(),
+                vec![PackageResolution {
+                    importer,
+                    specifier: "pkg".into(),
+                    target,
+                    package_json: root
+                        .join("node_modules/pkg/package.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                    package_json_hash: kiln_proto::source_digest("{}"),
+                }],
+            )
+            .expect("wire-canonical resolution map"),
+        })
+        .expect("sync response");
+    let Response::Error { message } = response else {
+        panic!("expected invalid resolution error, got {response:?}");
+    };
+    assert!(message.contains("canonical path"), "{message}");
+}
+
+#[test]
 fn sync_rejects_bad_digest_and_incomplete_commit_without_losing_pending_state() {
     let fixture = Fixture::started();
     let mut client = fixture.client();
@@ -556,6 +979,75 @@ fn sync_rejects_bad_digest_and_incomplete_commit_without_losing_pending_state() 
             source_view: SourceView(1)
         }
     ));
+}
+
+#[test]
+fn commit_sync_panic_drops_the_cached_graph_snapshot() {
+    let fixture = Fixture::empty();
+    let source = fixture.dir.join("panic-commit.js");
+    std::fs::write(&source, "export const answer = 1;\n").expect("write source");
+    let source = std::fs::canonicalize(source).expect("canonical source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical root");
+    let source_path = source.to_string_lossy().into_owned();
+    let daemon = Daemon::bind_with(
+        &fixture.socket,
+        StubEngine {
+            panic_on_set_source_call: Some(2),
+            ..StubEngine::default()
+        },
+    )
+    .expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: source_path.clone(),
+            text: "export const answer = 1;\n".into(),
+        })
+        .expect("set initial source");
+    assert!(matches!(
+        client
+            .request(&Request::Check {
+                source_view: SourceView(0),
+                path: source_path.clone(),
+                project_root: root.to_string_lossy().into_owned(),
+            })
+            .expect("prime graph cache"),
+        Response::Checked(_)
+    ));
+    let Response::Stats(before) = client.request(&Request::Stats).expect("stats before") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(before.graph_cache_entries, 1);
+
+    let (sync_id, needed) = begin_sync(
+        &mut client,
+        &[(source_path.as_str(), "export const answer = 2;\n")],
+    );
+    assert_eq!(needed.as_slice(), std::slice::from_ref(&source_path));
+    assert!(matches!(
+        stage_sync(
+            &mut client,
+            sync_id,
+            &source_path,
+            "export const answer = 2;\n"
+        ),
+        Response::Ok
+    ));
+    assert!(matches!(
+        commit_sync(&mut client, sync_id),
+        Response::Error { .. }
+    ));
+    let Response::Stats(after) = client.request(&Request::Stats).expect("stats after") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after.graph_cache_entries, 0);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 #[test]
@@ -748,6 +1240,7 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
         None,
         path,
         fixture.dir.to_string_lossy().into_owned(),
+        None,
     )
     .expect("prepare unsaved buffer");
 
@@ -1071,6 +1564,11 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     assert_eq!(first.header_path, expected_header.to_string_lossy());
     let header = std::fs::read_to_string(&first.header_path).expect("read shared build header");
     assert!(header.contains(&format!("int {}(", first.module_symbol)));
+    assert_eq!(
+        first.module_api_symbol,
+        format!("{}_api_v2", first.module_symbol)
+    );
+    assert!(header.contains(&format!("{}(", first.module_api_symbol)));
     assert!(!first.generated_c_cache_hit);
     assert!(!first.object_cache_hit);
     assert!(!first.library_cache_hit);
@@ -1088,6 +1586,57 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     assert!(second.object_cache_hit);
     assert!(second.library_cache_hit);
     assert_eq!(second.library_bytes, first.library_bytes);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn native_shared_relative_alias_converges_after_one_stale_retry() {
+    let fixture = Fixture::empty();
+    let source = fixture.dir.join("relative-native-shared.js");
+    std::fs::write(&source, "console.log('disk');\n").expect("write source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical root");
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: "relative-native-shared.js".into(),
+            text: "console.log('overlay');\n".into(),
+        })
+        .expect("set relative overlay");
+    let request = Request::NativeSharedBuild {
+        source_view: SourceView(0),
+        path: "relative-native-shared.js".into(),
+        project_root: root.to_string_lossy().into_owned(),
+        output: Some(
+            root.join("relative-native-shared.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        profile: NativeProfile::Dev,
+    };
+
+    let mut response = client.raw_request(&request).expect("first shared build");
+    if matches!(response, Response::StaleSourceView { .. }) {
+        response = client.raw_request(&request).expect("retry shared build");
+    }
+    match response {
+        Response::NativeSharedBuilt(_) => {}
+        Response::Error { ref message } if message.contains("no supported C compiler") => {}
+        Response::StaleSourceView { current } => {
+            panic!(
+                "relative native shared build remained stale at view {}",
+                current.0
+            )
+        }
+        other => panic!("unexpected shared build response: {other:?}"),
+    }
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
@@ -1226,8 +1775,13 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
         !first.module_symbol.is_empty(),
         "wrapper symbol is reported"
     );
+    assert_eq!(
+        first.module_api_symbol,
+        format!("{}_api_v2", first.module_symbol)
+    );
     let header = std::fs::read_to_string(&first.header_path).expect("read shared graph header");
     assert!(header.contains(&format!("int {}(", first.module_symbol)));
+    assert!(header.contains(&format!("{}(", first.module_api_symbol)));
     assert!(!first.generated_c_cache_hit);
     assert!(!first.object_cache_hit);
     assert!(!first.library_cache_hit);
@@ -1243,6 +1797,7 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
     assert_eq!(second.loader_path, first.loader_path);
     assert_eq!(second.header_path, first.header_path);
     assert_eq!(second.module_symbol, first.module_symbol);
+    assert_eq!(second.module_api_symbol, first.module_api_symbol);
     assert!(second.generated_c_cache_hit);
     assert!(second.object_cache_hit);
     assert!(second.library_cache_hit);
@@ -1960,6 +2515,28 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
             .expect("set source");
     }
 
+    let Response::Checked(summary) = client
+        .request(&Request::Check {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("check graph")
+    else {
+        panic!("expected checked response");
+    };
+    assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
+    let Response::Stats(after_check) = client.request(&Request::Stats).expect("check stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_check.graph_cache_hits, 0);
+    assert_eq!(after_check.graph_cache_misses, 1);
+    assert_eq!(after_check.graph_cache_entries, 1);
+    assert_eq!(after_check.graph_cache_modules, 2);
+
     let response = client
         .request(&Request::Run {
             source_view: SourceView(0),
@@ -1976,6 +2553,12 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     assert!(first.succeeded, "{:?}", first.diagnostics);
     assert_eq!(first.stdout, "dependency\n42\n");
     assert!(first.instructions > 0);
+
+    let Response::Stats(after_run) = client.request(&Request::Stats).expect("run stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_run.graph_cache_hits, 1);
+    assert_eq!(after_run.graph_cache_misses, 1);
 
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
@@ -1997,6 +2580,10 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     };
     assert_eq!(stats.parse_computed, 0);
     assert_eq!(stats.ir_computed, 0);
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_entries, 1);
+    assert_eq!(stats.graph_cache_modules, 2);
 
     std::fs::write(
         &dependency,
@@ -2081,7 +2668,10 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         ));
     }
 
-    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let project_root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical project root")
+        .to_string_lossy()
+        .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
             source_view: SourceView(0),

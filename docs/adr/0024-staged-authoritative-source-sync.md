@@ -62,6 +62,15 @@ The native `expected_revision` on `NativeBuildAtRevision` remains a separate pub
 Source-view validation protects the source authority boundary; expected-revision validation still
 protects publication of a prepared native artifact when the database changes during the build.
 
+`SourceView` is not derived-content identity. After a request proves that its view is current, the
+module-graph cache looks up a bounded set of snapshots by canonical root and entry, pinned
+resolution-map identity, and graph format. Each snapshot captures the database revisions of the
+source files that graph actually reached. A byte-identical sync or an edit outside that reachable
+set therefore advances the authority fence without discarding the graph. A reachable edit cannot
+hit the snapshot, and a different resolution map selects a different key. An uncertain input-
+mutation panic still clears every snapshot because a generic `QueryEngine` cannot promise which
+revisions it published before unwinding.
+
 ### Watch updates remain compare-and-swap
 
 `Request::SetSource { path, text, source_view }` is the low-latency watch/editor path, not a
@@ -87,6 +96,8 @@ indefinitely or attempt to infer which paths changed concurrently.
   or `SourceUpdated` and recover with a complete resync after a stale response.
 - A no-op complete sync still invalidates the authority token. This costs a view increment but
   prevents two clients from treating the same observed view as an unexpired write lease.
+- Authority-token churn and edits outside a graph's reachable source set do not invalidate that
+  graph. Several recently used entries remain warm behind a bounded LRU interface.
 - Disconnect cleanup is automatic because pending state is not shared with the engine or another
   connection.
 - Native builds retain two independent correctness checks: source-view freshness before prepare
@@ -103,6 +114,8 @@ indefinitely or attempt to infer which paths changed concurrently.
   request can observe or consume the partially changed internal state.
 - A successful commit applies removals and updates atomically and returns a strictly newer view,
   including when the resulting source bytes are unchanged.
+- A byte-identical sync and an unrelated source edit retain a graph snapshot; a reachable source
+  edit or pinned-resolution change cannot hit it.
 - A source-consuming request with an old view returns `StaleSourceView` before preparing a query.
 - A current `SetSource` returns `SourceUpdated` with the next view; a stale one leaves the source
   unchanged.

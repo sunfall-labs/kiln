@@ -213,9 +213,14 @@ Benefits:
 Development:
 
 ```text
-application bytecode/objects
-libjsruntime.dylib
+application objects + private provider archive
+CLI runtime + private provider archive → libjsruntime.dylib
 ```
+
+The provider is deliberately present in both products: generated application objects call its
+full language-semantics ABI directly, while the CLI runtime DSO uses its numeric formatting entry
+points and exports only the stable CLI runtime symbols. Keeping the provider private in both
+places avoids making that implementation ABI part of the dynamic runtime surface.
 
 Release:
 
