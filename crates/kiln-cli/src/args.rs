@@ -351,7 +351,7 @@ commands:
     test <directory>   run a Test262 tree or Kiln's local conformance corpus
     project            summarise the whole project
     stats              print the daemon's recompute counters
-    watch <file>       re-check <file> whenever it changes on disk
+    watch <file>       run <file> now and rerun it whenever its bytes change on disk
     daemon <action>    start | stop | status | serve
 
 options:
@@ -362,7 +362,7 @@ options:
                        derived from the working directory, so one daemon serves
                        one project. $KILN_SOCKET sets the same thing.
     --interval <ms>    how long `watch` waits for a file to stop changing before it
-                       re-checks it (default 25, min 1, max 2000). `watch` is
+                       reruns it (default 25, min 1, max 2000). `watch` is
                        event-driven, so this coalesces one save's burst of writes;
                        it is not a polling cadence.
     --changed          with `test`, run failures, smoke, and affected tests only

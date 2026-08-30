@@ -1,4 +1,4 @@
-//! `kiln watch` - re-check a file every time it changes.
+//! `kiln watch` - run a program initially and after every byte-changing save.
 //!
 //! The watcher is `notify`: FSEvents on macOS, inotify on Linux. What it replaced was a
 //! 200ms poll, which spent half its interval on average before any work could begin.
@@ -8,13 +8,12 @@
 //!
 //! Events are debounced. Editors save by writing a temporary file and renaming it over the
 //! target, which arrives as several events; without a window to coalesce them one
-//! keystroke-save re-checks two or three times.
+//! keystroke-save reruns two or three times.
 //!
 //! Change detection still compares file *contents*, not mtimes. The two mechanisms answer
 //! different questions and both are needed: notify says "something touched this path", the
-//! comparison says "is there anything to recompute". Editors rewrite files on save whether or
-//! not anything changed, and a re-check that reports "recomputed nothing" for an edit the
-//! user did not make is confusing rather than reassuring.
+//! comparison says "did the program actually change". Editors rewrite files on save whether or
+//! not anything changed, and rerunning for an edit the user did not make is noise and wasted work.
 //!
 //! The watch is registered on the file's *directory*, not the file. A watch on the file
 //! follows its inode, so the first atomic save renames a new file over the target and leaves
@@ -38,6 +37,7 @@ use crate::error::{Error, Result};
 pub fn run(
     backend: &mut dyn Backend,
     path: &Path,
+    project_root: &Path,
     debounce: Duration,
     out: &mut dyn Write,
     notes: &mut dyn Write,
@@ -68,7 +68,15 @@ pub fn run(
     let mut missing = false;
     match commands::read_source(path) {
         Ok(current) => {
-            check_once(backend, &display, &target.canonical, current.clone(), out)?;
+            run_once(
+                backend,
+                path,
+                project_root,
+                &target.canonical,
+                current.clone(),
+                out,
+                notes,
+            )?;
             text = Some(current);
         }
         // Being handed a path that is not there yet is the same state the loop already has to
@@ -102,7 +110,15 @@ pub fn run(
                             missing = false;
                         }
                         if text.as_deref() != Some(current.as_str()) {
-                            check_once(backend, &display, &target.canonical, current.clone(), out)?;
+                            run_once(
+                                backend,
+                                path,
+                                project_root,
+                                &target.canonical,
+                                current.clone(),
+                                out,
+                                notes,
+                            )?;
                             text = Some(current);
                         }
                     }
@@ -120,8 +136,8 @@ pub fn run(
                 }
             }
             // A backend error is not the end of the watch: the usual one is a dropped-event
-            // overflow, which costs a missed re-check, not a dead command. The user is told
-            // because the next `kiln check` reporting work they thought was already done
+            // overflow, which costs a missed rerun, not a dead command. The user is told
+            // because the next `kiln run` reporting work they thought was already done
             // would otherwise be inexplicable.
             Err(errors) => {
                 for error in errors {
@@ -191,17 +207,27 @@ impl Target {
     }
 }
 
-fn check_once(
+fn run_once(
     backend: &mut dyn Backend,
-    display: &str,
+    path: &Path,
+    project_root: &Path,
     canonical: &str,
-    text: String,
+    current: String,
     out: &mut dyn Write,
+    notes: &mut dyn Write,
 ) -> Result<()> {
-    let output = commands::check_source(backend, display, canonical.to_string(), text)?;
+    // `commands::run_source` owns the warm source-sync and interpreter request path while
+    // preserving the exact snapshot that the watcher compared for this save.
+    let output = commands::run_source(backend, path, project_root, canonical, current)?;
     out.write_all(output.text.as_bytes())
         .and_then(|()| out.flush())
-        .map_err(|source| Error::io("cannot write to stdout", source))
+        .map_err(|source| Error::io("cannot write to stdout", source))?;
+    for message in output.notes {
+        note(notes, format_args!("{message}"))?;
+    }
+    // A failed compile/runtime execution is a normal watch iteration. Its diagnostics have
+    // already been emitted above; keep the watcher alive so the next save can recover.
+    Ok(())
 }
 
 fn note(notes: &mut dyn Write, message: Arguments<'_>) -> Result<()> {
@@ -227,33 +253,45 @@ mod tests {
     use std::io;
     use std::sync::mpsc::Sender;
 
-    use kiln_proto::{FileId, ModuleSummary, Request, Response, Stats};
+    use kiln_proto::{Diagnostic, FileId, Request, Response, RunSummary, Stats};
 
-    /// Answers like the daemon would and moves the counters on every `Check`, so a test can
-    /// tell a real re-check from a wake-up that found nothing to do.
+    /// Answers like the daemon would, echoing the source as program output so tests can tell a
+    /// real execution from a wake-up that found nothing to do.
     struct Fake {
         stats: Stats,
+        source: String,
     }
 
     impl Backend for Fake {
         fn request(&mut self, request: Request) -> Result<Response> {
             Ok(match request {
                 Request::Stats => Response::Stats(self.stats.clone()),
-                Request::SetSource { .. } => {
+                Request::Sync { files } => Response::Needed {
+                    paths: files.into_iter().map(|file| file.path).collect(),
+                },
+                Request::SetSource { text, .. } => {
+                    self.source = text;
                     self.stats.revision += 1;
                     Response::Ok
                 }
-                Request::Check { path } => {
-                    self.stats.parse_computed += 1;
-                    self.stats.interface_computed += 1;
-                    Response::Checked(ModuleSummary {
+                Request::Run { path, .. } => {
+                    let failed = self.source.starts_with("fail");
+                    Response::Ran(RunSummary {
                         path,
                         file: FileId(1),
-                        implementation_hash: 7,
-                        interface_hash: 9,
-                        exports: vec!["main".to_string()],
-                        // ModuleSummary grew this field after the fixture was written.
-                        diagnostics: Vec::new(),
+                        succeeded: !failed,
+                        stdout: format!("program: {}\n", self.source.trim()),
+                        value: Some("undefined".to_string()),
+                        instructions: 1,
+                        diagnostics: if failed {
+                            vec![Diagnostic {
+                                message: "program failed".to_string(),
+                                start: None,
+                                end: None,
+                            }]
+                        } else {
+                            Vec::new()
+                        },
                     })
                 }
                 other => panic!("unexpected request {other:?}"),
@@ -276,6 +314,29 @@ mod tests {
         }
     }
 
+    struct NoteTap {
+        sender: Sender<String>,
+        pending: String,
+    }
+
+    impl io::Write for NoteTap {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.pending.push_str(&String::from_utf8_lossy(buf));
+            if self.pending.contains('\n') {
+                let pending = std::mem::take(&mut self.pending);
+                let _ = self.sender.send(pending);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if !self.pending.is_empty() {
+                let _ = self.sender.send(std::mem::take(&mut self.pending));
+            }
+            Ok(())
+        }
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kiln-cli-watch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -283,23 +344,29 @@ mod tests {
         dir
     }
 
-    /// Starts a watch on `path` and hands back the stream of what it prints to stdout.
-    fn watch_in_background(path: &Path) -> mpsc::Receiver<String> {
+    /// Starts a watch on `path` and hands back streams of stdout and notes.
+    fn watch_in_background(path: &Path) -> (mpsc::Receiver<String>, mpsc::Receiver<String>) {
         let (checks, printed) = mpsc::channel();
+        let (messages, notes) = mpsc::channel();
         let watched = path.to_path_buf();
         std::thread::spawn(move || {
             let mut backend = Fake {
                 stats: Stats::default(),
+                source: String::new(),
             };
             let _ = run(
                 &mut backend,
                 &watched,
+                watched.parent().expect("watch path has a parent"),
                 Duration::from_millis(50),
                 &mut Tap(checks),
-                &mut io::sink(),
+                &mut NoteTap {
+                    sender: messages,
+                    pending: String::new(),
+                },
             );
         });
-        printed
+        (printed, notes)
     }
 
     #[test]
@@ -338,14 +405,11 @@ mod tests {
         let path = dir.join("a.js");
         std::fs::write(&path, "export const a = 1;").expect("write");
 
-        let printed = watch_in_background(&path);
+        let (printed, _) = watch_in_background(&path);
         let first = printed
             .recv_timeout(Duration::from_secs(5))
-            .expect("the first check should be reported");
-        assert!(
-            first.contains("recomputed      parse 1, interface 1"),
-            "{first}"
-        );
+            .expect("the first run should be reported");
+        assert_eq!(first, "program: export const a = 1;\n");
 
         // Rewriting the same bytes must not spend a recompute. That is the whole reason the
         // content comparison outlives the poll it was written for.
@@ -358,11 +422,8 @@ mod tests {
         std::fs::write(&path, "export const a = 2;").expect("edit");
         let second = printed
             .recv_timeout(Duration::from_secs(5))
-            .expect("a real edit should re-check");
-        assert!(
-            second.contains("recomputed      parse 1, interface 1"),
-            "{second}"
-        );
+            .expect("a real edit should run");
+        assert_eq!(second, "program: export const a = 2;\n");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -373,19 +434,62 @@ mod tests {
         let path = dir.join("a.js");
         std::fs::write(&path, "export const a = 1;").expect("write");
 
-        let printed = watch_in_background(&path);
+        let (printed, _) = watch_in_background(&path);
         printed
             .recv_timeout(Duration::from_secs(5))
-            .expect("the first check should be reported");
+            .expect("the first run should be reported");
 
         std::fs::remove_file(&path).expect("remove");
         std::fs::write(&path, "export const a = 3;").expect("recreate");
         let after = printed
             .recv_timeout(Duration::from_secs(5))
-            .expect("the recreated file should re-check");
+            .expect("the recreated file should run");
+        assert_eq!(after, "program: export const a = 3;\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_run_reports_diagnostics_and_recovers_on_the_next_edit() {
+        let dir = scratch("failure-recovery");
+        let path = dir.join("a.js");
+        std::fs::write(&path, "good one").expect("write");
+
+        let (printed, notes) = watch_in_background(&path);
         assert!(
-            after.contains("recomputed      parse 1, interface 1"),
-            "{after}"
+            notes
+                .recv_timeout(Duration::from_secs(5))
+                .expect("watch should announce itself")
+                .contains("watching")
+        );
+        assert_eq!(
+            printed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the initial run should be reported"),
+            "program: good one\n"
+        );
+
+        std::fs::write(&path, "fail one").expect("write failing source");
+        assert_eq!(
+            printed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the failed run should still produce program output"),
+            "program: fail one\n"
+        );
+        let diagnostic = notes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the failed run should report its diagnostic");
+        assert!(
+            diagnostic.ends_with("a.js: program failed\n"),
+            "{diagnostic}"
+        );
+
+        std::fs::write(&path, "good two").expect("write recovered source");
+        assert_eq!(
+            printed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("watch should continue after a failed run"),
+            "program: good two\n"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

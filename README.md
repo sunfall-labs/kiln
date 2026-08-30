@@ -106,6 +106,7 @@ also need Zig, Clang, a compatible `cc`, or GCC on `PATH`.
 cargo build              # build the workspace
 cargo test               # the invalidation tests are the interesting ones
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts
+cargo run -p kiln-cli -- watch examples/hello.ts
 cargo run -p kiln-cli -- --one-shot run examples/modules/main.ts
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native
 cargo run -p kiln-cli -- --one-shot build examples/hello.ts --profile native-dev
@@ -114,6 +115,10 @@ cargo run -p kiln-cli -- test /path/to/test262/test --changed
 cargo run -p kiln-bench  # the timing harness; results land in bench/results/
 cargo build --timings    # the compiler developer's loop, measured (ADR 0004)
 ```
+
+`kiln watch` runs the entry in the interpreter immediately and after each byte-changing save.
+Program output stays on stdout, diagnostics stay on stderr, and a failed run does not end the
+watch—the next edit gets another chance.
 
 The daemon speaks the request set in `crates/kiln-proto/src/lib.rs`: `Ping` for liveness and
 protocol negotiation, `SetSource` to replace a file's contents, `Check` for one module's
