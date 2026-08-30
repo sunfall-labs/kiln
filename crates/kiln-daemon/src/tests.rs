@@ -35,6 +35,8 @@ struct StubEngine {
     source_revisions: HashMap<u32, Revision>,
     revision: u64,
     stats: Stats,
+    set_source_calls: usize,
+    panic_on_set_source_call: Option<usize>,
 }
 
 impl StubEngine {
@@ -162,6 +164,10 @@ impl QueryEngine for StubEngine {
     }
 
     fn set_source(&mut self, file: FileId, text: String) {
+        self.set_source_calls += 1;
+        if self.panic_on_set_source_call == Some(self.set_source_calls) {
+            panic!("stub engine set_source panic");
+        }
         if self.sources.get(&file.0) == Some(&text) {
             return;
         }
@@ -746,6 +752,75 @@ fn sync_rejects_bad_digest_and_incomplete_commit_without_losing_pending_state() 
             source_view: SourceView(1)
         }
     ));
+}
+
+#[test]
+fn commit_sync_panic_drops_the_cached_graph_snapshot() {
+    let fixture = Fixture::empty();
+    let source = fixture.dir.join("panic-commit.js");
+    std::fs::write(&source, "export const answer = 1;\n").expect("write source");
+    let source = std::fs::canonicalize(source).expect("canonical source");
+    let root = std::fs::canonicalize(&fixture.dir).expect("canonical root");
+    let source_path = source.to_string_lossy().into_owned();
+    let daemon = Daemon::bind_with(
+        &fixture.socket,
+        StubEngine {
+            panic_on_set_source_call: Some(2),
+            ..StubEngine::default()
+        },
+    )
+    .expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: source_path.clone(),
+            text: "export const answer = 1;\n".into(),
+        })
+        .expect("set initial source");
+    assert!(matches!(
+        client
+            .request(&Request::Check {
+                source_view: SourceView(0),
+                path: source_path.clone(),
+                project_root: root.to_string_lossy().into_owned(),
+            })
+            .expect("prime graph cache"),
+        Response::Checked(_)
+    ));
+    let Response::Stats(before) = client.request(&Request::Stats).expect("stats before") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(before.graph_cache_entries, 1);
+
+    let (sync_id, needed) = begin_sync(
+        &mut client,
+        &[(source_path.as_str(), "export const answer = 2;\n")],
+    );
+    assert_eq!(needed.as_slice(), std::slice::from_ref(&source_path));
+    assert!(matches!(
+        stage_sync(
+            &mut client,
+            sync_id,
+            &source_path,
+            "export const answer = 2;\n"
+        ),
+        Response::Ok
+    ));
+    assert!(matches!(
+        commit_sync(&mut client, sync_id),
+        Response::Error { .. }
+    ));
+    let Response::Stats(after) = client.request(&Request::Stats).expect("stats after") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after.graph_cache_entries, 0);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 #[test]
