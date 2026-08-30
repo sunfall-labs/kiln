@@ -386,9 +386,25 @@ impl PartialEq for ObjectData {
     }
 }
 
-#[derive(Debug, Default)]
+/// What a property slot holds.
+///
+/// An accessor is not a value that happens to be a function: reading one *calls* it, and writing
+/// through one calls a different one. Collapsing the two would make `{ get x() { … } }` and
+/// `{ x: function () { … } }` the same object, which they are not.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Property {
+    Value(Value),
+    /// Either half may be absent. A getter-only property reads through the getter and discards
+    /// writes; a setter-only one reads as `undefined`.
+    Accessor {
+        get: Option<Value>,
+        set: Option<Value>,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ObjectData {
-    properties: Vec<(String, Value)>,
+    properties: Vec<(String, Property)>,
     /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
     /// that exists only on the prototype creates an own property rather than mutating the shared
     /// one, which is what keeps two instances of a class independent.
@@ -396,12 +412,54 @@ pub struct ObjectData {
 }
 
 impl ObjectData {
-    /// An own property, ignoring the prototype chain.
-    pub fn get_own(&self, key: &str) -> Option<&Value> {
+    /// An own property slot, ignoring the prototype chain.
+    pub fn get_own_property(&self, key: &str) -> Option<&Property> {
         self.properties
             .iter()
             .find(|(name, _)| name == key)
-            .map(|(_, value)| value)
+            .map(|(_, property)| property)
+    }
+
+    /// An own *data* property, ignoring the prototype chain and any accessor.
+    ///
+    /// For the VM's own slots, which are always data and never reached by program syntax. A
+    /// program-visible read has to go through the interpreter, because an accessor is a call.
+    pub fn get_own(&self, key: &str) -> Option<&Value> {
+        match self.get_own_property(key) {
+            Some(Property::Value(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// A property slot, following the prototype chain.
+    pub fn lookup(&self, key: &str) -> Option<Property> {
+        if let Some(own) = self.get_own_property(key) {
+            return Some(own.clone());
+        }
+        match &self.prototype {
+            Some(Value::Object(parent)) => parent.borrow().lookup(key),
+            Some(Value::Function(parent)) => parent.properties.borrow().lookup(key),
+            _ => None,
+        }
+    }
+
+    /// Define an accessor, merging with a half already defined under the same key.
+    ///
+    /// Merging matters because `get x()` and `set x()` are written separately and describe one
+    /// property; defining the second must not discard the first.
+    pub fn define_accessor(&mut self, key: &str, getter: Option<Value>, setter: Option<Value>) {
+        let existing = match self.get_own_property(key) {
+            Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
+            _ => (None, None),
+        };
+        let property = Property::Accessor {
+            get: getter.or(existing.0),
+            set: setter.or(existing.1),
+        };
+        match self.properties.iter_mut().find(|(name, _)| name == key) {
+            Some((_, slot)) => *slot = property,
+            None => self.properties.push((key.to_owned(), property)),
+        }
     }
 
     /// A property, following the prototype chain.
@@ -439,11 +497,12 @@ impl ObjectData {
     /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
         if let Some((_, existing)) = self.properties.iter_mut().find(|(name, _)| name == key) {
-            *existing = value;
+            *existing = Property::Value(value);
             return;
         }
         let Some(index) = index_key(key) else {
-            self.properties.push((key.to_owned(), value));
+            self.properties
+                .push((key.to_owned(), Property::Value(value)));
             return;
         };
         // The indices already form a sorted prefix, so this is where the new one joins it.
@@ -452,7 +511,8 @@ impl ObjectData {
             .iter()
             .position(|(name, _)| index_key(name).is_none_or(|other| other > index))
             .unwrap_or(self.properties.len());
-        self.properties.insert(position, (key.to_owned(), value));
+        self.properties
+            .insert(position, (key.to_owned(), Property::Value(value)));
     }
 
     /// Remove an own property, keeping the order of the rest.
@@ -464,11 +524,11 @@ impl ObjectData {
         self.properties.iter().map(|(name, _)| name.as_str())
     }
 
-    /// Own properties in insertion order, which is the order JavaScript enumerates them in.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
+    /// Own property slots in insertion order, which is the order JavaScript enumerates them in.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Property)> {
         self.properties
             .iter()
-            .map(|(name, value)| (name.as_str(), value))
+            .map(|(name, property)| (name.as_str(), property))
     }
 }
 
@@ -1534,7 +1594,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     let name = self.string_constant(*name, current)?;
                     let arguments = self.take_call_arguments(*argc, current)?;
                     let receiver = self.pop(current)?;
-                    let method = self.property(&receiver, &name);
+                    let method = self.read_property(&receiver, &name, current)?;
                     let invoked = self.invoke(method, receiver, arguments, current);
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
@@ -1833,7 +1893,22 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                     };
                     // Spreading `null` or `undefined` contributes nothing rather than throwing,
                     // which is the one place object spread is more forgiving than array spread.
-                    for (key, value) in own_properties(&source) {
+                    let object = Rc::clone(object);
+                    for (key, property) in own_properties(&source) {
+                        // A spread copies *values*: it reads each property, which for an
+                        // accessor means calling its getter, and the result is a plain data
+                        // property on the target.
+                        let value = match property {
+                            Property::Value(value) => value,
+                            Property::Accessor { get, .. } => {
+                                // Setter-only: there is nothing to read, and a spread copies
+                                // what a read produces.
+                                let Some(getter) = get else {
+                                    continue;
+                                };
+                                self.call_value(&getter, source.clone(), Vec::new(), current)?
+                            }
+                        };
                         object.borrow_mut().set(&key, value);
                     }
                     self.stack.push(target);
@@ -1896,6 +1971,37 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         None => return Err(ExecutionError::LocalOutOfBounds { index: slot }),
                     }
                 }
+                Instruction::DefineAccessor { setter } => {
+                    let function = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let name = key.property_key();
+                    let (getter, setter) = if *setter {
+                        (None, Some(function))
+                    } else {
+                        (Some(function), None)
+                    };
+                    match &target {
+                        Value::Object(object) => {
+                            object.borrow_mut().define_accessor(&name, getter, setter);
+                        }
+                        // A static accessor lands on the constructor, whose properties live in
+                        // its own store rather than in an object.
+                        Value::Function(closure) => {
+                            closure
+                                .properties
+                                .borrow_mut()
+                                .define_accessor(&name, getter, setter);
+                        }
+                        other => {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
+                    self.stack.push(target);
+                }
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -1922,7 +2028,8 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         )?;
                         continue;
                     }
-                    self.stack.push(self.property(&target, &name));
+                    let value = self.read_property(&target, &name, current)?;
+                    self.stack.push(value);
                 }
                 Instruction::SetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
@@ -2459,6 +2566,21 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let items = self.drain_iterable(&source, instruction)?;
                 self.combine(native, items)
+            }
+            Native::JsonStringify => {
+                let indent = json_indent(arguments.get(2));
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let mut seen = Vec::new();
+                let mut resolve = |getter: &Value, receiver: &Value| {
+                    self.call_value(getter, receiver.clone(), Vec::new(), instruction)
+                };
+                Ok(
+                    match json_stringify(&value, &indent, "", &mut seen, &mut resolve)? {
+                        Some(text) => Value::String(text),
+                        // `JSON.stringify(undefined)` is `undefined`, not the string.
+                        None => Value::Undefined,
+                    },
+                )
             }
             Native::QueueMicrotask => {
                 self.microtasks.push_back(Job::Callback(
@@ -3681,6 +3803,34 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     /// `"abc".length` needs `String.prototype`, which does not exist yet. Returning undefined is
     /// wrong for those, and it is wrong in the direction that shows up as a visibly missing
     /// value rather than a plausible one.
+    /// Read a property, calling a getter when the slot holds one.
+    ///
+    /// Separate from [`Vm::property`], which answers with the slot's contents, because reading an
+    /// accessor is a *call* and only the machine can make one. Every program-visible read goes
+    /// through this; the VM's own reads of reserved slots do not need to.
+    fn read_property(
+        &mut self,
+        target: &Value,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let accessor = match target {
+            Value::Object(object) => object.borrow().lookup(name),
+            Value::Function(closure) if name != "prototype" => {
+                closure.properties.borrow().lookup(name)
+            }
+            _ => None,
+        };
+        match accessor {
+            Some(Property::Accessor { get, .. }) => match get {
+                Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
+                // Setter-only, so there is nothing to read.
+                None => Ok(Value::Undefined),
+            },
+            _ => Ok(self.property(target, name)),
+        }
+    }
+
     fn property(&self, target: &Value, name: &str) -> Value {
         match target {
             // A Set or Map instance is an object whose reserved state marks it. Its methods come
@@ -3895,7 +4045,24 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }),
             },
             Value::Object(object) => {
-                object.borrow_mut().set(&key.property_key(), value);
+                let name = key.property_key();
+                // A setter found anywhere on the chain takes the write; only when there is none
+                // does the assignment create an own data property. That asymmetry is what makes
+                // `obj.x = 1` on a class with `set x()` run the setter rather than shadow it.
+                // Bound out of the `if let`: the borrow would otherwise still be alive at the
+                // `borrow_mut` below, and at the setter call, which is ordinary code that may
+                // touch this very object.
+                let existing = object.borrow().lookup(&name);
+                if let Some(Property::Accessor { set, .. }) = existing {
+                    let Some(setter) = set else {
+                        // Getter-only: the write is discarded in sloppy mode and a TypeError in
+                        // strict. Modules are strict, but a script is not, and this is shared.
+                        return Ok(());
+                    };
+                    self.call_value(&setter, target.clone(), vec![value], instruction)?;
+                    return Ok(());
+                }
+                object.borrow_mut().set(&name, value);
                 Ok(())
             }
             Value::Function(closure) => {
@@ -4205,14 +4372,19 @@ fn json_indent(space: Option<&Value>) -> String {
 /// because the caller decides what to do with it: an object property is dropped, an array
 /// element becomes `null`, and at the top level the whole call returns `undefined`.
 ///
+/// `resolve` calls a getter, because reading a property is a call when the property is an
+/// accessor. It is a callback rather than the interpreter itself so that the serialiser stays a
+/// free function -- the shape of the output is not a machine concern.
+///
 /// Not supported yet: the `replacer` argument and `toJSON` hooks, both of which call back into
-/// the program and so need an interpreter this function does not have. Neither appears in the
+/// the program at points this signature does not reach. Neither appears in the
 /// corpus; when one does, this grows a `&mut Interpreter` and moves onto the type.
 fn json_stringify(
     value: &Value,
     indent: &str,
     current: &str,
     seen: &mut Vec<usize>,
+    resolve: &mut dyn FnMut(&Value, &Value) -> Result<Value, ExecutionError>,
 ) -> Result<Option<String>, ExecutionError> {
     let nested = format!("{current}{indent}");
     // With no indent every separator is empty, which collapses the pretty form to the compact
@@ -4241,13 +4413,13 @@ fn json_stringify(
         Value::String(text) => Some(json_quote(text)),
         Value::Array(items) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(items).cast::<()>())?;
-            let items = items.borrow();
+            let items = items.borrow().clone();
             let parts = items
                 .iter()
                 .map(|item| {
                     // An element that is not representable becomes null rather than vanishing,
                     // because dropping it would renumber every element after it.
-                    json_stringify(item, indent, &nested, guard.seen)
+                    json_stringify(item, indent, &nested, guard.seen, resolve)
                         .map(|part| part.unwrap_or_else(|| "null".to_owned()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -4259,18 +4431,31 @@ fn json_stringify(
         }
         Value::Object(object) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(object).cast::<()>())?;
-            let object = object.borrow();
+            // Read out before iterating, so the object is not borrowed while a getter runs --
+            // a getter is ordinary code and may touch the object it belongs to.
+            let entries = own_properties(value);
             let mut parts = Vec::new();
-            for (key, property) in object.entries() {
+            for (key, property) in entries {
                 // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
                 // own enumerable string property, so it is not part of the object's JSON.
                 if key.starts_with(RESERVED_KEY_PREFIX) {
                     continue;
                 }
-                if let Some(part) = json_stringify(property, indent, &nested, guard.seen)? {
-                    parts.push(format!("{}{colon}{part}", json_quote(key)));
+                let property = match property {
+                    Property::Value(value) => value,
+                    // The specification reads the property, which for an accessor is a call.
+                    // Serialising the getter itself would be a different object entirely.
+                    Property::Accessor { get, .. } => match get {
+                        Some(getter) => resolve(&getter, value)?,
+                        None => continue,
+                    },
+                };
+                if let Some(part) = json_stringify(&property, indent, &nested, guard.seen, resolve)?
+                {
+                    parts.push(format!("{}{colon}{part}", json_quote(&key)));
                 }
             }
+            let _ = object;
             Some(if parts.is_empty() {
                 "{}".to_owned()
             } else {
@@ -4684,19 +4869,9 @@ fn call_native(
         Native::IsFinite => Value::Boolean(argument_number(arguments).is_finite()),
         Native::ParseInt => parse_int(arguments),
         Native::ParseFloat => parse_float(arguments),
+        // Serialising reads every property, and reading an accessor is a call.
         Native::JsonStringify => {
-            let indent = json_indent(arguments.get(2));
-            let mut seen = Vec::new();
-            match json_stringify(
-                arguments.first().unwrap_or(&Value::Undefined),
-                &indent,
-                "",
-                &mut seen,
-            )? {
-                Some(text) => Value::String(text),
-                // `JSON.stringify(undefined)` is `undefined`, not the string "undefined".
-                None => Value::Undefined,
-            }
+            unreachable!("`JSON.stringify` is dispatched by the interpreter")
         }
         Native::JsonParse => {
             let text = match arguments.first() {
@@ -5486,23 +5661,28 @@ fn delete_property(target: &Value, key: &Value) -> bool {
 /// spread carries symbol keys across and `Object.keys` does not. An array or a string contributes
 /// its indices, which is what makes `{ ...[1, 2] }` an object with keys "0" and "1"; a primitive
 /// with nothing of its own contributes nothing, and so does `null` or `undefined`.
-fn own_properties(value: &Value) -> Vec<(String, Value)> {
+fn own_properties(value: &Value) -> Vec<(String, Property)> {
     match value {
         Value::Object(object) => object
             .borrow()
             .entries()
-            .map(|(key, value)| (key.to_owned(), value.clone()))
+            .map(|(key, property)| (key.to_owned(), property.clone()))
             .collect(),
         Value::Array(items) => items
             .borrow()
             .iter()
             .enumerate()
-            .map(|(index, item)| (index.to_string(), item.clone()))
+            .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
             .collect(),
         Value::String(text) => text
             .chars()
             .enumerate()
-            .map(|(index, character)| (index.to_string(), Value::String(character.to_string())))
+            .map(|(index, character)| {
+                (
+                    index.to_string(),
+                    Property::Value(Value::String(character.to_string())),
+                )
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -5943,12 +6123,18 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
         .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
-        .map(|(key, value)| {
-            format!(
-                "{}: {}",
-                inspect_key(key),
-                inspect_nested(value, depth + 1, seen)
-            )
+        .map(|(key, property)| {
+            let shown = match property {
+                Property::Value(value) => inspect_nested(value, depth + 1, seen),
+                // Node names the accessor rather than calling it: showing a value here would run
+                // the program's code just because something was printed.
+                Property::Accessor { get, set } => match (get.is_some(), set.is_some()) {
+                    (true, true) => "[Getter/Setter]".to_owned(),
+                    (true, false) => "[Getter]".to_owned(),
+                    _ => "[Setter]".to_owned(),
+                },
+            };
+            format!("{}: {}", inspect_key(key), shown)
         })
         .collect::<Vec<_>>();
     if parts.is_empty() {
@@ -7175,8 +7361,15 @@ mod tests {
         assert_eq!(result.exports[0].value, Value::Number(42.0));
     }
 
+    /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.
+    fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionError> {
+        let mut unreachable_getter =
+            |_: &Value, _: &Value| unreachable!("no fixture here defines an accessor");
+        json_stringify(value, indent, "", &mut Vec::new(), &mut unreachable_getter)
+    }
+
     fn json(value: &Value) -> Option<String> {
-        json_stringify(value, "", "", &mut Vec::new()).expect("no cycle in this fixture")
+        serialize(value, "").expect("no cycle in this fixture")
     }
 
     fn array(items: &[Value]) -> Value {
@@ -7247,14 +7440,14 @@ mod tests {
     #[test]
     fn json_empty_containers_stay_on_one_line_when_indented() {
         let value = object(&[("a", array(&[])), ("b", object(&[]))]);
-        let text = json_stringify(&value, "  ", "", &mut Vec::new()).expect("no cycle");
+        let text = serialize(&value, "  ").expect("no cycle");
         assert_eq!(text.as_deref(), Some("{\n  \"a\": [],\n  \"b\": {}\n}"));
     }
 
     #[test]
     fn json_indents_nested_containers() {
         let value = object(&[("a", array(&[Value::Number(1.0)]))]);
-        let text = json_stringify(&value, "  ", "", &mut Vec::new()).expect("no cycle");
+        let text = serialize(&value, "  ").expect("no cycle");
         assert_eq!(text.as_deref(), Some("{\n  \"a\": [\n    1\n  ]\n}"));
     }
 
@@ -7263,7 +7456,7 @@ mod tests {
         let items = Rc::new(RefCell::new(Vec::new()));
         items.borrow_mut().push(Value::Array(Rc::clone(&items)));
         assert!(matches!(
-            json_stringify(&Value::Array(items), "", "", &mut Vec::new()),
+            serialize(&Value::Array(items), ""),
             Err(ExecutionError::CyclicJson)
         ));
     }

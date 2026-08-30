@@ -125,6 +125,13 @@ pub struct ObjectProperty {
 pub enum ObjectMember {
     Property(ObjectProperty),
     Spread(Expression),
+    /// `get x() { … }` or `set x(v) { … }` in a literal. Its own member kind rather than a
+    /// property whose value is a function, because reading one is a call.
+    Accessor {
+        key: ObjectKey,
+        kind: MethodKind,
+        function: Function,
+    },
 }
 
 /// How an object literal names a property.
@@ -194,6 +201,19 @@ pub struct ClassMethod {
     pub function: Function,
     /// Static methods go on the constructor; instance methods go on its prototype.
     pub is_static: bool,
+    /// Whether this defines the property or reads and writes it.
+    pub kind: MethodKind,
+}
+
+/// How a member relates to the property it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind {
+    /// An ordinary method: the property *is* the function.
+    Normal,
+    /// `get x()`: reading the property calls this.
+    Get,
+    /// `set x(v)`: writing the property calls this.
+    Set,
 }
 
 /// An owned executable statement.
