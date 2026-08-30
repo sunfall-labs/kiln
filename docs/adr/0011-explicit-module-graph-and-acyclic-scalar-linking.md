@@ -19,10 +19,10 @@ re-exports, star exports, namespace re-exports, default names, and TypeScript ty
 Keeping only a list of strings would lose the binding origin needed for linking and would make a
 later live-binding implementation impossible to add without changing the frontend contract.
 
-The initial execution surface is deliberately smaller than the module grammar. The scalar
-interpreter has no object namespace value, and the first linker evaluates dependencies before their
-importers. Cycles therefore need a user-facing structured result while the representation is still
-being prepared for ECMAScript's instantiate-then-evaluate semantics.
+The execution surface remains deliberately smaller than the module grammar. The linker evaluates
+dependencies before their importers, and its namespace objects are snapshots rather than exotic
+live-binding views. Cycles therefore need a user-facing structured result while the representation
+is still being prepared for ECMAScript's instantiate-then-evaluate semantics.
 
 ## Decision
 
@@ -41,8 +41,8 @@ checking but are removed from runtime bindings and runtime dependency evaluation
 
 Default-expression exports have an explicit executable HIR statement. This prevents an expression
 from being executed and discarded as an ordinary expression statement while its export metadata
-claims a runtime binding. Named and default imports are represented in the linkage contract even
-though only the scalar forms described below are executable today.
+claims a runtime binding. Named, default, and namespace imports are represented explicitly in the
+linkage contract described below.
 
 ### Resolution is an exact filesystem policy
 
@@ -89,44 +89,42 @@ A back-edge returns `ModuleGraphError::Cycle` containing the closed canonical pa
 first scalar slice reports cycles as structured unsupported input. It does not claim that a
 topological order is ECMAScript-correct for cycles.
 
-### First executable linkage slice: scalar named/default imports and local exports
+### Current executable linkage slice: acyclic imports, re-exports, and namespaces
 
 `kiln-ir::compile_module` predeclares runtime named and default imports as compiler-assigned local
 slots and emits `ImportBinding { source, imported, local, local_slot }`. Local named/default exports
 resolve to `ExportBinding { exported, local_slot }`. The graph checks that each import source is
-resolved, each imported name exists in the provider's exports, and no provider exports the same
-name more than once.
+resolved, each imported name exists unambiguously in the provider's exports, and no module declares
+the same explicit export name more than once.
 
 The current interpreter initializes those import slots from dependency results, evaluates modules
-in the recorded dependencies-first order, and publishes the declared export slots. This is correct
-for the acyclic scalar subset and makes missing sources/exports deterministic diagnostics.
+in the recorded dependencies-first order, and publishes the declared export slots. Namespace
+imports and namespace re-exports use an interpreter object whose keys are sorted and whose values
+are a snapshot taken after the provider evaluates. Named/default indirect re-exports are lowered to
+private import slots and then published under their visible names. Default expressions and
+function/class/default declarations use ordinary compiler-owned export slots.
 
-The following forms remain explicit unsupported cases in this first linker:
+Star exports are resolved once at link time in dependencies-first order. Each visible name carries
+the canonical origin of its binding rather than only a boolean "provided" bit. An explicit export
+wins over the same name arriving through a star, `default` is never forwarded, and two star paths
+to the same canonical binding remain one export. Two different bindings with the same name are
+ambiguous: a named import receives `ModuleGraphError::AmbiguousExport`, while a namespace object
+omits that name. Resolution is iterative over the already-acyclic graph, so valid deep barrel chains
+have no arbitrary recursion-depth limit.
 
-- namespace imports (`import * as ns`) because scalar `Value` has no namespace/object form;
-- star exports (`export *`) because their names and ambiguity rules require graph-level expansion;
-- namespace re-exports (`export * as ns`) for the same object reason;
-- indirect/named re-exports (`export { x as y } from ...`) because they need provider aliases;
-- default-expression exports, which require a compiler-owned binding slot rather than a discarded
-  expression;
-- function/class/default declaration exports until functions and objects are in the executable
-  HIR;
-- cycles, as described above.
+Cycles remain an explicit unsupported case as described above. Other unsupported syntax is
+preserved in HIR and produces source-located compile/link errors; it is not silently treated as an
+empty module. Type-only imports/exports do not create runtime slots or runtime edges. Side-effect
+imports have no `ImportEntry`, so their non-type-only requested-module occurrence remains a runtime
+dependency and is evaluated for effects.
 
-Unsupported forms are preserved in HIR and produce source-located compile/link errors; they are not
-silently treated as empty modules. Type-only imports/exports do not create runtime slots or runtime
-edges. Side-effect imports have no `ImportEntry`, so their non-type-only requested-module
-occurrence remains a runtime dependency and is evaluated for effects.
+### Live bindings remain incomplete at the namespace and cycle boundaries
 
-### Live bindings are the next representation step
-
-The first acyclic implementation copies dependency values into import slots. That is an intentional
-subset boundary, not the final ECMAScript binding model. The next linkage representation will use
-binding cells (or equivalent indirections): local exports point at cells, and every imported read
-dereferences the provider cell rather than taking a snapshot. Module instantiation will allocate
-all cells before evaluation; SCC-based evaluation will then make cycles possible while preserving
-TDZ reads and live updates. Re-export aliases and star expansion belong on that same cell-based
-linker rather than being retrofitted into copied values.
+Mutable module bindings use cells, so a named importer observes later writes made through the
+exporting module. Namespace objects are still snapshots, and the graph still evaluates only an
+acyclic dependency order. Full ECMAScript linkage requires namespace properties to read through
+the provider bindings and module instantiation to allocate all bindings before SCC-based
+evaluation, preserving TDZ reads and live updates across cycles.
 
 ### Native units follow the module boundary
 
@@ -144,11 +142,10 @@ for the future cell-based ABI without collapsing all modules into one generated 
   filenames and cannot use packages until a higher-level resolver policy exists.
 - Parse and per-file module IR remain incrementally memoizable even though graph traversal is
   entry-rooted and explicit.
-- Acyclic named/default scalar imports and local exports have a usable interpreter path today;
-  cycles, namespace values, star expansion, re-export aliases, and default expressions fail
-  explicitly with structured diagnostics.
-- The current copy-based import slots do not yet provide live bindings. The cell/SCC design is
-  recorded here so that future support extends the linkage model instead of changing the meaning
-  of existing HIR fields.
+- Acyclic named/default/namespace imports, local exports, re-export aliases, default expressions,
+  and star expansion have a usable interpreter path today. Missing and ambiguous named exports
+  fail with structured diagnostics; ambiguous names are absent from namespace objects.
+- Mutable named imports read through binding cells. Namespace snapshots and the lack of
+  instantiate-then-evaluate SCC support remain explicit differences from full ECMAScript modules.
 - Native compilation inherits one translation unit per module and the same graph/linkage boundary;
   artifact caching can therefore invalidate only affected module objects and link inputs.

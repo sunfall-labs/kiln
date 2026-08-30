@@ -74,6 +74,8 @@ pub struct ModuleGraph {
     modules: BTreeMap<PathBuf, ModuleNode>,
     /// Dependencies-first, deterministic (source-occurrence ordered) module order.
     order: Vec<PathBuf>,
+    /// Link-time export identity for every visible, non-missing name.
+    export_resolutions: HashMap<PathBuf, BTreeMap<String, ExportResolution>>,
 }
 
 /// User-facing failures produced while constructing or executing a graph.
@@ -115,6 +117,11 @@ pub enum ModuleGraphError {
         source: String,
     },
     MissingExport {
+        importer: PathBuf,
+        provider: PathBuf,
+        name: String,
+    },
+    AmbiguousExport {
         importer: PathBuf,
         provider: PathBuf,
         name: String,
@@ -191,6 +198,16 @@ impl fmt::Display for ModuleGraphError {
             } => write!(
                 f,
                 "module {} imports missing export `{name}` from {}",
+                importer.display(),
+                provider.display()
+            ),
+            Self::AmbiguousExport {
+                importer,
+                provider,
+                name,
+            } => write!(
+                f,
+                "module {} imports ambiguous export `{name}` from {}",
                 importer.display(),
                 provider.display()
             ),
@@ -390,14 +407,15 @@ impl ModuleGraph {
             order: Vec::new(),
         };
         builder.visit(entry_path.clone())?;
-        let graph = Self {
+        let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
+        validate_links(&builder.modules, &builder.order, &export_resolutions)?;
+        Ok(Self {
             entry: entry_path,
             project_root: builder.resolver.project_root().to_path_buf(),
             modules: builder.modules,
             order: builder.order,
-        };
-        validate_links(&graph.modules, &graph.order)?;
-        Ok(graph)
+            export_resolutions,
+        })
     }
 
     pub fn entry(&self) -> &Path {
@@ -534,7 +552,14 @@ impl ModuleGraph {
                 let expanded = kiln_interpreter::read_through_cell(&star.value);
                 for (name, value) in kiln_interpreter::namespace_entries(&expanded) {
                     // `export *` never forwards a default: a module's default is its own.
-                    if name != "default" {
+                    if name != "default"
+                        && matches!(
+                            self.export_resolutions
+                                .get(path)
+                                .and_then(|resolutions| resolutions.get(&name)),
+                            Some(ExportResolution::Found(_))
+                        )
+                    {
                         exports.entry(name).or_insert(value);
                     }
                 }
@@ -670,6 +695,7 @@ fn validate_exports(path: &Path, program: &ModuleProgram) -> Result<(), ModuleGr
 fn validate_links(
     modules: &BTreeMap<PathBuf, ModuleNode>,
     order: &[PathBuf],
+    export_resolutions: &HashMap<PathBuf, BTreeMap<String, ExportResolution>>,
 ) -> Result<(), ModuleGraphError> {
     for importer_path in order {
         let importer =
@@ -697,58 +723,156 @@ fn validate_links(
             }
             // A namespace import names no export, so there is nothing to check: it takes
             // whatever the provider has, including nothing.
-            if import.imported != kiln_ir::NAMESPACE_IMPORT
-                && !provides_export(modules, &dependency.target, &import.imported, 0)
-            {
-                return Err(ModuleGraphError::MissingExport {
-                    importer: importer_path.clone(),
-                    provider: dependency.target.clone(),
-                    name: import.imported.clone(),
-                });
+            if import.imported != kiln_ir::NAMESPACE_IMPORT {
+                match export_resolutions
+                    .get(&dependency.target)
+                    .and_then(|resolutions| resolutions.get(&import.imported))
+                {
+                    Some(ExportResolution::Found(_)) => {}
+                    Some(ExportResolution::Ambiguous) => {
+                        return Err(ModuleGraphError::AmbiguousExport {
+                            importer: importer_path.clone(),
+                            provider: dependency.target.clone(),
+                            name: import.imported.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(ModuleGraphError::MissingExport {
+                            importer: importer_path.clone(),
+                            provider: dependency.target.clone(),
+                            name: import.imported.clone(),
+                        });
+                    }
+                }
             }
         }
     }
     Ok(())
 }
 
-/// Whether `module` exports `name`, following `export * from` into the modules it forwards.
+/// The canonical origin of a visible export.
 ///
-/// A star export is one entry naming a specifier, not a list of names, so this is where the two
-/// export tables meet. The graph is acyclic, but `depth` bounds the walk anyway: this runs before
-/// execution, and a link check that can hang is worse than one that gives up.
-fn provides_export(
+/// Identity matters because two star paths that converge on the same binding are not ambiguous,
+/// while two unrelated bindings with the same name are. A namespace re-export identifies the
+/// provider namespace rather than the importing module's temporary slot for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedBinding {
+    Local { module: PathBuf, local_slot: u32 },
+    Namespace { module: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExportResolution {
+    Found(ResolvedBinding),
+    Ambiguous,
+}
+
+/// Resolve every exported name in dependency-first order.
+///
+/// The graph builder has already rejected cycles, so every star provider has a completed table by
+/// the time its importer is visited. This avoids both recursive stack growth and an arbitrary
+/// maximum star depth.
+fn resolve_exports(
     modules: &BTreeMap<PathBuf, ModuleNode>,
-    module: &Path,
-    name: &str,
-    depth: usize,
-) -> bool {
-    const MAX_STAR_DEPTH: usize = 64;
-    let Some(node) = modules.get(module) else {
-        return false;
-    };
-    if node
-        .program
-        .exports
-        .iter()
-        .any(|export| export.exported == name)
-    {
-        return true;
-    }
-    if depth >= MAX_STAR_DEPTH {
-        return false;
-    }
-    node.program
-        .exports
-        .iter()
-        .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
-        .any(|source| {
-            node.dependencies
+    order: &[PathBuf],
+) -> Result<HashMap<PathBuf, BTreeMap<String, ExportResolution>>, ModuleGraphError> {
+    let mut tables: HashMap<PathBuf, BTreeMap<String, ExportResolution>> = HashMap::new();
+    for module_path in order {
+        let node =
+            modules
+                .get(module_path)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                    path: module_path.clone(),
+                })?;
+        let mut table = BTreeMap::new();
+        let mut explicit_names = HashSet::new();
+
+        for export in node
+            .program
+            .exports
+            .iter()
+            .filter(|export| !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
+        {
+            explicit_names.insert(export.exported.clone());
+            let resolution = if let Some(import) = node
+                .program
+                .imports
+                .iter()
+                .find(|import| import.local_slot == export.local_slot)
+            {
+                let dependency = node
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == import.source)
+                    .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                        importer: module_path.clone(),
+                        source: import.source.clone(),
+                    })?;
+                if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                    ExportResolution::Found(ResolvedBinding::Namespace {
+                        module: dependency.target.clone(),
+                    })
+                } else {
+                    match tables
+                        .get(&dependency.target)
+                        .and_then(|provider| provider.get(&import.imported))
+                    {
+                        Some(resolution) => resolution.clone(),
+                        None => continue,
+                    }
+                }
+            } else {
+                ExportResolution::Found(ResolvedBinding::Local {
+                    module: module_path.clone(),
+                    local_slot: export.local_slot,
+                })
+            };
+            table.insert(export.exported.clone(), resolution);
+        }
+
+        for source in node
+            .program
+            .exports
+            .iter()
+            .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+        {
+            let dependency = node
+                .dependencies
                 .iter()
                 .find(|dependency| dependency.specifier == source)
-                .is_some_and(|dependency| {
-                    provides_export(modules, &dependency.target, name, depth + 1)
-                })
-        })
+                .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                    importer: module_path.clone(),
+                    source: source.to_owned(),
+                })?;
+            let provider = tables.get(&dependency.target).ok_or_else(|| {
+                ModuleGraphError::InternalMissingModule {
+                    path: dependency.target.clone(),
+                }
+            })?;
+            for (name, resolution) in provider {
+                if name == "default" || explicit_names.contains(name) {
+                    continue;
+                }
+                match (table.get(name), resolution) {
+                    (None, resolution) => {
+                        table.insert(name.clone(), resolution.clone());
+                    }
+                    (Some(ExportResolution::Ambiguous), _) | (_, ExportResolution::Ambiguous) => {
+                        table.insert(name.clone(), ExportResolution::Ambiguous);
+                    }
+                    (
+                        Some(ExportResolution::Found(existing)),
+                        ExportResolution::Found(candidate),
+                    ) if existing != candidate => {
+                        table.insert(name.clone(), ExportResolution::Ambiguous);
+                    }
+                    (Some(ExportResolution::Found(_)), ExportResolution::Found(_)) => {}
+                }
+            }
+        }
+        tables.insert(module_path.clone(), table);
+    }
+    Ok(tables)
 }
 
 #[cfg(test)]
@@ -988,6 +1112,112 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["a wide", "alpha,shared"]);
+    }
+
+    #[test]
+    fn a_named_import_rejects_an_ambiguous_star_export() {
+        let project = TempProject::new();
+        project.write("a.js", "export const shared = 'a';");
+        project.write("b.js", "export const shared = 'b';");
+        let barrel = project.write(
+            "barrel.js",
+            "export * from './a.js';\nexport * from './b.js';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { shared } from './barrel.js'; console.log(shared);",
+        );
+
+        assert!(matches!(
+            project.graph(&entry),
+            Err(ModuleGraphError::AmbiguousExport {
+                importer,
+                provider,
+                name,
+            }) if importer == fs::canonicalize(entry).unwrap()
+                && provider == fs::canonicalize(barrel).unwrap()
+                && name == "shared"
+        ));
+    }
+
+    #[test]
+    fn a_namespace_omits_ambiguous_star_exports() {
+        let project = TempProject::new();
+        project.write("a.js", "export const shared = 'a'; export const onlyA = 1;");
+        project.write("b.js", "export const shared = 'b'; export const onlyB = 2;");
+        project.write(
+            "barrel.js",
+            "export * from './a.js';\nexport * from './b.js';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import * as barrel from './barrel.js';\n\
+             console.log(Object.keys(barrel).join(','));\n\
+             console.log(barrel.onlyA, barrel.onlyB, barrel.shared);",
+        );
+
+        let graph = project
+            .graph(&entry)
+            .expect("ambiguous names do not poison a namespace");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute namespace import");
+        assert_eq!(host.output, ["onlyA,onlyB", "1 2 undefined"]);
+    }
+
+    #[test]
+    fn two_star_paths_to_the_same_binding_are_not_ambiguous() {
+        let project = TempProject::new();
+        project.write("origin.js", "export const shared = 42;");
+        project.write("left.js", "export * from './origin.js';");
+        project.write("right.js", "export * from './origin.js';");
+        project.write(
+            "barrel.js",
+            "export * from './left.js';\nexport * from './right.js';",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { shared } from './barrel.js'; console.log(shared);",
+        );
+
+        let graph = project
+            .graph(&entry)
+            .expect("converging paths resolve to one binding");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute converging star graph");
+        assert_eq!(host.output, ["42"]);
+    }
+
+    #[test]
+    fn a_deep_star_chain_has_no_arbitrary_link_depth_limit() {
+        const BARRELS: usize = 80;
+        let project = TempProject::new();
+        project.write("leaf.js", "export const answer = 42;");
+        for index in (0..BARRELS).rev() {
+            let provider = if index + 1 == BARRELS {
+                "leaf.js".to_owned()
+            } else {
+                format!("barrel{}.js", index + 1)
+            };
+            project.write(
+                &format!("barrel{index}.js"),
+                &format!("export * from './{provider}';"),
+            );
+        }
+        let entry = project.write(
+            "main.js",
+            "import { answer } from './barrel0.js'; console.log(answer);",
+        );
+
+        let graph = project.graph(&entry).expect("deep star chain links");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("deep star chain executes");
+        assert_eq!(host.output, ["42"]);
     }
 
     /// An import is a live view of the exporter's binding, not a copy of the value it had when
