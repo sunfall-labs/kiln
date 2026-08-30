@@ -361,6 +361,14 @@ pub struct FunctionProto {
     /// pair cannot say which of the three shapes this is. This is the third bit.
     pub async_generator: bool,
     pub parameter_count: u32,
+    /// What `f.length` reports: the parameters before the first one with an initializer, and
+    /// before a rest.
+    ///
+    /// Not the same number as `parameter_count`, which is how many slots the frame has.
+    /// `function (a, b = 1, c) {}` has three slots and a `length` of one: the language reports
+    /// how many arguments a caller must supply, and everything from the first default onwards is
+    /// optional.
+    pub declared_length: u32,
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
     pub code: Vec<Instruction>,
@@ -3967,6 +3975,13 @@ impl Compiler {
         }
 
         let parameter_count = function.parameters.len() as u32;
+        // A rest parameter is already excluded: it lives in `function.rest` rather than among
+        // the positional ones, so counting stops at the first default on its own.
+        let declared_length = function
+            .parameters
+            .iter()
+            .take_while(|parameter| !matches!(parameter.pattern, Pattern::WithDefault { .. }))
+            .count() as u32;
         let outer_finalizer_depth =
             std::mem::replace(&mut self.function_finalizer_depth, self.finalizers.len());
         // A nested body cannot jump out to an enclosing loop, so it starts with no handlers of
@@ -4053,6 +4068,7 @@ impl Compiler {
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
             parameter_count,
+            declared_length,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             code: std::mem::replace(&mut self.code, restored.code),
             upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
