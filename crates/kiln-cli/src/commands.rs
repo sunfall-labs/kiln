@@ -61,7 +61,8 @@ pub(crate) fn run_source(
     canonical: &str,
     text: String,
 ) -> Result<Output> {
-    run_source_with_manifest(backend, path, project_root, canonical, text).map(|(output, _)| output)
+    run_source_with_manifest(backend, path, project_root, canonical, text)
+        .map(|(output, _, _)| output)
 }
 
 pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
@@ -75,8 +76,8 @@ pub(crate) fn run_source_with_manifest(
     project_root: &Path,
     canonical: &str,
     text: String,
-) -> Result<(Output, SourceManifest)> {
-    let (project_notes, synced_paths, manifest) =
+) -> Result<(Output, SourceManifest, bool)> {
+    let (project_notes, synced_paths, manifest, truncated) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
@@ -85,7 +86,7 @@ pub(crate) fn run_source_with_manifest(
         backend.set_source(canonical.to_owned(), text)?;
     }
     let output = finish_run(backend, path, project_root, canonical, project_notes)?;
-    Ok((output, manifest))
+    Ok((output, manifest, truncated))
 }
 
 /// Execute a new snapshot of the single file owned by an already-initialized watch.
@@ -148,7 +149,7 @@ pub fn build(
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (project_notes, synced_paths, _) =
+    let (project_notes, synced_paths, _, _) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
@@ -197,7 +198,7 @@ pub fn native_run(
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    let (project_notes, synced_paths, _) =
+    let (project_notes, synced_paths, _, _) =
         sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
     if !synced_paths.contains(&canonical) {
         backend.set_source(canonical.clone(), text)?;
@@ -304,7 +305,7 @@ pub fn check_source(
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    let (notes, _, _) = sync_project_sources(backend, root)?;
+    let (notes, _, _, _) = sync_project_sources(backend, root)?;
     let summary = backend.project()?;
     let elapsed = started.elapsed();
     let after = backend.stats()?;
@@ -324,7 +325,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 fn sync_project_sources(
     backend: &mut dyn Backend,
     root: &Path,
-) -> Result<(Vec<String>, HashSet<String>, SourceManifest)> {
+) -> Result<(Vec<String>, HashSet<String>, SourceManifest, bool)> {
     sync_project_sources_with_override(backend, root, None)
 }
 
@@ -336,7 +337,7 @@ fn sync_project_sources_with_override(
     backend: &mut dyn Backend,
     root: &Path,
     source_override: Option<(&str, &str)>,
-) -> Result<(Vec<String>, HashSet<String>, SourceManifest)> {
+) -> Result<(Vec<String>, HashSet<String>, SourceManifest, bool)> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -388,7 +389,7 @@ fn sync_project_sources_with_override(
             backend.set_source(path, text)?;
         }
     }
-    Ok((notes, synced_paths, manifest))
+    Ok((notes, synced_paths, manifest, walk.truncated))
 }
 
 pub fn stats(backend: &mut dyn Backend) -> Result<Output> {

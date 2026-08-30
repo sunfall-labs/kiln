@@ -4,7 +4,8 @@
 //! (`SetSource`) and never touches the filesystem. That keeps the daemon deterministic and
 //! makes `--one-shot` possible at all, but it means "the project" is whatever this walk
 //! finds, so the walk has to be predictable: fixed extensions, a fixed skip list, and a
-//! sorted result so interning order - and therefore every `FileId` - is reproducible.
+//! sorted depth-first traversal so even a bounded result - and therefore every `FileId` - is
+//! reproducible.
 
 use std::path::{Path, PathBuf};
 
@@ -26,39 +27,67 @@ pub struct Walk {
 }
 
 pub fn collect(root: &Path) -> Result<Walk> {
+    collect_with_limit(root, MAX_FILES)
+}
+
+fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
+    enum Work {
+        Directory(PathBuf),
+        Source(PathBuf),
+    }
+
     let mut files = Vec::new();
     let mut truncated = false;
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![Work::Directory(root.to_path_buf())];
 
-    while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|source| Error::io(format!("cannot read {}", dir.display()), source))?;
-        for entry in entries {
-            let entry = entry
-                .map_err(|source| Error::io(format!("cannot read {}", dir.display()), source))?;
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            // `file_type` does not follow symlinks, so a link back up the tree cannot turn
-            // the walk into a loop.
-            let file_type = entry.file_type().map_err(|source| {
-                Error::io(format!("cannot inspect {}", path.display()), source)
-            })?;
-            if file_type.is_dir() {
-                if !SKIP_DIRS.contains(&name) {
-                    stack.push(path);
-                }
-            } else if file_type.is_file() && is_source(&path) {
-                if files.len() == MAX_FILES {
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Source(path) => {
+                if files.len() == max_files {
                     truncated = true;
-                    stack.clear();
                     break;
                 }
                 files.push(path);
+            }
+            Work::Directory(dir) => {
+                let entries = std::fs::read_dir(&dir)
+                    .map_err(|source| Error::io(format!("cannot read {}", dir.display()), source))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|source| {
+                        Error::io(format!("cannot read {}", dir.display()), source)
+                    })?;
+                let mut children = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let path = entry.path();
+                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    // `file_type` does not follow symlinks, so a link back up the tree cannot
+                    // turn the walk into a loop.
+                    let file_type = entry.file_type().map_err(|source| {
+                        Error::io(format!("cannot inspect {}", path.display()), source)
+                    })?;
+                    if file_type.is_dir() {
+                        if !SKIP_DIRS.contains(&name) {
+                            children.push(Work::Directory(path));
+                        }
+                    } else if file_type.is_file() && is_source(&path) {
+                        children.push(Work::Source(path));
+                    }
+                }
+                children.sort_by(|left, right| {
+                    let left = match left {
+                        Work::Directory(path) | Work::Source(path) => path,
+                    };
+                    let right = match right {
+                        Work::Directory(path) | Work::Source(path) => path,
+                    };
+                    right.cmp(left)
+                });
+                stack.extend(children);
             }
         }
     }
@@ -186,6 +215,51 @@ mod tests {
         let second = collect(&tree.0).expect("walk succeeds").files;
         assert_eq!(first, second);
         assert!(first.windows(2).all(|pair| pair[0] < pair[1]), "{first:?}");
+    }
+
+    #[test]
+    fn a_bounded_walk_selects_the_lexical_prefix_independent_of_creation_order() {
+        let tree = Tree::new("bounded-sorted");
+        for index in (0..6).rev() {
+            tree.file(&format!("{index:04}.js"));
+        }
+
+        let walk = collect_with_limit(&tree.0, 5).expect("bounded walk succeeds");
+        let found = walk
+            .files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&tree.0)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            ["0000.js", "0001.js", "0002.js", "0003.js", "0004.js"]
+        );
+        assert!(walk.truncated);
+    }
+
+    #[test]
+    fn bounded_depth_first_order_visits_lexical_directories_before_later_siblings() {
+        let tree = Tree::new("bounded-depth-first");
+        tree.file("z.js");
+        tree.file("b/first.js");
+        tree.file("a/second.js");
+        tree.file("a/first.js");
+
+        let walk = collect_with_limit(&tree.0, 3).expect("bounded walk succeeds");
+        assert_eq!(
+            walk.files,
+            [
+                tree.0.join("a/first.js"),
+                tree.0.join("a/second.js"),
+                tree.0.join("b/first.js"),
+            ]
+        );
+        assert!(walk.truncated);
     }
 
     #[test]

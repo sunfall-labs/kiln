@@ -82,6 +82,7 @@ pub fn run(
     let mut text: Option<String> = None;
     let mut missing = false;
     let mut project_synced = false;
+    let mut project_truncated = false;
     let mut source_manifest = commands::SourceManifest::new();
     let peer = match backend.peer() {
         Ok(peer) => Some(peer),
@@ -101,7 +102,10 @@ pub fn run(
                     canonical: &target.canonical,
                     text: current.clone(),
                 },
-                SourceSync::Authoritative(&mut source_manifest),
+                SourceSync::Authoritative {
+                    manifest: &mut source_manifest,
+                    truncated: &mut project_truncated,
+                },
                 out,
                 notes,
             )?;
@@ -174,6 +178,13 @@ pub fn run(
                             let canonical = commands::canonical_path(&dependency)?;
                             let hash = kiln_proto::source_digest(&source);
                             if source_manifest.get(&canonical) != Some(&hash) {
+                                if needs_authoritative_membership_check(
+                                    project_truncated,
+                                    &source_manifest,
+                                    &canonical,
+                                ) {
+                                    authoritative_sync = true;
+                                }
                                 dependency_updates.push((canonical, source, hash));
                                 dependency_changed = true;
                             }
@@ -207,7 +218,10 @@ pub fn run(
                         }
                         if dependency_changed || text.as_deref() != Some(current.as_str()) {
                             let sync = if authoritative_sync {
-                                SourceSync::Authoritative(&mut source_manifest)
+                                SourceSync::Authoritative {
+                                    manifest: &mut source_manifest,
+                                    truncated: &mut project_truncated,
+                                }
                             } else {
                                 SourceSync::Incremental
                             };
@@ -318,8 +332,22 @@ struct SourceSnapshot<'a> {
 }
 
 enum SourceSync<'a> {
-    Authoritative(&'a mut commands::SourceManifest),
+    Authoritative {
+        manifest: &'a mut commands::SourceManifest,
+        truncated: &'a mut bool,
+    },
     Incremental,
+}
+
+/// An unknown path in a truncated walk may sort into the retained prefix and displace another
+/// source. Only another authoritative walk can decide that membership without letting watch grow
+/// a different project than ordinary discovery.
+fn needs_authoritative_membership_check(
+    project_truncated: bool,
+    manifest: &commands::SourceManifest,
+    canonical: &str,
+) -> bool {
+    project_truncated && !manifest.contains_key(canonical)
 }
 
 fn run_once(
@@ -335,8 +363,11 @@ fn run_once(
     // changed dependencies and this sends the already-read target directly; repeating the whole
     // filesystem walk on every edit would put O(project) work ahead of the incremental compiler.
     let output = match sync {
-        SourceSync::Authoritative(manifest) => {
-            let (output, current_manifest) = commands::run_source_with_manifest(
+        SourceSync::Authoritative {
+            manifest,
+            truncated,
+        } => {
+            let (output, current_manifest, current_truncated) = commands::run_source_with_manifest(
                 backend,
                 path,
                 project_root,
@@ -344,6 +375,7 @@ fn run_once(
                 source.text,
             )?;
             *manifest = current_manifest;
+            *truncated = current_truncated;
             output
         }
         SourceSync::Incremental => commands::run_watched_source(
@@ -1293,6 +1325,31 @@ mod tests {
         let err = Target::resolve(Path::new("definitely/not/here/a.js")).expect_err("should fail");
         assert!(err.to_string().contains("does not exist"), "{err}");
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn an_unknown_event_in_a_truncated_project_requires_authoritative_membership() {
+        let mut manifest = commands::SourceManifest::new();
+        manifest.insert(
+            "/project/known.js".into(),
+            kiln_proto::source_digest("known"),
+        );
+
+        assert!(!needs_authoritative_membership_check(
+            false,
+            &manifest,
+            "/project/new.js"
+        ));
+        assert!(!needs_authoritative_membership_check(
+            true,
+            &manifest,
+            "/project/known.js"
+        ));
+        assert!(needs_authoritative_membership_check(
+            true,
+            &manifest,
+            "/project/new.js"
+        ));
     }
 
     #[test]
