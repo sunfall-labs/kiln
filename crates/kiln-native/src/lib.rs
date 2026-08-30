@@ -1029,9 +1029,10 @@ impl NativeBuilder {
         );
         let wrapper_object_options = Digest::hash(
             format!(
-                "shared-graph\0pic\0c11\0{}\0{}",
+                "shared-graph\0pic\0c11\0{}\0{}\0zig-macos-no-ubsan={}",
                 identity.kind,
-                profile.as_str()
+                profile.as_str(),
+                macos_zig_default_ubsan_suppressed(&self.toolchain, profile)
             )
             .as_bytes(),
         );
