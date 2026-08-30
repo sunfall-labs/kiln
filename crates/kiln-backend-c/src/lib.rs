@@ -9782,6 +9782,16 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
         }),
+        Instruction::LoadWellKnown(_) => Err(EmitError::Unsupported {
+            feature: "well-known symbol access in the native backend".to_owned(),
+        }),
+        Instruction::PrivateIn(_)
+        | Instruction::GetPrivate(_)
+        | Instruction::SetPrivate(_)
+        | Instruction::InitPrivate(_)
+        | Instruction::DefinePrivateAccessor { .. } => Err(EmitError::Unsupported {
+            feature: "private fields and methods in the native backend".to_owned(),
+        }),
         Instruction::Const(_)
         | Instruction::LoadNewTarget
         | Instruction::LoadLocal(_)
@@ -9806,8 +9816,6 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::ThrowReference(_)
-        | Instruction::GetPrivate(_)
-        | Instruction::SetPrivate(_)
         | Instruction::Dup2
         | Instruction::CallComputed { .. }
         | Instruction::NewRegExp { .. }
@@ -9907,7 +9915,8 @@ fn stack_effect(
         | Instruction::RestArguments(_)
         | Instruction::PushHole
         | Instruction::LoadArguments
-        | Instruction::MakeFunction(_) => Ok((height + 1, false)),
+        | Instruction::MakeFunction(_)
+        | Instruction::LoadWellKnown(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
             let needed = usize::try_from(*count)
@@ -9998,7 +10007,7 @@ fn stack_effect(
             }
         }
         // Replaces the value with an array of its own enumerable keys.
-        Instruction::EnumerateKeys | Instruction::DeleteProperty(_) => {
+        Instruction::EnumerateKeys | Instruction::DeleteProperty(_) | Instruction::PrivateIn(_) => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -10119,6 +10128,20 @@ fn stack_effect(
         // ...and the value replaces both, exactly as `SetProperty` does: an assignment is an
         // expression and its value is what was assigned.
         Instruction::SetPrivate(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::InitPrivate(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::DefinePrivateAccessor { .. } => {
             if height < 2 {
                 Err(underflow(2))
             } else {
@@ -10485,7 +10508,9 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n");
+        output.push_str(
+            "    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n",
+        );
         output.push_str("    (void)args; (void)argc; (void)slot;\n");
         // Re-entry. A generator that has not started begins at its first instruction; one that
         // has jumps back to just after the `Yield` that suspended it, with the operand stack
@@ -10519,7 +10544,9 @@ fn render_function(
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
-        output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n");
+        output.push_str(
+            "    (void)host; (void)upvalues; (void)depth; (void)receiver; (void)new_target;\n",
+        );
         writeln!(
             output,
             "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
@@ -10866,6 +10893,12 @@ fn emit_instruction(
                 "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
             )
             .unwrap();
+        }
+        Instruction::LoadWellKnown(_)
+        | Instruction::PrivateIn(_)
+        | Instruction::InitPrivate(_)
+        | Instruction::DefinePrivateAccessor { .. } => {
+            unreachable!("unsupported typed-key instruction was validated before emission")
         }
         Instruction::GetPrivate(name) => {
             let Constant::String(text) = &constants[*name as usize] else {
@@ -11630,6 +11663,19 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 54);
                 word(&mut hash, u64::from(*value));
             }
+            Instruction::InitPrivate(value) => {
+                byte(&mut hash, 62);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::DefinePrivateAccessor { name, setter } => {
+                byte(&mut hash, 63);
+                word(&mut hash, u64::from(*name));
+                byte(&mut hash, u8::from(*setter));
+            }
+            Instruction::PrivateIn(value) => {
+                byte(&mut hash, 64);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::DefineAccessor { setter } => {
                 byte(&mut hash, 52);
                 byte(&mut hash, u8::from(*setter));
@@ -11649,6 +11695,16 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::GetComputed => byte(&mut hash, 29),
             Instruction::SetComputed => byte(&mut hash, 30),
+            Instruction::LoadWellKnown(symbol) => {
+                byte(&mut hash, 61);
+                byte(
+                    &mut hash,
+                    match symbol {
+                        kiln_ir::WellKnownSymbol::Iterator => 0,
+                        kiln_ir::WellKnownSymbol::AsyncIterator => 1,
+                    },
+                );
+            }
             Instruction::LoadBuiltin(builtin) => {
                 byte(&mut hash, 25);
                 word(&mut hash, *builtin as u64);
@@ -12874,6 +12930,34 @@ int main(void) {{
             matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("WeakMap")),
             "dead code must not bypass the native instruction allowlist"
         );
+    }
+
+    #[test]
+    fn typed_key_instructions_are_refused_by_the_native_backend() {
+        let cases = [
+            (
+                vec![
+                    Instruction::LoadWellKnown(kiln_ir::WellKnownSymbol::Iterator),
+                    Instruction::Pop,
+                ],
+                "well-known symbol",
+            ),
+            (
+                vec![Instruction::Const(0), Instruction::GetPrivate(0)],
+                "private fields",
+            ),
+        ];
+        for (code, feature) in cases {
+            let result = emit(&program(
+                vec![Constant::String("@@private:0:x".into())],
+                code,
+                0,
+            ));
+            assert!(
+                matches!(result, Err(EmitError::Unsupported { feature: actual }) if actual.contains(feature)),
+                "typed-key instruction must be rejected by native emission"
+            );
+        }
     }
 
     #[test]

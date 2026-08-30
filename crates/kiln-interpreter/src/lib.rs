@@ -12,7 +12,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use kiln_host_abi::{HostOps, HostValue};
-use kiln_ir::{BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue};
+use kiln_ir::{
+    BinaryOp, Constant, Instruction, ModuleProgram, Program, UnaryOp, Upvalue, WellKnownSymbol,
+};
 
 /// The built-ins the runtime provides natively.
 ///
@@ -2779,6 +2781,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(value.clone().into());
                 }
+                Instruction::LoadWellKnown(symbol) => {
+                    self.stack
+                        .push(Value::Symbol(Symbol::WellKnown(match symbol {
+                            WellKnownSymbol::Iterator => WellKnown::Iterator,
+                            WellKnownSymbol::AsyncIterator => WellKnown::AsyncIterator,
+                        })));
+                }
                 Instruction::LoadLocal(index) => {
                     let Some(value) = self.locals.get(*index as usize) else {
                         return Err(ExecutionError::LocalOutOfBounds {
@@ -2993,7 +3002,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let arguments = self.take_call_arguments(*argc, current)?;
                     let key = self.pop(current)?;
                     let receiver = self.pop(current)?;
-                    let method = self.computed(&receiver, &key);
+                    let method = self.read_computed(&receiver, &key, current);
+                    let Some(method) = self.catchable(method, current)? else {
+                        continue;
+                    };
                     let invoked = self.invoke(method, receiver, arguments, current);
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
@@ -3439,6 +3451,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
+                Instruction::PrivateIn(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    let found = match target {
+                        Value::Object(object) => {
+                            object.borrow().get_own(internal_key(&name)).is_some()
+                        }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow()
+                            .get_own(internal_key(&name))
+                            .is_some(),
+                        other => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "right-hand side of `#{} in` must be an object, got {}",
+                                    name.trim_start_matches("@@private:"),
+                                    other.type_name()
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
+                    };
+                    self.stack.push(Value::Boolean(found));
+                }
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
@@ -3507,6 +3546,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         _ => {}
                     }
                     self.stack.push(value);
+                }
+                Instruction::InitPrivate(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    match target {
+                        Value::Object(object) => {
+                            object.borrow_mut().set(internal_key(&name), value.clone())
+                        }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow_mut()
+                            .set(internal_key(&name), value.clone()),
+                        other => {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::DefinePrivateAccessor { name, setter } => {
+                    let name = self.string_constant(*name, current)?;
+                    let function = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let (getter, setter) = if *setter {
+                        (None, Some(function))
+                    } else {
+                        (Some(function), None)
+                    };
+                    match &target {
+                        Value::Object(object) => {
+                            object
+                                .borrow_mut()
+                                .define_accessor(internal_key(&name), getter, setter)
+                        }
+                        Value::Function(closure) => closure
+                            .properties
+                            .borrow_mut()
+                            .define_accessor(internal_key(&name), getter, setter),
+                        other => {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
+                    self.stack.push(target);
                 }
                 Instruction::DefineAccessor { setter } => {
                     let function = self.pop(current)?;
@@ -7756,7 +7844,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get(target, key, instruction);
         }
-        Ok(self.computed(target, key))
+        let property_key = key.to_property_key();
+        let accessor = match target {
+            Value::Object(object) => object.borrow().lookup(property_key.clone()),
+            Value::Function(closure)
+                if property_key != PropertyKey::String("prototype".to_owned()) =>
+            {
+                closure.properties.borrow().lookup(property_key.clone())
+            }
+            Value::Array(items) => items.properties.borrow().lookup(property_key.clone()),
+            _ => None,
+        };
+        match accessor {
+            Some(Property::Accessor { get, .. }) => match get {
+                Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
+                None => Ok(Value::Undefined),
+            },
+            _ => Ok(self.computed(target, key)),
+        }
     }
 
     /// Read `key` from a proxy, through its `get` trap or through its target.

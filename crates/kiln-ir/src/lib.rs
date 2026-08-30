@@ -73,6 +73,15 @@ pub enum BinaryOp {
     GreaterThanOrEqual,
 }
 
+/// Well-known symbols that can be named directly by protocol bytecode.
+///
+/// Keeping these in the IR avoids lowering a symbol lookup to the ordinary string namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WellKnownSymbol {
+    Iterator,
+    AsyncIterator,
+}
+
 /// Stack bytecode instructions.
 ///
 /// Conditional jumps consume their condition.  The compiler uses [`Instruction::Dup`] before a
@@ -125,6 +134,11 @@ pub enum Instruction {
     SpreadInto,
     /// Read `object[key]`. Stack is object, then key.
     GetComputed,
+    /// Push one of the specification's canonical well-known symbols.
+    ///
+    /// This is deliberately not a string constant: a user property named `"@@iterator"` must
+    /// never satisfy a protocol lookup for `Symbol.iterator`.
+    LoadWellKnown(WellKnownSymbol),
     /// Call `object.name(...)` with the object as receiver. Stack is object, then arguments.
     ///
     /// A method call cannot be a `GetProperty` followed by a `Call`: that discards the receiver,
@@ -243,6 +257,8 @@ pub enum Instruction {
     PushHole,
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Test whether `object` carries this class's private brand. Stack: `[object] -> [bool]`.
+    PrivateIn(u32),
     /// Read `object.#name`, where the name is a constant. Stack: `[object] -> [value]`.
     ///
     /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
@@ -250,6 +266,17 @@ pub enum Instruction {
     GetPrivate(u32),
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
+    /// Initialize `object.#name` during class construction. Stack: `[object, value] -> [value]`.
+    ///
+    /// Unlike [`Instruction::SetPrivate`], initialization creates the slot and never performs a
+    /// prior-brand check; the interpreter owns the private namespace and does not infer it from a
+    /// printable string.
+    InitPrivate(u32),
+    /// Define one accessor half for a private name. Stack: `[target, function] -> [target]`.
+    DefinePrivateAccessor {
+        name: u32,
+        setter: bool,
+    },
     /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
@@ -1828,7 +1855,7 @@ impl Compiler {
 
         self.scopes.push(HashMap::new());
 
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        let symbol = WellKnownSymbol::Iterator;
         if awaiting {
             // `for await` prefers the async iterator and falls back to the sync one, and the two
             // are awaited in different places: an async iterator's `next` returns a promise of
@@ -1839,27 +1866,24 @@ impl Compiler {
             self.expression(iterable);
             self.declare_hidden(&subject, span);
 
-            let asynchronous = self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+            let asynchronous = WellKnownSymbol::AsyncIterator;
             self.load_hidden(&subject);
-            self.code.push(Instruction::GetProperty(asynchronous));
+            self.code.push(Instruction::LoadWellKnown(asynchronous));
+            self.code.push(Instruction::GetComputed);
             self.push_constant(Constant::Undefined);
             self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
             let use_async = self.emit_jump(Instruction::JumpIfFalse(0));
 
             self.load_hidden(&subject);
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.code.push(Instruction::LoadWellKnown(symbol));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(false));
             let chosen = self.emit_jump(Instruction::Jump(0));
 
             self.patch_jump(use_async);
             self.load_hidden(&subject);
-            self.code.push(Instruction::CallMethod {
-                name: asynchronous,
-                argc: 0,
-            });
+            self.code.push(Instruction::LoadWellKnown(asynchronous));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(true));
 
             self.patch_jump(chosen);
@@ -1869,10 +1893,8 @@ impl Compiler {
             // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than
             // only an array.
             self.expression(iterable);
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.code.push(Instruction::LoadWellKnown(symbol));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
 
@@ -2005,11 +2027,9 @@ impl Compiler {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
         }
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: symbol,
-            argc: 0,
-        });
+        self.code
+            .push(Instruction::LoadWellKnown(WellKnownSymbol::Iterator));
+        self.code.push(Instruction::CallComputed { argc: 0 });
         self.declare_hidden(&iterator_binding, span);
 
         self.push_constant(Constant::Undefined);
@@ -2554,12 +2574,12 @@ impl Compiler {
                     argc: arguments.len() as u16,
                 });
             }
-            // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
-            // program can write, so asking whether the key is there *is* the brand check.
+            // `#x in o` uses an explicit private-brand instruction. The printable private key is
+            // only an IR constant naming the class's hidden slot; it is never an ordinary key.
             ExpressionKind::PrivateIn { name, object } => {
-                self.push_constant(Constant::String(self.private_key(name)));
+                let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
-                self.code.push(Instruction::Binary(BinaryOp::In));
+                self.code.push(Instruction::PrivateIn(name));
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the parent's prototype, not on `this`.
@@ -3225,7 +3245,7 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(Instruction::InitPrivate(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
@@ -3262,7 +3282,14 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::SetProperty(name));
+                    if accessor {
+                        self.code.push(Instruction::DefinePrivateAccessor {
+                            name,
+                            setter: matches!(method.kind, kiln_hir::MethodKind::Set),
+                        });
+                    } else {
+                        self.code.push(Instruction::InitPrivate(name));
+                    }
                 }
                 ObjectKey::Static(key) if !accessor => {
                     let name = self.constant_index(Constant::String(key.clone()));
@@ -3511,7 +3538,7 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(Instruction::InitPrivate(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
