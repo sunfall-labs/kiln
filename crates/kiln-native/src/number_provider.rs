@@ -161,6 +161,13 @@ fn installed_manifest_candidates() -> Vec<PathBuf> {
     let Ok(executable) = env::current_exe() else {
         return Vec::new();
     };
+    installed_manifest_candidates_for(&executable)
+}
+
+fn installed_manifest_candidates_for(executable: &Path) -> Vec<PathBuf> {
+    if !executable.is_absolute() {
+        return Vec::new();
+    }
     let Some(bin) = executable.parent() else {
         return Vec::new();
     };
@@ -413,7 +420,7 @@ fn require_compatible_target(
     compiler_target: &str,
     rust_target: &str,
 ) -> Result<(), NumberProviderError> {
-    let compiler = canonical_rust_target(compiler_target).or_else(host_rust_target);
+    let compiler = canonical_rust_target(compiler_target);
     let rust = canonical_rust_target(rust_target);
     if compiler.is_some() && compiler == rust {
         Ok(())
@@ -452,21 +459,6 @@ fn canonical_rust_target(target: &str) -> Option<String> {
         return None;
     };
     Some(format!("{arch}-{suffix}"))
-}
-
-fn host_rust_target() -> Option<String> {
-    let arch = match env::consts::ARCH {
-        "aarch64" => "aarch64",
-        "x86_64" => "x86_64",
-        _ => return None,
-    };
-    let os = match env::consts::OS {
-        "macos" => "apple-darwin",
-        "linux" => "unknown-linux-gnu",
-        "windows" => "pc-windows-msvc",
-        _ => return None,
-    };
-    Some(format!("{arch}-{os}"))
 }
 
 fn cargo_program() -> Option<PathBuf> {
@@ -575,10 +567,27 @@ mod tests {
         assert!(
             require_compatible_target("x86_64-linux-gnu", "x86_64-unknown-linux-musl").is_err()
         );
+        assert!(
+            require_compatible_target("unknown", "aarch64-apple-darwin").is_err(),
+            "an unavailable C target probe must not silently become the build host"
+        );
         assert_eq!(
             identity("aarch64-apple-darwin").target,
             "aarch64-apple-darwin"
         );
+    }
+
+    #[test]
+    fn installed_layout_searches_beside_bin_then_under_lib_kiln() {
+        let executable = Path::new("/opt/kiln/bin/kiln");
+        assert_eq!(
+            installed_manifest_candidates_for(executable),
+            vec![
+                PathBuf::from("/opt/kiln/bin").join(MANIFEST_FILE),
+                PathBuf::from("/opt/kiln/bin/../lib/kiln").join(MANIFEST_FILE),
+            ]
+        );
+        assert!(installed_manifest_candidates_for(Path::new("kiln")).is_empty());
     }
 
     #[test]

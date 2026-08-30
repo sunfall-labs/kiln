@@ -1551,6 +1551,14 @@ ELF gets a version script plus archive exclusion. Only the public module/graph w
 the private number ABI, `rust_eh_personality`, compiler-builtins, and path-derived graph entries do
 not escape the DSO. Existing two-library `dlopen` coverage now checks the Rust support symbols too.
 
+The shipped-artifact half now has one producer as well as a consumer. The target-explicit package
+script builds a PIC/panic-abort archive, derives the source/toolchain/archive identities, and
+publishes the archive before its strict manifest. The ABI check consumes that package through both
+the direct C harness and an actual `kiln --one-shot build`; it no longer validates a separate raw
+Cargo artifact. An unavailable C target probe is rejected rather than replaced with the build host,
+because doing that through a wrapper or cross compiler could silently select the wrong archive.
+The release target/deployment/libc matrix remains deliberately undecided in proposed ADR 0018.
+
 **Perf note.** The interpreter loop was doing an `Rc::clone` of the running program *per
 instruction* (the borrow has to come off a local, not off `self`); it now compares pointers and
 clones only when the frame's program actually changes. Recompute counters -- the thing
