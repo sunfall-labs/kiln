@@ -229,7 +229,13 @@ enum kiln_value_tag {
     KILN_VALUE_GENERATOR = 12,
     /* bits holds a double* -- an instant in milliseconds since the epoch. A pointer rather than
      * the value itself because a Date is mutable: `setFullYear` writes through it. */
-    KILN_VALUE_DATE = 13
+    KILN_VALUE_DATE = 13,
+    /* An array slot that was never written, or was deleted.
+     *
+     * It *reads* as undefined, which is why the marker must never escape into an expression --
+     * but it is not one: `1 in [1, , 3]` is false where `1 in [1, undefined, 3]` is true, a
+     * console shows `<1 empty item>`, and every element-walking method skips it. */
+    KILN_VALUE_HOLE = 14
 };
 
 #define KILN_C99_BUILTIN_DATE 7
@@ -567,6 +573,9 @@ static int kiln_c99_iso_string(kiln_value *out, double time);
 static int kiln_c99_date_to_string(kiln_value *out, double time);
 static double kiln_c99_instant_from_parts(const double parts[7]);
 static double kiln_c99_parse_date(const char *bytes, size_t len);
+static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
+static int kiln_c99_is_hole(kiln_value value);
+static kiln_value kiln_c99_hole(void);
 static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
@@ -1059,6 +1068,14 @@ static int kiln_c99_signbit(double value) {
     return signbit(value) != 0;
 }
 
+static kiln_value kiln_c99_hole(void) {
+    return kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0);
+}
+
+static int kiln_c99_is_hole(kiln_value value) {
+    return value.tag == KILN_VALUE_HOLE;
+}
+
 static kiln_value kiln_c99_uninitialized(void) {
     return kiln_c99_value(KILN_VALUE_UNINITIALIZED, 0, NULL, 0);
 }
@@ -1321,7 +1338,8 @@ static kiln_value kiln_c99_text(kiln_value value) {
                 free(joined.bytes);
                 return kiln_c99_undefined();
             }
-            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL) {
+            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL ||
+                kiln_c99_is_hole(element)) {
                 continue;
             }
             {
@@ -1832,8 +1850,9 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
                                 key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
         }
-        *out = (size_t)index < array->count ? array->elements[(size_t)index]
-                                            : kiln_c99_undefined();
+        *out = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index])
+                   ? array->elements[(size_t)index]
+                   : kiln_c99_undefined();
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_STRING && index >= 0.0) {
@@ -1887,8 +1906,9 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         /* Writing past the end grows the array and leaves undefined behind, which is what the
          * language does; a hole and an undefined element are only distinguishable through `in`,
          * which this backend refuses. */
+        /* Growing leaves holes, which read as undefined and are not the same thing. */
         for (fill = array->count; fill < slot; ++fill) {
-            array->elements[fill] = kiln_c99_undefined();
+            array->elements[fill] = kiln_c99_hole();
         }
         array->elements[slot] = value;
         if (slot + 1 > array->count) {
@@ -2029,6 +2049,23 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         for (index = 0; index < array->count; ++index) {
             if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_is_hole(array->elements[index])) {
+                /* A run of holes is reported as a count rather than repeated, which is what
+                 * makes a sparse array readable at all. */
+                size_t run = 1;
+                while (index + run < array->count &&
+                       kiln_c99_is_hole(array->elements[index + run])) {
+                    run += 1;
+                }
+                if (kiln_c99_text_append_c(text, "<") != KILN_C99_OK ||
+                    kiln_c99_pad_number(text, (int64_t)run, 1) != KILN_C99_OK ||
+                    kiln_c99_text_append_c(text, run == 1 ? " empty item>" : " empty items>") !=
+                        KILN_C99_OK) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                index += run - 1;
+                continue;
             }
             if (kiln_c99_inspect_into(text, array->elements[index], depth + 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
@@ -2710,7 +2747,42 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_OBJECT_ENTRIES: {
             kiln_value built;
             kiln_object *object;
-            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT) {
+            if (argc == 0) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            /* An array's own enumerable keys are its indices, as strings, and a hole is not one
+             * of them -- which is the same walk `for...in` does, so it is the same code. */
+            if (args[0].tag == KILN_VALUE_ARRAY) {
+                kiln_array *array = kiln_c99_array_of(args[0]);
+                status = kiln_c99_new_array(&built);
+                for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
+                    if (kiln_c99_is_hole(array->elements[index])) {
+                        continue;
+                    }
+                    if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                        status = kiln_c99_array_push(
+                            built, kiln_c99_text(kiln_c99_number((double)index)));
+                    } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, array->elements[index]);
+                    } else {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(
+                                pair, kiln_c99_text(kiln_c99_number((double)index)));
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(pair, array->elements[index]);
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                }
+                *result = built;
+                return status;
+            }
+            if (args[0].tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(args[0]);
@@ -3115,9 +3187,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 free(joined.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            /* A nullish element contributes nothing, which is what makes `[1, , 3].join()`
-             * produce "1,,3" rather than "1,undefined,3". */
-            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL) {
+            /* A nullish element, and a hole, contribute nothing -- which is what makes
+             * `[1, , 3].join()` produce "1,,3" rather than "1,undefined,3". */
+            if (element.tag == KILN_VALUE_UNDEFINED || element.tag == KILN_VALUE_NULL ||
+                kiln_c99_is_hole(element)) {
                 continue;
             }
             {
@@ -3137,6 +3210,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         kiln_value needle = argc > 0 ? args[0] : kiln_c99_undefined();
         int found = 0;
         for (index = 0; index < array->count; ++index) {
+            if (kiln_c99_is_hole(array->elements[index])) {
+                /* The only place `indexOf` and `includes` disagree, and the reason `includes`
+                 * exists: one skips a hole and the other reads it as undefined. */
+                found = code == KILN_C99_METHOD_INCLUDES && needle.tag == KILN_VALUE_UNDEFINED;
+                if (found) {
+                    break;
+                }
+                continue;
+            }
             found = code == KILN_C99_METHOD_INCLUDES
                         ? kiln_c99_same_value_zero(array->elements[index], needle)
                         : kiln_c99_strict_equal(array->elements[index], needle);
@@ -3223,6 +3305,18 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             for (index = 0; index < length && index < array->count; ++index) {
                 kiln_value visit[3];
                 kiln_value produced;
+                /* Every element walk skips a hole and visits an undefined. `map` still has to
+                 * *leave* one: its result has an entry per input position, and skipping would
+                 * shift everything after it. */
+                if (kiln_c99_is_hole(array->elements[index])) {
+                    if (code == KILN_C99_METHOD_MAP) {
+                        status = kiln_c99_array_push(built, kiln_c99_hole());
+                        if (status != KILN_C99_OK) {
+                            return status;
+                        }
+                    }
+                    continue;
+                }
                 visit[0] = array->elements[index];
                 visit[1] = kiln_c99_number((double)index);
                 visit[2] = receiver;
@@ -3263,6 +3357,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         for (; index < length && index < array->count; ++index) {
             kiln_value visit[4];
+            if (kiln_c99_is_hole(array->elements[index])) {
+                continue;
+            }
             visit[0] = accumulator;
             visit[1] = array->elements[index];
             visit[2] = kiln_c99_number((double)index);
@@ -3396,7 +3493,8 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
             return KILN_C99_OK;
         }
         if (index >= 0.0) {
-            *answer = (size_t)index < kiln_c99_array_of(target)->count;
+            kiln_array *array = kiln_c99_array_of(target);
+            *answer = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
             return KILN_C99_OK;
         }
         *answer = kiln_c99_array_method(key, key_len) != 0;
@@ -3442,7 +3540,7 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         double slot = kiln_c99_key_index(key, key_len);
         kiln_array *array = kiln_c99_array_of(target);
         if (slot >= 0.0 && (size_t)slot < array->count) {
-            array->elements[(size_t)slot] = kiln_c99_undefined();
+            array->elements[(size_t)slot] = kiln_c99_hole();
         }
         return KILN_C99_OK;
     }
@@ -3489,6 +3587,9 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
          * gives "0" and "1", not 0 and 1. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
+            if (kiln_c99_is_hole(array->elements[index])) {
+                continue;
+            }
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
             if (status != KILN_C99_OK) {
                 return status;
@@ -3687,6 +3788,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
 
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_HOLE:
     case KILN_VALUE_FUNCTION:
     case KILN_VALUE_BUILTIN:
     case KILN_VALUE_METHOD:
@@ -3761,8 +3863,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 free(nested.bytes);
                 return status;
             }
-            /* An element with no JSON spelling becomes null rather than disappearing: an array's
-             * positions are part of its meaning. */
+            /* An element with no JSON spelling -- undefined, a function, a hole -- becomes null
+             * rather than disappearing: an array's positions are part of its meaning. */
             if (!wrote && kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
                 free(nested.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
@@ -4951,6 +5053,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::DeleteComputed
         | Instruction::Apply
         | Instruction::RestArguments(_)
+        | Instruction::PushHole
         | Instruction::Yield
         | Instruction::Pop
         | Instruction::Dup
@@ -5027,7 +5130,6 @@ fn stack_effect(
         // what a program means. `kiln run` works on these; `kiln run --native` says why not.
         Instruction::Dup2
         | Instruction::GetPrivate(_)
-        | Instruction::PushHole
         | Instruction::NewRegExp { .. }
         | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
@@ -5047,6 +5149,7 @@ fn stack_effect(
         | Instruction::LoadBuiltin(_)
         | Instruction::LoadGlobal(_)
         | Instruction::RestArguments(_)
+        | Instruction::PushHole
         | Instruction::MakeFunction(_) => Ok((height + 1, false)),
         // A literal consumes what it is built from and leaves the container.
         Instruction::NewObject { count } => {
@@ -5265,22 +5368,52 @@ fn stack_effect(
     }
 }
 
-/// Whether any body in this program can produce a callable value.
+/// Whether any body in this program can produce a value the embedding boundary cannot carry.
 ///
 /// The boundary conversions depend on it, and they are not free to emit unconditionally:
 /// reaching `kiln_c99_text` from every entry point makes every unit reference the number
 /// provider, which the graph link tests deliberately link without. It would also change the
 /// bytes of a scalar unit, and those bytes are a cache key.
-fn produces_callables(program: &Program) -> bool {
-    let makes_one = |code: &[Instruction]| {
-        code.iter().any(|instruction| {
+///
+/// So the question is asked the other way round: a program whose every instruction is in the
+/// original scalar set can only ever hold a scalar, and everything else is assumed to be able to
+/// produce a reference. Listing what *cannot* rather than what can is what makes this safe to
+/// extend -- a new instruction is covered the day it is added, where an allowlist would have
+/// silently let its values cross unconverted. That is exactly what happened: the list named
+/// `MakeFunction` and `LoadBuiltin`, so `console.log([1])` -- a program with neither -- handed
+/// the host a raw array and failed with no diagnostic.
+fn produces_references(program: &Program) -> bool {
+    let scalar_only = |code: &[Instruction]| {
+        code.iter().all(|instruction| {
             matches!(
                 instruction,
-                Instruction::MakeFunction(_) | Instruction::LoadBuiltin(_)
+                Instruction::Const(_)
+                    | Instruction::LoadLocal(_)
+                    | Instruction::StoreLocal(_)
+                    | Instruction::LoadGlobal(_)
+                    | Instruction::StoreGlobal(_)
+                    | Instruction::NewCell(_)
+                    | Instruction::LoadCell(_)
+                    | Instruction::StoreCell(_)
+                    | Instruction::MarkUninitialized(_)
+                    | Instruction::Pop
+                    | Instruction::Dup
+                    | Instruction::Unary(_)
+                    | Instruction::Binary(_)
+                    | Instruction::Jump(_)
+                    | Instruction::JumpIfFalse(_)
+                    | Instruction::JumpIfTruthy(_)
+                    | Instruction::JumpIfNotNullish(_)
+                    | Instruction::HostCall { .. }
+                    | Instruction::Return
             )
         })
     };
-    makes_one(&program.code) || program.functions.iter().any(|proto| makes_one(&proto.code))
+    !scalar_only(&program.code)
+        || !program
+            .functions
+            .iter()
+            .all(|proto| scalar_only(&proto.code))
 }
 
 /// Whether anything in this program reaches module scope from inside a call.
@@ -5570,7 +5703,7 @@ fn render_function(
         frame_stacks,
         functions: &program.functions,
         symbol,
-        callables: produces_callables(program),
+        callables: produces_references(program),
         handlers,
         site: ReturnSite::Body,
         guarded: dead_zone_slots(&proto.code),
@@ -5658,7 +5791,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
-        callables: produces_callables(program),
+        callables: produces_references(program),
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry { exports: None },
         guarded: dead_zone_slots(&program.code),
@@ -5776,7 +5909,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
-        callables: produces_callables(program),
+        callables: produces_references(program),
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
             exports: Some(&module.exports),
@@ -5844,7 +5977,6 @@ fn emit_instruction(
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::Dup2
         | Instruction::GetPrivate(_)
-        | Instruction::PushHole
         | Instruction::NewRegExp { .. }
         | Instruction::ThrowReference(_)
         | Instruction::SetPrivate(_)
@@ -6129,6 +6261,9 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        // The marker for an element a literal left out. It never escapes into an expression:
+        // `NewArray` is the only thing that consumes it.
+        Instruction::PushHole => output.push_str("    stack[sp++] = kiln_c99_hole();\n"),
         Instruction::EnumerateKeys => {
             output.push_str(
                 "    { kiln_value keys; if (kiln_c99_own_keys(stack[sp - 1], &keys) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = keys; }\n",
