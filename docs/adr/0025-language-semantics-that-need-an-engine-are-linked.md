@@ -61,8 +61,11 @@ size_t  kiln_regexp_group_count(void *handle);
  * units -- start and end per group, (-1, -1) for a group that did not participate. */
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len,
                            size_t start, int64_t *out_ranges, size_t out_capacity);
-/* The name of group `index` as UTF-8, or -1 when it has none. */
-int32_t kiln_regexp_group_name(void *handle, size_t index, uint8_t *buffer, size_t capacity);
+/* ABI v2: the `index`th unique named group from the last match. Returns its UTF-8 byte length,
+ * 0 when there is no such group, and -1 when the buffer is too small. Writes (-1,-1) for an
+ * unmatched group; callers retry with a larger buffer after -1. */
+int32_t kiln_regexp_named_group(void *handle, size_t index, uint8_t *buffer, size_t capacity,
+                                int64_t *out_range);
 void    kiln_regexp_free(void *handle);
 ```
 
