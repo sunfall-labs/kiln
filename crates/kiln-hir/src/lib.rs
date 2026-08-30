@@ -564,6 +564,13 @@ pub enum ExpressionKind {
         name: String,
         value: Box<Expression>,
     },
+    /// A regular expression literal, kept as its source rather than as a compiled program: the
+    /// pattern is a value the program can read back through `source`, and compiling it belongs to
+    /// whoever owns the engine.
+    RegExp {
+        pattern: String,
+        flags: String,
+    },
     /// `delete object.property`.
     ///
     /// Not a unary operator over a member expression: the operand must not be *read*, and a

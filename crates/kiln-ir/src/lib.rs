@@ -200,6 +200,14 @@ pub enum Instruction {
     /// Remove an own property, leaving `true` -- which is what the `delete` operator evaluates
     /// to. Stack: `[target] -> [true]`.
     DeleteProperty(u32),
+    /// Build a regular expression from its source and flags, both constant strings.
+    ///
+    /// Built per evaluation rather than interned: each literal produces a fresh object, and the
+    /// object carries mutable state -- `lastIndex` -- that two evaluations must not share.
+    NewRegExp {
+        pattern: u32,
+        flags: u32,
+    },
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -341,6 +349,7 @@ pub enum Builtin {
     ClearInterval,
     QueueMicrotask,
     Promise,
+    RegExp,
 }
 
 impl Builtin {
@@ -375,6 +384,7 @@ impl Builtin {
             "clearInterval" => Some(Self::ClearInterval),
             "queueMicrotask" => Some(Self::QueueMicrotask),
             "Promise" => Some(Self::Promise),
+            "RegExp" => Some(Self::RegExp),
             _ => None,
         }
     }
@@ -409,6 +419,7 @@ impl Builtin {
             Self::ClearInterval => "clearInterval",
             Self::QueueMicrotask => "queueMicrotask",
             Self::Promise => "Promise",
+            Self::RegExp => "RegExp",
         }
     }
 }
@@ -2302,6 +2313,11 @@ impl Compiler {
                     }
                 }
             }
+            ExpressionKind::RegExp { pattern, flags } => {
+                let pattern = self.constant_index(Constant::String(pattern.clone()));
+                let flags = self.constant_index(Constant::String(flags.clone()));
+                self.code.push(Instruction::NewRegExp { pattern, flags });
+            }
             ExpressionKind::PrivateMember { object, name } => {
                 self.expression(object);
                 let name = self.constant_index(Constant::String(private_key(name)));
@@ -3965,6 +3981,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             collect_identifiers(expression, names, collecting);
         }
+        ExpressionKind::RegExp { .. } => {}
         ExpressionKind::PrivateMember { object, .. } => {
             collect_identifiers(object, names, collecting);
         }
@@ -4081,6 +4098,7 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             expression_references(expression, name)
         }
+        ExpressionKind::RegExp { .. } => false,
         ExpressionKind::PrivateMember { object, .. } => expression_references(object, name),
         ExpressionKind::PrivateAssignment { object, value, .. } => {
             expression_references(object, name) || expression_references(value, name)
