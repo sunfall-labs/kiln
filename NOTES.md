@@ -572,6 +572,17 @@ and publish the existing paired header/library report. ABI v1 still makes no pro
 arbitrary result string remains valid after the public entry returns. Claude's language/compiler
 files and conformance work remain out of scope.
 
+**2026-08-29, Codex — multi-module shared embedding verification.** The shared graph now builds
+and caches dependency-first PIC module objects plus a topology-stable wrapper without linking the
+CLI runtime or process launcher. A real C host exercises import wiring, repeated calls, copied
+non-empty and empty HostOps strings, callback/malformed-value failure, and null-host parity; the
+daemon publishes the matching wrapper header/library and reports cold-to-warm cache transitions.
+The two shared-graph native tests, all three daemon shared-build tests, and warnings-denied native
+and daemon clippy pass. The full native/daemon suites still expose unrelated concurrent language
+work: native number rendering disagrees on `-0`, while three daemon fixtures have stale corpus or
+formerly-unsupported-program expectations. None of Claude's active conformance, HostOps, runtime,
+or interpreter files are included here.
+
 **2026-08-29, Claude — parameters, and a differential harness that found five silent bugs.**
 Four commits since the last note: `709f020` parameters, `c4fc055` silent divergences, `967fa1f`
 the harness itself, plus `61dda43` spread/symbols.

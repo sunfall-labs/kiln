@@ -77,6 +77,24 @@ embedding artifact. Shared-library linking is initially supported on macOS and L
 toolchain flags, emitted header, and dynamic-loader behavior are exercised by real C-host
 integration tests.
 
+An acyclic module graph is embedded behind one topology-derived wrapper symbol with the same
+two-argument entry ABI as a scalar shared library. The graph's generated module entries keep their
+private import/export-array ABI. The wrapper allocates those arrays per invocation, evaluates
+modules in dependency-first order, and links only their PIC objects plus its own PIC object: it
+does not reuse the process-oriented CLI runtime or graph launcher. Module C and object cache keys
+remain independently reusable, while the wrapper source/object keys include graph wiring and the
+final shared-link key includes the ordered module objects, wrapper object, and platform library
+identity.
+
+The HostOps contract permits a callback-produced string to remain valid only until the current
+module entry returns. A provider can export that value for a later consumer, so the graph wrapper
+interposes a private HostOps proxy and copies each successful callback string before the upstream
+callback returns. Those copies live through the whole graph invocation and are then released with
+the wrapper's per-call storage. This solves provider-to-consumer lifetime and keeps concurrent
+invocations isolated. It does not broaden ABI v1: callers still cannot assume an arbitrary string
+in the public result remains valid after the wrapper returns. Retainable results or leak-free
+caller ownership require a future versioned ownership/dispose or caller-buffer design.
+
 ## Consequences
 
 - Editing one module body invalidates that module's C and object plus the final link, not the
@@ -89,6 +107,8 @@ integration tests.
   correctness/performance evidence.
 - Native embedding keeps ownership and I/O policy in the host process: the library exports module
   computation, while every external effect still crosses the same numeric HostOps callback.
+- Multi-module embedding preserves dependency order without process-global import/export storage,
+  so repeated and concurrent calls do not share graph execution state.
 - Embedders consume the header emitted by the same build as the library, so a content-derived
   symbol change cannot silently leave a hand-written declaration stale.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
