@@ -29,7 +29,7 @@ pub type Frontend = fn(path: &str, source: &str) -> HirModule;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(pub u32);
 
-/// Monotonic clock. Every input write bumps it; nothing else does.
+/// Monotonic clock. Every source addition, replacement, or removal bumps it; nothing else does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Revision(pub u64);
 
@@ -105,6 +105,19 @@ pub trait QueryEngine {
     /// not certain the engine already holds without paying for it, which is what makes a
     /// stateless client safe to point at a warm daemon.
     fn set_source(&mut self, file: FileId, text: String);
+
+    /// Return the interned files that currently have source text, together with their paths.
+    ///
+    /// Interning a path does not make it an active source: callers can use this snapshot to
+    /// reconcile an authoritative source set and call [`QueryEngine::remove_source`] for paths
+    /// that disappeared.
+    fn source_files(&self) -> Vec<(FileId, String)>;
+
+    /// Remove a source while retaining its interned [`FileId`] for a later restore.
+    ///
+    /// Removing an already-absent source is a no-op. Implementations must invalidate queries
+    /// that read either this source or the active file set.
+    fn remove_source(&mut self, file: FileId);
 
     fn source(&self, file: FileId) -> Option<&str>;
 

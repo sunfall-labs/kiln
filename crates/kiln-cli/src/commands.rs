@@ -1269,6 +1269,51 @@ mod tests {
     }
 
     #[test]
+    fn sync_names_the_current_source_view_after_a_file_is_deleted() {
+        let dir = std::env::temp_dir().join(format!("kiln-cli-sync-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create sync fixture");
+        let survivor = dir.join("survivor.js");
+        let deleted = dir.join("deleted.ts");
+        std::fs::write(&survivor, "export const survivor = 1;\n").expect("write survivor");
+        std::fs::write(&deleted, "export const deleted = 2;\n").expect("write deleted");
+        let survivor_path = canonical_path(&survivor).expect("canonical survivor");
+        let deleted_path = canonical_path(&deleted).expect("canonical deleted");
+
+        let mut fake = Fake::new();
+        sync_project_sources(&mut fake, &dir).expect("initial sync");
+        let Request::Sync { files } = &fake.seen[0] else {
+            panic!("first request must be the sync handshake");
+        };
+        let first_paths: BTreeSet<_> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(first_paths.len(), 2);
+        assert!(first_paths.contains(survivor_path.as_str()));
+        assert!(first_paths.contains(deleted_path.as_str()));
+
+        std::fs::remove_file(&deleted).expect("delete source");
+        let second_start = fake.seen.len();
+        sync_project_sources(&mut fake, &dir).expect("sync after deletion");
+        let second_requests = &fake.seen[second_start..];
+        let Request::Sync { files } = &second_requests[0] else {
+            panic!("first request after deletion must be the sync handshake");
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, survivor_path);
+        assert_eq!(
+            second_requests
+                .iter()
+                .filter_map(|request| match request {
+                    Request::SetSource { path, .. } => Some(path),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![&survivor_path]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn project_warns_when_there_is_nothing_to_summarise() {
         let dir = std::env::temp_dir().join(format!("kiln-cli-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

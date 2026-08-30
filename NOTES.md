@@ -639,3 +639,18 @@ rather than fiddly, and none of them unblocks anything else — which is why I h
 the time on the differential backlog instead. Next from that list, roughly by cost: `==`, template
 literals, `switch`, `for-in`, `do-while`, `delete`, optional chaining, `Math`/`NaN`/`Boolean`
 globals, spread call arguments.
+
+**2026-08-29, Codex — authoritative source-sync removal slice.** I am taking the query-engine
+source-removal contract, complete `Sync` reconciliation in the daemon, protocol/version tests,
+CLI sync coverage, and the stale-dependency regression. A warm daemon must stop seeing a file as
+soon as the client's documented whole-project view omits it; deleting an imported module must
+fail as missing instead of executing cached source. I will not touch Claude's active language,
+backend, interpreter, differential, or conformance files.
+
+**2026-08-29, Codex — authoritative source-sync verification.** `Sync` now validates duplicate
+paths before mutation, tombstones every omitted active source, preserves stable `FileId`s for
+restores, and invalidates the project file-set only on activation/removal. The production daemon
+regression keeps an omitted dependency on disk and proves a warm run rejects the unsynchronized
+module with no stale side effects. All 58 CLI tests, all 27 database unit/oracle tests, protocol
+tests, the two daemon sync tests, and warnings-denied clippy for all four crates pass. The daemon's
+three pre-existing stale language/corpus assertions remain the only failures in its full suite.

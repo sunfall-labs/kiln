@@ -30,11 +30,9 @@ use kiln_hir::{Export, ExportName, ExportOrigin, Item, ItemKind, Module, SourceK
 /// The engine's internal validity clock.
 ///
 /// Distinct from [`Revision`] on purpose. `Revision` is the user-visible input clock and counts
-/// exactly one tick per `set_source`, which is what callers assert on. The epoch additionally
-/// ticks when the *set of files* changes, because that set is an input too: `project()` reads it,
-/// and interning a new file has to be able to invalidate a memo that was already verified at the
-/// current revision. Keeping the two apart means growing the project does not silently inflate a
-/// number other crates report as "edits".
+/// exactly one tick per source mutation, which is what callers assert on. The epoch is the
+/// engine's internal validation clock; keeping the concepts separate avoids coupling query
+/// bookkeeping to the public meaning of an edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct Epoch(u64);
 
@@ -50,7 +48,7 @@ impl Epoch {
 enum QueryKey {
     /// Input: the text of one file.
     Source(FileId),
-    /// Input: which files exist at all. Only `project()` reads it.
+    /// Input: which interned paths currently have source text. Only `project()` reads it.
     FileSet,
     Parse(FileId),
     Ir(FileId),
@@ -106,7 +104,7 @@ pub struct MemoEngine {
     files: Vec<FileState>,
     by_path: HashMap<String, FileId>,
     project: Option<Memo<Project>>,
-    /// Ticks when any file is added; read by `project()`.
+    /// Ticks when a source becomes active or inactive; read by `project()`.
     file_set_changed_at: Epoch,
     epoch: Epoch,
     revision: Revision,
@@ -311,7 +309,12 @@ impl MemoEngine {
         self.force(QueryKey::FileSet);
 
         // Forcing an interface cannot intern a file, so the length is stable across the loop.
+        // Unset interned paths are deliberately absent from the project: interning reserves a
+        // reusable FileId, but only a source write makes a file part of the project.
         for index in 0..self.files.len() {
+            if !self.files[index].source_set {
+                continue;
+            }
             let dep = QueryKey::Interface(FileId(index as u32));
             self.force(dep);
             deps.push(dep);
@@ -319,14 +322,14 @@ impl MemoEngine {
 
         let mut hasher = Fnv1a::new();
         let mut exports = 0;
-        for state in &self.files {
+        for state in self.files.iter().filter(|state| state.source_set) {
             let interface = &state.interface.as_ref().expect(FORCED).value;
             hasher.write_u64(interface.interface_hash);
             exports += interface.exports.len();
         }
 
         let project = Project {
-            modules: self.files.len(),
+            modules: self.files.iter().filter(|state| state.source_set).count(),
             exports,
             interface_hash: hasher.finish(),
         };
@@ -518,10 +521,6 @@ impl QueryEngine for MemoEngine {
             return *file;
         }
         let file = FileId(self.files.len() as u32);
-        // The file set is an input, so adding to it has to invalidate whatever read it. Only the
-        // internal epoch moves: no source was written, so the revision has not advanced.
-        self.epoch = self.epoch.next();
-        self.file_set_changed_at = self.epoch;
         self.files.push(FileState {
             path: path.to_string(),
             source: String::new(),
@@ -546,6 +545,7 @@ impl QueryEngine for MemoEngine {
         if self.file(file).source_set && self.file(file).source == text {
             return;
         }
+        let was_set = self.file(file).source_set;
         self.epoch = self.epoch.next();
         self.revision = Revision(self.revision.0 + 1);
         let epoch = self.epoch;
@@ -553,6 +553,38 @@ impl QueryEngine for MemoEngine {
         state.source = text;
         state.source_set = true;
         state.source_changed_at = epoch;
+        // Activating an interned-but-unset path changes the file set just as removal does. Body
+        // edits leave this input alone so they can still cut off at the interface query.
+        if !was_set {
+            self.file_set_changed_at = epoch;
+        }
+    }
+
+    fn source_files(&self) -> Vec<(FileId, String)> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| state.source_set)
+            .map(|(index, state)| (FileId(index as u32), state.path.clone()))
+            .collect()
+    }
+
+    fn remove_source(&mut self, file: FileId) {
+        let Some(state) = self.files.get(file.0 as usize) else {
+            return;
+        };
+        if !state.source_set {
+            return;
+        }
+
+        self.epoch = self.epoch.next();
+        self.revision = Revision(self.revision.0 + 1);
+        let epoch = self.epoch;
+        let state = self.file_mut(file);
+        state.source.clear();
+        state.source_set = false;
+        state.source_changed_at = epoch;
+        self.file_set_changed_at = epoch;
     }
 
     fn source(&self, file: FileId) -> Option<&str> {
@@ -892,21 +924,28 @@ mod tests {
         );
     }
 
-    /// The file set is an input in its own right: `project()` reads it, so growing it has to
-    /// invalidate the rollup even though no source was written and the revision did not move.
+    /// Interning reserves identity but does not activate a source. The project remains warm until
+    /// the first write changes the active file-set input.
     #[test]
-    fn interning_a_file_invalidates_the_project_without_bumping_the_revision() {
+    fn interning_is_invisible_to_the_project_until_the_source_is_written() {
         let (mut db, _) = engine(&[("a.js", A_V1)]);
         assert_eq!(db.project().modules, 1);
+        db.reset_stats();
         let revision = db.revision();
 
         let b = db.intern("b.js");
         assert_eq!(db.revision(), revision, "interning is not a source write");
-        assert_eq!(db.project().modules, 2);
-        assert_eq!(db.project().exports, 1, "b.js is empty until it is written");
+        assert_eq!(db.project().modules, 1);
+        assert_eq!(
+            db.project().exports,
+            1,
+            "b.js is absent until it is written"
+        );
+        assert_eq!(db.stats().project_computed, 0);
 
         db.set_source(b, B_V1.to_string());
         assert_eq!(db.project().exports, 2);
+        assert_eq!(db.stats().project_computed, 1);
         assert_eq!(db.revision(), Revision(revision.0 + 1));
     }
 
@@ -919,6 +958,82 @@ mod tests {
         assert_eq!(db.intern("a.js"), first);
         assert_eq!(db.source(first), Some(A_V1));
         assert_eq!(db.source(FileId(7)), None);
+    }
+
+    #[test]
+    fn source_files_lists_only_active_sources() {
+        let (mut db, files) = engine(&[("a.js", A_V1)]);
+        let b = db.intern("b.js");
+
+        assert_eq!(db.source_files(), vec![(files[0], "a.js".to_owned())]);
+        db.set_source(b, B_V1.to_owned());
+        assert_eq!(
+            db.source_files(),
+            vec![(files[0], "a.js".to_owned()), (b, "b.js".to_owned())]
+        );
+    }
+
+    #[test]
+    fn removing_a_source_invalidates_project_and_excludes_it_from_rollups() {
+        let (mut db, files) = cold_project();
+        let file = files[0];
+        db.reset_stats();
+
+        db.remove_source(file);
+
+        assert_eq!(db.source(file), None);
+        assert_eq!(db.source_files(), vec![(files[1], "b.js".to_owned())]);
+        let project = db.project();
+        assert_eq!(project.modules, 1);
+        assert_eq!(project.exports, 1);
+        assert_eq!(db.stats().revision, 3);
+        assert_eq!(db.stats().project_computed, 1);
+        assert_eq!(db.stats().parse_computed, 0);
+        assert_eq!(db.stats().interface_computed, 0);
+    }
+
+    #[test]
+    fn removing_an_absent_source_is_idempotent() {
+        let (mut db, files) = engine(&[("a.js", A_V1)]);
+        db.remove_source(files[0]);
+
+        let revision = db.revision();
+        let stats = db.stats();
+        db.remove_source(files[0]);
+        assert_eq!(db.revision(), revision);
+        assert_eq!(db.stats(), stats);
+
+        let unset = db.intern("unset.js");
+        let revision = db.revision();
+        db.remove_source(unset);
+        assert_eq!(db.revision(), revision);
+
+        db.remove_source(FileId(7));
+        assert_eq!(db.revision(), revision);
+    }
+
+    #[test]
+    fn removed_source_can_be_restored_with_the_same_file_id() {
+        let (mut db, files) = cold_project();
+        let file = files[0];
+        db.remove_source(file);
+        db.project();
+        db.reset_stats();
+
+        assert_eq!(db.intern("a.js"), file);
+        db.set_source(file, A_V1.to_owned());
+        assert_eq!(db.source(file), Some(A_V1));
+        assert_eq!(db.project().modules, 2);
+        assert_eq!(db.project().exports, 2);
+        assert_eq!(
+            db.source_files(),
+            vec![(file, "a.js".to_owned()), (files[1], "b.js".to_owned())]
+        );
+        assert_eq!(db.stats().revision, 4);
+        assert_eq!(db.stats().parse_computed, 1);
+        assert_eq!(db.stats().interface_computed, 0);
+        assert_eq!(db.stats().early_cutoff, 1);
+        assert_eq!(db.stats().project_computed, 1);
     }
 
     #[test]

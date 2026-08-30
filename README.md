@@ -36,7 +36,7 @@ What exists today:
 | `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
 | `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
 | `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 7, including structured interpreter, native-build, native-run, and test results. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 10, including structured interpreter, native-build, native-run, shared-library, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
@@ -118,9 +118,10 @@ cargo build --timings    # the compiler developer's loop, measured (ADR 0004)
 The daemon speaks the request set in `crates/kiln-proto/src/lib.rs`: `Ping` for liveness and
 protocol negotiation, `SetSource` to replace a file's contents, `Check` for one module's
 summary, `Run` for interpreted execution, `NativeBuild` / `NativeRun` for cached native work,
-`Test` for resident conformance batches, `Project` for the whole-project rollup, and `Stats` /
-`ResetStats` for the recompute counters. Test failures and native artifacts are remembered under
-`.kiln/`. The exact CLI spelling is in `kiln --help`.
+`NativeSharedBuild` for embedding libraries, `Test` for resident conformance batches, `Project`
+for the whole-project rollup, and `Stats` / `ResetStats` for the recompute counters. A complete
+source sync also removes files that disappeared from the client's project view. Test failures and
+native artifacts are remembered under `.kiln/`. The exact CLI spelling is in `kiln --help`.
 
 ## Design and decisions
 

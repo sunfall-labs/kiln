@@ -322,6 +322,10 @@ proptest! {
                 .map(|index| db.interface(FileId(index as u32)))
                 .collect();
             let files_before = inputs.len();
+            let active_before: Vec<bool> = inputs
+                .iter()
+                .map(|(_, text)| text.is_some())
+                .collect();
             db.reset_stats();
 
             apply(&mut db, &mut inputs, *op);
@@ -341,8 +345,17 @@ proptest! {
             );
 
             // The rollup reads the file set and every interface and nothing else, so if neither
-            // moved, no amount of editing underneath them may reach it.
-            if warm && inputs.len() == files_before && observed.interfaces == interfaces_before {
+            // moved, no amount of editing underneath them may reach it. Activating an
+            // interned-but-unset path changes the file set even if its interface is empty.
+            let active_after: Vec<bool> = inputs
+                .iter()
+                .map(|(_, text)| text.is_some())
+                .collect();
+            if warm
+                && inputs.len() == files_before
+                && active_after == active_before
+                && observed.interfaces == interfaces_before
+            {
                 prop_assert_eq!(
                     project_computed,
                     0,
