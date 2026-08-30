@@ -300,7 +300,8 @@ pub enum StatementKind {
     /// closure created in the body capture that iteration's value rather than the last one.
     ForOf {
         kind: VariableKind,
-        name: String,
+        /// A pattern, so `for (const [key, value] of entries)` binds both.
+        pattern: Pattern,
         iterable: Expression,
         body: Box<Statement>,
     },
@@ -458,6 +459,17 @@ pub enum ExpressionKind {
         increment: bool,
         prefix: bool,
         target: String,
+    },
+    /// `object.property++`, and the other three spellings.
+    ///
+    /// Separate from [`ExpressionKind::Update`] because the target is a place rather than a name:
+    /// the object is evaluated once and both the read and the write go through that one
+    /// reference, which a name never needs.
+    UpdateMember {
+        increment: bool,
+        prefix: bool,
+        object: Box<Expression>,
+        property: Box<ObjectKey>,
     },
     /// `yield value` and `yield* iterable`.
     ///
@@ -667,6 +679,26 @@ pub enum AssignmentOperator {
     Divide,
     Remainder,
     Exponentiate,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
+    UnsignedShiftRight,
+    /// `&&=`, `||=` and `??=`. These do not compute and store: they *test* the current value and
+    /// assign only if it is the wrong one, so the right-hand side may never be evaluated and the
+    /// store may never happen. That is why they are not a `BinaryOperator` with an assignment
+    /// wrapped round it.
+    LogicalAnd,
+    LogicalOr,
+    Nullish,
+}
+
+impl AssignmentOperator {
+    /// Whether this assigns conditionally, evaluating its right-hand side only when it must.
+    pub fn is_short_circuiting(self) -> bool {
+        matches!(self, Self::LogicalAnd | Self::LogicalOr | Self::Nullish)
+    }
 }
 
 impl Module {
