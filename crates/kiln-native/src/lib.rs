@@ -1982,6 +1982,7 @@ typedef struct kiln_host {
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
+extern void kiln_cli_report_failure(int status, kiln_value value);
 "#,
     );
     for (_, module) in modules {
@@ -2059,7 +2060,12 @@ int main(void) {
             node.program.exports.len()
         )
         .unwrap();
-        output.push_str("    if (status != 0) return 1;\n");
+        // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
+        // reference cannot cross the boundary and printing it is the only thing left to do with
+        // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
+        output.push_str(
+            "    if (status != 0) { kiln_cli_report_failure(status, result); return 1; }\n",
+        );
         if node.path == graph.entry() {
             output.push_str("    if (kiln_cli_write_result(result) != 0) return 1;\n");
         }

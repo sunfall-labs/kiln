@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 5;
+pub const NATIVE_RUNTIME_VERSION: u32 = 6;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -305,7 +305,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #include <stddef.h>
 #include <stdint.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 5
+#define KILN_NATIVE_RUNTIME_VERSION 6
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 1
 
@@ -313,6 +313,10 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+/* A throw the program did not catch. The entry point converts the thrown value to text before
+ * returning this, because a reference cannot cross the boundary and the launcher's whole job with
+ * it is to print it. */
+#define KILN_C99_THROWN (-7)
 
 #define KILN_HOST_OP_WRITE_STDOUT 1
 
@@ -495,6 +499,25 @@ int kiln_cli_write_result(kiln_value value) {
     return kiln_cli_write_result_file(path, value);
 }
 
+/* Why the program stopped, on stderr.
+ *
+ * Without this a native run that threw exited 1 in silence, which is the failure mode the whole
+ * corpus is built to avoid: a refusal you can see beats a wrong answer you cannot, and an exit
+ * code with no words is neither. */
+void kiln_cli_report_failure(int status, kiln_value value) {
+    if (status == KILN_C99_THROWN) {
+        fputs("uncaught ", stderr);
+        if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
+            fwrite(value.ptr, 1, value.len, stderr);
+        } else {
+            fputs("exception", stderr);
+        }
+        fputc('\n', stderr);
+        return;
+    }
+    fprintf(stderr, "the program stopped with status %d\n", status);
+}
+
 static int kiln_cli_write_value(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
@@ -585,6 +608,7 @@ const LAUNCHER_DECL_PREFIX: &str = r#"
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
+extern void kiln_cli_report_failure(int status, kiln_value value);
 extern int 
 "#;
 
@@ -604,6 +628,7 @@ int main(void) {
 
 const LAUNCHER_BODY: &str = r#"(&host, &result);
     if (status != 0) {
+        kiln_cli_report_failure(status, result);
         return 1;
     }
     return kiln_cli_write_result(result) == KILN_C99_OK ? 0 : 1;
@@ -642,7 +667,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_is_separate_from_the_private_number_provider() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 5);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 6);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));

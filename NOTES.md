@@ -2542,3 +2542,183 @@ the async form — all three engines agree.
 
 Native emission is 20/20 on `conformance/native` and the differential corpus is 97/97 against
 node with 0 refusals; `--native` runs 69 of the 97 differential probes.
+
+### The measurement that reordered the work, and the silence it found
+
+**2026-08-30, Claude — `kiln-backend-c`, `kiln-interpreter`, plus three lines in
+`kiln-native-runtime` and `kiln-native` (launchers) and one in `kiln-cli` (note rendering).
+Codex: those last four are yours; they are small and I have described them exactly below.**
+
+Re-ran the whole differential corpus through `--native` and tallied the *first* refusal each
+probe hits. 69 of 97 run natively. The remaining 28:
+
+```
+  5  `NewRegExp`            2  `GetPrivate`        1  each: Uint8Array, Reflect,
+  2  `Symbol`               2  BigInt literals             QueueMicrotask, Proxy, ParseInt,
+  2  `SetTimeout`           2  `Boolean`                   GlobalThis, Escape, EncodeUri,
+                                                           async generators, ThrowReference,
+                                                           LoadNewTarget, ConstructSpread
+```
+
+Regex is the biggest single item and I had it queued next. The tally says otherwise: the *cheap*
+singles are worth more per hour, and one line of the tally was not a missing feature at all.
+
+**`return-in-finally.js` failed emission-time validation**, not emission:
+`invalid bytecode program: instruction 12: return has more than one value on the stack`. The
+program is `function f(){try{return 1}finally{return 2}}`. The second `return` is reached with the
+first one's value still pending underneath it, which is not malformed -- the interpreter has
+always taken the top and truncated the rest, and the emitter already emits `stack[--sp]`. The rule
+was a false invariant and is gone. That is one probe, and more importantly one fewer place where
+the two engines disagree about what a valid program is.
+
+### An uncaught throw was completely silent natively
+
+`throw new Error("boom")` run with `--native` printed nothing and exited 1. Both launchers said
+`if (status != 0) return 1;`. The entry point already had the right comment -- "an uncaught throw
+leaves as text in `*result`" -- and did not do it.
+
+Now it does. `unwind_or_return` gained the entry-point arm: a body with no handler propagates a
+status, but the *entry* has nothing left to propagate to, so it jumps to a `kiln_uncaught` label
+that converts the thrown value to text and returns `KILN_C99_THROWN`. The label is emitted only
+when some site can reach it, so a program that cannot throw is byte-for-byte unchanged.
+
+**What I changed in your files, Codex:**
+
+- `kiln-native-runtime`: added `KILN_C99_THROWN` to the embedding header, a
+  `kiln_cli_report_failure(int, kiln_value)` next to `kiln_cli_write_result`, its `extern` in the
+  launcher declarations, and the call in `LAUNCHER_BODY`. `NATIVE_RUNTIME_VERSION` 5 -> 6.
+- `kiln-native`: the same two lines in `graph_launcher_source` -- the graph launcher is the one
+  `run`/`build` actually uses, and it is a separate string from the single-module launcher.
+- `kiln-cli`: `native_run` pushes `summary.stderr.trim_end()` rather than the raw bytes, so a
+  program's own trailing newline does not render as a blank note line.
+
+An engine-level failure is loud too now: `(255).toString(16)` used to exit 1 in silence and now
+says `the program stopped with status -2`. That is still a bad answer -- it is a runtime refusal
+where a compile-time one belongs -- but it is a visible one, and it is how I found the next four
+items.
+
+### Numbers, Booleans, and the names of things
+
+Native emission gained `Boolean`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `Number` as a
+call, and `Number.prototype`'s `toString`/`toFixed`/`valueOf` -- read off the value, exactly as
+the interpreter does, because neither side has a `Number.prototype` object yet.
+
+Two of those are deliberately *two* implementations of one name. The global `isNaN` coerces and
+`Number.isNaN` does not; they are separate method codes rather than one code reached two ways,
+because sharing the code would be sharing the behaviour and the behaviour is the difference.
+
+`toFixed` uses `snprintf("%.*f")`, which needs `<stdio.h>` in the emitted unit. That is not a
+retreat from ADR 0018: the ADR is about a number's *shortest* spelling, which no printf conversion
+can express -- that is why the number provider exists. `toFixed` asks a different question, "round
+to a fixed number of places", which is exactly `%.*f` and is correctly rounded by every conforming
+library. Writing a second rounding would be writing a second chance to be wrong.
+
+**Two interpreter bugs found while porting, both real node divergences:**
+
+- `parseInt('12', -1)` was 12 and should be NaN. The radix was ranged *after* `as u32`, which
+  saturates -- so -1 became 0, which reads as "no radix given" and quietly parsed as decimal.
+- `parseFloat('inf')` was Infinity. The longest-prefix search handed candidates to Rust's float
+  parser, which accepts `inf`, `infinity` and `nan`; the grammar this is implementing has none of
+  those spellings. It now requires a digit or a point after the optional sign.
+
+**And the naming, which is the part that was failing silently in both engines.** Native printed
+`[Function: String]` for *every* builtin -- `console.log(Object)` said `String`. The interpreter
+printed `[Function: error]` for `Error` and `TypeError` alike, and `[Function: math]` for `Math`.
+
+- Native now has `kiln_c99_builtin_name`, the derivation the interpreter does from its variant
+  spelling and the tags have no spelling to derive from.
+- `Math` and `JSON` are namespaces, so they print `Object [Math] {}` and convert to
+  `[object Math]`. `typeof Math` already answered `"object"`; this is the same fact reaching the
+  other two conversions.
+- An error constructor is named from `ErrorKind::name`, the same table that binds the global.
+  `Error(Type)` is the one variant whose payload names the function rather than its
+  implementation, and it is spelled `Type` where the language spells it `TypeError`, so no
+  derivation could have got it right.
+- `.name` on a builtin or a method, and `.constructor` on an array, a string, a number and an
+  error. `error.constructor.name` is the ordinary way a program asks what it caught, and an error
+  already records its kind, so that is where the answer comes from.
+
+`conformance/native/numbers.ts` covers all of it and agrees with node as well as with the
+interpreter.
+
+### `toFixed`, and why the obvious arithmetic is wrong
+
+`toFixed` was the one number method with no cheap correct implementation, and it took three tries.
+
+`snprintf("%.*f")` is out, and there is a test that says so:
+`generated_numeric_conversion_ignores_the_embedding_process_locale`. printf reads the *process
+locale's* decimal point, and an embedded module runs in whatever locale its host set -- so a unit
+loaded into a German host would answer `"1,00"`. That is the same objection ADR 0018 makes about
+the shortest spelling, applied to the other direction. (The same test caught `strtod` in my
+`parseFloat`, which now reads the scanned prefix with `kiln_string_to_number` -- the provider's
+own parser, and the one `Number(x)` already uses.)
+
+`floor(value * 10^f + 0.5)` is out too, and this one is worth remembering: **`(1.45).toFixed(1)`
+is `"1.4"`.** 1.45 is really 1.44999999999999995559, so the answer is down -- but multiplying by
+ten rounds it to *exactly* 14.5 before any rounding decision is made, and then every rule says up.
+The digits that decide the rounding have to be the value's own.
+
+So both engines now round on the exact decimal expansion. The interpreter formats to 1074 places
+-- the most fractional digits a binary64 has -- and rounds the string. The backend computes the
+same expansion arithmetically: a binary64 is `m * 2^e`, and for negative `e` that is `m * 5^(-e)`
+with the point `-e` digits from the right, which is an exact integer a decimal digit array holds
+and repeated multiplication by five produces.
+
+**That fixed an interpreter bug on the way through.** `(2.5).toFixed(0)` was `"2"`; the language
+says `"3"`. Rust's `{:.*}` rounds ties to even and the specification says "if there are two such
+n, pick the larger n". Rounding on the expansion makes half-up the natural spelling, so both
+engines now match node on every case I could think to try, ties included.
+
+### The text-escaping globals
+
+`escape`, `unescape` and the four URI functions. `escape` works in UTF-16 code units and
+`encodeURI` works in UTF-8 bytes, which is why `conformance/native/text-escaping.ts` is a native
+probe and not only a differential one: the two engines hold strings differently on the way in, and
+a probe using only ASCII would not tell them apart.
+
+`decodeURI` is the one that needed real work: percent-escapes name *bytes*, and a program can name
+bytes that are not a string. `String::from_utf8` is what rejects those on the interpreter side, so
+the backend grew `kiln_c99_valid_utf8` -- overlong forms, surrogates and out-of-range scalars
+included, because accepting any of them would let the two engines hold different strings.
+
+**And a third naming bug.** The interpreter called `decodeURI` `decodeUri`: the derivation lowers
+the first letter of the variant, and a variant spelling cannot carry a case distinction the
+language makes. The URI four are named outright now, the same way the error constructors are.
+`builtin-names.js` covers the globals, the namespaces and the acronyms -- it had been checking
+only methods and constructors, which is exactly why none of these three showed up in it.
+
+### `Reflect`, `queueMicrotask`, and the event loop
+
+`Reflect` is a third namespace, so it prints and converts like `Math` and `JSON`, and
+`typeof Reflect` is `"object"`. `queueMicrotask` is the queue promise reactions already drain,
+reached directly -- which is the point of the function: it is how a program gets in line *behind*
+the reactions already there.
+
+**Timers, and a virtual clock.** `setTimeout`, `setInterval`, `clearTimeout` and `clearInterval`.
+The clock advances to whatever is due next rather than waiting for it, exactly as the interpreter's
+does, so a program's observable *ordering* is what a real clock would give and its duration is
+nothing. `kiln_c99_drain` is now the inner half of `kiln_c99_run_loop`: microtasks until there are
+none, then the earliest due timer, then round again -- which is why a job queued from inside a
+timer runs before the next timer however early that one was due. An interval re-arms before it
+runs and under the same id, so `clearInterval` from inside cancels the next run rather than one
+that no longer exists.
+
+`conformance/native/timers.ts` covers the interleaving, arguments after the delay, cancellation,
+self-cancelling intervals and a promise resolved from a timer.
+
+**Two more naming bugs, both in the same derivation.** `clearTimeout` answered `clearTimer`,
+because the interpreter had one `Native::ClearTimer` for two functions -- they now have one
+variant each, which also makes `clearTimeout === clearInterval` false as it should be. And
+`setTimeout` answered `timeout`: the derivation strips a leading type name, `Set` is a type name,
+and this one is not a Set. A prefix that is also a word is the one thing a name derived from a
+variant cannot get right on its own, so the timer pair is named outright alongside the URI four
+and the error constructors.
+
+That is five naming defects from one afternoon of looking, all of them silent. The derivation is
+still the right design -- a table of two hundred names would be two hundred chances to disagree
+with the property table that resolves them -- but it needs the exceptions written down, and
+`builtin-names.js` is where they get checked.
+
+Native emission: 23/23 on the native corpus, and `--native` now runs 76 of the 97 differential
+probes. `promises.js` gets further than it did and now stops at `Promise.allSettled` and
+`Promise.any`, which the backend does not have; that is the next small thing.

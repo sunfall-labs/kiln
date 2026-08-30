@@ -22,6 +22,14 @@ console.log(Number.isInteger, Number.parseFloat, Array.isArray, Array.from);
 console.log(map.set, map.get, map.has, map.delete, set.add, set.has);
 console.log(Promise.resolve, Promise.all, Promise.race);
 console.log(String, Number, Boolean, Object, Array, Symbol, Promise);
+// The globals that belong to no namespace, including the four whose spelling carries an acronym
+// the variant name flattens -- `DecodeUri` reads back as `decodeUri` unless something says
+// otherwise, and nothing else in this file would have caught that.
+console.log(parseInt, parseFloat, isNaN, isFinite, escape, unescape);
+console.log(encodeURI, encodeURIComponent, decodeURI, decodeURIComponent);
+console.log(TypeError, RangeError, ReferenceError, SyntaxError, Map, Set, Date);
+// A namespace is an object holding functions, so it shows as one rather than as a callable.
+console.log(Math, JSON, typeof Math, String(Math), `${JSON}`);
 
 // A constructor is named for its type; a method reached through an instance is named for itself.
 console.log(`${[].push}`.length > 0, typeof [].push, [].push === [].push);

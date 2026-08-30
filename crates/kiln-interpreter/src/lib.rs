@@ -229,7 +229,10 @@ pub enum Native {
     SetInterval,
     /// `clearTimeout` and `clearInterval` are one operation: both remove a scheduled callback by
     /// the id it was given, and the language does not distinguish which kind it was.
-    ClearTimer,
+    /// `clearTimeout` and `clearInterval` do the same thing and are two variants because they
+    /// are two functions: a program can print either name, and `f === g` must be false for them.
+    ClearTimeout,
+    ClearInterval,
     QueueMicrotask,
     DateConstructor,
     DateNow,
@@ -1611,9 +1614,13 @@ impl Value {
             // The same name a console shows. `String(f)` in node is the source text, which a
             // backend does not have; naming the function beats an invented body, and naming it
             // the way the program does beats naming it the way the implementation does.
-            Self::Native(native) => {
-                format!("[Function: {}]", builtin_js_name(&format!("{native:?}")))
-            }
+            Self::Native(native) => match namespace_name(native) {
+                // A namespace is an object that happens to hold functions, and `String` of an
+                // object is its `toString` tag. `typeof Math` already answered `"object"`; this
+                // is the same fact reaching the other conversion.
+                Some(name) => format!("[object {name}]"),
+                None => format!("[Function: {}]", native_js_name(native)),
+            },
             Self::Callback(method) => {
                 format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
             }
@@ -3041,9 +3048,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::IsFinite => Native::IsFinite,
                         kiln_ir::Builtin::SetTimeout => Native::SetTimeout,
                         kiln_ir::Builtin::SetInterval => Native::SetInterval,
-                        kiln_ir::Builtin::ClearTimeout | kiln_ir::Builtin::ClearInterval => {
-                            Native::ClearTimer
-                        }
+                        kiln_ir::Builtin::ClearTimeout => Native::ClearTimeout,
+                        kiln_ir::Builtin::ClearInterval => Native::ClearInterval,
                         kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
                         kiln_ir::Builtin::Promise => Native::PromiseConstructor,
                         kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
@@ -3915,7 +3921,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
                 Ok(Value::Number(id))
             }
-            Native::ClearTimer => {
+            Native::ClearTimeout | Native::ClearInterval => {
                 let id = argument_number(arguments);
                 self.timers.retain(|timer| timer.id != id);
                 Ok(Value::Undefined)
@@ -8690,7 +8696,8 @@ fn call_native(
         // not have one.
         Native::SetTimeout
         | Native::SetInterval
-        | Native::ClearTimer
+        | Native::ClearTimeout
+        | Native::ClearInterval
         | Native::QueueMicrotask
         // Every promise operation settles something, schedules something, or calls back into the
         // program -- so none of them is a pure function of its arguments.
@@ -9075,11 +9082,8 @@ fn call_native(
             if !(0.0..=100.0).contains(&digits) {
                 return Err(ExecutionError::RadixOutOfRange);
             }
-            if !value.is_finite() {
-                Value::String(number_string(value))
-            } else {
-                Value::String(format!("{value:.*}", digits as usize))
-            }
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::String(number_to_fixed(value, digits as u32))
         }
         Native::NumberConstructor => Value::Number(match arguments.first() {
             None => 0.0,
@@ -10341,6 +10345,62 @@ fn is_integer(value: f64) -> bool {
     value.is_finite() && value.fract() == 0.0
 }
 
+/// `Number.prototype.toFixed`, as the specification spells it: the integer `n` for which
+/// `n / 10^f - x` is closest to zero, taking the *larger* `n` on a tie.
+///
+/// Not `format!("{x:.*}")`, which rounds ties to even -- so it answered `"2"` for
+/// `(2.5).toFixed(0)` where the language says `"3"`. Written as an integer rounding rather than as
+/// a formatting flag so the C backend can be the same handful of lines: the two engines agreeing
+/// about rounding matters more than either being clever about it.
+///
+/// The scaling is done in binary64, so a value whose scaled form needs more than 53 bits gets the
+/// nearest double rather than the exact integer the specification names. Everything a program
+/// actually formats -- a price, a percentage, a duration -- is far inside that.
+fn number_to_fixed(value: f64, digits: u32) -> String {
+    if !value.is_finite() || value.abs() >= 1e21 {
+        // The specification hands both of these back to `ToString`.
+        return number_string(value);
+    }
+    let places = digits as usize;
+    // The *exact* decimal expansion, not a rounding of it. A binary64 has at most 1074 fractional
+    // digits, so this is the value itself -- and it has to be, because the digit that decides the
+    // rounding is one `{:.places$}` would already have consumed. That matters beyond ties:
+    // `(1.45).toFixed(1)` is `"1.4"`, because 1.45 is really 1.44999..., and any scaling by a
+    // power of ten rounds that up to 14.5 before the language ever gets to look at it.
+    let exact = format!("{:.*}", 1074, value.abs());
+    let point = exact.find('.').unwrap_or(exact.len());
+    let mut kept: Vec<u8> = exact.bytes().filter(|byte| *byte != b'.').collect();
+    let decided = point + places;
+    // Round half *up*, which is what "if there are two such n, pick the larger n" says. Rust's own
+    // formatting rounds ties to even and would answer `"2"` for `(2.5).toFixed(0)`.
+    let round_up = kept.get(decided).is_some_and(|digit| *digit >= b'5');
+    kept.truncate(decided);
+    if round_up {
+        let mut at = kept.len();
+        loop {
+            if at == 0 {
+                kept.insert(0, b'1');
+                break;
+            }
+            at -= 1;
+            if kept[at] == b'9' {
+                kept[at] = b'0';
+            } else {
+                kept[at] += 1;
+                break;
+            }
+        }
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    let text = String::from_utf8(kept).unwrap_or_default();
+    // A carry can have lengthened the integer part, so it is measured rather than assumed.
+    let split = text.len() - places;
+    if places == 0 {
+        return format!("{sign}{text}");
+    }
+    format!("{sign}{}.{}", &text[..split], &text[split..])
+}
+
 /// `parseInt(text, radix?)`.
 ///
 /// Reads as far as it can and stops, rather than rejecting: `parseInt("12px")` is 12. That
@@ -10351,12 +10411,17 @@ fn parse_int(arguments: &[Value]) -> Value {
         .map_or_else(String::new, Value::to_display_string);
     let text = text.trim();
     let radix = match arguments.get(1).map(Value::as_number) {
-        Some(radix) if radix.is_finite() && radix != 0.0 => radix as u32,
-        _ => 0,
+        Some(radix) if radix.is_finite() && radix != 0.0 => radix.trunc(),
+        _ => 0.0,
     };
-    if !(radix == 0 || (2..=36).contains(&radix)) {
+    // Ranged before the cast, not after: `as u32` saturates, so a negative radix became zero --
+    // which reads as "no radix given" and quietly parsed `parseInt('12', -1)` as decimal where
+    // the language says NaN.
+    if !(radix == 0.0 || (2.0..=36.0).contains(&radix)) {
         return Value::Number(f64::NAN);
     }
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let radix = radix as u32;
 
     let (negative, rest) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -10393,6 +10458,16 @@ fn parse_float(arguments: &[Value]) -> Value {
     }
     if text.starts_with("-Infinity") {
         return Value::Number(f64::NEG_INFINITY);
+    }
+    // A decimal literal starts with a digit or a point. Checked before the prefix search below,
+    // because Rust's float parser also accepts `inf`, `infinity` and `nan` -- spellings this
+    // grammar does not have, and which would otherwise have made `parseFloat('inf')` infinite.
+    if !text
+        .strip_prefix(['+', '-'])
+        .unwrap_or(text)
+        .starts_with(|character: char| character.is_ascii_digit() || character == '.')
+    {
+        return Value::Number(f64::NAN);
     }
     // Take the longest prefix that parses, which is what "reads as far as it can" means when the
     // grammar allows an exponent: "1e" is 1, not an error.
@@ -10660,7 +10735,10 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             Some(name) => format!("[Function: {name}]"),
             None => "[Function (anonymous)]".to_owned(),
         },
-        Value::Native(native) => format!("[Function: {}]", builtin_js_name(&format!("{native:?}"))),
+        Value::Native(native) => match namespace_name(native) {
+            Some(name) => format!("Object [{name}] {{}}"),
+            None => format!("[Function: {}]", native_js_name(native)),
+        },
         Value::Callback(method) => {
             format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
         }
@@ -11664,6 +11742,44 @@ fn empty_items(count: usize) -> String {
 /// the type and lowering the first letter recovers the JavaScript name --
 /// `conformance/differential/builtin-names.js` checks that against node for every builtin the
 /// corpus can reach.
+/// The name a console shows for a runtime-supplied callable.
+///
+/// `Error(Type)` is the one variant whose payload names the function rather than its
+/// implementation, and the payload is spelled `Type` where the language spells it `TypeError` --
+/// so it is answered from the same table that binds the global, not from the variant. Every other
+/// name is derived, for the reason [`builtin_js_name`] gives.
+fn native_js_name(native: &Native) -> String {
+    match native {
+        Native::Error(kind) => kind.name().to_owned(),
+        // The URI four are an acronym the variant spelling flattens: `DecodeUri` lowers to
+        // `decodeUri`, and the language spells it `decodeURI`. A derivation cannot recover a case
+        // distinction that the input does not carry, so these are named outright.
+        // `SetTimeout` starts with a type name that is not its type: the derivation strips `Set`
+        // -- the collection -- and answers `timeout`. A prefix that is a word in its own right is
+        // the one thing a name derived from a variant cannot get right on its own.
+        Native::SetTimeout => "setTimeout".to_owned(),
+        Native::SetInterval => "setInterval".to_owned(),
+        Native::EncodeUri => "encodeURI".to_owned(),
+        Native::EncodeUriComponent => "encodeURIComponent".to_owned(),
+        Native::DecodeUri => "decodeURI".to_owned(),
+        Native::DecodeUriComponent => "decodeURIComponent".to_owned(),
+        other => builtin_js_name(&format!("{other:?}")),
+    }
+}
+
+/// The name a namespace shows, or `None` for a callable.
+///
+/// `Json` is spelled `JSON` in the language, which is the one place the variant's spelling and
+/// the program's disagree -- and the reason this is a table of three rather than a derivation.
+const fn namespace_name(native: &Native) -> Option<&'static str> {
+    match native {
+        Native::Math => Some("Math"),
+        Native::Json => Some("JSON"),
+        Native::Reflect => Some("Reflect"),
+        _ => None,
+    }
+}
+
 fn builtin_js_name(variant: &str) -> String {
     // A payload is not part of the name: `DateField(Time)` is `getTime`'s implementation, not a
     // function called `DateField(Time)`.
