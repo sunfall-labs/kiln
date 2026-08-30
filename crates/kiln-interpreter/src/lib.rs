@@ -1487,6 +1487,9 @@ impl PartialEq for Closure {
 #[derive(Debug, Default)]
 pub struct ArrayData {
     items: RefCell<Vec<Value>>,
+    /// Sparse overrides for indexed-property enumerability. Most arrays never define a
+    /// descriptor, so keeping only hidden indices preserves the cheap dense path.
+    index_non_enumerable: RefCell<Vec<usize>>,
     /// Empty for almost every array, and allocated with it rather than on demand because an
     /// array that never gains a named property still has to answer that it has none.
     properties: RefCell<ObjectData>,
@@ -1496,6 +1499,7 @@ impl ArrayData {
     fn new(items: Vec<Value>) -> Rc<Self> {
         Rc::new(Self {
             items: RefCell::new(items),
+            index_non_enumerable: RefCell::new(Vec::new()),
             properties: RefCell::new(ObjectData::default()),
         })
     }
@@ -1506,6 +1510,38 @@ impl ArrayData {
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<Value>> {
         self.items.borrow_mut()
+    }
+
+    fn index_enumerable(&self, index: usize) -> bool {
+        !self.index_non_enumerable.borrow().contains(&index)
+    }
+
+    fn set_index_enumerable(&self, index: usize, enumerable: bool) {
+        let mut hidden = self.index_non_enumerable.borrow_mut();
+        hidden.retain(|at| *at != index);
+        if !enumerable {
+            let position = hidden
+                .iter()
+                .position(|at| *at > index)
+                .unwrap_or(hidden.len());
+            hidden.insert(position, index);
+        }
+    }
+
+    fn remove_index_attributes(&self, index: usize) {
+        self.index_non_enumerable
+            .borrow_mut()
+            .retain(|at| *at != index);
+    }
+
+    fn replace_index_attributes(&self, hidden: impl IntoIterator<Item = usize>) {
+        *self.index_non_enumerable.borrow_mut() = hidden.into_iter().collect();
+    }
+
+    fn truncate_index_attributes(&self, length: usize) {
+        self.index_non_enumerable
+            .borrow_mut()
+            .retain(|at| *at < length);
     }
 }
 
@@ -4941,6 +4977,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // A partial descriptor such as `{ enumerable: false }` changes only the
                     // requested attributes. In particular, it must not turn an existing
                     // accessor into a data property whose value is `undefined`.
+                    if let Value::Array(items) = &target
+                        && let Some(index) =
+                            string_key(&key).and_then(|key| key.parse::<usize>().ok())
+                        && enumerable_present
+                        && !items.properties.borrow().is_frozen()
+                    {
+                        items.set_index_enumerable(index, enumerable);
+                    }
                 } else {
                     let value = if value_present {
                         self.read_property(&descriptor, "value", instruction)?
@@ -8235,16 +8279,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // property write. Sloppy mode discards it and strict mode throws; the machine does
             // not know which it is in, and discarding is the one that cannot invent an error.
             Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
-            Value::Array(items) => match array_index(key) {
+            Value::Array(array) => match array_index(key) {
                 Some(index) => {
-                    let mut items = items.borrow_mut();
+                    let mut values = array.borrow_mut();
+                    let was_present = values
+                        .get(index)
+                        .is_some_and(|item| !matches!(item, Value::Native(Native::Hole)));
                     // Writing past the end extends with *holes*, not undefined: `a[3] = 4` on a
                     // one-element array leaves two positions that `in` denies, `for...in` skips
                     // and a console shows as `<2 empty items>`.
-                    if index >= items.len() {
-                        items.resize(index + 1, Value::Native(Native::Hole));
+                    if index >= values.len() {
+                        values.resize(index + 1, Value::Native(Native::Hole));
                     }
-                    items[index] = value;
+                    values[index] = value;
+                    drop(values);
+                    if !was_present {
+                        // Assignment creates a fresh enumerable property when it fills a hole.
+                        array.remove_index_attributes(index);
+                    }
                     Ok(())
                 }
                 // `length` is derived, not stored: writing it truncates or extends. This is how
@@ -8260,22 +8312,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     {
                         let length = length as usize;
-                        let mut items = items.borrow_mut();
-                        if length <= items.len() {
-                            items.truncate(length);
+                        let mut values = array.borrow_mut();
+                        if length <= values.len() {
+                            values.truncate(length);
                         } else {
                             // Growing leaves holes, which read as undefined and are not the same
                             // thing: `1 in a` is false for one.
-                            items.resize(length, Value::Native(Native::Hole));
+                            values.resize(length, Value::Native(Native::Hole));
                         }
+                        // A descriptor for an index beyond the new length no longer describes
+                        // an own property and must not affect a later re-use of that index.
                     }
+                    array.truncate_index_attributes(length as usize);
                     Ok(())
                 }
                 // Not an index, so it is an ordinary named property of the array.
                 None => {
                     let name = key.to_property_key();
                     if self.inherited_setter(
-                        &items.properties,
+                        &array.properties,
                         target,
                         &name,
                         &value,
@@ -8283,7 +8338,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )? {
                         return Ok(());
                     }
-                    items.properties.borrow_mut().set(&name, value);
+                    array.properties.borrow_mut().set(&name, value);
                     Ok(())
                 }
             },
@@ -9596,7 +9651,16 @@ fn call_native(
         },
         Native::ArrayPop => match receiver {
             // Popping an empty array is `undefined`, not an error.
-            Value::Array(items) => items.borrow_mut().pop().unwrap_or(Value::Undefined),
+            Value::Array(items) => {
+                let mut values = items.borrow_mut();
+                let index = values.len().checked_sub(1);
+                let result = values.pop().unwrap_or(Value::Undefined);
+                drop(values);
+                if let Some(index) = index {
+                    items.remove_index_attributes(index);
+                }
+                result
+            }
             _ => Value::Undefined,
         },
         Native::ArrayIndexOf | Native::ArrayIncludes => {
@@ -9787,28 +9851,68 @@ fn call_native(
         // In place, and returns the same array rather than a copy.
         Native::ArrayReverse => match receiver {
             Value::Array(items) => {
+                let old_values = items.borrow().clone();
+                let old_hidden = items.index_non_enumerable.borrow().clone();
                 items.borrow_mut().reverse();
+                let length = old_values.len();
+                let hidden = (0..length).filter(|index| {
+                    let other = length - 1 - *index;
+                    old_values.get(*index).is_some_and(array_item_present)
+                        && old_values.get(other).is_some_and(array_item_present)
+                        && old_hidden.contains(index)
+                });
+                items.replace_index_attributes(hidden);
                 receiver.clone()
             }
             _ => Value::Undefined,
         },
         Native::ArrayShift => match receiver {
-            Value::Array(items) => {
-                let mut items = items.borrow_mut();
+            Value::Array(array) => {
+                let old_values = array.borrow().clone();
+                let old_hidden = array.index_non_enumerable.borrow().clone();
+                let mut items = array.borrow_mut();
                 if items.is_empty() {
                     Value::Undefined
                 } else {
-                    items.remove(0)
+                    let result = items.remove(0);
+                    let new_length = items.len();
+                    drop(items);
+                    let hidden = (0..new_length).filter(|index| {
+                        old_values.get(*index).is_some_and(array_item_present)
+                            && old_values
+                                .get(*index + 1)
+                                .is_some_and(array_item_present)
+                            && old_hidden.contains(index)
+                    });
+                    array.replace_index_attributes(hidden);
+                    result
                 }
             }
             _ => Value::Undefined,
         },
         Native::ArrayUnshift => match receiver {
-            Value::Array(items) => {
-                let mut items = items.borrow_mut();
+            Value::Array(array) => {
+                let old_values = array.borrow().clone();
+                let old_hidden = array.index_non_enumerable.borrow().clone();
+                let mut items = array.borrow_mut();
                 // Inserted as a block so the arguments keep their order at the front.
                 items.splice(0..0, arguments.iter().cloned());
-                Value::Number(items.len() as f64)
+                let length = items.len();
+                drop(items);
+                let inserted = arguments.len();
+                let hidden = (0..length).filter(|index| {
+                    let source_present = if *index < inserted {
+                        true
+                    } else {
+                        let source = index - inserted;
+                        old_values.get(source).is_some_and(array_item_present)
+                    };
+                    old_values.get(*index).is_some_and(array_item_present)
+                        && source_present
+                        && old_hidden.contains(index)
+                });
+                array.replace_index_attributes(hidden);
+                Value::Number(length as f64)
             }
             _ => Value::Undefined,
         },
@@ -9831,6 +9935,8 @@ fn call_native(
         },
         Native::ArraySplice => match receiver {
             Value::Array(items) => {
+                let old_values = items.borrow().clone();
+                let old_hidden = items.index_non_enumerable.borrow().clone();
                 let length = items.borrow().len();
                 let start = relative_index(arguments.first(), length, 0);
                 // A missing count removes everything from `start`, where an explicit `undefined`
@@ -9853,6 +9959,22 @@ fn call_native(
                     .borrow_mut()
                     .splice(start..start + removing, inserted)
                     .collect();
+                let inserting = arguments.len().saturating_sub(2);
+                let new_length = old_values.len() - removing + inserting;
+                let hidden = (0..new_length).filter(|index| {
+                    let source_present = if *index < start {
+                        old_values.get(*index).is_some_and(array_item_present)
+                    } else if *index < start + inserting {
+                        true
+                    } else {
+                        let source = *index + removing - inserting;
+                        old_values.get(source).is_some_and(array_item_present)
+                    };
+                    old_values.get(*index).is_some_and(array_item_present)
+                        && source_present
+                        && old_hidden.contains(index)
+                });
+                items.replace_index_attributes(hidden);
                 // The removed elements, which is what makes `splice` usable as a queue read.
                 Value::Array(ArrayData::new(removed))
             }
@@ -9860,6 +9982,8 @@ fn call_native(
         },
         Native::ArrayCopyWithin => match receiver {
             Value::Array(items) => {
+                let old_values = items.borrow().clone();
+                let old_hidden = items.index_non_enumerable.borrow().clone();
                 let length = items.borrow().len();
                 let target = relative_index(arguments.first(), length, 0);
                 let start = relative_index(arguments.get(1), length, 0);
@@ -9879,12 +10003,26 @@ fn call_native(
                         *slot = value;
                     }
                 }
+                let copied = end.saturating_sub(start).min(length - target);
+                let hidden = (0..length).filter(|index| {
+                    if (target..target + copied).contains(index) {
+                        let source = start + (*index - target);
+                        old_values.get(*index).is_some_and(array_item_present)
+                            && old_values.get(source).is_some_and(array_item_present)
+                            && old_hidden.contains(index)
+                    } else {
+                        old_hidden.contains(index)
+                    }
+                });
+                items.replace_index_attributes(hidden);
                 receiver.clone()
             }
             _ => Value::Undefined,
         },
         Native::ArrayFill => match receiver {
             Value::Array(items) => {
+                let old_values = items.borrow().clone();
+                let old_hidden = items.index_non_enumerable.borrow().clone();
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let length = items.borrow().len();
                 let start = relative_index(arguments.get(1), length, 0);
@@ -9892,6 +10030,12 @@ fn call_native(
                 for slot in items.borrow_mut().iter_mut().take(end).skip(start) {
                     *slot = value.clone();
                 }
+                let hidden = (0..length).filter(|index| {
+                    old_hidden.contains(index)
+                        && (old_values.get(*index).is_some_and(array_item_present)
+                            || !(start..end).contains(index))
+                });
+                items.replace_index_attributes(hidden);
                 receiver.clone()
             }
             _ => Value::Undefined,
@@ -10949,10 +11093,9 @@ fn own_enumerable(target: &Value, key: &Value) -> bool {
             .any(|(name, _)| name == &key),
         Value::Array(items) => {
             if let Some(index) = array_index(&key_value(&key)) {
-                return items
-                    .borrow()
-                    .get(index)
-                    .is_some_and(|v| !matches!(v, Value::Native(Native::Hole)));
+                return items.borrow().get(index).is_some_and(|v| {
+                    !matches!(v, Value::Native(Native::Hole)) && items.index_enumerable(index)
+                });
             }
             items
                 .properties
@@ -10998,10 +11141,16 @@ fn set_target_enumerable(target: &Value, key: &PropertyKey, enumerable: bool) {
             .properties
             .borrow_mut()
             .set_enumerable(key, enumerable),
-        Value::Array(items) if string_index(key).is_none() => items
-            .properties
-            .borrow_mut()
-            .set_enumerable(key, enumerable),
+        Value::Array(items) => {
+            if let Some(index) = array_index(&key_value(key)) {
+                items.set_index_enumerable(index, enumerable);
+            } else {
+                items
+                    .properties
+                    .borrow_mut()
+                    .set_enumerable(key, enumerable);
+            }
+        }
         _ => {}
     }
 }
@@ -11302,10 +11451,19 @@ fn delete_property(target: &Value, key: &Value) -> bool {
         // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the
         // one place the difference between the two is directly observable.
         Value::Array(items) => {
-            if let Some(index) = array_index(key)
-                && let Some(slot) = items.borrow_mut().get_mut(index)
-            {
-                *slot = Value::Native(Native::Hole);
+            if let Some(index) = array_index(key) {
+                let exists = items
+                    .borrow()
+                    .get(index)
+                    .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
+                if !exists {
+                    items.remove_index_attributes(index);
+                    return true;
+                }
+                if let Some(slot) = items.borrow_mut().get_mut(index) {
+                    *slot = Value::Native(Native::Hole);
+                    items.remove_index_attributes(index);
+                }
             } else {
                 items.properties.borrow_mut().remove(key.to_property_key());
             }
@@ -11348,7 +11506,9 @@ fn own_properties(value: &Value) -> Vec<(PropertyKey, Property)> {
                 .borrow()
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                .filter(|(index, item)| {
+                    !matches!(item, Value::Native(Native::Hole)) && items.index_enumerable(*index)
+                })
                 .map(|(index, item)| {
                     (
                         PropertyKey::String(index.to_string()),
@@ -12834,11 +12994,6 @@ fn own_property_entries(value: &Value) -> Vec<(PropertyKey, Property)> {
 }
 
 /// One own property described as the object `Object.getOwnPropertyDescriptor` returns.
-///
-/// The three attribute flags are not tracked per-property here; freezing is, so `writable` and
-/// `configurable` report the whole object's state. That is right for the two shapes programs
-/// actually build -- a plain object and a frozen one -- and wrong only for a property made
-/// non-writable on its own, which nothing can express yet.
 fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
     let intrinsic_array_length =
         matches!(target, Value::Array(_)) && *key == PropertyKey::String("length".to_owned());
@@ -12927,6 +13082,10 @@ fn dense_items(items: &[Value]) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+fn array_item_present(item: &Value) -> bool {
+    !matches!(item, Value::Native(Native::Hole))
 }
 
 /// How a console reports a run of holes: `<1 empty item>` or `<3 empty items>`.
@@ -14846,6 +15005,88 @@ mod tests {
             Value::Object(object)
                 if object.borrow().get("configurable") == Some(Value::Boolean(false))
         ));
+    }
+
+    #[test]
+    fn array_index_descriptor_attributes_cover_enumeration_and_partial_updates() {
+        let target = Value::Array(ArrayData::new(vec![Value::Number(7.0), Value::Number(8.0)]));
+        let mut descriptor = ObjectData::default();
+        descriptor.set("enumerable", Value::Boolean(false));
+        let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        vm.dispatch_native(
+            Native::ObjectDefineProperty,
+            &Value::Undefined,
+            &[target.clone(), Value::String("0".into()), descriptor],
+            0,
+        )
+        .expect("define array index descriptor");
+
+        assert_eq!(
+            own_property_keys(&target),
+            vec![
+                PropertyKey::String("0".into()),
+                PropertyKey::String("1".into()),
+                PropertyKey::String("length".into()),
+            ]
+        );
+        assert_eq!(
+            own_properties(&target)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            vec![PropertyKey::String("1".into())]
+        );
+        let descriptor =
+            own_descriptor(&target, &PropertyKey::String("0".into())).expect("index descriptor");
+        let Value::Object(descriptor) = descriptor else {
+            panic!("descriptor is an object");
+        };
+        assert_eq!(
+            descriptor.borrow().get("enumerable"),
+            Some(Value::Boolean(false))
+        );
+        assert_eq!(
+            descriptor.borrow().get("writable"),
+            Some(Value::Boolean(true))
+        );
+        assert_eq!(
+            descriptor.borrow().get("configurable"),
+            Some(Value::Boolean(true))
+        );
+
+        // A partial enumerable update retains the other property attributes.
+        let mut partial = ObjectData::default();
+        partial.set("enumerable", Value::Boolean(true));
+        vm.dispatch_native(
+            Native::ObjectDefineProperty,
+            &Value::Undefined,
+            &[
+                target.clone(),
+                Value::String("0".into()),
+                Value::Object(Rc::new(RefCell::new(partial))),
+            ],
+            0,
+        )
+        .expect("partially update array index descriptor");
+        assert_eq!(
+            own_descriptor(&target, &PropertyKey::String("0".into())).and_then(|descriptor| {
+                match descriptor {
+                    Value::Object(descriptor) => descriptor.borrow().get("writable"),
+                    _ => None,
+                }
+            }),
+            Some(Value::Boolean(true))
+        );
+        assert!(delete_property(&target, &Value::String("0".into())));
     }
 
     #[test]
