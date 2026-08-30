@@ -630,6 +630,7 @@ typedef struct kiln_closure {
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
+    kiln_value captured_this;
     kiln_value captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
     kiln_value captured_arguments;
@@ -2948,10 +2949,14 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
+    if (closure->arrow) {
+        receiver = closure->captured_this;
+        new_target = closure->captured_new_target;
+    }
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
-         * differs only in who drives it, which is this rather than the program. */
+        * differs only in who drives it, which is this rather than the program. */
         kiln_value built;
         int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
         if (status != KILN_C99_OK) {
@@ -12183,6 +12188,14 @@ fn emit_instruction(
             // One handler slot per instruction: a body cannot register more handlers than it has
             // instructions, which is the same bound an automatic frame uses.
             let frame_handlers = target.code.len().max(1);
+            // Every function body receives its effective receiver. An arrow snapshots that
+            // value now; an ordinary closure carries the same field but never consults it.
+            // Module entry has no receiver and therefore captures `undefined` explicitly.
+            let defining_receiver = if target.arrow && matches!(site, ReturnSite::Body) {
+                "receiver"
+            } else {
+                "kiln_c99_undefined()"
+            };
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
@@ -14314,6 +14327,56 @@ int main(void) {{
         assert!(
             run.status.success(),
             "a closure and its module body did not share one cell (exit {:?})",
+            run.status.code()
+        );
+    }
+
+    /// An arrow has no call-time receiver. It snapshots the receiver of the frame that creates
+    /// it, even when a later plain call supplies `undefined` as `this`.
+    #[test]
+    fn executable_arrow_captures_its_defining_receiver() {
+        let arrow = FunctionProto {
+            arrow: true,
+            code: vec![Instruction::LoadThis, Instruction::Return],
+            ..function(Vec::new())
+        };
+        let maker = FunctionProto {
+            code: vec![Instruction::MakeFunction(1), Instruction::Return],
+            ..function(Vec::new())
+        };
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("make".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::NewObject { count: 0 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::SetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::StoreLocal(2),
+                Instruction::LoadLocal(2),
+                Instruction::Call { argc: 0 },
+                Instruction::LoadLocal(1),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: vec![maker, arrow],
+        })
+        .expect("arrow receiver program emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits == 1 ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "arrow-receiver");
+        assert!(
+            run.status.success(),
+            "an arrow observed its call-time receiver instead of its defining receiver (exit {:?})",
             run.status.code()
         );
     }

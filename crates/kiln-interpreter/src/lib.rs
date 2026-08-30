@@ -2476,6 +2476,7 @@ pub struct GeneratorState {
     stack: Vec<Value>,
     instruction: usize,
     this_value: Value,
+    new_target: Value,
     arguments: Vec<Value>,
     /// Handlers registered inside the generator, held while it is suspended.
     ///
@@ -5760,6 +5761,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             saved_handlers,
             instruction_pointer,
             this_value,
+            new_target,
             arguments,
             started,
         ) = {
@@ -5771,6 +5773,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 state.handlers.clone(),
                 state.instruction,
                 state.this_value.clone(),
+                state.new_target.clone(),
                 state.arguments.clone(),
                 state.started,
             )
@@ -5780,8 +5783,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
-            // A generator resumption is never a `new` call, whatever built the generator.
-            new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
+            new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
@@ -19602,5 +19604,94 @@ mod tests {
         // Returning at the end of the module body would make every timer unobservable.
         let program = timer_program(&[("scheduled", 5.0)]);
         assert_eq!(stdout_of(&program), "scheduled");
+    }
+
+    #[test]
+    fn an_async_arrow_captures_its_defining_receiver() {
+        let maker = kiln_ir::FunctionProto {
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![Instruction::MakeFunction(1), Instruction::Return],
+            upvalues: Vec::new(),
+        };
+        let arrow = kiln_ir::FunctionProto {
+            asynchronous: true,
+            name: None,
+            arrow: true,
+            generator: true,
+            async_generator: false,
+            parameter_count: 0,
+            local_count: 0,
+            code: vec![
+                Instruction::LoadThis,
+                Instruction::GetProperty(1),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+        };
+        let report = kiln_ir::FunctionProto {
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            parameter_count: 1,
+            local_count: 1,
+            code: vec![
+                Instruction::LoadLocal(0),
+                Instruction::HostCall {
+                    op: HostOp::WriteStdout,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+        };
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("make".into()),
+                Constant::String("tag".into()),
+                Constant::String("owner".into()),
+                Constant::String("wrong".into()),
+                Constant::String("call".into()),
+                Constant::String("then".into()),
+            ],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::NewObject { count: 1 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::SetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::StoreLocal(2),
+                Instruction::Const(1),
+                Instruction::Const(3),
+                Instruction::NewObject { count: 1 },
+                Instruction::StoreLocal(3),
+                Instruction::LoadLocal(2),
+                Instruction::LoadLocal(3),
+                Instruction::CallMethod { name: 4, argc: 1 },
+                Instruction::MakeFunction(2),
+                Instruction::CallMethod { name: 5, argc: 1 },
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            local_count: 4,
+            functions: vec![maker, arrow, report],
+        };
+
+        assert_eq!(stdout_of(&program), "owner");
     }
 }
