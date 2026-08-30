@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ExecutionLimits, execute};
+use kiln_interpreter::{ExecutionLimits, execute, execute_node};
 use kiln_runtime::CaptureHost;
 
 use crate::case::{
@@ -38,6 +38,22 @@ pub(crate) fn run_against_expected_stdout(
 }
 
 fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
+    run_with_executor(path, expected, mode, false)
+}
+
+/// Run a source file through the same compiler but with the Tokio-owned Node Adapter installed.
+pub fn run_node_against_expected_stdout(
+    path: &Path,
+    expected: &str,
+    mode: RunMode,
+) -> VariantResult {
+    VariantResult {
+        variant: Variant::Sloppy,
+        result: run_with_executor(path, expected, mode, true),
+    }
+}
+
+fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> CaseResult {
     let started = Instant::now();
     crate::source_compiler::install();
 
@@ -116,11 +132,20 @@ fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     };
 
     let mut host = CaptureHost::new();
-    if let Err(error) = execute(
-        std::rc::Rc::new(program),
-        &mut host,
-        ExecutionLimits::default(),
-    ) {
+    let result = if node {
+        execute_node(
+            std::rc::Rc::new(program),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+    } else {
+        execute(
+            std::rc::Rc::new(program),
+            &mut host,
+            ExecutionLimits::default(),
+        )
+    };
+    if let Err(error) = result {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
         result.stdout = host.into_stdout();
         return result;
@@ -235,5 +260,40 @@ mod tests {
     fn eliding_never_splits_a_character() {
         let wide = "é".repeat(DIFF_EXCERPT_BYTES);
         assert!(excerpt(&wide).ends_with('…'), "the excerpt is elided");
+    }
+
+    #[test]
+    fn node_mode_runs_fs_promises_to_quiescence() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("kiln-node-fs-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let script = root.join("case.js");
+        let data = root.join("data.txt");
+        let source = format!(
+            r#"const fs = process.getBuiltinModule('node:fs/promises');
+fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((bytes) => {{
+  console.log(bytes.length);
+  console.log(bytes[0]);
+  return fs.stat({path:?});
+}}).then((stat) => {{
+  console.log(stat.size);
+  console.log(stat.isFile());
+  console.log(stat.isDirectory());
+}});"#,
+            path = data.to_string_lossy()
+        );
+        fs::write(&script, source).expect("fixture script is written");
+
+        let result = run_node_against_expected_stdout(
+            &script,
+            "11\n104\n11\ntrue\nfalse\n",
+            RunMode::Node,
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
     }
 }

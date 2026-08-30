@@ -15,6 +15,8 @@ pub enum RunMode {
     Parse,
     /// Parse, compile to Kiln bytecode, and execute in a fresh interpreter/host pair.
     Interpreter,
+    /// Execute through the interpreter with its Tokio-owned Node host Adapter installed.
+    Node,
 }
 
 /// The realm variant used for an invocation.
