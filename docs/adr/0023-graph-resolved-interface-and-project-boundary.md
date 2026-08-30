@@ -32,11 +32,11 @@ visible names to their canonical exporting module and slot. This information is 
 execution and native ABI wiring, but it is not a replacement for the per-file interface query or
 the all-active-source project rollup.
 
-The distinction matters for clients as well as for the implementation. A `Check` request currently
-has a path and project root, but its summary is a per-file result. A future graph-aware check may
-expose optional resolved exports when graph context is available. A fully graph-resolved project
-summary would need an explicit entry/root and protocol contract; it must not be inferred by
-silently changing the meaning of the existing `Project` request.
+The distinction matters for clients as well as for the implementation. A `Check` request has a
+path and project root, so its summary can carry both the per-file result and an optional
+entry-rooted resolved export list. A fully graph-resolved project summary would need an explicit
+entry/root and protocol contract; it must not be inferred by silently changing the meaning of the
+existing `Project` request.
 
 ## Decision
 
@@ -73,13 +73,17 @@ Graph resolution failures remain diagnostics or structured graph errors. When a 
 requested, the daemon must not silently fall back to a single-file interface or an incomplete
 project rollup, because doing so can produce a successful-looking result with the wrong imports.
 
-### Check may add optional graph information
+### Check carries optional graph information
 
-The existing per-file `Check` result remains valid without graph construction. An additive future
-field such as `resolved_exports: Option<...>` may be populated when the request explicitly asks
-for graph context and graph resolution succeeds; it is `None` when no graph was built. The shape
-of that field, its path/slot identity, and its wire-version policy are follow-up protocol work.
-Its absence today is not permission to reinterpret `exports` as graph-resolved origins.
+The per-file `Check` result retains `exports` as its declared runtime names and adds
+`resolved_exports: Option<Vec<String>>`. The client synchronizes the project source set before a
+rooted check. The daemon populates the optional field when entry-rooted graph resolution succeeds;
+it is `None` when no graph was built or resolution failed, and the latter also produces explicit
+diagnostics. Resolved names are canonical and sorted, and ambiguous star exports are omitted.
+
+The field is additive: older summaries deserialize with `None`, and older clients ignore it. This
+does not require a protocol-version bump because neither peer can misinterpret an existing field.
+It is not permission to reinterpret `exports` as graph-resolved origins.
 
 ## Consequences
 
@@ -89,8 +93,8 @@ Its absence today is not permission to reinterpret `exports` as graph-resolved o
   shrink when an entry imports fewer files.
 - Native and interpreter graph consumers share one resolved-origin source of truth, while ordinary
   single-file queries retain their existing APIs.
-- A graph-resolved project or a wire-visible resolved-export report requires a separate design:
-  it must specify entry/root inputs, reachability, error reporting, and protocol compatibility.
+- A graph-resolved project remains separate design work: it must specify entry/root inputs,
+  reachability, error reporting, and protocol compatibility.
 
 ## Acceptance checks
 
@@ -101,5 +105,5 @@ Its absence today is not permission to reinterpret `exports` as graph-resolved o
   than a raw provider export table.
 - Missing, ambiguous, cyclic, or out-of-root graph resolution is reported as a diagnostic or
   structured graph failure; it is never silently treated as a successful single-file result.
-- Any future `resolved_exports` field is additive and explicitly distinguishes `None` (no graph
-  context) from a graph that failed to resolve.
+- `Check.resolved_exports` round-trips additively, reports star-forwarded names, omits ambiguous
+  names, and stays `None` when no graph result exists; graph failure is also diagnosed.

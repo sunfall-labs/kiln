@@ -250,14 +250,39 @@ fn native_output_path(
 pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
-    let root = canonical_path(root)?;
     let text = read_source(path)?;
-    check_source(backend, &display, canonical, root, text)
+    let before = backend.stats()?;
+    let started = Instant::now();
+    let (mut notes, synced_paths, _, _) =
+        sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
+    if !synced_paths.contains(&canonical) {
+        backend.set_source(canonical.clone(), text)?;
+    }
+    let summary = backend.check(canonical, project_root_string(root)?)?;
+    let elapsed = started.elapsed();
+    let after = backend.stats()?;
+
+    let work = Work::between(&before, &after);
+    notes.extend(summary.diagnostics.iter().map(|diagnostic| {
+        match (diagnostic.start, diagnostic.end) {
+            (Some(start), Some(end)) => {
+                format!("{display}:{start}..{end}: {}", diagnostic.message)
+            }
+            _ => format!("{display}: {}", diagnostic.message),
+        }
+    }));
+    Ok(Output {
+        text: render::check(&display, &summary, &work, after.revision, elapsed),
+        notes,
+        exit_code: 0,
+        revision: None,
+        value: None,
+    })
 }
 
-/// The half of [`check`] that already has the file's text, so `watch` - which reads the file
-/// itself to notice the change - does not have to read it a second time and risk checking a
-/// different version than the one it saw.
+/// Test seam for the single-source request sequence. Production [`check`] synchronizes the
+/// project first so the daemon can report an entry-rooted resolved surface.
+#[cfg(test)]
 pub fn check_source(
     backend: &mut dyn Backend,
     display: &str,
@@ -845,6 +870,7 @@ mod tests {
                         implementation_hash: 7,
                         interface_hash: 9,
                         exports: vec!["main".to_string()],
+                        resolved_exports: None,
                         diagnostics: self.diagnostics.clone(),
                     })
                 }
@@ -1002,6 +1028,34 @@ mod tests {
             out.text
         );
         assert!(out.notes.is_empty());
+    }
+
+    #[test]
+    fn check_syncs_dependencies_before_requesting_a_resolved_surface() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-cli-check-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create check fixture");
+        let dependency = root.join("dependency.js");
+        let entry = root.join("entry.js");
+        std::fs::write(&dependency, "export const answer = 42;\n").expect("write dependency");
+        std::fs::write(&entry, "export * from './dependency.js';\n").expect("write entry");
+
+        let mut backend = Fake::new();
+        check(&mut backend, &entry, &root).expect("check graph");
+        assert_eq!(
+            backend.names(),
+            ["Stats", "Sync", "SetSource", "SetSource", "Check", "Stats"]
+        );
+        let Request::Check { project_root, .. } = &backend.seen[4] else {
+            panic!("expected rooted Check request");
+        };
+        assert_eq!(project_root, &root.to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
