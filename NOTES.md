@@ -1170,3 +1170,34 @@ In an exact detached checkout of `9b8e4cd`, `npm ci`, the real twelve-bundle bui
 tests, and warnings-denied full workspace clippy all passed; the corpus then measured 39/39 pass
 with no failures, skips, or unsupported cases. `conformance/results/baseline.json` is refreshed from
 that exact run, making every newly executed Effect program a per-test regression obligation.
+
+**2026-08-29, Claude — the rest of the module story: namespaces, re-exports, `export *`.**
+
+Following on from ADR 0019. Every remaining module form now lowers:
+
+- **`import * as ns`** binds one frozen object holding every export, keys sorted. Sorted on
+  purpose: the linker holds exports in a hash map, so without it `Object.keys(ns)` would differ
+  run to run. `kiln_interpreter::namespace_object` / `namespace_entries` are the two ends of it.
+- **`export default <expression>`** binds `kiln_hir::DEFAULT_EXPORT_LOCAL` (`*default*`) — the
+  same reserved name a module record already uses for an anonymous default *declaration*, so
+  `export default function () {}` and `export default 1 + 1` share one path.
+- **`export { x as y } from` and `export * as ns from`** desugar in `compile_module` into an
+  import the module never names plus an ordinary local export. No third kind of export binding,
+  no linker changes: the import path and the local-export path each stay the only one of their
+  kind.
+- **`export * from`** could not desugar — a module's export table is fixed when it compiles and
+  the provider's is not. It compiles to a namespace import plus **one** export entry named
+  `*star*<specifier>` (`kiln_ir::STAR_REEXPORT_PREFIX`), which the linker expands. `ExportBinding`
+  is unchanged, so nothing in the native backend had to move. Local exports are inserted before
+  star ones so a barrel file that overrides one name wins, and `default` is never forwarded.
+  `provides_export` in the graph follows stars for the link-time check, depth-bounded at 64.
+
+**Live bindings are still not live.** Every export is read once, when the provider finishes. A
+re-export that should show a later reassignment in the provider shows the value at that moment
+instead. Fixing it means exporting cells rather than values, which is a real change and a
+separate one — flagging it because the re-export work makes it *look* done.
+
+Coverage: three module-graph tests for the forms, plus `examples/modules/exports/via.ts` gated in
+`ci-test.sh` (interpreter only — the C backend is scalars-only, so linking it natively would test
+a refusal). Everything green: 44 test binaries, clippy clean, differential 67/0/0, conformance
+39/39, all twelve Effect bundles byte-identical to node.

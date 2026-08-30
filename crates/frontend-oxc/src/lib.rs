@@ -193,11 +193,6 @@ fn bigint_digits(raw: &str) -> Option<String> {
     Some(num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)?.to_string())
 }
 
-/// The local name a module record gives an anonymous `export default` declaration.
-///
-/// It carries characters an identifier cannot, so nothing a program writes can collide with it.
-const DEFAULT_EXPORT: &str = "*default*";
-
 struct Lowerer;
 
 impl Lowerer {
@@ -227,7 +222,7 @@ impl Lowerer {
                         .map(|mut function| {
                             function
                                 .name
-                                .get_or_insert_with(|| DEFAULT_EXPORT.to_owned());
+                                .get_or_insert_with(|| kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
                             HirStatementKind::Function(Box::new(function))
                         });
                     self.default_declaration(lowered, statement_span)
@@ -235,7 +230,9 @@ impl Lowerer {
                     &declaration.declaration
                 {
                     let lowered = self.class(declaration, statement_span).map(|mut class| {
-                        class.name.get_or_insert_with(|| DEFAULT_EXPORT.to_owned());
+                        class
+                            .name
+                            .get_or_insert_with(|| kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
                         HirStatementKind::Class(Box::new(class))
                     });
                     self.default_declaration(lowered, statement_span)
