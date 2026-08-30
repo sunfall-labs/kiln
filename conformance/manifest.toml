@@ -890,8 +890,10 @@ features = ["property-key-order", "property-descriptors", "function-properties",
 catches = """
 Integer-index, string, and symbol key ordering; non-enumerable descriptor defaults; callable own
 properties through `in`, spread, and `Object.assign`; and arrays honoring an overridden
-`Symbol.iterator` in spread and `Array.from`. These paths share one typed-key store and regress
-together when any operation falls back to a type-only shortcut.
+`Symbol.iterator` in spread and `Array.from`. Indexed array descriptors must also hide an index
+from `Object.keys`, `Object.entries`, `Object.values`, and spread while retaining it in
+`Reflect.ownKeys`, JSON array serialization, and `getOwnPropertyDescriptor`. These paths share
+one typed-key store and regress together when any operation falls back to a type-only shortcut.
 """
 expected_stdout = """
 1,2,b,a,z,hidden,Symbol(first),Symbol(second)
@@ -900,4 +902,9 @@ expected_stdout = """
 true true visible visible,hidden,Symbol(first)
 1 1 true false
 7,8 7,8
+1 1:2 2
+0,1,length [1,2] false
+0 0,2 0,2,3
+(none) 1
+0,1,2 1,2 2
 """
