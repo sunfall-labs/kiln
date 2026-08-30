@@ -646,47 +646,49 @@ impl NativeBuilder {
             link_options_digest,
             executable_inputs,
         );
-        let (executable, executable_digest, executable_hit, link_elapsed) =
-            match self.cache.lookup(&executable_key)? {
-                Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
-                Lookup::Miss => {
-                    materialize(&paths.module_o, &application, false)?;
-                    materialize(&paths.launcher_o, &launcher_object, false)?;
-                    materialize(&paths.number_provider_a, &number_provider, false)?;
-                    if let Some(runtime_dso) = &runtime_dso {
-                        materialize(&paths.runtime_dso, &runtime_dso.bytes, false)?;
-                    } else {
-                        materialize(&paths.runtime_o, &runtime_object, false)?;
-                    }
-                    let mut link_options = LinkOptions {
-                        profile: profile.toolchain(),
-                        ..LinkOptions::default()
-                    };
-                    if cfg!(not(target_os = "windows")) {
-                        link_options.libraries.push("m".to_owned());
-                    }
-                    if runtime_dso.is_some() {
-                        link_options
-                            .runtime_libraries
-                            .push(paths.runtime_dso.clone());
-                        configure_cli_runtime_rpath(&mut link_options);
-                    }
+        let (executable, executable_digest, executable_hit, link_elapsed) = match self
+            .cache
+            .lookup(&executable_key)?
+        {
+            Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
+            Lookup::Miss => {
+                materialize(&paths.module_o, &application, false)?;
+                materialize(&paths.launcher_o, &launcher_object, false)?;
+                materialize(&paths.number_provider_a, &number_provider, false)?;
+                if let Some(runtime_dso) = &runtime_dso {
+                    materialize(&paths.runtime_dso, &runtime_dso.bytes, false)?;
+                } else {
+                    materialize(&paths.runtime_o, &runtime_object, false)?;
+                }
+                let mut link_options = LinkOptions {
+                    profile: profile.toolchain(),
+                    ..LinkOptions::default()
+                };
+                if cfg!(not(target_os = "windows")) {
+                    link_options.libraries.push("m".to_owned());
+                }
+                if runtime_dso.is_some() {
                     link_options
                         .runtime_libraries
-                        .push(paths.number_provider_a.clone());
-                    let mut objects = vec![paths.module_o.clone(), paths.launcher_o.clone()];
-                    if runtime_dso.is_none() {
-                        objects.push(paths.runtime_o.clone());
-                    }
-                    let report = self
-                        .toolchain
-                        .link_executable(&objects, &paths.executable, &link_options)?;
-                    let bytes = read(&paths.executable, "read linked executable")?;
-                    let digest = Digest::hash(&bytes);
-                    self.cache.put(&executable_key, &bytes)?;
-                    (bytes, digest, false, report.elapsed)
+                        .push(paths.runtime_dso.clone());
+                    configure_cli_runtime_rpath(&mut link_options);
                 }
-            };
+                link_options
+                    .runtime_libraries
+                    .push(paths.number_provider_a.clone());
+                let mut objects = vec![paths.module_o.clone(), paths.launcher_o.clone()];
+                if runtime_dso.is_none() {
+                    objects.push(paths.runtime_o.clone());
+                }
+                let report =
+                    self.toolchain
+                        .link_executable(&objects, &paths.executable, &link_options)?;
+                let bytes = read(&paths.executable, "read linked executable")?;
+                let digest = Digest::hash(&bytes);
+                self.cache.put(&executable_key, &bytes)?;
+                (bytes, digest, false, report.elapsed)
+            }
+        };
         debug_assert_eq!(executable_digest, Digest::hash(&executable));
         materialize(&options.output, &executable, true)?;
 
@@ -2662,19 +2664,21 @@ fn publish_shared_artifacts(
     materialize(output, library, false)
 }
 
-fn publish_runtime_loaders(from_executable: &Path, to_executable: &Path) -> Result<(), NativeError> {
+fn publish_runtime_loaders(
+    from_executable: &Path,
+    to_executable: &Path,
+) -> Result<(), NativeError> {
     let source_parent = from_executable
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let source_directory = source_parent.join(".kiln-loaders");
-    let source_metadata = fs::symlink_metadata(&source_directory).map_err(|source| {
-        NativeError::Io {
+    let source_metadata =
+        fs::symlink_metadata(&source_directory).map_err(|source| NativeError::Io {
             operation: "inspect private CLI runtime loader directory",
             path: source_directory.clone(),
             source,
-        }
-    })?;
+        })?;
     if !source_metadata.file_type().is_dir() {
         return Err(NativeError::ImmutableArtifactCollision {
             path: source_directory,
@@ -2689,13 +2693,12 @@ fn publish_runtime_loaders(from_executable: &Path, to_executable: &Path) -> Resu
         path: destination_parent.to_path_buf(),
         source,
     })?;
-    let destination_parent = fs::canonicalize(destination_parent).map_err(|source| {
-        NativeError::Io {
+    let destination_parent =
+        fs::canonicalize(destination_parent).map_err(|source| NativeError::Io {
             operation: "canonicalize native output directory",
             path: destination_parent.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     let destination_directory = destination_parent.join(".kiln-loaders");
     for entry in fs::read_dir(&source_directory).map_err(|source| NativeError::Io {
         operation: "read private CLI runtime loader directory",
@@ -2713,9 +2716,7 @@ fn publish_runtime_loaders(from_executable: &Path, to_executable: &Path) -> Resu
             source,
         })?;
         if !metadata.file_type().is_file() {
-            return Err(NativeError::ImmutableArtifactCollision {
-                path: entry.path(),
-            });
+            return Err(NativeError::ImmutableArtifactCollision { path: entry.path() });
         }
         let bytes = read(&entry.path(), "read private CLI runtime loader")?;
         materialize_immutable(&destination_directory.join(entry.file_name()), &bytes)?;
@@ -3263,9 +3264,9 @@ fn configure_cli_runtime_link(
         options
             .extra_args
             .push(format!("-Wl,-install_name,{identity}").into());
-        options.extra_args.push(
-            format!("-Wl,-exported_symbols_list,{}", exports.to_string_lossy()).into(),
-        );
+        options
+            .extra_args
+            .push(format!("-Wl,-exported_symbols_list,{}", exports.to_string_lossy()).into());
     }
     #[cfg(target_os = "linux")]
     {
@@ -3281,9 +3282,9 @@ fn configure_cli_runtime_link(
         options
             .extra_args
             .push(format!("-Wl,-soname,{identity}").into());
-        options.extra_args.push(
-            format!("-Wl,--version-script,{}", exports.to_string_lossy()).into(),
-        );
+        options
+            .extra_args
+            .push(format!("-Wl,--version-script,{}", exports.to_string_lossy()).into());
         options.extra_args.push("-Wl,--exclude-libs,ALL".into());
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -4124,13 +4125,15 @@ mod tests {
                 .expect("readelf is available");
             let dynamic = String::from_utf8_lossy(&dynamic.stdout);
             assert!(dynamic.contains("$ORIGIN/.kiln-loaders"));
-            assert!(dynamic.contains(
-                _loader
-                    .file_name()
-                    .expect("loader name")
-                    .to_string_lossy()
-                    .as_ref()
-            ));
+            assert!(
+                dynamic.contains(
+                    _loader
+                        .file_name()
+                        .expect("loader name")
+                        .to_string_lossy()
+                        .as_ref()
+                )
+            );
         }
     }
 
