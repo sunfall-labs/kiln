@@ -307,8 +307,9 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             version: BYTECODE_VERSION,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
+                Instruction::NewCell(0),
                 Instruction::Const(0),
-                Instruction::StoreLocal(0),
+                Instruction::StoreCell(0),
                 Instruction::Return,
             ],
             local_count: 1,
@@ -329,7 +330,7 @@ fn native_entry_program() -> ModuleProgram {
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
-                Instruction::LoadLocal(0),
+                Instruction::LoadCell(0),
                 Instruction::HostCall {
                     op: HostOp::WriteStdout,
                     argc: 1,
@@ -952,5 +953,20 @@ mod tests {
         assert_eq!(measurement.stats.ir_computed, 1);
         assert_eq!(measurement.stats.project_computed, 0);
         assert!(measurement.steady_state);
+    }
+
+    #[test]
+    fn native_graph_fixture_executes_through_the_interpreter() {
+        let root = temp_root();
+        let _cleanup = TempTree(root.clone());
+        native_fixture_files(&root).expect("write native fixture files");
+        let graph = native_graph(&root, 42).expect("build native fixture graph");
+        let mut host = kiln_runtime::CaptureHost::new();
+
+        graph
+            .execute(&mut host, Default::default())
+            .expect("execute native fixture graph");
+
+        assert_eq!(host.stdout(), "42\n");
     }
 }
