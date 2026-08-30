@@ -157,9 +157,13 @@ pub struct Class {
     pub span: Span,
 }
 
-/// One element of an array literal.
+/// One element of a list built by evaluating expressions in order.
+///
+/// Shared by array literals and argument lists, which are the same construct: both evaluate their
+/// entries left to right and both let a spread contribute however many an iterable holds. Keeping
+/// one type means the spread rule is written once.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArrayElement {
+pub enum ListElement {
     Item(Expression),
     /// `...xs`, which contributes every element of an iterable rather than one value.
     Spread(Expression),
@@ -237,6 +241,17 @@ pub enum StatementKind {
         init: Option<Box<Statement>>,
         test: Option<Expression>,
         update: Option<Expression>,
+        body: Box<Statement>,
+    },
+    /// `for (const name in object) body`.
+    ///
+    /// Enumerates the object's own enumerable string keys. Not lowered to a `for-of` over a key
+    /// array: a key deleted by the body must not be visited, which needs a check the loop itself
+    /// performs and an array snapshot cannot express.
+    ForIn {
+        kind: VariableKind,
+        name: String,
+        object: Expression,
         body: Box<Statement>,
     },
     /// `for (const name of iterable) body`.
@@ -384,7 +399,7 @@ pub enum ExpressionKind {
     },
     Call {
         callee: Box<Expression>,
-        arguments: Vec<Expression>,
+        arguments: Vec<ListElement>,
     },
     /// `super(...)` in a derived constructor: run the parent constructor against this instance
     /// rather than allocating a new one.
@@ -422,7 +437,7 @@ pub enum ExpressionKind {
     /// An array literal. Holes (`[1, , 2]`) are not represented: they are a distinct concept
     /// from `undefined` elements and are refused by the frontend rather than flattened here.
     Array {
-        elements: Vec<ArrayElement>,
+        elements: Vec<ListElement>,
     },
     /// `a, b, c`: every operand is evaluated, and the last one is the value.
     Sequence {
@@ -443,7 +458,7 @@ pub enum ExpressionKind {
     /// `new callee(...arguments)`.
     New {
         callee: Box<Expression>,
-        arguments: Vec<Expression>,
+        arguments: Vec<ListElement>,
     },
     /// `object.property = value`, including the compound forms.
     ///

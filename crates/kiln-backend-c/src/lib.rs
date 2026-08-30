@@ -688,6 +688,9 @@ fn stack_effect(
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
+        | Instruction::Apply
+        | Instruction::EnumerateKeys
+        | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
         | Instruction::SetComputed
@@ -921,6 +924,9 @@ fn emit_instruction(
         | Instruction::SpreadObject
         | Instruction::DeleteProperty(_)
         | Instruction::DeleteComputed
+        | Instruction::Apply
+        | Instruction::EnumerateKeys
+        | Instruction::ConstructSpread
         | Instruction::IterableToArray
         | Instruction::GetComputed
         | Instruction::SetComputed
@@ -1141,6 +1147,9 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::SpreadInto => byte(&mut hash, 41),
             Instruction::SpreadObject => byte(&mut hash, 45),
             Instruction::DeleteComputed => byte(&mut hash, 47),
+            Instruction::Apply => byte(&mut hash, 48),
+            Instruction::EnumerateKeys => byte(&mut hash, 50),
+            Instruction::ConstructSpread => byte(&mut hash, 49),
             Instruction::DeleteProperty(value) => {
                 byte(&mut hash, 46);
                 word(&mut hash, u64::from(*value));
