@@ -606,16 +606,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 
 /// Synchronize all discoverable project sources, returning non-fatal walk notes. The source hash
 /// and uploaded text are deliberately derived from one read of each file.
-fn sync_project_sources(
-    backend: &mut dyn Backend,
-    root: &Path,
-) -> Result<(
-    Vec<String>,
-    HashSet<String>,
-    SourceManifest,
-    bool,
-    SourceView,
-)> {
+fn sync_project_sources(backend: &mut dyn Backend, root: &Path) -> SyncResult {
     sync_project_sources_with_override(backend, root, None)
 }
 
@@ -627,13 +618,7 @@ fn sync_project_sources_with_override(
     backend: &mut dyn Backend,
     root: &Path,
     source_override: Option<(&str, &str)>,
-) -> Result<(
-    Vec<String>,
-    HashSet<String>,
-    SourceManifest,
-    bool,
-    SourceView,
-)> {
+) -> SyncResult {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -701,6 +686,14 @@ fn sync_project_sources_with_override(
     }
     unreachable!()
 }
+
+type SyncResult = Result<(
+    Vec<String>,
+    HashSet<String>,
+    SourceManifest,
+    bool,
+    SourceView,
+)>;
 
 pub fn stats(backend: &mut dyn Backend) -> Result<Output> {
     Ok(Output::new(render::stats(&backend.stats()?)))
@@ -1275,6 +1268,44 @@ mod tests {
                 }),
                 other => panic!("unexpected request {other:?}"),
             })
+        }
+    }
+
+    struct StaleBackend {
+        inner: Fake,
+        stale_commits: usize,
+        stale_checks: usize,
+    }
+
+    impl StaleBackend {
+        fn new(stale_commits: usize, stale_checks: usize) -> Self {
+            Self {
+                inner: Fake::new(),
+                stale_commits,
+                stale_checks,
+            }
+        }
+    }
+
+    impl Backend for StaleBackend {
+        fn request(&mut self, request: Request) -> Result<Response> {
+            match request {
+                Request::CommitSync { .. } if self.stale_commits > 0 => {
+                    self.stale_commits -= 1;
+                    self.inner.seen.push(request);
+                    Ok(Response::StaleSourceView {
+                        current: SourceView(99),
+                    })
+                }
+                Request::Check { .. } if self.stale_checks > 0 => {
+                    self.stale_checks -= 1;
+                    self.inner.seen.push(request);
+                    Ok(Response::StaleSourceView {
+                        current: SourceView(99),
+                    })
+                }
+                request => self.inner.request(request),
+            }
         }
     }
 
@@ -1935,6 +1966,104 @@ mod tests {
         assert!(out.text.contains("modules         2"), "{}", out.text);
         assert!(out.notes.is_empty());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_commit_restarts_the_complete_sync_with_the_same_texts() {
+        let dir =
+            std::env::temp_dir().join(format!("kiln-cli-stale-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        let entry = dir.join("entry.js");
+        std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
+
+        let mut backend = StaleBackend::new(1, 0);
+        check(&mut backend, &entry, &dir).expect("stale commit is retried");
+        let syncs = backend
+            .inner
+            .seen
+            .iter()
+            .filter(|request| matches!(request, Request::Sync { .. }))
+            .count();
+        let stages = backend
+            .inner
+            .seen
+            .iter()
+            .filter_map(|request| match request {
+                Request::StageSource { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(syncs, 2);
+        assert_eq!(
+            stages,
+            vec!["export const answer = 42;\n", "export const answer = 42;\n"]
+        );
+        assert_eq!(
+            backend
+                .inner
+                .seen
+                .iter()
+                .filter(|r| matches!(r, Request::Check { .. }))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_check_restarts_sync_and_repeats_the_operation_once() {
+        let dir = std::env::temp_dir().join(format!("kiln-cli-stale-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        let entry = dir.join("entry.js");
+        std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
+
+        let mut backend = StaleBackend::new(0, 1);
+        check(&mut backend, &entry, &dir).expect("stale check is retried");
+        assert_eq!(
+            backend
+                .inner
+                .seen
+                .iter()
+                .filter(|r| matches!(r, Request::Sync { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            backend
+                .inner
+                .seen
+                .iter()
+                .filter(|r| matches!(r, Request::Check { .. }))
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_stale_commit_is_reported_without_a_third_transaction() {
+        let dir =
+            std::env::temp_dir().join(format!("kiln-cli-stale-bounded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        let entry = dir.join("entry.js");
+        std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
+
+        let mut backend = StaleBackend::new(2, 0);
+        let error = check(&mut backend, &entry, &dir).expect_err("second stale is bounded");
+        assert!(error.to_string().contains("stale source view"));
+        assert_eq!(
+            backend
+                .inner
+                .seen
+                .iter()
+                .filter(|r| matches!(r, Request::Sync { .. }))
+                .count(),
+            2
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

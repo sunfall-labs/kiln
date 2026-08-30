@@ -387,6 +387,7 @@ fn needs_authoritative_membership_check(
     project_truncated && !manifest.contains_key(canonical)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_once(
     backend: &mut dyn Backend,
     path: &Path,
@@ -1172,6 +1173,7 @@ mod tests {
         stats: Stats,
         sources: HashMap<String, String>,
         staged: HashMap<kiln_proto::SyncId, Vec<(String, String)>>,
+        stale_update: bool,
         requests: Option<Sender<Request>>,
     }
 
@@ -1191,6 +1193,12 @@ mod tests {
                     paths: files.into_iter().map(|file| file.path).collect(),
                 },
                 Request::SetSource { path, text, .. } => {
+                    if self.stale_update {
+                        self.stale_update = false;
+                        return Ok(Response::StaleSourceView {
+                            current: SourceView(self.stats.revision + 1),
+                        });
+                    }
                     self.sources.insert(path, text);
                     self.stats.revision += 1;
                     Response::SourceUpdated {
@@ -1360,6 +1368,17 @@ mod tests {
         mpsc::Receiver<String>,
         mpsc::Receiver<Request>,
     ) {
+        watch_in_background_observed_configured(path, false)
+    }
+
+    fn watch_in_background_observed_configured(
+        path: &Path,
+        stale_update: bool,
+    ) -> (
+        mpsc::Receiver<String>,
+        mpsc::Receiver<String>,
+        mpsc::Receiver<Request>,
+    ) {
         let (checks, printed) = mpsc::channel();
         let (messages, notes) = mpsc::channel();
         let (request_tx, requests) = mpsc::channel();
@@ -1369,6 +1388,7 @@ mod tests {
                 stats: Stats::default(),
                 sources: HashMap::new(),
                 staged: HashMap::new(),
+                stale_update,
                 requests: Some(request_tx),
             };
             let _ = run(
@@ -1573,6 +1593,40 @@ mod tests {
         assert!(matches!(warm[0], Request::SetSource { .. }));
         assert!(matches!(warm[1], Request::Run { .. }));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_direct_watch_update_reconciles_authoritatively_once() {
+        let dir = scratch("stale-direct");
+        let path = dir.join("a.js");
+        std::fs::write(&path, "export const a = 1;").expect("write");
+        let (printed, _, requests) = watch_in_background_observed_configured(&path, true);
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial run");
+        while requests.try_recv().is_ok() {}
+
+        std::fs::write(&path, "export const a = 2;").expect("edit");
+        assert_eq!(
+            printed.recv_timeout(Duration::from_secs(5)).expect("rerun"),
+            "program: export const a = 2;\n"
+        );
+        let requests = requests.try_iter().collect::<Vec<_>>();
+        assert!(matches!(requests.first(), Some(Request::SetSource { .. })));
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(request, Request::Sync { .. }))
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| matches!(request, Request::Sync { .. }))
+                .count(),
+            1,
+            "stale CAS triggers one authoritative transaction"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
