@@ -146,6 +146,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             changed,
             parse_only,
+            node,
             output,
         } => {
             let mut backend = open(one_shot, &socket)?;
@@ -155,6 +156,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &root,
                 changed,
                 parse_only,
+                node,
                 output.as_deref(),
             )?)
         }

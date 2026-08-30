@@ -69,6 +69,137 @@ impl HostValue {
     }
 }
 
+/// Opaque identity of one asynchronous host request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    /// Creates an identity from its stable numeric representation.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation used by private embedding seams.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Opaque identity of a host resource owned by one realm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(u64);
+
+impl ResourceId {
+    /// Creates an identity from its stable numeric representation.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation used by private embedding seams.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One asynchronous operation requested from a realm host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncHostOp {
+    /// Read an entire file as owned bytes.
+    ReadFile { path: String },
+    /// Replace or create a file with the supplied bytes.
+    WriteFile { path: String, data: Vec<u8> },
+    /// Read metadata without opening a persistent file resource.
+    Stat { path: String },
+}
+
+/// Portable file metadata needed by the first Node filesystem slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    /// File length in bytes.
+    pub size: u64,
+    /// Whether the path names a regular file.
+    pub is_file: bool,
+    /// Whether the path names a directory.
+    pub is_directory: bool,
+}
+
+/// A successful asynchronous host operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncHostValue {
+    /// No payload beyond successful completion.
+    Undefined,
+    /// Owned bytes, normally a file or stream chunk.
+    Bytes(Vec<u8>),
+    /// Portable filesystem metadata.
+    FileStat(FileStat),
+    /// A persistent resource inserted into the realm's resource table.
+    Resource(ResourceId),
+}
+
+/// Stable error information that a Node compatibility Adapter can turn into a JavaScript error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncHostError {
+    /// Node-compatible short error code where one exists, such as `ENOENT`.
+    pub code: String,
+    /// Operation name, such as `open` or `stat`.
+    pub syscall: String,
+    /// Path associated with the failure, if any.
+    pub path: Option<String>,
+    /// Human-readable detail supplied by the host implementation.
+    pub message: String,
+}
+
+impl AsyncHostError {
+    /// Constructs one structured asynchronous host error.
+    pub fn new(
+        code: impl Into<String>,
+        syscall: impl Into<String>,
+        path: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            syscall: syscall.into(),
+            path,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AsyncHostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for AsyncHostError {}
+
+/// Result delivered when an asynchronous host request reaches a realm checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The request being completed.
+    pub request: RequestId,
+    /// Monotonic submission order used as the deterministic readiness tie-break.
+    pub sequence: u64,
+    /// Operation result owned by the receiving realm.
+    pub result: Result<AsyncHostValue, AsyncHostError>,
+}
+
+/// Starts and controls asynchronous operations without exposing an executor implementation.
+pub trait AsyncHostOps {
+    /// Start an operation and return its opaque request identity immediately.
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
+
+    /// Cancel a pending operation, returning whether it was still owned by this host.
+    fn cancel(&mut self, request: RequestId) -> bool;
+
+    /// Return whether referenced work currently keeps the realm alive.
+    fn has_referenced_work(&self) -> bool;
+
+    /// Block until the next completion is ready, or return `None` when no requests remain.
+    fn next_completion(&mut self) -> Option<Completion>;
+}
+
 /// A number as `String(value)` renders it.
 ///
 /// The allocation-free semantic core writes into caller-owned storage; this boundary turns those
@@ -142,6 +273,26 @@ mod tests {
         assert_eq!(HostValue::number(f64::NAN).to_js_string(), "NaN");
         assert_eq!(HostValue::number(f64::INFINITY).to_js_string(), "Infinity");
         assert_eq!(HostValue::String("kiln".into()).to_js_string(), "kiln");
+    }
+
+    #[test]
+    fn async_identities_round_trip_without_exposing_layout() {
+        assert_eq!(RequestId::new(7).get(), 7);
+        assert_eq!(ResourceId::new(11).get(), 11);
+    }
+
+    #[test]
+    fn async_errors_keep_node_shaping_data_separate() {
+        let error = AsyncHostError::new(
+            "ENOENT",
+            "open",
+            Some("missing.txt".to_owned()),
+            "no such file or directory",
+        );
+        assert_eq!(error.code, "ENOENT");
+        assert_eq!(error.syscall, "open");
+        assert_eq!(error.path.as_deref(), Some("missing.txt"));
+        assert_eq!(error.to_string(), "ENOENT: no such file or directory");
     }
 
     #[test]
