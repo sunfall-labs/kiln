@@ -2226,3 +2226,46 @@ polyfill path nobody tested. And `Math` was missing `hypot`, `atan2`, the trigon
 `SQRT1_2`, `LOG2E` and `LOG10E`. `hypot` is implemented as a fold of `f64::hypot` rather than
 `sqrt(x*x + y*y)`, because squaring overflows for arguments whose result is perfectly
 representable, which is the whole reason the function exists.
+
+### `try`/`throw` natively, and the interpreter bug the native oracle found
+
+**2026-08-30, Claude — `kiln-backend-c` and one change in `kiln-interpreter`'s `unwind`.**
+
+Exceptions emit now. C has no unwinder and no computed goto, so a throw is a status returned from
+every call and a **per-body handler stack**; the catch target is a `switch` over exactly the
+labels that are handler targets, which the emitter knows. `PushHandler` records the stack height
+alongside the label, because a `catch` starts from the height the `try` began at however deep the
+expression that threw had got. A body that catches nothing emits none of this and propagates by
+returning, so a scalar unit's bytes are unchanged.
+
+**Then the native corpus earned its keep.** `conformance/native/exceptions.ts` disagreed on one
+line, and node sided with the *native* backend:
+
+```js
+try { [1,2,3].map(x => { if (x === 2) throw "in map"; return x; }); } catch (e) { ... }
+function depth() { try { return 1 + boom() + 100; } catch (e) { return 5; } }
+depth()   // node and native: 5.  interpreter: [ 1, 5, 3 ]
+```
+
+A built-in that takes a callback drives the interpreter from inside a Rust frame of its own.
+`unwind` was jumping straight to a handler installed *below* that frame -- so `run_frames` kept
+running, at the caller's instruction pointer, in the caller's frame, inside a driver that thought
+it was still walking an array. The visible symptom was not an error: it was a later function
+returning a leftover value, which is the worst kind.
+
+A handler now records the native depth it was installed at, and a throw that would cross one
+travels as an error until the Rust stack is flat, where the same handler takes it. **The host
+handler is the exception, and that is not a special case bolted on** -- a host handler means the
+Rust frame immediately outside asked for the value, so returning to it is arriving at a boundary
+rather than crossing one. Getting that wrong broke every promise rejection, which is how I found
+it took about a minute.
+
+`conformance/differential/throw-across-a-builtin.js` covers `map`, `sort`, `forEach`, `filter`,
+`reduce` and `find`, nested callbacks, and a handler *inside* a callback -- and checks what runs
+*after* each, because the residue was the symptom.
+
+**What native exceptions do not do yet:** an engine-level TypeError -- `undefined.x`, calling a
+non-function -- is still `KILN_C99_CONTROL_ERROR` and is *not* catchable natively, where the
+interpreter throws a real Error object a program can catch. Making those throw needs `Error`
+objects, which needs `New`. Until then a native `catch` takes what the program threw and nothing
+else, and a probe that catches a TypeError will diverge visibly rather than quietly.
