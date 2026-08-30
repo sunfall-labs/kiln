@@ -55,7 +55,6 @@ pub(crate) fn run_source(
     canonical: &str,
     text: String,
 ) -> Result<Output> {
-    let display = path.display().to_string();
     let (project_notes, synced_paths) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
@@ -64,6 +63,34 @@ pub(crate) fn run_source(
     if !synced_paths.contains(canonical) {
         backend.set_source(canonical.to_owned(), text)?;
     }
+    finish_run(backend, path, project_root, canonical, project_notes)
+}
+
+/// Execute a new snapshot of the single file owned by an already-initialized watch.
+///
+/// The first watch iteration uses [`run_source`] to establish the authoritative project view.
+/// Later iterations observe only this target, so walking and reading the whole project again
+/// cannot discover an event that the watcher itself would act on. Uploading the bytes already
+/// read by the watcher also keeps comparison, compilation, and execution on the same save.
+pub(crate) fn run_watched_source(
+    backend: &mut dyn Backend,
+    path: &Path,
+    project_root: &Path,
+    canonical: &str,
+    text: String,
+) -> Result<Output> {
+    backend.set_source(canonical.to_owned(), text)?;
+    finish_run(backend, path, project_root, canonical, Vec::new())
+}
+
+fn finish_run(
+    backend: &mut dyn Backend,
+    path: &Path,
+    project_root: &Path,
+    canonical: &str,
+    project_notes: Vec<String>,
+) -> Result<Output> {
+    let display = path.display().to_string();
     let summary = backend.run(canonical.to_owned(), project_root_string(project_root)?)?;
     let notes = summary
         .diagnostics
@@ -1397,6 +1424,29 @@ mod tests {
         assert_eq!(project_root, &dir.to_string_lossy());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_warm_watch_uploads_only_its_target_snapshot_before_running() {
+        let path = Path::new("/tmp/project/entry.js");
+        let canonical = "/tmp/project/entry.js";
+        let mut fake = Fake::new();
+
+        run_watched_source(
+            &mut fake,
+            path,
+            Path::new("/tmp/project"),
+            canonical,
+            "export const answer = 43;\n".to_owned(),
+        )
+        .expect("warm watch snapshot runs");
+
+        assert_eq!(fake.names(), ["SetSource", "Run"]);
+        let Request::SetSource { path, text } = &fake.seen[0] else {
+            panic!("warm watch must upload its target first");
+        };
+        assert_eq!(path, canonical);
+        assert_eq!(text, "export const answer = 43;\n");
     }
 
     #[test]
