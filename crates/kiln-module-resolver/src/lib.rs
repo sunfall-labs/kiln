@@ -1,9 +1,9 @@
 //! Deterministic filesystem resolution for Kiln's first ESM graph slice.
 //!
-//! The resolver intentionally has a small policy surface. It accepts only explicit relative and
-//! absolute filesystem specifiers, never guesses an extension or an `index` file, and verifies
-//! the canonical target remains inside the canonical project root. Package, URL, and future
-//! TypeScript/Node resolution policies belong above this seam.
+//! The resolver intentionally has a small policy surface. [`ModuleResolver`] accepts only
+//! explicit relative and absolute filesystem specifiers, never guesses an extension or an
+//! `index` file, and verifies the canonical target remains inside the canonical project root.
+//! [`NodePackageResolver`] is a separate package-policy adapter behind [`ResolutionPolicy`].
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -19,6 +19,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "mt
 pub enum ResolutionKind {
     Relative,
     Absolute,
+    Package,
 }
 
 impl ResolutionKind {
@@ -26,6 +27,7 @@ impl ResolutionKind {
         match self {
             Self::Relative => "relative",
             Self::Absolute => "absolute",
+            Self::Package => "package",
         }
     }
 }
@@ -135,6 +137,31 @@ pub enum ResolveError {
     UnsupportedExtension {
         path: PathBuf,
     },
+    PackageNotFound {
+        package: String,
+        importer: PathBuf,
+    },
+    PackageManifestMissing {
+        path: PathBuf,
+    },
+    InvalidPackageManifest {
+        path: PathBuf,
+    },
+    PackageSubpathNotExported {
+        package: String,
+        subpath: String,
+    },
+    PackageExportBlocked {
+        package: String,
+        subpath: String,
+    },
+    PackageEntryMissing {
+        package: String,
+    },
+    InvalidPackageTarget {
+        package: String,
+        target: String,
+    },
 }
 
 impl fmt::Display for ResolveError {
@@ -189,6 +216,35 @@ impl fmt::Display for ResolveError {
                 "unsupported module extension: {}",
                 display_path(path)
             ),
+            Self::PackageNotFound { package, importer } => write!(
+                formatter,
+                "could not find package `{package}` from {}",
+                display_path(importer)
+            ),
+            Self::PackageManifestMissing { path } => write!(
+                formatter,
+                "package manifest is missing: {}",
+                display_path(path)
+            ),
+            Self::InvalidPackageManifest { path } => write!(
+                formatter,
+                "invalid package manifest: {}",
+                display_path(path)
+            ),
+            Self::PackageSubpathNotExported { package, subpath } => {
+                write!(formatter, "package `{package}` does not export `{subpath}`")
+            }
+            Self::PackageExportBlocked { package, subpath } => write!(
+                formatter,
+                "package `{package}` blocks access to `{subpath}`"
+            ),
+            Self::PackageEntryMissing { package } => {
+                write!(formatter, "package `{package}` has no entry point")
+            }
+            Self::InvalidPackageTarget { package, target } => write!(
+                formatter,
+                "package `{package}` has invalid export target `{target}`"
+            ),
         }
     }
 }
@@ -236,6 +292,290 @@ impl ModuleResolver {
     }
 }
 
+/// The module-resolution seam consumed by graph construction.
+///
+/// Implementations select one canonical source path for a specifier and importer. Keeping the
+/// policy behind this interface lets explicit filesystem imports and Node package imports remain
+/// separate adapters without making the graph know about package metadata.
+pub trait ResolutionPolicy {
+    fn project_root(&self) -> &Path;
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError>;
+}
+
+impl ResolutionPolicy for ModuleResolver {
+    fn project_root(&self) -> &Path {
+        self.project_root()
+    }
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
+        ModuleResolver::resolve(self, specifier, importer)
+    }
+}
+
+/// Node-style package resolution layered over the exact filesystem resolver.
+///
+/// This intentionally implements a bounded package policy: nearest `node_modules`, package
+/// `exports` exact keys (including explicit `null` blocking), and `main` fallback. It does not
+/// evaluate conditional exports or wildcard keys, and it never guesses an extension or index
+/// file. Every selected target still goes through canonical containment and supported-extension
+/// checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePackageResolver {
+    explicit: ModuleResolver,
+}
+
+impl NodePackageResolver {
+    pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
+        Ok(Self {
+            explicit: ModuleResolver::new(project_root)?,
+        })
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.explicit.project_root()
+    }
+
+    pub fn resolve(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+    ) -> Result<ResolvedModule, ResolveError> {
+        let importer = importer.as_ref();
+        if !matches!(
+            classify_specifier(specifier),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::BarePackage,
+                ..
+            })
+        ) {
+            return self.explicit.resolve(specifier, importer);
+        }
+
+        let canonical_importer = canonical_importer(importer, self.project_root())?;
+        let (package, subpath) = parse_package_specifier(specifier)?;
+        let package_dir = self.find_package(&package, &canonical_importer)?;
+        let manifest_path = package_dir.join("package.json");
+        if !manifest_path.is_file() {
+            return Err(ResolveError::PackageManifestMissing {
+                path: manifest_path,
+            });
+        }
+        let manifest_text = fs::read_to_string(&manifest_path).map_err(|_| {
+            ResolveError::InvalidPackageManifest {
+                path: manifest_path.clone(),
+            }
+        })?;
+        let manifest: PackageManifest = serde_json::from_str(&manifest_text).map_err(|_| {
+            ResolveError::InvalidPackageManifest {
+                path: manifest_path.clone(),
+            }
+        })?;
+
+        let target = match manifest.exports {
+            Some(exports) => select_export(&package, &subpath, exports, &manifest_path)?,
+            None if subpath.is_empty() => {
+                manifest
+                    .main
+                    .ok_or_else(|| ResolveError::PackageEntryMissing {
+                        package: package.clone(),
+                    })?
+            }
+            None => subpath.clone(),
+        };
+        self.resolve_package_target(&package, &package_dir, &target)
+    }
+
+    fn find_package(&self, package: &str, importer: &Path) -> Result<PathBuf, ResolveError> {
+        let mut ancestor = importer.parent();
+        while let Some(directory) = ancestor {
+            let candidate = directory.join("node_modules").join(package);
+            match fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_dir() => {
+                    let canonical = canonical_path(&candidate, PathRole::Target)?;
+                    if !canonical.starts_with(self.project_root()) {
+                        return Err(ResolveError::OutsideProject {
+                            path: canonical,
+                            project_root: self.project_root().to_path_buf(),
+                        });
+                    }
+                    return Ok(canonical);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ResolveError::Io {
+                        role: PathRole::Target,
+                        path: candidate,
+                        kind: error.kind(),
+                    });
+                }
+            }
+            if directory == self.project_root() {
+                break;
+            }
+            ancestor = directory.parent();
+        }
+        Err(ResolveError::PackageNotFound {
+            package: package.to_owned(),
+            importer: importer.to_path_buf(),
+        })
+    }
+
+    fn resolve_package_target(
+        &self,
+        package: &str,
+        package_dir: &Path,
+        target: &str,
+    ) -> Result<ResolvedModule, ResolveError> {
+        if target.is_empty() || target.contains(['?', '#']) || target.as_bytes().contains(&0) {
+            return Err(ResolveError::InvalidPackageTarget {
+                package: package.to_owned(),
+                target: target.to_owned(),
+            });
+        }
+        let candidate = package_dir.join(target);
+        let canonical_target = canonical_path(&candidate, PathRole::Target)?;
+        ensure_utf8(&canonical_target, PathRole::Target)?;
+        if !canonical_target.starts_with(self.project_root()) {
+            return Err(ResolveError::OutsideProject {
+                path: canonical_target,
+                project_root: self.project_root().to_path_buf(),
+            });
+        }
+        if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
+            return Err(ResolveError::NotRegularFile {
+                role: PathRole::Target,
+                path: canonical_target,
+            });
+        }
+        if !has_supported_extension(&canonical_target) {
+            return Err(ResolveError::UnsupportedExtension {
+                path: canonical_target,
+            });
+        }
+        Ok(ResolvedModule::new(
+            canonical_target,
+            ResolutionKind::Package,
+        ))
+    }
+}
+
+impl ResolutionPolicy for NodePackageResolver {
+    fn project_root(&self) -> &Path {
+        self.project_root()
+    }
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
+        NodePackageResolver::resolve(self, specifier, importer)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PackageManifest {
+    exports: Option<serde_json::Value>,
+    main: Option<String>,
+}
+
+fn select_export(
+    package: &str,
+    subpath: &str,
+    exports: serde_json::Value,
+    manifest_path: &Path,
+) -> Result<String, ResolveError> {
+    let key = if subpath.is_empty() {
+        ".".to_owned()
+    } else {
+        format!("./{subpath}")
+    };
+    let value = match exports {
+        serde_json::Value::Null => {
+            return Err(ResolveError::PackageExportBlocked {
+                package: package.to_owned(),
+                subpath: key,
+            });
+        }
+        serde_json::Value::String(target) if key == "." => target,
+        serde_json::Value::String(_) => {
+            return Err(ResolveError::PackageSubpathNotExported {
+                package: package.to_owned(),
+                subpath: key,
+            });
+        }
+        serde_json::Value::Object(exports) => match exports.get(&key) {
+            None => {
+                return Err(ResolveError::PackageSubpathNotExported {
+                    package: package.to_owned(),
+                    subpath: key,
+                });
+            }
+            Some(serde_json::Value::Null) => {
+                return Err(ResolveError::PackageExportBlocked {
+                    package: package.to_owned(),
+                    subpath: key,
+                });
+            }
+            Some(serde_json::Value::String(target)) => target.clone(),
+            Some(_) => {
+                return Err(ResolveError::InvalidPackageManifest {
+                    path: manifest_path.to_path_buf(),
+                });
+            }
+        },
+        _ => {
+            return Err(ResolveError::InvalidPackageManifest {
+                path: manifest_path.to_path_buf(),
+            });
+        }
+    };
+    if !value.starts_with("./") {
+        return Err(ResolveError::InvalidPackageTarget {
+            package: package.to_owned(),
+            target: value,
+        });
+    }
+    Ok(value)
+}
+
+fn parse_package_specifier(specifier: &str) -> Result<(String, String), ResolveError> {
+    let mut parts = specifier.split('/');
+    let package = if specifier.starts_with('@') {
+        let scope = parts.next().unwrap_or_default();
+        let name = parts.next().unwrap_or_default();
+        if scope.len() < 2 || name.is_empty() {
+            return Err(ResolveError::InvalidSpecifier {
+                specifier: specifier.to_owned(),
+                reason: InvalidSpecifierReason::BarePackage,
+            });
+        }
+        format!("{scope}/{name}")
+    } else {
+        parts.next().unwrap_or_default().to_owned()
+    };
+    if package.is_empty() || package == "." || package == ".." {
+        return Err(ResolveError::InvalidSpecifier {
+            specifier: specifier.to_owned(),
+            reason: InvalidSpecifierReason::BarePackage,
+        });
+    }
+    let subpath = if specifier.len() == package.len() {
+        String::new()
+    } else {
+        specifier[package.len() + 1..].to_owned()
+    };
+    if !subpath.is_empty()
+        && subpath
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(ResolveError::InvalidSpecifier {
+            specifier: specifier.to_owned(),
+            reason: InvalidSpecifierReason::BarePackage,
+        });
+    }
+    Ok((package, subpath))
+}
+
 /// Resolve one explicit module specifier against a project root.
 ///
 /// `importer` and `project_root` may be absolute paths that have not yet been canonicalized;
@@ -256,29 +596,8 @@ fn resolve_in_root(
 ) -> Result<ResolvedModule, ResolveError> {
     let kind = classify_specifier(specifier)?;
 
-    if !importer.is_absolute() {
-        return Err(ResolveError::NonAbsolutePath {
-            role: PathRole::Importer,
-            path: importer.to_path_buf(),
-        });
-    }
-    ensure_utf8(importer, PathRole::Importer)?;
     ensure_utf8(project_root, PathRole::ProjectRoot)?;
-
-    let canonical_importer = canonical_path(importer, PathRole::Importer)?;
-    ensure_utf8(&canonical_importer, PathRole::Importer)?;
-    if !canonical_importer.starts_with(project_root) {
-        return Err(ResolveError::OutsideProject {
-            path: canonical_importer,
-            project_root: project_root.to_path_buf(),
-        });
-    }
-    if !metadata_is_regular_file(&canonical_importer, PathRole::Importer)? {
-        return Err(ResolveError::NotRegularFile {
-            role: PathRole::Importer,
-            path: canonical_importer,
-        });
-    }
+    let canonical_importer = canonical_importer(importer, project_root)?;
 
     let candidate = match kind {
         ResolutionKind::Relative => canonical_importer
@@ -286,6 +605,7 @@ fn resolve_in_root(
             .unwrap_or(project_root)
             .join(specifier),
         ResolutionKind::Absolute => PathBuf::from(specifier),
+        ResolutionKind::Package => unreachable!("explicit resolver cannot classify packages"),
     };
     let canonical_target = canonical_path(&candidate, PathRole::Target)?;
     ensure_utf8(&canonical_target, PathRole::Target)?;
@@ -361,6 +681,31 @@ fn has_url_scheme(specifier: &str) -> bool {
             byte.is_ascii_alphabetic()
                 || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
         })
+}
+
+fn canonical_importer(importer: &Path, project_root: &Path) -> Result<PathBuf, ResolveError> {
+    if !importer.is_absolute() {
+        return Err(ResolveError::NonAbsolutePath {
+            role: PathRole::Importer,
+            path: importer.to_path_buf(),
+        });
+    }
+    ensure_utf8(importer, PathRole::Importer)?;
+    let canonical_importer = canonical_path(importer, PathRole::Importer)?;
+    ensure_utf8(&canonical_importer, PathRole::Importer)?;
+    if !canonical_importer.starts_with(project_root) {
+        return Err(ResolveError::OutsideProject {
+            path: canonical_importer,
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    if !metadata_is_regular_file(&canonical_importer, PathRole::Importer)? {
+        return Err(ResolveError::NotRegularFile {
+            role: PathRole::Importer,
+            path: canonical_importer,
+        });
+    }
+    Ok(canonical_importer)
 }
 
 fn canonical_path(path: &Path, role: PathRole) -> Result<PathBuf, ResolveError> {
@@ -568,6 +913,112 @@ mod tests {
                 })
             );
         }
+    }
+
+    fn write_package(project: &TempProject, package: &str, manifest: &str) {
+        project.write(&format!("node_modules/{package}/package.json"), manifest);
+    }
+
+    #[test]
+    fn resolves_nearest_scoped_and_unscoped_packages_with_exact_exports() {
+        let project = TempProject::new();
+        let importer = project.write("src/nested/main.ts", "");
+        let root_entry = project.write("node_modules/pkg/dist/root.js", "");
+        let feature_entry = project.write("node_modules/pkg/dist/feature.ts", "");
+        write_package(
+            &project,
+            "pkg",
+            r#"{"exports":{".":"./dist/root.js","./feature":"./dist/feature.ts","./blocked":null}}"#,
+        );
+        let scoped_entry = project.write("node_modules/@scope/name/index.mjs", "");
+        write_package(
+            &project,
+            "@scope/name",
+            r#"{"exports":{".":"./index.mjs"}}"#,
+        );
+
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        let resolved = resolver
+            .resolve("pkg", &importer)
+            .expect("resolve package root");
+        assert_eq!(resolved.kind, ResolutionKind::Package);
+        assert_eq!(resolved.path, fs::canonicalize(root_entry).unwrap());
+        let resolved = resolver
+            .resolve("pkg/feature", &importer)
+            .expect("resolve exact package subpath");
+        assert_eq!(resolved.path, fs::canonicalize(feature_entry).unwrap());
+        let resolved = resolver
+            .resolve("@scope/name", &importer)
+            .expect("resolve scoped package root");
+        assert_eq!(resolved.path, fs::canonicalize(scoped_entry).unwrap());
+    }
+
+    #[test]
+    fn nearest_package_wins_and_explicit_resolution_is_preserved() {
+        let project = TempProject::new();
+        let importer = project.write("src/deep/main.js", "");
+        let nearest = project.write("src/node_modules/pkg/main.ts", "");
+        project.write("node_modules/pkg/main.ts", "");
+        write_package(&project, "pkg", r#"{"main":"main.ts"}"#);
+        let nested_manifest = project.root.join("src/node_modules/pkg/package.json");
+        fs::write(&nested_manifest, r#"{"main":"main.ts"}"#).expect("write nested manifest");
+        project.write("src/explicit.js", "");
+
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        assert_eq!(
+            resolver.resolve("pkg", &importer).unwrap().path,
+            fs::canonicalize(nearest).unwrap()
+        );
+        assert_eq!(
+            resolver.resolve("../explicit.js", &importer).unwrap().kind,
+            ResolutionKind::Relative
+        );
+    }
+
+    #[test]
+    fn package_exports_block_unlisted_and_null_subpaths() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        project.write("node_modules/pkg/main.js", "");
+        write_package(
+            &project,
+            "pkg",
+            r#"{"exports":{".":"./main.js","./private":null}}"#,
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        assert!(matches!(
+            resolver.resolve("pkg/private", &importer),
+            Err(ResolveError::PackageExportBlocked { .. })
+        ));
+        assert!(matches!(
+            resolver.resolve("pkg/missing", &importer),
+            Err(ResolveError::PackageSubpathNotExported { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_targets_keep_containment_and_extension_guards() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let outside = project.outside.join("escape.js");
+        fs::write(&outside, "").expect("write outside target");
+        project.write("node_modules/escape/package.json", "{}");
+        symlink(&outside, project.root.join("node_modules/escape/escape.js"))
+            .expect("write escaping package target");
+        write_package(&project, "escape", r#"{"exports":{".":"./escape.js"}}"#);
+        write_package(&project, "data", r#"{"exports":{".":"./package.json"}}"#);
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        assert!(matches!(
+            resolver.resolve("escape", &importer),
+            Err(ResolveError::OutsideProject { .. })
+        ));
+        assert!(matches!(
+            resolver.resolve("data", &importer),
+            Err(ResolveError::UnsupportedExtension { .. })
+        ));
     }
 
     #[test]

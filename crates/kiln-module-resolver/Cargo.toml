@@ -5,6 +5,8 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/sunfall-labs/kiln"
 
-# Keep module resolution below the frontend and graph layers. In particular, this crate must not
-# pull in a package-manager or parser dependency: the initial policy is deliberately explicit.
+# Keep module resolution below the frontend and graph layers. Package metadata is parsed here as a
+# small policy adapter; package-manager state and dependency installation remain caller-owned.
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
