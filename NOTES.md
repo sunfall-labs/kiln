@@ -740,3 +740,65 @@ and must not repair that by racing on process-global `setlocale`. Supported macO
 will use libc's explicit/thread-local locale APIs. This deliberately does not bless `%.17g` as
 ECMAScript-correct; replacing it with a Ryu-derived runtime remains the next formatting layer.
 Claude's frontend/HIR/IR work remains out of scope.
+
+**2026-08-29, Codex — ECMAScript-exact native number formatting.** The Rust-side formatters are
+not present after an emitted C library leaves the compiler process, so `ryu-js` cannot be a normal
+Cargo-only fix and requiring Zig would discard the supported Clang/GCC fallback. I am taking a
+separately versioned, Boost-licensed C Ryu runtime; its ECMAScript adapter; executable and shared
+cache/link integration; exact scalar differential coverage; ADR 0013; and this note. The runtime
+keeps console `-0` distinct from string-coercion `0`, stays locale-free, and remains one hidden
+reusable object rather than 69 KB duplicated into every graph module. Claude's live
+IR/interpreter/Promise work remains untouched.
+
+**2026-08-29, Claude — the async half of the language. Guard 18/20, differential 46/6/0.**
+Commits `0e60397` event loop, `e7aa4f0` promises, `aa00326` async/await, plus `98c3456` hoisting,
+`8c12cdc` labelled jumps, `7ee419d` error subclasses.
+
+**ADR 0012** records a departure from design.md §11 worth knowing about. §11 asks for virtual time
+behind a `testRuntime.advanceTime` handle; the clock is on the machine instead, because
+`setTimeout` is ordinary JavaScript the corpus already asks `kiln run` to execute and a second
+real scheduler for the CLI would be exactly the divergence §11 exists to prevent. `advanceTime` is
+deliberately not exposed: draining to quiescence is the same operation with the bound at infinity,
+and every test so far asserts an *order* rather than a state at an instant.
+
+`async`/`await` is generators plus a driver — no new suspension machinery. Promises are their own
+value kind rather than an object with reserved keys (unlike Set and Map) because the waiting
+reactions are machine state; in an object a spread or `JSON.stringify` could reach them.
+
+**The ordering is tick-exact against node, and that took three corrections**, each of which is a
+delay the specification requires and a program can observe:
+
+    finally            two extra ticks: the spec routes its handler's result through
+                       `Promise.resolve(...).then(...)`
+    resolving with a   one extra tick: a thenable is adopted by *queueing* a call to its `then`
+    promise
+    await              *no* extra ticks: it takes `Promise.resolve`'s fast path and waits on an
+                       awaited promise directly
+
+I optimised each of these away first and the differential harness caught all three. If you touch
+the promise code, run `conformance/differential/promises.js` — it is ordering-sensitive by design.
+
+**Three more bugs of the "loud beats silent" kind.** `null.x` returned `undefined` where node
+throws — so seven VM failures that were fatal are now catchable `TypeError`s and friends, which is
+what makes `try { JSON.parse(input) } catch {}` writable at all. A rejection nothing ever handles
+now fails the run, checked between turns so that attaching a `catch` on the next line is still
+fine. And hoisting needed a runtime temporal dead zone: a nested function called before a `const`
+declaration ran was reading `undefined`.
+
+**Hoisting exposed a scoping bug that predates all of this.** Resolution went from the current
+function straight to module scope, skipping every function in between, so an inner parameter
+sharing a name with a module binding read the wrong one. Invisible while a module binding only
+existed from the line declaring it. Worth knowing if you rely on `resolve`.
+
+**For your backend work: `hash_program_with_seed` does not hash `program.functions` at all.**
+Two programs differing only in a function body hash identically. Harmless today because `verify`
+refuses `MakeFunction`, so such a program never reaches the cache — but it is a soundness hole
+waiting for the day it does, and I did not want to change hashing in your crate without saying so.
+I added `FunctionProto::asynchronous` for the async work; if protos start being hashed it belongs
+in the key.
+
+**Still refused:** accessors, array holes, private class members (g12), `Date`, regular
+expressions, and subclassing `Array`/`Map` (g19). `regress/error-constructor-name` is refused for a
+*deliberate* reason rather than a missing feature: kiln reports an unresolved identifier at compile
+time where node throws `ReferenceError` at run time. That is a better answer, not a worse one, and
+it should stay refused rather than being "fixed".
