@@ -171,8 +171,6 @@ impl From<&PropertyKey> for PropertyKey {
 }
 
 /// VM-private bookkeeping never enters the program-visible string namespace.
-#[cfg(test)]
-const RESERVED_KEY_PREFIX: &str = "@@";
 fn internal_key(name: &str) -> PropertyKey {
     PropertyKey::Internal(InternalKey::Slot(name.to_owned()))
 }
@@ -1581,9 +1579,8 @@ pub enum Value {
 impl Value {
     /// The string a value becomes when used as a property key.
     ///
-    /// Distinct from `to_display_string`: a symbol keys a property under its reserved slot, not
-    /// under its human-readable description, and conflating the two would make
-    /// `obj[Symbol.iterator]` and `obj["Symbol(Symbol.iterator)"]` the same property.
+    /// Distinct from `to_display_string`: this is the historical printable symbol spelling, not
+    /// the object-store key. Symbol identity is retained by [`Value::to_property_key`].
     pub fn property_key(&self) -> String {
         match self {
             Self::Symbol(symbol) => symbol.property_key(),
@@ -10542,6 +10539,9 @@ fn has_property(target: &Value, key: &Value) -> bool {
             if let Some(index) = array_index(key) {
                 return index < items.borrow().len();
             }
+            if items.properties.borrow().lookup(typed.clone()).is_some() {
+                return true;
+            }
             // Methods and `length` live on the prototype in a real engine; here the property
             // lookup answers for both, so `in` has to agree with it.
             name == "length"
@@ -12892,26 +12892,53 @@ mod tests {
         assert!(!has_property(&object, &Value::String("absent".to_owned())));
     }
 
-    /// The corpus asserts `Symbol.iterator in [1,2]`, so `in` and the property read have to
-    /// agree about what an array exposes. They share one table for that reason.
+    /// `Symbol.iterator` is a virtual protocol property, while the spelling `"@@iterator"` is an
+    /// ordinary string property. An own string property may coexist with the protocol symbol.
     #[test]
     fn arrays_expose_the_same_properties_to_reads_and_to_in() {
         let items = Value::Array(ArrayData::new(vec![Value::Number(1.0)]));
-        for key in ["join", "values", "@@iterator", "length"] {
+        if let Value::Array(array) = &items {
+            array
+                .properties
+                .borrow_mut()
+                .set("@@iterator", Value::Number(7.0));
+        }
+        for key in ["join", "values", "length", "@@iterator"] {
             assert!(
                 has_property(&items, &Value::String(key.to_owned())),
                 "`{key} in array` must be true"
             );
         }
+        let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
+        assert!(has_property(&items, &symbol));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        assert_eq!(
+            vm.property_key(
+                &items,
+                &Value::String("@@iterator".to_owned()).to_property_key()
+            ),
+            Value::Number(7.0)
+        );
+        assert!(matches!(
+            vm.property_key(&items, &symbol.to_property_key()),
+            Value::Native(Native::ArrayValues)
+        ));
         assert!(has_property(&items, &Value::Number(0.0)), "index 0 present");
         assert!(!has_property(&items, &Value::Number(1.0)), "index 1 absent");
     }
 
-    /// A symbol keys a property under its reserved slot, not under its printable description.
+    /// A symbol's printable description does not turn it into a string key.
     #[test]
     fn a_symbol_key_is_not_its_display_string() {
         let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
-        assert_eq!(symbol.property_key(), "@@iterator");
         assert_eq!(symbol.to_display_string(), "Symbol(Symbol.iterator)");
         assert_eq!(symbol.type_of(), "symbol");
     }
@@ -12923,8 +12950,9 @@ mod tests {
     fn reading_an_array_method_twice_yields_the_same_function() {
         assert!(strict_equal(
             &array_property("values"),
-            &array_property("@@iterator")
+            &array_property("values")
         ));
+        assert!(matches!(array_property("@@iterator"), Value::Undefined));
         assert!(strict_equal(
             &array_property("join"),
             &array_property("join")
@@ -13963,14 +13991,13 @@ mod tests {
     }
 
     #[test]
-    fn json_skips_internal_properties() {
-        // `@@`-prefixed entries are the VM's own bookkeeping -- an iterator cursor, a well-known
-        // symbol -- and are not own enumerable string properties of the object.
-        let value = object(&[
-            ("@@index", Value::Number(0.0)),
-            ("real", Value::Number(1.0)),
-        ]);
-        assert_eq!(json(&value).as_deref(), Some(r#"{"real":1}"#));
+    fn json_skips_internal_properties_but_keeps_at_at_strings() {
+        let mut data = ObjectData::default();
+        data.set(internal_key("index"), Value::Number(0.0));
+        data.set("@@index", Value::Number(1.0));
+        data.set("real", Value::Number(2.0));
+        let value = Value::Object(Rc::new(RefCell::new(data)));
+        assert_eq!(json(&value).as_deref(), Some(r#"{"@@index":1,"real":2}"#));
     }
 
     #[test]
@@ -14043,16 +14070,21 @@ mod tests {
     }
 
     #[test]
-    fn a_symbols_key_is_reserved_so_a_string_cannot_spell_it() {
+    fn symbols_are_typed_and_at_at_strings_are_not_symbols() {
         let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
             serial: 7,
             description: None,
         }));
-        assert!(symbol.property_key().starts_with(RESERVED_KEY_PREFIX));
-        assert!(
-            Symbol::WellKnown(WellKnown::Iterator)
-                .property_key()
-                .starts_with(RESERVED_KEY_PREFIX)
+        let mut data = ObjectData::default();
+        data.set(symbol.clone(), Value::Number(1.0));
+        data.set("@@symbol:7", Value::Number(2.0));
+        assert_eq!(data.get(symbol.clone()), Some(Value::Number(1.0)));
+        assert_eq!(data.get("@@symbol:7"), Some(Value::Number(2.0)));
+        assert_eq!(
+            data.own_keys()
+                .filter(|key| matches!(key, PropertyKey::Symbol(_)))
+                .count(),
+            1
         );
     }
 
@@ -14062,13 +14094,117 @@ mod tests {
             serial: 1,
             description: None,
         }));
-        let source = object(&[
-            ("plain", Value::Number(1.0)),
-            (&symbol.property_key(), Value::Number(2.0)),
-        ]);
+        let source = object(&[("plain", Value::Number(1.0))]);
+        if let Value::Object(source) = &source {
+            source.borrow_mut().set(symbol.clone(), Value::Number(2.0));
+        }
         let copied = own_properties(&source);
         assert_eq!(copied.len(), 2, "a spread carries symbol keys across");
         assert_eq!(copied[0].0, "plain");
+    }
+
+    #[test]
+    fn symbol_identity_survives_symbols_api_accessors_copies_and_delete() {
+        let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 42,
+            description: Some("state".to_owned()),
+        }));
+        let mut source = ObjectData::default();
+        source.set(symbol.clone(), Value::Number(9.0));
+        source.define_accessor(
+            Symbol::WellKnown(WellKnown::ToStringTag),
+            Some(Value::Native(Native::ArrayValues)),
+            None,
+        );
+        let source = Value::Object(Rc::new(RefCell::new(source)));
+        let symbols = own_property_keys(&source)
+            .into_iter()
+            .filter_map(|key| match key {
+                PropertyKey::Symbol(symbol) => Some(symbol),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            symbols,
+            vec![symbol.clone(), Symbol::WellKnown(WellKnown::ToStringTag)]
+        );
+        let copied = own_properties(&source);
+        assert!(copied.iter().any(|(key, property)| {
+            key == &PropertyKey::Symbol(symbol.clone())
+                && matches!(property, Property::Value(Value::Number(9.0)))
+        }));
+        assert!(copied.iter().any(|(key, property)| {
+            matches!(
+                key,
+                PropertyKey::Symbol(Symbol::WellKnown(WellKnown::ToStringTag))
+            ) && matches!(property, Property::Accessor { .. })
+        }));
+        assert!(has_property(&source, &Value::Symbol(symbol.clone())));
+        assert!(delete_property(&source, &Value::Symbol(symbol.clone())));
+        assert!(!has_property(&source, &Value::Symbol(symbol)));
+    }
+
+    #[test]
+    fn symbols_are_omitted_from_string_enumeration_and_json() {
+        let symbol = Symbol::WellKnown(WellKnown::Iterator);
+        let mut data = ObjectData::default();
+        data.set(symbol, Value::Number(1.0));
+        data.set("@@iterator", Value::Number(2.0));
+        let value = Value::Object(Rc::new(RefCell::new(data)));
+        assert_eq!(
+            own_property_keys(&value)
+                .into_iter()
+                .filter_map(|key| string_key(&key).map(str::to_owned))
+                .collect::<Vec<_>>(),
+            vec!["@@iterator"]
+        );
+        assert_eq!(json(&value).as_deref(), Some(r#"{"@@iterator":2}"#));
+    }
+
+    #[test]
+    fn arrays_keep_symbol_accessors_separate_from_string_properties() {
+        let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 99,
+            description: None,
+        }));
+        let array = ArrayData::new(Vec::new());
+        array.properties.borrow_mut().define_accessor(
+            symbol.clone(),
+            Some(Value::Native(Native::ArrayValues)),
+            None,
+        );
+        array
+            .properties
+            .borrow_mut()
+            .set("@@symbol:99", Value::Number(3.0));
+        let value = Value::Array(array);
+        assert!(has_property(&value, &Value::Symbol(symbol.clone())));
+        assert!(has_property(
+            &value,
+            &Value::String("@@symbol:99".to_owned())
+        ));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        assert_eq!(
+            vm.property_key(
+                &value,
+                &Value::String("@@symbol:99".to_owned()).to_property_key()
+            ),
+            Value::Number(3.0)
+        );
+        assert!(matches!(
+            own_properties(&value)
+                .into_iter()
+                .find(|(key, _)| key == &PropertyKey::Symbol(symbol.clone())),
+            Some((_, Property::Accessor { .. }))
+        ));
     }
 
     #[test]
@@ -14293,11 +14429,9 @@ mod tests {
     }
 
     #[test]
-    fn a_symbol_shows_its_description_rather_than_its_reserved_key() {
-        // The key is `@@iterator`, which is an implementation detail and not what a console says.
+    fn a_symbol_inspection_shows_its_description() {
         let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
         assert_eq!(inspect(&symbol), "Symbol(Symbol.iterator)");
-        assert_eq!(symbol.property_key(), "@@iterator");
     }
 
     #[test]
