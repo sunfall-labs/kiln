@@ -17135,6 +17135,153 @@ fn table_step(
         .unwrap_or(tabulated)
 }
 
+/// The names physically owned by each virtual intrinsic prototype table.
+///
+/// Reads can fall through to `Object.prototype`, but reflection must not report inherited names
+/// as own properties. Keeping this inventory beside the table machinery gives the virtual
+/// prototypes the same observable shape as ordinary objects.
+fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static str] {
+    match table {
+        PrototypeTable::Object => &[
+            "hasOwnProperty",
+            "isPrototypeOf",
+            "propertyIsEnumerable",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+        ],
+        PrototypeTable::Array | PrototypeTable::TypedArray => &[
+            "map",
+            "forEach",
+            "filter",
+            "reduce",
+            "sort",
+            "findIndex",
+            "find",
+            "some",
+            "every",
+            "flatMap",
+            "findLast",
+            "findLastIndex",
+            "reduceRight",
+            "join",
+            "push",
+            "pop",
+            "indexOf",
+            "includes",
+            "slice",
+            "at",
+            "flat",
+            "entries",
+            "keys",
+            "concat",
+            "reverse",
+            "shift",
+            "unshift",
+            "lastIndexOf",
+            "fill",
+            "splice",
+            "copyWithin",
+            "toString",
+            "values",
+            "set",
+            "subarray",
+        ],
+        PrototypeTable::String => &[
+            "values",
+            "toUpperCase",
+            "toLowerCase",
+            "includes",
+            "indexOf",
+            "slice",
+            "substring",
+            "substr",
+            "split",
+            "trim",
+            "startsWith",
+            "endsWith",
+            "repeat",
+            "at",
+            "codePointAt",
+            "localeCompare",
+            "toLocaleUpperCase",
+            "toLocaleLowerCase",
+            "normalize",
+            "charAt",
+            "charCodeAt",
+            "padStart",
+            "padEnd",
+            "replace",
+            "replaceAll",
+            "lastIndexOf",
+            "trimStart",
+            "trimEnd",
+            "concat",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+            "match",
+            "matchAll",
+            "search",
+        ],
+        PrototypeTable::Number => &["toString", "toFixed", "valueOf"],
+        PrototypeTable::Function => &["toString", "call", "apply", "bind"],
+        PrototypeTable::RegExp => &["test", "exec", "toString"],
+        PrototypeTable::Date => &["getTime", "valueOf", "toISOString", "toJSON", "toString"],
+        PrototypeTable::ArrayBuffer => &["resize", "slice"],
+        PrototypeTable::SharedArrayBuffer => &["grow", "slice"],
+        PrototypeTable::TypedArrayFor(_) => &["BYTES_PER_ELEMENT"],
+        PrototypeTable::DataView => &[
+            "getInt8",
+            "getUint8",
+            "getInt16",
+            "getUint16",
+            "getInt32",
+            "getUint32",
+            "getFloat32",
+            "getFloat64",
+            "setInt8",
+            "setUint8",
+            "setInt16",
+            "setUint16",
+            "setInt32",
+            "setUint32",
+            "setFloat32",
+            "setFloat64",
+            "getBigInt64",
+            "getBigUint64",
+            "setBigInt64",
+            "setBigUint64",
+        ],
+        PrototypeTable::Iterator => &[
+            "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some",
+            "every", "find",
+        ],
+        PrototypeTable::Boolean | PrototypeTable::Symbol | PrototypeTable::BigInt => {
+            &["toString", "toLocaleString", "valueOf"]
+        }
+        PrototypeTable::Promise => &["then", "catch", "finally"],
+        PrototypeTable::Map => &[
+            "set", "get", "has", "delete", "clear", "forEach", "values", "keys", "entries",
+        ],
+        PrototypeTable::Set => &[
+            "add", "has", "delete", "clear", "forEach", "values", "keys", "entries",
+        ],
+        PrototypeTable::WeakMap => &["set", "get", "has", "delete"],
+        PrototypeTable::WeakSet => &["add", "has", "delete"],
+    }
+}
+
+fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)> {
+    std::iter::once("constructor")
+        .chain(intrinsic_prototype_method_names(table).iter().copied())
+        .filter_map(|name| match Native::PrototypeOf(table).property(name) {
+            Some(Value::Undefined) | None => None,
+            Some(value) => Some((name.to_owned(), Property::Value(value))),
+        })
+        .collect()
+}
+
 /// The own, program-visible keys of a value, in insertion order.
 fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     let from_object = |data: &ObjectData| -> Vec<String> {
@@ -17168,6 +17315,14 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
                 keys.push("prototype".to_owned());
                 keys.extend(statics);
             }
+            keys
+        }
+        Value::Native(Native::PrototypeOf(table)) => {
+            let mut keys = intrinsic_prototype_entries(*table)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            intrinsics.reshape(target, &mut keys);
             keys
         }
         Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
