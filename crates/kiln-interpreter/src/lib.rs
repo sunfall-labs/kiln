@@ -177,6 +177,17 @@ fn internal_key(name: &str) -> PropertyKey {
     PropertyKey::Internal(InternalKey::Slot(name.to_owned()))
 }
 
+/// Render a private key's source identifier without exposing its engine-private scope.
+///
+/// Graph execution prefixes the compiler's class scope with a module namespace, but private
+/// identifiers themselves cannot contain `:`, so the final segment is always the user-written
+/// name. Keeping this separate from [`internal_key`] ensures diagnostics never become part of the
+/// storage-key format.
+fn private_display_name(name: &str) -> &str {
+    name.rsplit_once(':')
+        .map_or(name, |(_, identifier)| identifier)
+}
+
 fn iterator_key() -> PropertyKey {
     PropertyKey::Symbol(Symbol::WellKnown(WellKnown::Iterator))
 }
@@ -1072,6 +1083,17 @@ impl ObjectData {
         self.insert_ordered(key, Property::Value(value));
     }
 
+    /// Insert or overwrite an engine-private value, ignoring the ordinary object's extensibility
+    /// and frozen flags. Private elements are initialized by the class machinery, not by a
+    /// JavaScript property write, so `Object.freeze(this)` cannot block a later private field.
+    fn set_private(&mut self, key: PropertyKey, value: Value) {
+        if let Some((_, existing)) = self.properties.iter_mut().find(|(name, _)| name == &key) {
+            *existing = Property::Value(value);
+            return;
+        }
+        self.insert_ordered(key, Property::Value(value));
+    }
+
     fn insert_ordered(&mut self, key: PropertyKey, property: Property) {
         let position = match string_index(&key) {
             Some(index) => self
@@ -1935,6 +1957,10 @@ struct RealmState {
     next_sequence: RefCell<u64>,
     symbol_serial: RefCell<u64>,
     driver_program: RefCell<Option<Rc<Program>>>,
+    /// Private elements are keyed by object identity rather than by the ordinary property store.
+    /// Keeping the slots here gives every object-like value one uniform storage path, including
+    /// arrays, proxies, typed arrays and host-backed objects that do not carry ObjectData.
+    private_slots: RefCell<Vec<(Value, ObjectData)>>,
 }
 
 impl Realm {
@@ -1955,6 +1981,7 @@ impl Realm {
                 next_sequence: RefCell::new(0),
                 symbol_serial: RefCell::new(0),
                 driver_program: RefCell::new(None),
+                private_slots: RefCell::new(Vec::new()),
             }),
         }
     }
@@ -2726,6 +2753,54 @@ struct Vm<'host, H: HostOps + ?Sized> {
     limits: ExecutionLimits,
 }
 
+/// Whether a value can carry ECMAScript internal slots. Primitive values cannot be branded, but
+/// every object-like representation can be queried by a private instruction. The private store
+/// is separate from ordinary properties because several host-backed values have no ObjectData.
+fn private_target(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Object(_)
+            | Value::Function(_)
+            | Value::Array(_)
+            | Value::Generator(_)
+            | Value::Promise(_)
+            | Value::RegExp(_)
+            | Value::Date(_)
+            | Value::Settler(..)
+            | Value::TypedArray(_)
+            | Value::ArrayBuffer(_)
+            | Value::Proxy(_)
+            | Value::Bound(_)
+            | Value::Native(_)
+            | Value::Callback(_)
+    )
+}
+
+/// Identity comparison for values that can carry private elements. The realm keeps one strong
+/// reference to each branded object, preventing pointer reuse from aliasing a later object.
+fn same_private_target(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+        (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+        (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
+        (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
+        (Value::Promise(a), Value::Promise(b)) => Rc::ptr_eq(a, b),
+        (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
+        (Value::Date(a), Value::Date(b)) => Rc::ptr_eq(a, b),
+        (Value::BigInt(a), Value::BigInt(b)) => Rc::ptr_eq(a, b),
+        (Value::Settler(a, left_kind), Value::Settler(b, right_kind)) => {
+            *left_kind == *right_kind && Rc::ptr_eq(a, b)
+        }
+        (Value::TypedArray(a), Value::TypedArray(b)) => Rc::ptr_eq(a, b),
+        (Value::ArrayBuffer(a), Value::ArrayBuffer(b)) => Rc::ptr_eq(a, b),
+        (Value::Proxy(a), Value::Proxy(b)) => Rc::ptr_eq(a, b),
+        (Value::Bound(a), Value::Bound(b)) => Rc::ptr_eq(a, b),
+        (Value::Native(a), Value::Native(b)) => a == b,
+        (Value::Callback(a), Value::Callback(b)) => a == b,
+        _ => false,
+    }
+}
+
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn new<'host>(
         program: Rc<Program>,
@@ -2755,6 +2830,64 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             steps: 0,
             limits,
         }
+    }
+
+    fn private_property(&self, target: &Value, key: &PropertyKey) -> Option<Property> {
+        if !private_target(target) {
+            return None;
+        }
+        self.realm
+            .private_slots
+            .borrow()
+            .iter()
+            .find(|(owner, _)| same_private_target(owner, target))
+            .and_then(|(_, data)| data.get_own_property(key.clone()).cloned())
+    }
+
+    fn private_has(&self, target: &Value, key: &PropertyKey) -> bool {
+        self.private_property(target, key).is_some()
+    }
+
+    fn init_private(&self, target: &Value, key: PropertyKey, value: Value) -> bool {
+        if !private_target(target) {
+            return false;
+        }
+        let mut slots = self.realm.private_slots.borrow_mut();
+        if let Some((_, data)) = slots
+            .iter_mut()
+            .find(|(owner, _)| same_private_target(owner, target))
+        {
+            data.set_private(key, value);
+        } else {
+            let mut data = ObjectData::default();
+            data.set_private(key, value);
+            slots.push((target.clone(), data));
+        }
+        true
+    }
+
+    fn define_private_accessor(
+        &self,
+        target: &Value,
+        key: PropertyKey,
+        getter: Option<Value>,
+        setter: Option<Value>,
+    ) -> bool {
+        if !private_target(target) {
+            return false;
+        }
+        let mut slots = self.realm.private_slots.borrow_mut();
+        if let Some((_, data)) = slots
+            .iter_mut()
+            .find(|(owner, _)| same_private_target(owner, target))
+        {
+            data.define_accessor(key, getter, setter);
+        } else {
+            let mut data = ObjectData::default();
+            data.define_accessor(key, getter, setter);
+            slots.push((target.clone(), data));
+        }
+        true
     }
 
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
@@ -3490,29 +3623,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::PrivateIn(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
-                    let found = match target {
-                        Value::Object(object) => object
-                            .borrow()
-                            .get_own_property(internal_key(&name))
-                            .is_some(),
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow()
-                            .get_own_property(internal_key(&name))
-                            .is_some(),
-                        other => {
-                            self.throw_error(
-                                ErrorKind::Type,
-                                format!(
-                                    "right-hand side of `#{} in` must be an object, got {}",
-                                    name.trim_start_matches("@@private:"),
-                                    other.type_name()
-                                ),
-                                current,
-                            )?;
-                            continue;
-                        }
-                    };
+                    if !private_target(&target) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "right-hand side of `#{} in` must be an object, got {}",
+                                private_display_name(&name),
+                                target.type_name()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let found = self.private_has(&target, &internal_key(&name));
                     self.stack.push(Value::Boolean(found));
                 }
                 Instruction::GetPrivate(name) => {
@@ -3521,25 +3644,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Own-only, and a miss is a TypeError. That own-only rule *is* the brand
                     // check: an object of another class does not carry the name, however much
                     // of the rest of the shape it shares.
-                    let private_key = internal_key(&name);
-                    let found = match &target {
-                        Value::Object(object) => object
-                            .borrow()
-                            .get_own_property(private_key.clone())
-                            .cloned(),
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow()
-                            .get_own_property(private_key.clone())
-                            .cloned(),
-                        _ => None,
-                    };
-                    let Some(property) = found else {
+                    let Some(property) = self.private_property(&target, &internal_key(&name))
+                    else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
                                 "Cannot read private member #{} from an object whose class did not declare it",
-                                name.trim_start_matches("@@private:")
+                                private_display_name(&name)
                             ),
                             current,
                         )?;
@@ -3561,7 +3672,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 ErrorKind::Type,
                                 format!(
                                     "Cannot read private member #{} which has no getter",
-                                    name.trim_start_matches("@@private:")
+                                    private_display_name(&name)
                                 ),
                                 current,
                             )?;
@@ -3574,40 +3685,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
                     let private_key = internal_key(&name);
-                    let found = match &target {
-                        Value::Object(object) => object
-                            .borrow()
-                            .get_own_property(private_key.clone())
-                            .cloned(),
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow()
-                            .get_own_property(private_key.clone())
-                            .cloned(),
-                        _ => None,
-                    };
-                    let Some(property) = found else {
+                    let Some(property) = self.private_property(&target, &private_key) else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
                                 "Cannot write private member #{} to an object whose class did not declare it",
-                                name.trim_start_matches("@@private:")
+                                private_display_name(&name)
                             ),
                             current,
                         )?;
                         continue;
                     };
                     match property {
-                        Property::Value(_) => match target {
-                            Value::Object(object) => {
-                                object.borrow_mut().set(private_key, value.clone())
-                            }
-                            Value::Function(closure) => closure
-                                .properties
-                                .borrow_mut()
-                                .set(private_key, value.clone()),
-                            _ => {}
-                        },
+                        Property::Value(_) => {
+                            // Private writes bypass ObjectData's frozen/extensible checks.
+                            self.init_private(&target, private_key, value.clone());
+                        }
                         Property::Accessor {
                             set: Some(setter), ..
                         } => {
@@ -3622,7 +3715,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 ErrorKind::Type,
                                 format!(
                                     "Cannot write private member #{} which has no setter",
-                                    name.trim_start_matches("@@private:")
+                                    private_display_name(&name)
                                 ),
                                 current,
                             )?;
@@ -3635,20 +3728,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    match target {
-                        Value::Object(object) => {
-                            object.borrow_mut().set(internal_key(&name), value.clone())
-                        }
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow_mut()
-                            .set(internal_key(&name), value.clone()),
-                        other => {
-                            return Err(ExecutionError::NotAnObject {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
-                        }
+                    if !self.init_private(&target, internal_key(&name), value.clone()) {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
                     }
                     self.stack.push(value);
                 }
@@ -3661,22 +3745,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         (Some(function), None)
                     };
-                    match &target {
-                        Value::Object(object) => {
-                            object
-                                .borrow_mut()
-                                .define_accessor(internal_key(&name), getter, setter)
-                        }
-                        Value::Function(closure) => closure
-                            .properties
-                            .borrow_mut()
-                            .define_accessor(internal_key(&name), getter, setter),
-                        other => {
-                            return Err(ExecutionError::NotAnObject {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
-                        }
+                    if !self.define_private_accessor(&target, internal_key(&name), getter, setter) {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
                     }
                     self.stack.push(target);
                 }
@@ -14169,6 +14242,58 @@ mod tests {
         assert!(matches!(
             run(&program),
             Err(ExecutionError::Uncaught { message, .. }) if message.contains("no setter")
+        ));
+    }
+
+    #[test]
+    fn private_slots_cover_array_targets_and_ignore_freeze() {
+        let target = Value::Array(ArrayData::new(Vec::new()));
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        let key = internal_key("@@private:0:value");
+        assert!(private_target(&target));
+        assert!(!vm.private_has(&target, &key));
+        if let Value::Array(array) = &target {
+            array.properties.borrow_mut().freeze();
+        }
+        assert!(vm.init_private(&target, key.clone(), Value::Number(3.0)));
+        assert!(vm.private_has(&target, &key));
+        assert_eq!(
+            vm.private_property(&target, &key),
+            Some(Property::Value(Value::Number(3.0)))
+        );
+        assert!(!private_target(&Value::BigInt(Rc::new(
+            "1".parse().expect("valid bigint"),
+        ))));
+    }
+
+    #[test]
+    fn private_in_rejects_bigint_as_a_primitive_target() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::BigInt("1".into()),
+                Constant::String("@@private:0:x".into()),
+            ],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::PrivateIn(1),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::Uncaught { message, .. })
+                if message.contains("right-hand side of `#x in` must be an object")
         ));
     }
 

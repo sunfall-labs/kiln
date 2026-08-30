@@ -16,7 +16,7 @@ use kiln_interpreter::{
     ExecutionError, ExecutionLimits, ExecutionResult, Realm, Value, drain_realm,
     execute_module_in_realm,
 };
-use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
+use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module, remap_private_namespace};
 use kiln_module_resolver::{
     ModuleResolver, PathRole, ResolutionPolicy, ResolveError, SUPPORTED_EXTENSIONS,
 };
@@ -739,7 +739,15 @@ where
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
 
-                        let program = (self.provider)(&path)?;
+                        let mut program = (self.provider)(&path)?;
+                        // Each compiler instance starts its class-private counter at zero. The
+                        // canonical graph path supplies a deterministic namespace so classes in
+                        // separate module programs cannot accidentally share a private slot in
+                        // the realm they execute in.
+                        let namespace = path
+                            .to_str()
+                            .ok_or_else(|| ModuleGraphError::FrontendPath { path: path.clone() })?;
+                        remap_private_namespace(&mut program, &namespace);
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
                         for specifier in &program.dependencies {
@@ -1453,6 +1461,27 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["true"]);
+    }
+
+    #[test]
+    fn private_names_are_distinct_between_module_programs() {
+        let project = TempProject::new();
+        project.write(
+            "dependency.js",
+            "class Provider { #x = 1; }\nexport const value = new Provider();",
+        );
+        let entry = project.write(
+            "main.js",
+            "import { value } from './dependency.js';\n\
+             class Consumer { #x = 2; hasBrand(object) { return #x in object; } }\n\
+             console.log(new Consumer().hasBrand(value));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["false"]);
     }
 
     #[test]
