@@ -210,6 +210,16 @@ pub enum Native {
     /// the id it was given, and the language does not distinguish which kind it was.
     ClearTimer,
     QueueMicrotask,
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
+    PromiseAll,
+    PromiseAllSettled,
+    PromiseRace,
+    PromiseAny,
+    PromiseThen,
+    PromiseCatch,
+    PromiseFinally,
     BooleanConstructor,
     ParseInt,
     ParseFloat,
@@ -343,6 +353,14 @@ impl Native {
                 Some(Value::Number(f64::NEG_INFINITY))
             }
             (Self::NumberConstructor, "NaN") => Some(Value::Number(f64::NAN)),
+            (Self::PromiseConstructor, "resolve") => Some(Value::Native(Self::PromiseResolve)),
+            (Self::PromiseConstructor, "reject") => Some(Value::Native(Self::PromiseReject)),
+            (Self::PromiseConstructor, "all") => Some(Value::Native(Self::PromiseAll)),
+            (Self::PromiseConstructor, "allSettled") => {
+                Some(Value::Native(Self::PromiseAllSettled))
+            }
+            (Self::PromiseConstructor, "race") => Some(Value::Native(Self::PromiseRace)),
+            (Self::PromiseConstructor, "any") => Some(Value::Native(Self::PromiseAny)),
             (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
             (Self::SymbolConstructor, "iterator") => {
@@ -560,6 +578,12 @@ pub enum Value {
     Native(Native),
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
     Generator(Rc<RefCell<GeneratorState>>),
+    Promise(Rc<RefCell<PromiseState>>),
+    /// The `resolve` or `reject` handed to a promise executor.
+    ///
+    /// A function bound to one promise, which no other value kind here can express: a `Native`
+    /// carries no state and a `Closure` carries bytecode. The flag says which of the two it is.
+    Settler(Rc<RefCell<PromiseState>>, bool),
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
@@ -609,7 +633,9 @@ impl Value {
             Self::Function(_) => "function",
             Self::Object(_) => "object",
             Self::Native(_) | Self::Callback(_) => "function",
-            Self::Array(_) | Self::Generator(_) => "object",
+            Self::Array(_) | Self::Generator(_) | Self::Promise(_) => "object",
+            // A settler is a function the program can call, hold and pass on, so it says so.
+            Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -628,6 +654,8 @@ impl Value {
             Self::Native(_) | Self::Callback(_) => "function",
             Self::Array(_) => "array",
             Self::Generator(_) => "generator",
+            Self::Promise(_) => "promise",
+            Self::Settler(..) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
         }
@@ -649,7 +677,12 @@ impl Value {
             Self::Function(_) => f64::NAN,
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
-            Self::Object(_) | Self::Native(_) | Self::Callback(_) | Self::Generator(_) => f64::NAN,
+            Self::Object(_)
+            | Self::Native(_)
+            | Self::Callback(_)
+            | Self::Generator(_)
+            | Self::Promise(_)
+            | Self::Settler(..) => f64::NAN,
             // `Number(Symbol())` is a TypeError; NaN is the closest thing available without one.
             Self::Symbol(_) => f64::NAN,
             // `Number([])` is 0 and `Number([2])` is 2: ToPrimitive joins, then parses.
@@ -672,6 +705,8 @@ impl Value {
             | Self::Callback(_)
             | Self::Array(_)
             | Self::Generator(_)
+            | Self::Promise(_)
+            | Self::Settler(..)
             | Self::Symbol(_) => true,
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -700,6 +735,8 @@ impl Value {
             Self::Native(native) => format!("[Function {native:?}]"),
             Self::Callback(method) => format!("[Function {method:?}]"),
             Self::Generator(_) => "[object Generator]".to_owned(),
+            Self::Promise(_) => "[object Promise]".to_owned(),
+            Self::Settler(..) => "function () { [native code] }".to_owned(),
             Self::Symbol(symbol) => format!("Symbol({})", symbol.description()),
             // `String([1,2])` is "1,2": arrays stringify as a comma join, not as [object Array].
             Self::Array(items) => join(&items.borrow(), ","),
@@ -866,6 +903,12 @@ pub enum ExecutionError {
         instruction: usize,
         message: String,
     },
+    /// An exception reached a handler the *host* installed rather than one the program wrote.
+    ///
+    /// Never escapes the call that installed it: [`Vm::call_catching`] turns it back into the
+    /// thrown value. It exists because a rejection carries a value and an `ExecutionError`
+    /// carries a message, and a promise needs the value.
+    CaughtByHost,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -940,6 +983,7 @@ impl fmt::Display for ExecutionError {
             Self::CyclicJson => write!(formatter, "converting circular structure to JSON"),
             Self::GeneratorReturned => write!(formatter, "generator returned"),
             Self::Uncaught { message, .. } => write!(formatter, "uncaught {message}"),
+            Self::CaughtByHost => write!(formatter, "exception delivered to the host"),
             Self::NotAnObject { instruction, value } => write!(
                 formatter,
                 "instruction {instruction} set a property on a {value}, which is not an object"
@@ -1043,6 +1087,8 @@ pub fn execute<H: HostOps + ?Sized>(
         now: 0.0,
         timers: Vec::new(),
         microtasks: VecDeque::new(),
+        caught: None,
+        unhandled: None,
         next_timer_id: 1.0,
         next_sequence: 0,
         limits,
@@ -1108,6 +1154,8 @@ pub fn execute_module<H: HostOps + ?Sized>(
         now: 0.0,
         timers: Vec::new(),
         microtasks: VecDeque::new(),
+        caught: None,
+        unhandled: None,
         next_timer_id: 1.0,
         next_sequence: 0,
         limits,
@@ -1153,6 +1201,98 @@ struct Timer {
     /// `Some(delay)` for `setInterval`, which reschedules itself after each run.
     repeat: Option<f64>,
 }
+
+/// A promise: a value that is not there yet, and the reactions waiting for it.
+///
+/// Its own value kind rather than an object with reserved keys, unlike Set and Map, because the
+/// waiting reactions are machine state rather than program-visible properties -- putting them in
+/// an object would mean a spread or a `JSON.stringify` could reach them.
+#[derive(Debug, PartialEq)]
+pub struct PromiseState {
+    settled: Option<Settled>,
+    /// Reactions registered while still pending, in the order `then` was called.
+    reactions: Vec<Reaction>,
+    /// Whether a rejection has somewhere to go. A promise rejected with nothing attached is a
+    /// silent failure, which is worth reporting rather than dropping.
+    handled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Settled {
+    Fulfilled(Value),
+    Rejected(Value),
+}
+
+/// One `then` waiting on a promise: what to run, and where the result goes.
+#[derive(Debug, PartialEq)]
+struct Reaction {
+    on_fulfilled: Value,
+    on_rejected: Value,
+    sink: Sink,
+    /// `finally`: run the handler, then settle the sink with the *original* outcome rather than
+    /// the handler's result. That is the whole difference from `then(f, f)`, which would replace
+    /// a rejection with a fulfilment.
+    passthrough: bool,
+}
+
+/// Where a settled outcome goes.
+#[derive(Debug, PartialEq)]
+enum Sink {
+    /// The promise `then` returned.
+    Promise(Rc<RefCell<PromiseState>>),
+    /// One input of a combinator. `Promise.all` and its siblings have to count and collect, which
+    /// is bookkeeping no JavaScript handler performs -- so their inputs feed this instead.
+    Combinator(Native, usize, Rc<Combinator>),
+    /// Settle a promise with a *recorded* outcome once something else has settled, unless that
+    /// something rejected. `finally` waits on its handler's result and then restores the outcome
+    /// it was passing through.
+    Replay(Rc<RefCell<PromiseState>>, Settled),
+}
+
+/// The shared state of one `Promise.all`, `allSettled`, `race` or `any`.
+///
+/// On the heap because each input settles later and has to find it, and behind `Cell`s because
+/// several reactions reach it and none of them holds it for longer than a step.
+#[derive(Debug, PartialEq)]
+struct Combinator {
+    /// One slot per input, filled as they settle -- so the result keeps the *input* order rather
+    /// than the order they finished in.
+    slots: RefCell<Vec<Value>>,
+    outstanding: std::cell::Cell<usize>,
+    result: Rc<RefCell<PromiseState>>,
+}
+
+impl PromiseState {
+    fn pending() -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            settled: None,
+            reactions: Vec::new(),
+            handled: false,
+        }))
+    }
+}
+
+/// One unit of work on the microtask queue.
+///
+/// Both kinds drain together and in order, because the language puts them on one queue: a
+/// `queueMicrotask` between two `then`s runs between them.
+#[derive(Debug)]
+enum Job {
+    /// `queueMicrotask(callback)`.
+    Callback(Value, Vec<Value>),
+    /// A settled promise's reaction, waiting to be run.
+    React(Settled, Reaction),
+    /// Attach `outer` to `inner`, for a promise resolved with another promise.
+    ///
+    /// A job rather than an immediate attachment because the specification resolves a thenable by
+    /// *queueing* a call to its `then`, which costs a tick -- so returning a promise from a
+    /// handler settles one turn later than returning a plain value. That is observable, and
+    /// programs order themselves around it.
+    Adopt(Rc<RefCell<PromiseState>>, Rc<RefCell<PromiseState>>),
+}
+
+/// The `target` of a handler the host installed, which no compiler-emitted handler can have.
+const HOST_HANDLER: usize = usize::MAX;
 
 /// A `catch` or `finally` waiting for an exception.
 ///
@@ -1221,8 +1361,12 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     now: f64,
     /// Scheduled callbacks, in no particular order -- the next one is chosen by due time.
     timers: Vec<Timer>,
-    /// Jobs to run before the next timer, in order. Promise reactions will queue here.
-    microtasks: VecDeque<(Value, Vec<Value>)>,
+    /// Jobs to run before the next timer, in order.
+    microtasks: VecDeque<Job>,
+    /// The value delivered to a host handler, waiting to be collected by `call_catching`.
+    caught: Option<Value>,
+    /// A rejection that reached the end of the run with nothing attached to it.
+    unhandled: Option<Value>,
     /// Ids handed out to timers, and the tie-break order among those due together.
     next_timer_id: f64,
     next_sequence: u64,
@@ -1589,6 +1733,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             globals.set("Symbol", Value::Native(Native::SymbolConstructor));
                             globals.set("String", Value::Native(Native::StringConstructor));
                             globals.set("Math", Value::Native(Native::Math));
+                            globals.set("Promise", Value::Native(Native::PromiseConstructor));
                             globals.set("Number", Value::Native(Native::NumberConstructor));
                             globals.set("Boolean", Value::Native(Native::BooleanConstructor));
                             globals.set("NaN", Value::Number(f64::NAN));
@@ -1613,6 +1758,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             Native::ClearTimer
                         }
                         kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
+                        kiln_ir::Builtin::Promise => Native::PromiseConstructor,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -1833,6 +1979,18 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                             let closure = Rc::clone(closure);
                             self.call(closure, argc, current)?;
                         }
+                        // A promise executor's `resolve`/`reject`: an ordinary callable value,
+                        // which reaches the program as one and so has to be callable here.
+                        Value::Settler(..) => {
+                            let callee = callee.clone();
+                            let arguments = self.take_arguments(argc, current)?;
+                            let called =
+                                self.call_value(&callee, Value::Undefined, arguments, current);
+                            let Some(result) = self.catchable(called, current)? else {
+                                continue;
+                            };
+                            self.stack.push(result);
+                        }
                         Value::Native(native) => {
                             let native = *native;
                             let arguments = self.take_arguments(argc, current)?;
@@ -1942,6 +2100,21 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 message: describe_thrown(&thrown),
             });
         };
+        if handler.target == HOST_HANDLER {
+            // The host asked for the value rather than a jump. Frames and stack are still
+            // restored, so the machine is left exactly as an ordinary catch would leave it.
+            while self.frames.len() > handler.frame_depth {
+                let frame = self.frames.pop().expect("checked by the loop condition");
+                self.locals = frame.locals;
+                self.function = frame.function;
+                self.this_value = frame.this_value;
+                self.arguments = frame.arguments;
+                self.instruction = frame.instruction;
+            }
+            self.stack.truncate(handler.stack_height);
+            self.caught = Some(thrown);
+            return Err(ExecutionError::CaughtByHost);
+        }
         while self.frames.len() > handler.frame_depth {
             let frame = self.frames.pop().expect("checked by the loop condition");
             self.locals = frame.locals;
@@ -2183,8 +2356,82 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 self.timers.retain(|timer| timer.id != id);
                 Ok(Value::Undefined)
             }
+            Native::PromiseResolve => {
+                // Already a promise? Hand it straight back; wrapping would add a tick for
+                // nothing and break `Promise.resolve(p) === p`.
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(value, Value::Promise(_)) {
+                    return Ok(value);
+                }
+                let promise = PromiseState::pending();
+                self.resolve_promise(&promise, value);
+                Ok(Value::Promise(promise))
+            }
+            Native::PromiseReject => {
+                let promise = PromiseState::pending();
+                let reason = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.settle(&promise, &Settled::Rejected(reason));
+                Ok(Value::Promise(promise))
+            }
+            Native::PromiseThen => {
+                let Value::Promise(promise) = receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let derived = PromiseState::pending();
+                self.react(
+                    &Rc::clone(promise),
+                    arguments.first().cloned().unwrap_or(Value::Undefined),
+                    arguments.get(1).cloned().unwrap_or(Value::Undefined),
+                    Sink::Promise(Rc::clone(&derived)),
+                    false,
+                );
+                Ok(Value::Promise(derived))
+            }
+            // `catch(r)` is `then(undefined, r)`, and saying so keeps one implementation.
+            Native::PromiseCatch => self.dispatch_native(
+                Native::PromiseThen,
+                receiver,
+                &[
+                    Value::Undefined,
+                    arguments.first().cloned().unwrap_or(Value::Undefined),
+                ],
+                instruction,
+            ),
+            // `finally(f)` runs `f` either way and passes the outcome through untouched, which
+            // is what separates it from `then(f, f)`.
+            Native::PromiseFinally => {
+                let Value::Promise(promise) = receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let derived = PromiseState::pending();
+                self.react(
+                    &Rc::clone(promise),
+                    handler.clone(),
+                    handler,
+                    Sink::Promise(Rc::clone(&derived)),
+                    true,
+                );
+                Ok(Value::Promise(derived))
+            }
+            // `all`, `allSettled`, `race` and `any` differ only in when they settle and what
+            // they collect, so they share one walk over the inputs.
+            Native::PromiseAll
+            | Native::PromiseAllSettled
+            | Native::PromiseRace
+            | Native::PromiseAny => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let items = self.drain_iterable(&source, instruction)?;
+                self.combine(native, items)
+            }
             Native::QueueMicrotask => {
-                self.microtasks.push_back((
+                self.microtasks.push_back(Job::Callback(
                     arguments.first().cloned().unwrap_or(Value::Undefined),
                     Vec::new(),
                 ));
@@ -2504,6 +2751,41 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         Ok(if ordering.is_nan() { 0.0 } else { ordering })
     }
 
+    /// Call `callee`, recovering the value it threw rather than unwinding past this point.
+    ///
+    /// The outer `Result` is the machine failing; the inner one is the program's own outcome --
+    /// `Err` holding whatever it threw. A promise reaction needs exactly this shape, because a
+    /// rejection carries a value and an `ExecutionError` carries only a message.
+    fn call_catching(
+        &mut self,
+        callee: &Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Result<Value, Value>, ExecutionError> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+        });
+        match self.call_value(callee, this_value, arguments, instruction) {
+            Ok(value) => {
+                self.handlers.truncate(installed);
+                Ok(Ok(value))
+            }
+            Err(ExecutionError::CaughtByHost) => {
+                // `unwind` popped it; anything the callee left above it goes too.
+                self.handlers.truncate(installed);
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => {
+                self.handlers.truncate(installed);
+                Err(error)
+            }
+        }
+    }
+
     /// Call `callee` and run it to completion, returning its value.
     ///
     /// For a native this is a direct call; for a compiled function it pushes a frame and drives
@@ -2520,6 +2802,18 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         match callee {
             Value::Native(native) => {
                 self.dispatch_native(*native, &this_value, &arguments, instruction)
+            }
+            // `resolve` and `reject` from a promise executor. Calling one settles its promise
+            // and evaluates to undefined, however many times the program calls it.
+            Value::Settler(promise, rejects) => {
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let promise = Rc::clone(promise);
+                if *rejects {
+                    self.settle(&promise, &Settled::Rejected(value));
+                } else {
+                    self.resolve_promise(&promise, value);
+                }
+                Ok(Value::Undefined)
             }
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
@@ -2674,6 +2968,310 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         prototype
     }
 
+    /// Settle a promise, queueing whatever was waiting on it.
+    ///
+    /// Only the first settlement counts: a promise is a value that arrives once, and both
+    /// `resolve` and `reject` are handed to the program, which may call either twice.
+    fn settle(&mut self, promise: &Rc<RefCell<PromiseState>>, outcome: &Settled) {
+        let (reactions, unobserved) = {
+            let mut state = promise.borrow_mut();
+            if state.settled.is_some() {
+                return;
+            }
+            state.settled = Some(outcome.clone());
+            let unobserved = !state.handled && matches!(outcome, Settled::Rejected(_));
+            (std::mem::take(&mut state.reactions), unobserved)
+        };
+        // Recorded now and cleared if anything attaches later in the same drain, because a
+        // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
+        // ordinary code.
+        if unobserved && let Settled::Rejected(reason) = &outcome {
+            self.unhandled = Some(reason.clone());
+        }
+        for reaction in reactions {
+            self.microtasks
+                .push_back(Job::React(outcome.clone(), reaction));
+        }
+    }
+
+    /// Resolve a promise with a value, adopting it when that value is itself a promise.
+    ///
+    /// Adoption is what makes `then` chainable: returning a promise from a handler waits for it
+    /// rather than fulfilling with the promise object. It needs no special machinery -- waiting
+    /// for `inner` and settling `promise` with whatever it produces is exactly a reaction with no
+    /// handlers, which passes both outcomes through unchanged.
+    fn resolve_promise(&mut self, promise: &Rc<RefCell<PromiseState>>, value: Value) {
+        let Value::Promise(inner) = &value else {
+            self.settle(promise, &Settled::Fulfilled(value));
+            return;
+        };
+        if Rc::ptr_eq(promise, inner) {
+            // Waiting for itself would wait forever, so the specification makes it a TypeError.
+            let error = self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(
+                    "Chaining cycle detected for promise".to_owned(),
+                )],
+            );
+            self.settle(promise, &Settled::Rejected(error));
+            return;
+        }
+        self.microtasks
+            .push_back(Job::Adopt(Rc::clone(promise), Rc::clone(inner)));
+    }
+
+    /// Attach a reaction to a promise, queueing it immediately if the promise has already settled.
+    ///
+    /// Queued rather than run, even when the outcome is already known: a handler must never run
+    /// synchronously from `then`, or the order of a program would depend on *when* a promise
+    /// settled rather than on what it does.
+    fn react(
+        &mut self,
+        promise: &Rc<RefCell<PromiseState>>,
+        on_fulfilled: Value,
+        on_rejected: Value,
+        sink: Sink,
+        passthrough: bool,
+    ) {
+        let reaction = Reaction {
+            on_fulfilled,
+            on_rejected,
+            sink,
+            passthrough,
+        };
+        let settled = {
+            let mut state = promise.borrow_mut();
+            let first = !state.handled;
+            state.handled = true;
+            if first && matches!(state.settled, Some(Settled::Rejected(_))) {
+                // Something is handling it after all.
+                self.unhandled = None;
+            }
+            state.settled.clone()
+        };
+        match settled {
+            Some(outcome) => self.microtasks.push_back(Job::React(outcome, reaction)),
+            None => promise.borrow_mut().reactions.push(reaction),
+        }
+    }
+
+    /// Run one reaction: call its handler, and settle the promise it derives from the result.
+    ///
+    /// A handler that throws rejects the derived promise rather than failing the program -- which
+    /// is the whole reason `call_catching` exists, since a rejection carries the thrown value.
+    fn run_reaction(&mut self, outcome: Settled, reaction: Reaction) -> Result<(), ExecutionError> {
+        // Neither of these carries handlers: the bookkeeping *is* the reaction.
+        match &reaction.sink {
+            Sink::Combinator(native, index, state) => {
+                return self.combine_step(*native, *index, &Rc::clone(state), outcome);
+            }
+            Sink::Replay(promise, recorded) => {
+                let promise = Rc::clone(promise);
+                // A handler that returned a rejected promise replaces the outcome; anything else
+                // leaves it as it was, which is what `finally` promises.
+                let outcome = match outcome {
+                    Settled::Rejected(reason) => Settled::Rejected(reason),
+                    Settled::Fulfilled(_) => recorded.clone(),
+                };
+                self.settle(&promise, &outcome);
+                return Ok(());
+            }
+            Sink::Promise(_) => {}
+        }
+        let Sink::Promise(derived) = &reaction.sink else {
+            unreachable!("checked just above");
+        };
+        let derived = Rc::clone(derived);
+
+        let (handler, argument) = match &outcome {
+            Settled::Fulfilled(value) => (reaction.on_fulfilled.clone(), value.clone()),
+            Settled::Rejected(reason) => (reaction.on_rejected.clone(), reason.clone()),
+        };
+        if handler.is_nullish() {
+            // No handler for this outcome, so it passes through unchanged -- which is what makes
+            // `.then(f)` propagate a rejection and `.catch(r)` propagate a value.
+            match outcome {
+                Settled::Fulfilled(value) => self.resolve_promise(&derived, value),
+                Settled::Rejected(reason) => {
+                    self.settle(&derived, &Settled::Rejected(reason));
+                }
+            }
+            return Ok(());
+        }
+        // `finally`'s handler takes no argument and its result is discarded, so the only thing
+        // it can change is whether the promise rejects -- which is why a throw is still honoured.
+        let arguments = if reaction.passthrough {
+            Vec::new()
+        } else {
+            vec![argument]
+        };
+        match self.call_catching(&handler, Value::Undefined, arguments, self.instruction)? {
+            Ok(result) => {
+                if reaction.passthrough {
+                    // The specification routes a `finally` handler's result through
+                    // `Promise.resolve(...).then(...)`, so the outcome it restores arrives two
+                    // ticks after a plain `then` queued alongside it. That delay is observable,
+                    // so it is reproduced rather than optimised away -- and it is also what lets
+                    // a handler returning a promise hold the chain open.
+                    let waited = PromiseState::pending();
+                    self.resolve_promise(&waited, result);
+                    let relay = PromiseState::pending();
+                    self.react(
+                        &waited,
+                        Value::Undefined,
+                        Value::Undefined,
+                        Sink::Promise(Rc::clone(&relay)),
+                        false,
+                    );
+                    self.react(
+                        &relay,
+                        Value::Undefined,
+                        Value::Undefined,
+                        Sink::Replay(derived, outcome),
+                        false,
+                    );
+                } else {
+                    self.resolve_promise(&derived, result);
+                }
+            }
+            Err(thrown) => self.settle(&derived, &Settled::Rejected(thrown)),
+        }
+        Ok(())
+    }
+
+    /// `Promise.all`, `allSettled`, `race` and `any` over an already-collected list.
+    ///
+    /// One implementation because the four differ only in when they settle: `race` and `any` on
+    /// the first input to do the right thing, `all` and `allSettled` when every input has. The
+    /// tracker object carries the counters, and lives on the heap because each input's reaction
+    /// runs later and has to find it.
+    fn combine(&mut self, native: Native, items: Vec<Value>) -> Result<Value, ExecutionError> {
+        let result = PromiseState::pending();
+        let total = items.len();
+
+        if total == 0 {
+            // An empty `all` or `allSettled` is already done; an empty `any` has no input that
+            // could succeed, so it rejects, and an empty `race` never settles at all.
+            match native {
+                Native::PromiseAll | Native::PromiseAllSettled => {
+                    let empty = Value::Array(Rc::new(RefCell::new(Vec::new())));
+                    self.settle(&result, &Settled::Fulfilled(empty));
+                }
+                Native::PromiseAny => {
+                    let error = self.construct_error(
+                        ErrorKind::Error,
+                        &[Value::String("All promises were rejected".to_owned())],
+                    );
+                    self.settle(&result, &Settled::Rejected(error));
+                }
+                _ => {}
+            }
+            return Ok(Value::Promise(result));
+        }
+
+        let state = Rc::new(Combinator {
+            slots: RefCell::new(vec![Value::Undefined; total]),
+            outstanding: std::cell::Cell::new(total),
+            result: Rc::clone(&result),
+        });
+        for (index, item) in items.into_iter().enumerate() {
+            // Every input goes through the same resolution a `Promise.resolve` would, so a plain
+            // value participates on the same terms as a promise -- one tick later, like
+            // everything else.
+            let input = match item {
+                Value::Promise(promise) => promise,
+                other => {
+                    let promise = PromiseState::pending();
+                    self.resolve_promise(&promise, other);
+                    promise
+                }
+            };
+            self.react(
+                &input,
+                Value::Undefined,
+                Value::Undefined,
+                Sink::Combinator(native, index, Rc::clone(&state)),
+                false,
+            );
+        }
+        Ok(Value::Promise(result))
+    }
+
+    /// One input of a combinator settling.
+    ///
+    /// The four rules in one place, because they differ only in which outcome ends the whole
+    /// thing and what it collects:
+    ///
+    /// - `all` fails on the first rejection and collects fulfilments.
+    /// - `any` succeeds on the first fulfilment and collects rejections.
+    /// - `race` takes the first outcome of either kind.
+    /// - `allSettled` never fails and collects a descriptor for each.
+    fn combine_step(
+        &mut self,
+        native: Native,
+        index: usize,
+        state: &Rc<Combinator>,
+        outcome: Settled,
+    ) -> Result<(), ExecutionError> {
+        // The first input to decide the answer settles the result, and `settle` ignores the rest
+        // -- so there is no separate "already done" flag to keep in step with it.
+        match (native, &outcome) {
+            (Native::PromiseRace, _) => {
+                self.settle(&state.result, &outcome);
+                return Ok(());
+            }
+            (Native::PromiseAll, Settled::Rejected(_))
+            | (Native::PromiseAny, Settled::Fulfilled(_)) => {
+                self.settle(&state.result, &outcome);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let collected = match (native, &outcome) {
+            (Native::PromiseAllSettled, Settled::Fulfilled(value)) => {
+                let mut data = ObjectData::default();
+                data.set("status", Value::String("fulfilled".to_owned()));
+                data.set("value", value.clone());
+                Value::Object(Rc::new(RefCell::new(data)))
+            }
+            (Native::PromiseAllSettled, Settled::Rejected(reason)) => {
+                let mut data = ObjectData::default();
+                data.set("status", Value::String("rejected".to_owned()));
+                data.set("reason", reason.clone());
+                Value::Object(Rc::new(RefCell::new(data)))
+            }
+            (_, Settled::Fulfilled(value)) => value.clone(),
+            (_, Settled::Rejected(reason)) => reason.clone(),
+        };
+        if let Some(slot) = state.slots.borrow_mut().get_mut(index) {
+            *slot = collected;
+        }
+
+        state
+            .outstanding
+            .set(state.outstanding.get().saturating_sub(1));
+        if state.outstanding.get() > 0 {
+            return Ok(());
+        }
+        let gathered = Value::Array(Rc::new(RefCell::new(state.slots.borrow().clone())));
+        match native {
+            // Every input rejected, and `any` reports them together rather than picking one.
+            Native::PromiseAny => {
+                let error = self.construct_error(
+                    ErrorKind::Error,
+                    &[Value::String("All promises were rejected".to_owned())],
+                );
+                if let Value::Object(object) = &error {
+                    object.borrow_mut().set("errors", gathered);
+                }
+                self.settle(&state.result, &Settled::Rejected(error));
+            }
+            _ => self.settle(&state.result, &Settled::Fulfilled(gathered)),
+        }
+        Ok(())
+    }
+
     /// Run every queued job, moving the virtual clock forward to reach each timer.
     ///
     /// This is the event loop. Microtasks drain completely before any timer runs and again after
@@ -2685,6 +3283,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     fn run_event_loop(&mut self) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks()?;
+            // Checked between turns, not at each settlement: `Promise.reject(x)` followed by a
+            // `.catch` on the next line must not be a failure, and by the time the queue is
+            // empty every handler that was going to attach has.
+            self.check_unhandled_rejection()?;
             let Some(index) = self.next_due_timer() else {
                 return Ok(());
             };
@@ -2710,10 +3312,37 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
     }
 
+    /// Report a rejection nothing ever handled.
+    ///
+    /// A promise that rejects with nothing attached is a silent failure: the program looks like
+    /// it worked. Node prints a warning and exits non-zero; this fails the run, which is the same
+    /// judgement stated more plainly and matches how an uncaught throw is treated.
+    fn check_unhandled_rejection(&mut self) -> Result<(), ExecutionError> {
+        let Some(reason) = self.unhandled.take() else {
+            return Ok(());
+        };
+        Err(ExecutionError::Uncaught {
+            instruction: self.instruction,
+            message: format!("(in promise) {}", describe_thrown(&reason)),
+        })
+    }
+
     /// Run microtasks until none are left, including ones queued by the ones already running.
     fn drain_microtasks(&mut self) -> Result<(), ExecutionError> {
-        while let Some((callback, arguments)) = self.microtasks.pop_front() {
-            self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
+        while let Some(job) = self.microtasks.pop_front() {
+            match job {
+                Job::Callback(callback, arguments) => {
+                    self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
+                }
+                Job::React(outcome, reaction) => self.run_reaction(outcome, reaction)?,
+                Job::Adopt(outer, inner) => self.react(
+                    &inner,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::Promise(outer),
+                    false,
+                ),
+            }
         }
         Ok(())
     }
@@ -2782,6 +3411,27 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::Native(Native::Error(kind)) => {
                 let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
+            }
+            Value::Native(Native::PromiseConstructor) => {
+                let promise = PromiseState::pending();
+                let executor = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // The executor runs *now*, synchronously, which is what lets it capture
+                // something and settle the promise later.
+                let outcome = self.call_catching(
+                    &executor,
+                    Value::Undefined,
+                    vec![
+                        Value::Settler(Rc::clone(&promise), false),
+                        Value::Settler(Rc::clone(&promise), true),
+                    ],
+                    current,
+                )?;
+                // An executor that throws rejects the promise, rather than failing the program:
+                // `new Promise(() => { throw e })` is how a rejection is often written.
+                if let Err(thrown) = outcome {
+                    self.settle(&promise, &Settled::Rejected(thrown));
+                }
+                self.stack.push(Value::Promise(promise));
             }
             Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
                 let is_map = matches!(kind, Native::MapConstructor);
@@ -2973,6 +3623,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::String(_) => string_property(name),
             Value::Number(_) => number_property(name),
             Value::Array(_) => array_property(name),
+            Value::Promise(_) => match name {
+                "then" => Value::Native(Native::PromiseThen),
+                "catch" => Value::Native(Native::PromiseCatch),
+                "finally" => Value::Native(Native::PromiseFinally),
+                _ => Value::Undefined,
+            },
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
             Value::Generator(_) => match name {
@@ -3057,6 +3713,9 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 &arguments,
                 instruction,
             )?)),
+            Value::Settler(..) => self
+                .call_value(&method, receiver, arguments, instruction)
+                .map(Some),
             Value::Function(closure) => {
                 // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
                 // the shared call path receives them; it pops the placeholder as the callee.
@@ -3501,9 +4160,11 @@ fn json_stringify(
                 format!("{{{open}{}{close}}}", parts.join(&separator))
             })
         }
-        // Neither has own enumerable properties, so both serialise as the empty object -- which
-        // is also what a real engine produces for them.
-        Value::Generator(_) => Some("{}".to_owned()),
+        // None of these has own enumerable properties, so all serialise as the empty object --
+        // which is also what a real engine produces for them.
+        Value::Generator(_) | Value::Promise(_) => Some("{}".to_owned()),
+        // A function has no JSON spelling, and a settler is one.
+        Value::Settler(..) => None,
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
     })
 }
@@ -3630,7 +4291,19 @@ fn call_native(
         Native::SetTimeout
         | Native::SetInterval
         | Native::ClearTimer
-        | Native::QueueMicrotask => {
+        | Native::QueueMicrotask
+        // Every promise operation settles something, schedules something, or calls back into the
+        // program -- so none of them is a pure function of its arguments.
+        | Native::PromiseConstructor
+        | Native::PromiseResolve
+        | Native::PromiseReject
+        | Native::PromiseAll
+        | Native::PromiseAllSettled
+        | Native::PromiseRace
+        | Native::PromiseAny
+        | Native::PromiseThen
+        | Native::PromiseCatch
+        | Native::PromiseFinally => {
             unreachable!("the scheduling built-ins are dispatched by the interpreter")
         }
         // A marker, not a callable: every read of it is turned into a ReferenceError before it
@@ -5068,6 +5741,17 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         Value::Native(native) => format!("[Function: {native:?}]"),
         Value::Callback(method) => format!("[Function: {method:?}]"),
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
+        Value::Settler(..) => "[Function (anonymous)]".to_owned(),
+        Value::Promise(promise) => match &promise.borrow().settled {
+            None => "Promise { <pending> }".to_owned(),
+            Some(Settled::Fulfilled(value)) => {
+                format!("Promise {{ {} }}", inspect_nested(value, depth + 1, seen))
+            }
+            Some(Settled::Rejected(reason)) => format!(
+                "Promise {{ <rejected> {} }}",
+                inspect_nested(reason, depth + 1, seen)
+            ),
+        },
         Value::Array(items) => {
             let Some(guard) = InspectGuard::enter(seen, Rc::as_ptr(items).cast::<()>()) else {
                 return "[Circular *1]".to_owned();
