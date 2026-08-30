@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -87,6 +87,22 @@ pub struct SourceHash {
     pub hash: SourceDigest,
 }
 
+/// Connection-local identity for one staged source synchronization.
+///
+/// A sync is deliberately split into begin, stage, and commit messages so a stateless client can
+/// upload only the files the daemon is missing without exposing a partially uploaded project to
+/// concurrent queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SyncId(pub u64);
+
+/// Monotonic identity of the daemon's authoritative source set.
+///
+/// Source-consuming requests carry the view they synchronized against. The daemon validates that
+/// view while holding the same engine lock used to prepare the request, so a query cannot prepare
+/// against one source set and execute against another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SourceView(pub u64);
+
 /// A source file, interned by the daemon. Stable for the lifetime of a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FileId(pub u32);
@@ -97,32 +113,45 @@ pub enum Request {
     Ping {
         protocol: u32,
     },
-    /// Replace a file's contents. Bumps the database revision.
+    /// Replace a file's contents using a compare-and-swap against the authoritative source view.
+    /// Returns [`Response::SourceUpdated`] with the new view.
     SetSource {
         path: String,
         text: String,
+        source_view: SourceView,
     },
-    /// The client's whole view of the project, named but not sent.
+    /// Begin a complete synchronization of the client's source manifest.
     ///
-    /// Answered with [`Response::Needed`]: the subset whose contents the daemon does not
-    /// already hold, which is all the client then has to push. Without this a stateless client
-    /// re-sends every source on every command -- on a 320-file project that was ~370KB of JSON
-    /// to answer a question whose response was "nothing changed". The list is authoritative:
-    /// active daemon sources omitted from it are removed before the response is sent.
+    /// This request is begin-only and does not mutate the authoritative source set. It is
+    /// answered with [`Response::Needed`] containing a connection-local [`SyncId`] and the subset
+    /// whose contents the daemon does not already hold. The client stages those files and then
+    /// commits the complete snapshot with [`Request::CommitSync`].
     Sync {
         files: Vec<SourceHash>,
+    },
+    /// Stage one digest-checked file for an in-flight synchronization.
+    StageSource {
+        sync_id: SyncId,
+        path: String,
+        text: String,
+    },
+    /// Atomically publish a previously staged complete synchronization.
+    CommitSync {
+        sync_id: SyncId,
     },
     /// Run the query pipeline for a file and return its summary.
     Check {
         path: String,
         /// Project root used to reconcile relative editor-buffer spellings with this file.
         project_root: String,
+        source_view: SourceView,
     },
     /// Compile the cached HIR and execute one module through the interpreter.
     Run {
         path: String,
         /// Project root used to resolve this module's explicit relative imports.
         project_root: String,
+        source_view: SourceView,
     },
     /// Emit, compile, and link one module through the native backend.
     NativeBuild {
@@ -132,6 +161,7 @@ pub enum Request {
         /// invocations produce the same artifact location.
         output: Option<String>,
         profile: NativeProfile,
+        source_view: SourceView,
     },
     /// Build from an exact database snapshot, publishing only if that snapshot remains current.
     NativeBuildAtRevision {
@@ -139,6 +169,7 @@ pub enum Request {
         project_root: String,
         output: Option<String>,
         profile: NativeProfile,
+        source_view: SourceView,
         expected_revision: u64,
     },
     /// Emit, compile, and link one scalar module as a shared library for an embedding host.
@@ -149,12 +180,14 @@ pub enum Request {
         /// invocations produce the same artifact location.
         output: Option<String>,
         profile: NativeProfile,
+        source_view: SourceView,
     },
     /// Emit, compile, link, and execute one module through the native backend.
     NativeRun {
         path: String,
         project_root: String,
         profile: NativeProfile,
+        source_view: SourceView,
     },
     /// Discover, select, and execute a conformance corpus in this resident process.
     Test {
@@ -166,7 +199,9 @@ pub enum Request {
         previously_failed: Vec<String>,
     },
     /// Whole-project summary, which depends on every module interface.
-    Project,
+    Project {
+        source_view: SourceView,
+    },
     /// Recompute counters, so callers can assert what was and was not invalidated.
     Stats,
     /// Reset all counters without discarding cached values.
@@ -183,7 +218,9 @@ pub enum Response {
     Checked(ModuleSummary),
     Ran(RunSummary),
     NativeBuilt(NativeBuildSummary),
-    /// The requested snapshot was superseded before the native artifact could be published.
+    /// The requested database revision was superseded before the native artifact could be
+    /// published. This is distinct from [`Response::StaleSourceView`], which rejects a request
+    /// before preparation because its authoritative source view is old.
     Stale {
         current_revision: u64,
     },
@@ -194,7 +231,20 @@ pub enum Response {
     Stats(Stats),
     /// The paths from a [`Request::Sync`] whose contents the daemon still needs.
     Needed {
+        sync_id: SyncId,
         paths: Vec<String>,
+    },
+    /// A complete synchronization was atomically published.
+    Synced {
+        source_view: SourceView,
+    },
+    /// A direct [`Request::SetSource`] update was atomically published.
+    SourceUpdated {
+        source_view: SourceView,
+    },
+    /// The request's source view is no longer authoritative.
+    StaleSourceView {
+        current: SourceView,
     },
     Ok,
     Error {
@@ -406,6 +456,108 @@ pub struct Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_v16_sync_and_source_view_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 16);
+
+        let requests = [
+            (
+                Request::Sync {
+                    files: vec![SourceHash {
+                        path: "main.js".to_owned(),
+                        hash: source_digest("hello"),
+                    }],
+                },
+                serde_json::json!({
+                    "Sync": {"files": [{
+                        "path": "main.js",
+                        "hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                    }]}
+                }),
+            ),
+            (
+                Request::StageSource {
+                    sync_id: SyncId(9),
+                    path: "main.js".to_owned(),
+                    text: "hello".to_owned(),
+                },
+                serde_json::json!({
+                    "StageSource": {"sync_id": 9, "path": "main.js", "text": "hello"}
+                }),
+            ),
+            (
+                Request::CommitSync { sync_id: SyncId(9) },
+                serde_json::json!({"CommitSync": {"sync_id": 9}}),
+            ),
+            (
+                Request::SetSource {
+                    path: "main.js".to_owned(),
+                    text: "hello".to_owned(),
+                    source_view: SourceView(12),
+                },
+                serde_json::json!({
+                    "SetSource": {"path": "main.js", "text": "hello", "source_view": 12}
+                }),
+            ),
+            (
+                Request::Project {
+                    source_view: SourceView(12),
+                },
+                serde_json::json!({"Project": {"source_view": 12}}),
+            ),
+        ];
+
+        for (request, expected) in requests {
+            let encoded = serde_json::to_value(&request).expect("serialize protocol request");
+            assert_eq!(encoded, expected);
+            let decoded: Request =
+                serde_json::from_value(encoded).expect("decode protocol request");
+            assert_eq!(
+                serde_json::to_value(decoded).expect("re-serialize protocol request"),
+                expected
+            );
+        }
+
+        let responses = [
+            (
+                Response::Needed {
+                    sync_id: SyncId(9),
+                    paths: vec!["main.js".to_owned()],
+                },
+                serde_json::json!({"Needed": {"sync_id": 9, "paths": ["main.js"]}}),
+            ),
+            (
+                Response::Synced {
+                    source_view: SourceView(12),
+                },
+                serde_json::json!({"Synced": {"source_view": 12}}),
+            ),
+            (
+                Response::SourceUpdated {
+                    source_view: SourceView(13),
+                },
+                serde_json::json!({"SourceUpdated": {"source_view": 13}}),
+            ),
+            (
+                Response::StaleSourceView {
+                    current: SourceView(13),
+                },
+                serde_json::json!({"StaleSourceView": {"current": 13}}),
+            ),
+        ];
+
+        for (response, expected) in responses {
+            let encoded = serde_json::to_value(&response).expect("serialize protocol response");
+            assert_eq!(encoded, expected);
+            let decoded: Response =
+                serde_json::from_value(encoded).expect("decode protocol response");
+            assert_eq!(
+                serde_json::to_value(decoded).expect("re-serialize protocol response"),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn source_digest_is_sha256_and_sync_serializes_one_canonical_hex_value() {
