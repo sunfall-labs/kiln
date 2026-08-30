@@ -102,12 +102,15 @@ public because their content-derived two-argument symbol is the scalar embedding
 
 The HostOps contract permits a callback-produced string to remain valid only until the current
 module entry returns. A provider can export that value for a later consumer, so the graph wrapper
-interposes a private HostOps proxy and copies each successful callback string before the upstream
-callback returns. Those copies live through the whole graph invocation and are then released with
-the wrapper's per-call storage. This solves provider-to-consumer lifetime and keeps concurrent
-invocations isolated. It does not broaden ABI v1: callers still cannot assume an arbitrary string
-in the public result remains valid after the wrapper returns. Retainable results or leak-free
-caller ownership require a future versioned ownership/dispose or caller-buffer design.
+interposes a private HostOps proxy. After the upstream callback returns, while ABI v1 still
+requires its result string to be alive, the proxy copies that string before it returns control to
+the generated module. A callback-local stack buffer is not a valid result: its lifetime has ended
+before the proxy can inspect it. The copies live through the whole graph invocation and are then
+released with the wrapper's per-call storage. This solves provider-to-consumer lifetime and keeps
+concurrent invocations isolated. It does not broaden ABI v1: callers still cannot assume an
+arbitrary string in the public result remains valid after the wrapper returns. Retainable results
+or leak-free caller ownership require a future versioned ownership/dispose or caller-buffer
+design.
 
 ## Consequences
 

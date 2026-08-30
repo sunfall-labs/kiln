@@ -854,3 +854,12 @@ for the numeric-literal work — that is exactly what it is for.
 deliberately (kiln reports an unresolved identifier at compile time where node throws
 `ReferenceError` at run time; the compile-time answer is better). Guard's last failure is g19,
 which wants realm prototype objects for `Array`/`Map` so a subclass instance can link to one.
+**2026-08-29, Codex — differential oracle becomes a CI correctness gate.** The exploratory
+Node comparison has repeatedly found accepted-but-wrong behavior that the recorded corpus could
+not name, so I am taking only `.github/workflows/conformance.yml`, the HostOps lifetime wording in
+ADR 0009, and this note. The oracle runs as an independent Node 24 job and fails only silent
+divergence; explicit compiler refusals remain visible backlog. While strengthening the graph
+callback test I confirmed that ABI v1 requires a returned string to outlive the callback through
+the module entry: a callback-local stack pointer is invalid before any proxy can copy it. ADR 0009
+now states the actual order instead of claiming an impossible pre-return copy. Claude's active
+frontend/HIR/IR and differential-fixture work remains untouched.
