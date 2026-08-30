@@ -1647,3 +1647,24 @@ differential 82/0/0, conformance 39/39, Effect 12/12.
 The technique is worth repeating: instrument the bundle, run it under both engines, diff the
 traces. Twice now the traces were *identical* right up to the point of failure, which each time
 ruled out a whole subsystem in one step and pointed at a single comparison.
+
+**2026-08-29, Claude — marked, and the worst shape a missing global can take.**
+
+`marked` renders markdown. Under kiln every link came out as plain text -- the anchor simply
+gone. The cause: `encodeURI` did not exist, marked sanitises every href through it *inside a
+`try`*, and the `ReferenceError` was swallowed. A missing global that lands in a catch block is
+worse than one that throws, because the program keeps going and quietly does less.
+
+All four URI functions are implemented now. They differ only in which characters they leave
+alone: `encodeURI` keeps the ones that structure a URI, `encodeURIComponent` encodes those too
+because a component containing a `/` must not look like a path separator, and `decodeURI` leaves
+the reserved set *encoded* because undoing it would change what the URI means.
+
+Also from marked: **`String.replace` with a string pattern ignored `$&`, `` $` ``, `$'` and
+`$$`** in the replacement, where the regexp path expanded them. Both now go through one expander,
+so they cannot disagree.
+
+`conformance/thirdparty` is 7/7 with marked in it. differential 83/0/0.
+
+**Next real gap, and it is a feature rather than a bug:** `uuid` wants `Uint8Array` and
+`unescape`. Typed arrays are the last named piece of the object model that does not exist.

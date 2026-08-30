@@ -272,6 +272,10 @@ pub enum Native {
     PrototypeOf(PrototypeTable),
     StringRaw,
     RegExpToString,
+    EncodeUri,
+    EncodeUriComponent,
+    DecodeUri,
+    DecodeUriComponent,
     StringSubstring,
     StringSubstr,
     CollectionKeys,
@@ -1561,6 +1565,8 @@ pub enum ExecutionError {
     ProxyNotSerialisable,
     /// `array.length = x` where `x` is not a whole number in range.
     InvalidArrayLength,
+    /// A percent-escape that is not two hex digits, or that decodes to invalid UTF-8.
+    MalformedUri,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -1641,6 +1647,7 @@ impl fmt::Display for ExecutionError {
                 "cannot perform this operation on a revoked proxy"
             ),
             Self::InvalidArrayLength => write!(formatter, "invalid array length"),
+            Self::MalformedUri => write!(formatter, "URI malformed"),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -1713,6 +1720,9 @@ impl ExecutionError {
                 "Cannot perform this operation on a revoked proxy".to_owned(),
             ),
             Self::InvalidArrayLength => (ErrorKind::Range, "Invalid array length".to_owned()),
+            // The specification has a `URIError` for this; this realm's nearest kind is used
+            // rather than adding one nothing else would ever raise.
+            Self::MalformedUri => (ErrorKind::Type, "URI malformed".to_owned()),
             Self::ProxyNotSerialisable => (
                 ErrorKind::Type,
                 "Cannot serialise a proxy nested inside a value".to_owned(),
@@ -2633,6 +2643,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Number => Native::NumberConstructor,
                         kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
                         kiln_ir::Builtin::ParseInt => Native::ParseInt,
+                        kiln_ir::Builtin::EncodeUri => Native::EncodeUri,
+                        kiln_ir::Builtin::EncodeUriComponent => Native::EncodeUriComponent,
+                        kiln_ir::Builtin::DecodeUri => Native::DecodeUri,
+                        kiln_ir::Builtin::DecodeUriComponent => Native::DecodeUriComponent,
                         kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
                         kiln_ir::Builtin::IsNaN => Native::IsNaN,
                         kiln_ir::Builtin::IsFinite => Native::IsFinite,
@@ -5409,6 +5423,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set("Number", Value::Native(Native::NumberConstructor));
         globals.set("Boolean", Value::Native(Native::BooleanConstructor));
         globals.set("Function", Value::Native(Native::FunctionConstructor));
+        globals.set("encodeURI", Value::Native(Native::EncodeUri));
+        globals.set(
+            "encodeURIComponent",
+            Value::Native(Native::EncodeUriComponent),
+        );
+        globals.set("decodeURI", Value::Native(Native::DecodeUri));
+        globals.set(
+            "decodeURIComponent",
+            Value::Native(Native::DecodeUriComponent),
+        );
         globals.set("Proxy", Value::Native(Native::ProxyConstructor));
         globals.set("NaN", Value::Number(f64::NAN));
         globals.set("Infinity", Value::Number(f64::INFINITY));
@@ -7537,6 +7561,73 @@ fn call_native(
         }
         Native::ErrorToString => Value::String(error_to_string(receiver)),
         Native::RegExpToString => Value::String(receiver.to_display_string()),
+        // The four URI functions differ only in which characters they leave alone. `encodeURI`
+        // keeps the ones that structure a URI -- `:/?#[]@!$&'()*+,;=` -- because it is encoding a
+        // whole one; `encodeURIComponent` encodes those too, because a component that contains a
+        // `/` must not look like a path separator.
+        Native::EncodeUri | Native::EncodeUriComponent => {
+            let text = arguments
+                .first()
+                .map_or_else(String::new, Value::to_display_string);
+            let whole = matches!(native, Native::EncodeUri);
+            let mut out = String::with_capacity(text.len());
+            for character in text.chars() {
+                let unreserved = character.is_ascii_alphanumeric()
+                    || matches!(character, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')');
+                let reserved = matches!(
+                    character,
+                    ';' | '/' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | ',' | '#'
+                );
+                if unreserved || (whole && reserved) {
+                    out.push(character);
+                    continue;
+                }
+                let mut buffer = [0_u8; 4];
+                for byte in character.encode_utf8(&mut buffer).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            Value::String(out)
+        }
+        Native::DecodeUri | Native::DecodeUriComponent => {
+            let text = arguments
+                .first()
+                .map_or_else(String::new, Value::to_display_string);
+            let bytes = text.as_bytes();
+            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] != b'%' {
+                    out.push(bytes[index]);
+                    index += 1;
+                    continue;
+                }
+                // A `%` not followed by two hex digits is a URIError, not a literal percent.
+                let Some(pair) = text.get(index + 1..index + 3) else {
+                    return Err(ExecutionError::MalformedUri);
+                };
+                let Ok(byte) = u8::from_str_radix(pair, 16) else {
+                    return Err(ExecutionError::MalformedUri);
+                };
+                // `decodeURI` leaves the reserved set encoded: undoing it would change what the
+                // URI means, which is the one thing decoding must not do.
+                if matches!(native, Native::DecodeUri)
+                    && matches!(
+                        byte,
+                        b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
+                    )
+                {
+                    out.extend_from_slice(&bytes[index..index + 3]);
+                } else {
+                    out.push(byte);
+                }
+                index += 3;
+            }
+            match String::from_utf8(out) {
+                Ok(decoded) => Value::String(decoded),
+                Err(_) => return Err(ExecutionError::MalformedUri),
+            }
+        }
         Native::ObjectSetPrototypeOf => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
             if let Some(prototype) = arguments.get(1) {
@@ -8191,11 +8282,60 @@ fn call_native(
                     let replacement = arguments
                         .get(1)
                         .map_or_else(String::new, Value::to_display_string);
-                    Value::String(if matches!(native, Native::StringReplaceAll) {
-                        text.replace(&pattern, &replacement)
-                    } else {
-                        text.replacen(&pattern, &replacement, 1)
-                    })
+                    // The replacement is a *template*, not literal text, even when the pattern
+                    // is a plain string: `$&` is what matched, `` $` `` and `$'` are what came
+                    // before and after, and `$$` is one dollar. Treating it literally is the
+                    // kind of wrong answer that only shows up in output nobody reads closely.
+                    // The replacement is a *template*, not literal text, even when the pattern
+                    // is a plain string: `$&` is what matched, `` $` `` and `$'` are what came
+                    // before and after it, and `$$` is one dollar. The same expander the regexp
+                    // path uses does it, so the two cannot disagree.
+                    let all = matches!(native, Native::StringReplaceAll);
+                    let subject: Vec<u16> = text.encode_utf16().collect();
+                    let needle: Vec<u16> = pattern.encode_utf16().collect();
+                    let mut out = String::with_capacity(text.len());
+                    let mut at = 0;
+                    loop {
+                        // An empty pattern matches at every position including the end, which is
+                        // why it cannot go through the window search.
+                        let found = if needle.is_empty() {
+                            (at <= subject.len()).then_some(at)
+                        } else {
+                            subject
+                                .get(at..)
+                                .and_then(|rest| {
+                                    rest.windows(needle.len())
+                                        .position(|window| window == needle.as_slice())
+                                })
+                                .map(|offset| at + offset)
+                        };
+                        let Some(start) = found else { break };
+                        out.push_str(&utf16_slice(&subject, at..start));
+                        out.push_str(&expand_replacement(
+                            &replacement,
+                            &subject,
+                            &(start..start + needle.len()),
+                            &[],
+                        ));
+                        at = start + needle.len();
+                        if !all {
+                            break;
+                        }
+                        if needle.is_empty() {
+                            if start < subject.len() {
+                                // Carry across the unit the empty match stepped over.
+                                out.push_str(&utf16_slice(&subject, start..start + 1));
+                                at = start + 1;
+                            } else {
+                                at = subject.len() + 1;
+                                break;
+                            }
+                        }
+                    }
+                    if at <= subject.len() {
+                        out.push_str(&utf16_slice(&subject, at..subject.len()));
+                    }
+                    Value::String(out)
                 }
                 Native::StringLastIndexOf => {
                     let needle = arguments
