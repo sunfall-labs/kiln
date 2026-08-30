@@ -2163,6 +2163,19 @@ fn decode_run_result(
 }
 
 fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), NativeError> {
+    let temporary = write_materialized_temporary(path, bytes, executable)?;
+    let result = install_materialized(&temporary, path);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn write_materialized_temporary(
+    path: &Path,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<PathBuf, NativeError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2182,8 +2195,7 @@ fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), Native
     ));
     let result = (|| {
         let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| NativeError::Io {
@@ -2205,7 +2217,7 @@ fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), Native
             set_executable(&temporary)?;
         }
         drop(file);
-        install_materialized(&temporary, path)
+        Ok(temporary.clone())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -2240,17 +2252,82 @@ fn publish_shared_artifacts(
 }
 
 fn materialize_immutable(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
-    match fs::read(path) {
-        Ok(existing) if existing == bytes => Ok(()),
-        Ok(_) => Err(NativeError::ImmutableArtifactCollision {
-            path: path.to_path_buf(),
-        }),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => materialize(path, bytes, false),
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| NativeError::Io {
+        operation: "create canonical shared-library directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|source| NativeError::Io {
+        operation: "inspect canonical shared-library directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    if !parent_metadata.file_type().is_dir() {
+        return Err(NativeError::ImmutableArtifactCollision {
+            path: parent.to_path_buf(),
+        });
+    }
+    if immutable_contents_match(path, bytes)? {
+        return Ok(());
+    }
+    let temporary = write_materialized_temporary(path, bytes, false)?;
+    let result = match fs::hard_link(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            immutable_contents_match(path, bytes).and_then(|matches| {
+                matches
+                    .then_some(())
+                    .ok_or_else(|| NativeError::ImmutableArtifactCollision {
+                        path: path.to_path_buf(),
+                    })
+            })
+        }
         Err(source) => Err(NativeError::Io {
-            operation: "read canonical shared library",
+            operation: "install canonical shared library",
             path: path.to_path_buf(),
             source,
         }),
+    };
+    let cleanup = fs::remove_file(&temporary).map_err(|source| NativeError::Io {
+        operation: "remove canonical shared-library temporary",
+        path: temporary,
+        source,
+    });
+    result.and(cleanup)
+}
+
+fn immutable_contents_match(path: &Path, bytes: &[u8]) -> Result<bool, NativeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(NativeError::Io {
+                operation: "inspect canonical shared library",
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(NativeError::ImmutableArtifactCollision {
+            path: path.to_path_buf(),
+        });
+    }
+    let existing = fs::read(path).map_err(|source| NativeError::Io {
+        operation: "read canonical shared library",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if existing == bytes {
+        Ok(true)
+    } else {
+        Err(NativeError::ImmutableArtifactCollision {
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -2743,7 +2820,65 @@ mod tests {
             NativeError::ImmutableArtifactCollision { .. }
         ));
         assert_eq!(fs::read(header).unwrap(), b"new header");
-        assert_eq!(fs::read(output).unwrap(), b"new library");
+        assert_eq!(fs::read(&output).unwrap(), b"new library");
+
+        #[cfg(unix)]
+        {
+            fs::remove_file(&loader).expect("remove regular loader");
+            std::os::unix::fs::symlink(&output, &loader).expect("create matching loader symlink");
+            let error = publish_shared_artifacts(&output, &loader, b"new header", b"new library")
+                .expect_err("a symlink cannot stand in for an immutable loader");
+            assert!(matches!(
+                error,
+                NativeError::ImmutableArtifactCollision { .. }
+            ));
+            assert!(
+                fs::symlink_metadata(&loader)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_materialization_never_replaces_a_concurrent_winner() {
+        let root = TestDirectory::new("kiln-native-immutable-race");
+        let destination = root.path.join("content.so");
+        let barrier = Arc::new(Barrier::new(3));
+        let writers = [b"first payload".as_slice(), b"second payload".as_slice()]
+            .into_iter()
+            .map(|payload| {
+                let destination = destination.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    materialize_immutable(&destination, payload)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = writers
+            .into_iter()
+            .map(|writer| writer.join().expect("immutable writer exits"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(
+                    result,
+                    Err(NativeError::ImmutableArtifactCollision { .. })
+                ))
+                .count(),
+            1
+        );
+        let installed = fs::read(destination).expect("read concurrent winner");
+        assert!(
+            installed == b"first payload" || installed == b"second payload",
+            "unexpected installed payload: {installed:?}"
+        );
     }
 
     #[test]
