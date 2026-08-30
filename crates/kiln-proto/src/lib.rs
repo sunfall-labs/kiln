@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -475,7 +475,10 @@ pub struct NativeBuildSummary {
 /// Measurements and cache observability for one embedded shared-library build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSharedLibrarySummary {
+    /// Legacy ABI-v1 entry point exported by the shared library.
     pub module_symbol: String,
+    /// ABI-v2 owned-result descriptor accessor exported by the shared library.
+    pub module_api_symbol: String,
     pub output_path: String,
     /// Canonical library to package; add its parent directory to the host's loader search path.
     pub loader_path: String,
@@ -655,8 +658,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v17_sync_and_source_view_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 17);
+    fn protocol_v18_sync_and_source_view_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 18);
 
         let requests = [
             (

@@ -59,7 +59,7 @@ fn exports_of(text: &str) -> Vec<String> {
 }
 
 /// Test clients keep the current protocol source view automatically. This lets the older daemon
-/// tests focus on query behavior while still exercising the v17 CAS contract.
+/// tests focus on query behavior while still exercising the v18 CAS contract.
 struct Client {
     raw: RawClient,
     source_view: SourceView,
@@ -1336,6 +1336,11 @@ fn production_daemon_native_shared_build_returns_summary_and_cache_hits() {
     assert_eq!(first.header_path, expected_header.to_string_lossy());
     let header = std::fs::read_to_string(&first.header_path).expect("read shared build header");
     assert!(header.contains(&format!("int {}(", first.module_symbol)));
+    assert_eq!(
+        first.module_api_symbol,
+        format!("{}_api_v2", first.module_symbol)
+    );
+    assert!(header.contains(&format!("{}(", first.module_api_symbol)));
     assert!(!first.generated_c_cache_hit);
     assert!(!first.object_cache_hit);
     assert!(!first.library_cache_hit);
@@ -1542,8 +1547,13 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
         !first.module_symbol.is_empty(),
         "wrapper symbol is reported"
     );
+    assert_eq!(
+        first.module_api_symbol,
+        format!("{}_api_v2", first.module_symbol)
+    );
     let header = std::fs::read_to_string(&first.header_path).expect("read shared graph header");
     assert!(header.contains(&format!("int {}(", first.module_symbol)));
+    assert!(header.contains(&format!("{}(", first.module_api_symbol)));
     assert!(!first.generated_c_cache_hit);
     assert!(!first.object_cache_hit);
     assert!(!first.library_cache_hit);
@@ -1559,6 +1569,7 @@ fn production_daemon_native_shared_graph_build_returns_summary_and_cache_hits() 
     assert_eq!(second.loader_path, first.loader_path);
     assert_eq!(second.header_path, first.header_path);
     assert_eq!(second.module_symbol, first.module_symbol);
+    assert_eq!(second.module_api_symbol, first.module_api_symbol);
     assert!(second.generated_c_cache_hit);
     assert!(second.object_cache_hit);
     assert!(second.library_cache_hit);
