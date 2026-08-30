@@ -1,0 +1,37 @@
+// Two things a program does to an object that are not writes to it: freezing it, and naming
+// something that is not there.
+
+// A frozen object ignores every write. Modules are strict and a real engine would throw here,
+// but both kiln engines are silent, and they have to agree before either can change.
+const settings = { retries: 3, verbose: false };
+console.log(Object.freeze(settings) === settings, Object.isFrozen(settings));
+settings.retries = 99;
+(settings as any).added = 1;
+console.log(settings.retries, (settings as any).added, JSON.stringify(settings));
+console.log(Object.isFrozen({}), Object.isFrozen(1), Object.isFrozen("x"), Object.freeze(7));
+// Freezing is shallow: the object is frozen, not what it holds.
+const nested = Object.freeze({ inner: { count: 0 } });
+nested.inner.count = 5;
+console.log(nested.inner.count, Object.isFrozen(nested.inner));
+
+// A name that is not defined is a ReferenceError naming itself, and only when control reaches
+// it -- a reference in a branch that never runs is not an error, which is why real bundles are
+// full of them.
+if (typeof globalThisIsAbsent !== "undefined") {
+  console.log("never", (globalThisIsAbsent as any).x);
+}
+try {
+  console.log(absentEverywhere);
+} catch (error: any) {
+  console.log(error.constructor.name, error.name, error.message);
+}
+// Caught by an enclosing handler rather than the nearest one, and inside a function.
+function reach(): string {
+  try {
+    return alsoAbsent as unknown as string;
+  } catch (error: any) {
+    return `caught ${error.message}`;
+  }
+}
+console.log(reach());
+console.log(typeof stillAbsent, typeof reach);
