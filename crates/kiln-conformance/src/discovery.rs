@@ -30,6 +30,7 @@ pub enum Provenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceTest {
     id: String,
+    source_path: PathBuf,
     path: PathBuf,
     features: Vec<String>,
     declaration: Declaration,
@@ -60,6 +61,14 @@ impl ConformanceTest {
         &self.path
     }
 
+    /// The authored source whose changes select this test.
+    ///
+    /// This differs from [`Self::path`] when a manifest points at a generated JavaScript bundle:
+    /// the bundle is executed, but editing the TypeScript source must still select the case.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
     /// Feature tags, per `docs/design.md` §9; the changed-test selector keys on these.
     pub fn features(&self) -> &[String] {
         &self.features
@@ -88,9 +97,10 @@ impl ConformanceTest {
         }
     }
 
-    fn from_manifest(test: &ManifestTest, path: PathBuf) -> Self {
+    fn from_manifest(test: &ManifestTest, source_path: PathBuf, path: PathBuf) -> Self {
         Self {
             id: test.id.clone(),
+            source_path,
             path,
             features: test.features.clone(),
             declaration: Declaration::ExpectedStdout(test.expected_stdout.clone()),
@@ -106,6 +116,7 @@ impl ConformanceTest {
             .replace('\\', "/");
         Self {
             id,
+            source_path: case.path.clone(),
             path: case.path.clone(),
             features: case.metadata.features.clone(),
             declaration: Declaration::Frontmatter(Box::new(case)),
@@ -123,7 +134,13 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
     if let Some(manifest) = governing_manifest(root)? {
         return Ok(manifest
             .tests_under(root)
-            .map(|test| ConformanceTest::from_manifest(test, manifest.program_path(test)))
+            .map(|test| {
+                ConformanceTest::from_manifest(
+                    test,
+                    manifest.source_path(test),
+                    manifest.program_path(test),
+                )
+            })
             .collect());
     }
     let mut tests: Vec<_> = kiln_test262::discover(root)

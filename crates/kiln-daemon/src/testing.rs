@@ -140,7 +140,13 @@ where
     let mut changes = ChangeSet::new();
     let test_paths = tests
         .into_iter()
-        .map(|test| (normalize_path(test.path()), TestId::new(test.id())))
+        .map(|test| {
+            (
+                normalize_path(test.source_path()),
+                normalize_path(test.path()),
+                TestId::new(test.id()),
+            )
+        })
         .collect::<Vec<_>>();
     for path in paths {
         let normalized = normalize_path(Path::new(path));
@@ -178,8 +184,8 @@ where
         if normalized.contains("host-ops") || normalized.contains("host_ops") {
             changes.add_host_op("console.log");
         }
-        for (test_path, test_id) in &test_paths {
-            if path_matches(&normalized, test_path) {
+        for (source_path, program_path, test_id) in &test_paths {
+            if path_matches(&normalized, source_path) || path_matches(&normalized, program_path) {
                 changes.add_changed_test(test_id.clone());
             }
         }
@@ -238,6 +244,51 @@ fn duration_nanos(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_CORPUS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TemporaryCorpus {
+        path: PathBuf,
+    }
+
+    impl TemporaryCorpus {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "kiln-changed-bundle-test-{}-{}",
+                std::process::id(),
+                TEMP_CORPUS_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(path.join("effect/src")).expect("create authored source directory");
+            fs::create_dir_all(path.join("effect/bundle")).expect("create bundle directory");
+            fs::write(path.join("effect/src/one.ts"), "console.log('source');\n")
+                .expect("write authored source");
+            fs::write(
+                path.join("effect/bundle/one.js"),
+                "console.log('bundle');\n",
+            )
+            .expect("write executable bundle");
+            fs::write(
+                path.join("manifest.toml"),
+                r#"[[test]]
+id = "effect/one"
+source = "effect/src/one.ts"
+bundle = "effect/bundle/one.js"
+expected_stdout = "bundle\n"
+"#,
+            )
+            .expect("write manifest");
+            Self { path }
+        }
+    }
+
+    impl Drop for TemporaryCorpus {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn changed_crates_features_and_global_inputs_map_to_selector_tags() {
@@ -333,6 +384,29 @@ mod tests {
         assert_eq!(summary.selected, 1);
         assert_eq!(summary.cases.len(), 1);
         assert_eq!(summary.cases[0].path, "guard/g01-spread-symbols");
+    }
+
+    #[test]
+    fn changed_manifest_source_selects_a_bundle_executed_case() {
+        let corpus = TemporaryCorpus::new();
+        let discovered = kiln_conformance::discover(&corpus.path).expect("discover bundle case");
+        let test = &discovered[0];
+        assert!(test.source_path().ends_with("effect/src/one.ts"));
+        assert!(test.path().ends_with("effect/bundle/one.js"));
+
+        let changes = change_set_for_tests(&["effect/src/one.ts".to_owned()], discovered.iter());
+        assert_eq!(changes.changed_tests.len(), 1);
+        assert!(changes.changed_tests.contains(&TestId::new("effect/one")));
+
+        let selection = select(
+            discovered
+                .iter()
+                .map(|test| selector_metadata(test, TestMode::Interpreter)),
+            &changes,
+            &FailureState::new(),
+        );
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].id, TestId::new("effect/one"));
     }
 
     #[test]

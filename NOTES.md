@@ -989,3 +989,9 @@ dead unsupported bytecode cannot reach an emitter `unreachable!()`. I also align
 with the HostOps ABI: `{ ptr: NULL, len: 0 }` is a valid empty string. The main operator lowering
 landed incidentally in Claude's concurrently staged `42405a1`; my follow-up commit owns only the
 closed-world hardening, equivalence fixture, empty-string regression, ADR wording, and this note.
+
+**2026-08-29, Codex — changed-test identity stays on authored sources.** Manifest cases now keep
+their authored source path separately from the executable path. A generated Effect bundle is still
+what the runner parses and executes, but changing either `effect/src/one.ts` or its bundle selects
+the same stable manifest test ID. The regression creates both files, proves discovery chose the
+bundle, then proves the TypeScript source change selects exactly that case.
