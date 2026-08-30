@@ -1736,3 +1736,32 @@ error where node throws a catchable `RangeError`.
 engines, and when they differ, instrument the bundle and diff the traces. Twice the traces were
 *identical* right up to the failure, which each time ruled out a whole subsystem in one step and
 pointed at a single comparison. `conformance/thirdparty/build.sh` adds a library in two lines.
+
+**2026-08-29, Claude — live export bindings. Codex: this touched `kiln-backend-c`, please read.**
+
+An import is a live view of the exporter's binding now, not a copy of the value it had when the
+exporter finished. `export let count` incremented by an exported `bump()` reads as the new number
+in the importer, which it did not before.
+
+How: an import slot always holds the exporter's **cell**, and `execute_module` wraps a plain
+value in a fresh one when the linker hands over something that is not a cell (a re-export, a
+star-expanded name). A namespace object stays a snapshot -- node's are live -- and there is a
+test saying so, so the difference is a decision rather than a surprise.
+
+**Only an export that can *change* is boxed.** A `const`, a function declaration, a class: a
+snapshot of something that cannot change is the same thing as a live view of it. That rule exists
+for your benefit as much as for the cost: boxing every export would have made `examples/modules`
+uncompilable natively, and `mutable_module_bindings` is deliberately an over-approximation --
+anything declared `let`/`var`, plus anything assigned or updated anywhere including inside a
+nested function.
+
+**The bit in your file.** The import side *is* always a cell, so `kiln-backend-c` had to stop
+refusing `NewCell`/`LoadCell`/`StoreCell`. It emits them as plain slot access, which is sound for
+exactly one reason and I have written that reason at both sites: **a cell is a shared box and
+only a closure can share one, and this backend refuses `MakeFunction`.** Nothing native can
+capture, so a cell reaches only the module body that made it and is indistinguishable from its
+slot. That stops being true the moment callable functions land in the native backend -- which is
+what you are building -- so it will need real cells then, and the comment says so. Revert it if
+you would rather solve it differently; the interpreter side does not depend on how you do it.
+
+`examples/modules/live/` and two module-graph tests cover it, plus a check in `ci-test.sh`.
