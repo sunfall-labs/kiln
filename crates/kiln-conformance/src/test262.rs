@@ -257,6 +257,7 @@ fn run_variant_uncaught(
         return execute_positive(
             has_flag(case, "async"),
             &module,
+            conformance_limits(case),
             diagnostics,
             prefix_len,
             started,
@@ -308,7 +309,11 @@ fn run_variant_uncaught(
     };
 
     let mut host = CaptureHost::new();
-    match execute_reclaiming(std::rc::Rc::new(program), &mut host, conformance_limits()) {
+    match execute_reclaiming(
+        std::rc::Rc::new(program),
+        &mut host,
+        conformance_limits(case),
+    ) {
         Ok(_) => {
             diagnostics.push(Diagnostic::new(
                 DiagnosticPhase::Runtime,
@@ -347,6 +352,7 @@ fn run_variant_uncaught(
 fn execute_positive(
     is_async: bool,
     module: &kiln_hir::Module,
+    limits: ExecutionLimits,
     diagnostics: Vec<Diagnostic>,
     prefix_len: usize,
     started: Instant,
@@ -359,8 +365,7 @@ fn execute_positive(
     };
 
     let mut host = CaptureHost::new();
-    let outcome =
-        execute_reclaiming(std::rc::Rc::new(program), &mut host, conformance_limits()).map(|_| ());
+    let outcome = execute_reclaiming(std::rc::Rc::new(program), &mut host, limits).map(|_| ());
     finish_run(outcome, host, is_async, diagnostics, started)
 }
 
@@ -387,7 +392,8 @@ fn execute_module_case(
     let is_async = has_flag(case, "async");
     let linked = if program.dependencies.is_empty() && program.imports.is_empty() {
         let mut host = CaptureHost::new();
-        let outcome = execute_module(&program, &[], &mut host, conformance_limits()).map(|_| ());
+        let outcome =
+            execute_module(&program, &[], &mut host, conformance_limits(case)).map(|_| ());
         Ok((outcome, host))
     } else {
         link_and_execute(case, program)
@@ -531,7 +537,7 @@ fn link_and_execute(
 ) -> Result<(Result<(), ExecutionError>, CaptureHost), LinkFailure> {
     let graph = build_module_graph(case, entry_program)?;
     let mut host = CaptureHost::new();
-    match graph.execute(&mut host, conformance_limits()) {
+    match graph.execute(&mut host, conformance_limits(case)) {
         Ok(_) => Ok((Ok(()), host)),
         Err(ModuleGraphError::Execution { error, .. }) => Ok((Err(error), host)),
         Err(error) => Err(classify_graph_error(&error)),
@@ -766,15 +772,33 @@ fn runtime_diagnostic(error: &ExecutionError) -> Diagnostic {
     Diagnostic::new(DiagnosticPhase::Runtime, error.to_string(), None)
 }
 
+/// The step budget a case that builds Unicode strings needs.
+///
+/// `harness/regExpUtils.js`'s `buildString` walks code points one at a time -- 1,114,112 of them
+/// for a property that matches everything -- at roughly thirty steps each. That is honest work,
+/// not a loop, and it is the one thing in the corpus the default budget cannot pay for.
+const UNICODE_STRING_BUILDER_STEPS: u64 = 60_000_000;
+
 /// Execution limits for a Test262 case.
 ///
-/// Deliberately the default. Raising the budget to 50,000,000 was tried on the theory that the
-/// assertion harness spends a share of it before the test starts; the same cases exhausted the
-/// larger budget, fifty times more slowly, which says they are not short of steps but looping. A
-/// step limit that a passing test never approaches is doing its job, and enlarging it only makes
-/// a real hang cost more wall-clock.
-fn conformance_limits() -> ExecutionLimits {
-    ExecutionLimits::default()
+/// The default for everything except the cases that include `regExpUtils.js`. Raising the budget
+/// across the board was tried, on the theory that the assertion harness spends a share of it
+/// before the test starts; the same cases exhausted the larger budget, fifty times more slowly,
+/// which said they were not short of steps but looping. A step limit a passing test never
+/// approaches is doing its job, and enlarging it only makes a real hang cost more wall-clock --
+/// so the raise is spent on the one harness file that provably needs it and nowhere else.
+fn conformance_limits(case: &TestCase) -> ExecutionLimits {
+    let default = ExecutionLimits::default();
+    if case_includes(case)
+        .iter()
+        .any(|include| include == "regExpUtils.js")
+    {
+        return ExecutionLimits {
+            max_steps: UNICODE_STRING_BUILDER_STEPS,
+            ..default
+        };
+    }
+    default
 }
 
 fn default_variant(case: &TestCase) -> Variant {
