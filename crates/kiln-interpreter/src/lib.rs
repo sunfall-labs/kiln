@@ -2014,6 +2014,12 @@ impl ExecutionError {
                 "Cannot perform this operation on a revoked proxy".to_owned(),
             ),
             Self::InvalidArrayLength => (ErrorKind::Range, "Invalid array length".to_owned()),
+            // What a real engine raises when the stack runs out, and catchable for the same
+            // reason: a program that recurses on user input has to be able to say so.
+            Self::CallDepthExceeded { .. } => (
+                ErrorKind::Range,
+                "Maximum call stack size exceeded".to_owned(),
+            ),
             // The specification has a `URIError` for this; this realm's nearest kind is used
             // rather than adding one nothing else would ever raise.
             Self::MalformedUri => (ErrorKind::Type, "URI malformed".to_owned()),
@@ -3439,7 +3445,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     match callee {
                         Value::Function(closure) => {
                             let closure = Rc::clone(closure);
-                            self.call(closure, argc, current)?;
+                            // Through `catchable`, so running out of frames is a `RangeError`
+                            // the program can catch rather than the end of the run. A parser
+                            // that reports a nesting limit instead of dying is written exactly
+                            // this way, and so is every "is this too deep" guard.
+                            let called = self.call(closure, argc, current);
+                            if self.catchable(called, current)?.is_none() {
+                                continue;
+                            }
                         }
                         // A promise executor's `resolve`/`reject`: an ordinary callable value,
                         // which reaches the program as one and so has to be callable here.
@@ -12719,10 +12732,15 @@ mod tests {
             max_call_depth: 8,
             ..ExecutionLimits::default()
         };
-        assert!(matches!(
-            execute(Rc::new(program.clone()), &mut host, limits),
-            Err(ExecutionError::CallDepthExceeded { limit: 8 })
-        ));
+        // Reported as a thrown `RangeError`, which nothing here catches, rather than as a
+        // fatal status: the bound is still enforced, and a program that wants to survive its own
+        // recursion can now write the `try` that does it.
+        let outcome = execute(Rc::new(program.clone()), &mut host, limits);
+        assert!(
+            matches!(&outcome, Err(ExecutionError::Uncaught { message, .. })
+                if message.contains("Maximum call stack size exceeded")),
+            "expected an uncaught RangeError, got {outcome:?}"
+        );
     }
 
     /// A module slot written inside a frame must be visible to the next frame that reads it:

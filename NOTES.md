@@ -2306,8 +2306,35 @@ reserved properties and a method, which is what the interpreter does and for the
 tombstones every entry rather than emptying the vector, for the same reason a delete does: a live
 iterator holds an index into it.
 
+**`Error` landed next, and with it the thing I flagged three entries ago:** an engine-level
+TypeError is a value a program can catch natively, not a refusal. `undefined.x`, calling a
+non-function and running out of stack all build a real error object and throw it, where they used
+to return a status that meant "this backend cannot do that" -- a status a `catch` must *not*
+take, which is why the two had to become different things.
+
+**Non-enumerable properties are now a real concept in both engines.** An error's own properties
+read by name and are never enumerated: `Object.keys(err)` is empty and `JSON.stringify(err)` is
+`{}`. kiln enumerated them, so any program that serialised an error carried fields node omits.
+The interpreter grows a list of hidden names on `ObjectData` -- a list rather than a flag on
+every slot, because it is empty for every object except an error -- and `entries` is the
+enumeration accessor, so filtering there gives every walker the rule at once.
+
+That distinction caught a second thing: **`Object.keys` and `Object.getOwnPropertyNames` were the
+same native**, and they are not the same function. One reports what is enumerated and the other
+reports what exists; an error object is where they first disagree.
+
+**And stack exhaustion is a catchable `RangeError` in the interpreter too** -- it was on the
+recorded-but-unimplemented list near the top of this file. A parser that reports a nesting limit
+instead of dying is written exactly that way.
+
+**`for...of` over a plain array had never worked natively**, which no probe had noticed because
+spread goes through a different code path -- it walks an array directly, where `for...of` asks
+for `@@iterator` and drives `next`. Both work now, and they disagree about a hole on purpose:
+iteration *reads* each position, so a hole arrives as undefined, where `map` over the same input
+leaves it alone.
+
 **Still refused, and this is the queue in order:** `NewRegExp` (5), `async` (4), `Promise` (2),
-`Error` (2), `BigInt` (2). `async` is the only one with a real design question
+`BigInt` (2), `SuperForward` (2). `async` is the only one with a real design question
 left: it needs promises and a microtask queue, and the queue is the part with nowhere obvious to
 live in a program that just returns from `main`.
 
@@ -2316,7 +2343,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 17/17, differential 96/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 18/18, differential 97/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked

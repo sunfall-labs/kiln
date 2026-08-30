@@ -37,3 +37,13 @@ console.log(grown, grown.length, 1 in grown, JSON.stringify(grown));
 const visited: string[] = [];
 for (const index in grown) { visited.push(index); }
 console.log(visited);
+
+// `for...of` visits every position, including a hole, which reads as undefined -- unlike
+// `forEach`, which skips one. Spread walks the array directly and `for...of` drives the
+// iteration protocol, so both paths have to agree about that.
+const walked: any[] = [];
+for (const value of [1, , 3]) { walked.push(value); }
+console.log(walked, [...[1, , 3]], [1, , 3].length);
+let visits = 0;
+[1, , 3].forEach(() => { visits += 1; });
+console.log(visits, [...[1, , 3].values()]);

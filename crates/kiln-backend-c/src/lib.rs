@@ -243,6 +243,13 @@ enum kiln_value_tag {
 
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
+/* The error constructors, contiguous so the kind is the offset: `new TypeError(m)` and
+ * `new Error(m)` differ only in the name they write. */
+#define KILN_C99_BUILTIN_ERROR 10
+#define KILN_C99_BUILTIN_TYPE_ERROR 11
+#define KILN_C99_BUILTIN_RANGE_ERROR 12
+#define KILN_C99_BUILTIN_REFERENCE_ERROR 13
+#define KILN_C99_BUILTIN_SYNTAX_ERROR 14
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -380,6 +387,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_COLLECTION_SELF 103
 #define KILN_C99_METHOD_ITERATOR_NEXT 104
 #define KILN_C99_METHOD_ITERATOR_SELF 105
+#define KILN_C99_METHOD_ARRAY_VALUES 106
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -449,6 +457,9 @@ typedef struct kiln_closure {
 typedef struct kiln_property {
     const char *key;
     size_t key_len;
+    /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
+     * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
+    int enumerable;
     int accessor;
     kiln_value value;
     kiln_value getter;
@@ -617,6 +628,9 @@ static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
 static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
 static int kiln_c99_new_collection(kiln_value *out, int is_map);
+static const char *kiln_c99_error_name(uint64_t builtin);
+static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
+static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
@@ -840,6 +854,7 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         }
         object->properties[position].key = key;
         object->properties[position].key_len = key_len;
+        object->properties[position].enumerable = 1;
         object->properties[position].accessor = 0;
         object->properties[position].value = value;
         object->properties[position].getter = kiln_c99_undefined();
@@ -1038,6 +1053,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_COLLECTION_SELF: return "@@iterator";
     case KILN_C99_METHOD_ITERATOR_NEXT: return "next";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
+    case KILN_C99_METHOD_ARRAY_VALUES: return "values";
     default: return NULL;
     }
 }
@@ -1242,10 +1258,14 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value *thrown) {
     kiln_closure *closure;
     if (!kiln_c99_is_callable(callee)) {
-        return KILN_C99_CONTROL_ERROR;
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "is not a function");
     }
     if (depth >= KILN_C99_MAX_CALL_DEPTH) {
-        return KILN_C99_CALL_DEPTH_ERROR;
+        /* A `RangeError` the program can catch, which is what a real engine raises when the
+         * stack runs out -- and what a recursive descent parser catches to report a nesting
+         * limit rather than dying. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Maximum call stack size exceeded");
     }
     if (callee.tag == KILN_VALUE_METHOD) {
         return kiln_c99_invoke_method(host, result, callee.bits, receiver, args, argc, depth,
@@ -1389,6 +1409,16 @@ static kiln_value kiln_c99_text(kiln_value value) {
     }
     case KILN_VALUE_OBJECT: {
         static const char object_text[] = "[object Object]";
+        kiln_value kind;
+        kiln_value shown;
+        /* An error converts to `Name: message`, not `[object Object]`: it is the one object with
+         * a text form of its own, and every log line that prints one depends on it. */
+        if (kiln_c99_get(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
+            kind.tag == KILN_VALUE_NUMBER &&
+            kiln_c99_get(NULL, value, "stack", 5, &shown, 0, NULL) == KILN_C99_OK &&
+            shown.tag == KILN_VALUE_STRING) {
+            return shown;
+        }
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     }
     case KILN_VALUE_DATE: {
@@ -1789,6 +1819,14 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
         }
+        /* `for...of` asks for this and then drives `next`, where spread walks the array
+         * directly. Both have to work, and they are different code paths, so an array needs the
+         * protocol spelled out even though nothing else about it is unusual. */
+        if (kiln_c99_same_name(key, key_len, "@@iterator") ||
+            kiln_c99_same_name(key, key_len, "values")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            return KILN_C99_OK;
+        }
         code = kiln_c99_array_method(key, key_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
@@ -1928,7 +1966,12 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
     }
     case KILN_VALUE_UNDEFINED:
     case KILN_VALUE_NULL:
-        return KILN_C99_CONTROL_ERROR;
+        /* A TypeError the program can catch, not a refusal: `try { undefined.x } catch (e) { ... }`
+         * is ordinary code, and a fatal status would make it unwritable. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    target.tag == KILN_VALUE_NULL
+                                        ? "Cannot read properties of null"
+                                        : "Cannot read properties of undefined");
     default:
         /* A number, boolean or callable has no own properties here. */
         return KILN_C99_CONTROL_ERROR;
@@ -2176,6 +2219,9 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < object->count; ++index) {
+            if (!object->properties[index].enumerable) {
+                continue;
+            }
             if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -2917,8 +2963,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             object = kiln_c99_object_of(args[0]);
             status = kiln_c99_new_array(&built);
             for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-                kiln_value key = kiln_c99_copy_text(object->properties[index].key,
-                                                    object->properties[index].key_len);
+                kiln_value key;
+                if (!object->properties[index].enumerable) {
+                    continue;
+                }
+                key = kiln_c99_copy_text(object->properties[index].key,
+                                         object->properties[index].key_len);
                 if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                     status = kiln_c99_array_push(built, key);
                 } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
@@ -2958,6 +3008,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 }
                 source = kiln_c99_object_of(args[argument]);
                 for (index = 0; index < source->count; ++index) {
+                    if (!source->properties[index].enumerable) {
+                        continue;
+                    }
                     status = kiln_c99_put(host, target, source->properties[index].key,
                                           source->properties[index].key_len,
                                           source->properties[index].value, depth, thrown);
@@ -3260,6 +3313,29 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_ITERATOR_SELF:
             *result = receiver;
             return KILN_C99_OK;
+        case KILN_C99_METHOD_ARRAY_VALUES: {
+            /* Over a snapshot, so a `for...of` that appends to the array it is walking
+             * terminates -- which is what the length being read once means. */
+            kiln_value snapshot;
+            kiln_array *array;
+            if (receiver.tag != KILN_VALUE_ARRAY) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            array = kiln_c99_array_of(receiver);
+            status = kiln_c99_new_array(&snapshot);
+            for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
+                /* A hole reads as undefined here: `for...of` visits every position, unlike
+                 * `forEach`, which skips one. */
+                status = kiln_c99_array_push(snapshot,
+                                             kiln_c99_is_hole(array->elements[index])
+                                                 ? kiln_c99_undefined()
+                                                 : array->elements[index]);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_new_iterator(result, snapshot);
+        }
         case KILN_C99_METHOD_GENERATOR_SELF:
             if (receiver.tag != KILN_VALUE_GENERATOR) {
                 return KILN_C99_CONTROL_ERROR;
@@ -3688,7 +3764,12 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         kiln_array *array = kiln_c99_array_of(source);
         size_t length = array->count;
         for (index = 0; index < length && index < array->count; ++index) {
-            status = kiln_c99_array_push(target, array->elements[index]);
+            /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
+             * That is what makes `[...[1, , 3]]` a dense three-element array where `map` over
+             * the same input leaves the hole alone. */
+            status = kiln_c99_array_push(target, kiln_c99_is_hole(array->elements[index])
+                                                     ? kiln_c99_undefined()
+                                                     : array->elements[index]);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -3896,6 +3977,9 @@ static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
         for (index = 0; index < object->count; ++index) {
+            if (!object->properties[index].enumerable) {
+                continue;
+            }
             status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
                                                                    object->properties[index].key_len));
             if (status != KILN_C99_OK) {
@@ -3945,6 +4029,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         for (index = 0; index < length && index < object->count; ++index) {
             kiln_value copied;
             int status;
+            if (!object->properties[index].enumerable) {
+                continue;
+            }
             if (object->properties[index].accessor) {
                 if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
                     continue;
@@ -4208,6 +4295,9 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             kiln_value member;
             kiln_text member_text = {NULL, 0, 0};
             int wrote;
+            if (!object->properties[index].enumerable) {
+                continue;
+            }
             if (object->properties[index].accessor) {
                 if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
                     continue;
@@ -4838,6 +4928,89 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
     return KILN_C99_OK;
 }
 
+static const char *kiln_c99_error_name(uint64_t builtin) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_TYPE_ERROR: return "TypeError";
+    case KILN_C99_BUILTIN_RANGE_ERROR: return "RangeError";
+    case KILN_C99_BUILTIN_REFERENCE_ERROR: return "ReferenceError";
+    case KILN_C99_BUILTIN_SYNTAX_ERROR: return "SyntaxError";
+    case KILN_C99_BUILTIN_ERROR: return "Error";
+    default: return NULL;
+    }
+}
+
+/* An error is an ordinary object carrying `message`, `name` and `stack`, none of them
+ * enumerated: `err.message` reads and `Object.keys(err)` is empty, which is why
+ * `JSON.stringify(err)` is `{}`. The kind is remembered in a reserved property rather than
+ * inferred from `name`, so a program that overwrites `name` does not change what it *is*. */
+static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
+    const char *name = kiln_c99_error_name(kind);
+    kiln_value error;
+    kiln_text stack = {NULL, 0, 0};
+    kiln_value text = message.tag == KILN_VALUE_UNDEFINED ? kiln_c99_from_units(NULL, 0)
+                                                          : kiln_c99_text(message);
+    int status;
+    if (name == NULL || text.tag != KILN_VALUE_STRING) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_new_object(&error);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (kiln_c99_text_append_c(&stack, name) != KILN_C99_OK ||
+        (text.len != 0 && (kiln_c99_text_append_c(&stack, ": ") != KILN_C99_OK ||
+                           kiln_c99_text_append(&stack, text.ptr, text.len) != KILN_C99_OK))) {
+        free(stack.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, error, "name", 4, kiln_c99_copy_text(name, strlen(name)), 0,
+                              NULL);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, error, "stack", 5,
+                              kiln_c99_value(KILN_VALUE_STRING, 0, stack.bytes, stack.len), 0,
+                              NULL);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, error, "@@error", 7, kiln_c99_number((double)kind), 0, NULL);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    {
+        /* None of the four is enumerated. The reserved one is hidden by its prefix anyway; the
+         * other three have to be marked. */
+        kiln_object *object = kiln_c99_object_of(error);
+        size_t index;
+        for (index = 0; index < object->count; ++index) {
+            object->properties[index].enumerable = 0;
+        }
+    }
+    *out = error;
+    return KILN_C99_OK;
+}
+
+/* Raise a language-level error: build it, hand it to the caller as the thrown value, and report
+ * that something was thrown rather than that something could not be done.
+ *
+ * The difference matters because a `catch` takes the first and must not take the second: a
+ * TypeError is the program's business and an unimplemented instruction is not. */
+static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
+    kiln_value built;
+    int status;
+    if (thrown == NULL) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_new_error(&built, kind, kiln_c99_copy_text(message, strlen(message)));
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *thrown = built;
+    return KILN_C99_THROWN;
+}
+
 /* `new f(...)`: build the instance, run the body with it as `this`, and yield the instance --
  * unless the body returned an object, which wins. That override is what makes a factory
  * constructor work. */
@@ -4899,6 +5072,10 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value instance;
     kiln_value produced;
     int status;
+    if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_error_name(callee.bits) != NULL) {
+        return kiln_c99_new_error(result, callee.bits,
+                                  argc > 0 ? args[0] : kiln_c99_undefined());
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_MAP ||
                                              callee.bits == KILN_C99_BUILTIN_SET)) {
         int is_map = callee.bits == KILN_C99_BUILTIN_MAP;
@@ -5001,6 +5178,24 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         switch (constructor.bits) {
         case KILN_C99_BUILTIN_DATE: *answer = value.tag == KILN_VALUE_DATE; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_ERROR:
+        case KILN_C99_BUILTIN_TYPE_ERROR:
+        case KILN_C99_BUILTIN_RANGE_ERROR:
+        case KILN_C99_BUILTIN_REFERENCE_ERROR:
+        case KILN_C99_BUILTIN_SYNTAX_ERROR: {
+            /* `Error` is the base of all of them, so it accepts any kind; the others accept only
+             * their own. There is no prototype chain here to walk, and this is the same answer
+             * one would give. */
+            kiln_value kind;
+            *answer = 0;
+            if (value.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_get(NULL, value, "@@error", 7, &kind, 0, NULL) == KILN_C99_OK &&
+                kind.tag == KILN_VALUE_NUMBER) {
+                *answer = constructor.bits == KILN_C99_BUILTIN_ERROR ||
+                          (uint64_t)kiln_c99_as_number(kind) == constructor.bits;
+            }
+            return KILN_C99_OK;
+        }
         case KILN_C99_BUILTIN_MAP:
             *answer = value.tag == KILN_VALUE_COLLECTION &&
                       kiln_c99_collection_of(value)->is_map;
@@ -5474,6 +5669,11 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Date
             | kiln_ir::Builtin::Map
             | kiln_ir::Builtin::Set
+            | kiln_ir::Builtin::Error
+            | kiln_ir::Builtin::TypeError
+            | kiln_ir::Builtin::RangeError
+            | kiln_ir::Builtin::ReferenceError
+            | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity,
         ) => Ok(()),
@@ -6832,6 +7032,13 @@ fn emit_instruction(
                 kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
                 kiln_ir::Builtin::Map => "kiln_c99_builtin(KILN_C99_BUILTIN_MAP)",
                 kiln_ir::Builtin::Set => "kiln_c99_builtin(KILN_C99_BUILTIN_SET)",
+                kiln_ir::Builtin::Error => "kiln_c99_builtin(KILN_C99_BUILTIN_ERROR)",
+                kiln_ir::Builtin::TypeError => "kiln_c99_builtin(KILN_C99_BUILTIN_TYPE_ERROR)",
+                kiln_ir::Builtin::RangeError => "kiln_c99_builtin(KILN_C99_BUILTIN_RANGE_ERROR)",
+                kiln_ir::Builtin::ReferenceError => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_REFERENCE_ERROR)"
+                }
+                kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -8388,7 +8595,9 @@ int main(void) {{
     }
 
     /// Recursion is bounded rather than left to exhaust the C stack, which aborts the process
-    /// instead of reporting anything.
+    /// instead of reporting anything. It reports as a *thrown* `RangeError` rather than a
+    /// status, because that is what a real engine raises and what a program that recurses on its
+    /// input has to be able to catch.
     #[test]
     fn executable_runaway_recursion_reports_rather_than_crashing() {
         let forever = FunctionProto {
@@ -8417,13 +8626,13 @@ int main(void) {{
         })
         .expect("program emits");
         let wrapper = format!(
-            "int main(void) {{ kiln_value result; return {}(NULL, &result) == KILN_C99_CALL_DEPTH_ERROR ? 0 : 1; }}\n",
+            "int main(void) {{ kiln_value result; return {}(NULL, &result) == KILN_C99_THROWN ? 0 : 1; }}\n",
             generated.symbol
         );
         let run = run_with_main(&generated, &wrapper, "depth");
         assert!(
             run.status.success(),
-            "unbounded recursion did not report a call-depth error (exit {:?})",
+            "unbounded recursion did not report a thrown RangeError (exit {:?})",
             run.status.code()
         );
     }
