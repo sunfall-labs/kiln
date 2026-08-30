@@ -550,9 +550,11 @@ pub struct Regression {
 
 /// Compare a run against a baseline, returning the rendered comparison and any regressions.
 ///
-/// Two independent gates. Wall clock has a threshold and a noise floor because it is a noisy
+/// Three independent gates. Wall clock has a threshold and a noise floor because it is a noisy
 /// measurement; recompute counts have neither, because they are exact and an edit that starts
-/// recomputing more work has regressed no matter what the clock says.
+/// recomputing more work has regressed no matter what the clock says. Both sides must also be
+/// steady-state measurements: comparing timings that describe different work is invalid even if
+/// their first-iteration counters happen to match.
 pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<Regression>) {
     let mut out = String::new();
     let mut regressions = Vec::new();
@@ -588,6 +590,7 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
         let slower = pct > threshold && delta > NOISE_FLOOR_MS;
         let recomputed = m.recomputes();
         let base_recomputed = base.recomputes();
+        let unstable = !m.steady_state || !base.steady_state;
 
         let _ = writeln!(
             out,
@@ -598,7 +601,7 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
             pct * 100.0,
             recomputed,
             base_recomputed,
-            if slower || recomputed > base_recomputed {
+            if slower || recomputed > base_recomputed || unstable {
                 "REGRESSION"
             } else {
                 "ok"
@@ -623,6 +626,21 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
                 detail: format!(
                     "recomputed {recomputed} queries vs {base_recomputed} in the baseline"
                 ),
+            });
+        }
+        if !m.steady_state {
+            regressions.push(Regression {
+                id: m.id.clone(),
+                detail:
+                    "measurement is not steady-state: recompute counts varied between iterations"
+                        .to_string(),
+            });
+        }
+        if !base.steady_state {
+            regressions.push(Regression {
+                id: m.id.clone(),
+                detail: "baseline is not steady-state: recompute counts varied between iterations"
+                    .to_string(),
             });
         }
     }
@@ -703,6 +721,40 @@ mod tests {
             regressions[0].detail.contains("recomputed 5"),
             "{regressions:?}"
         );
+    }
+
+    #[test]
+    fn a_non_steady_measurement_fails_even_when_latency_and_recomputes_match() {
+        let mut run = report(10.0, 1);
+        run.measurements[0].steady_state = false;
+
+        let (text, regressions) = compare(&run, &report(10.0, 1), 0.15);
+
+        assert_eq!(regressions.len(), 1, "{regressions:?}");
+        assert!(
+            regressions[0]
+                .detail
+                .contains("measurement is not steady-state"),
+            "{regressions:?}"
+        );
+        assert!(text.contains("REGRESSION"), "{text}");
+    }
+
+    #[test]
+    fn a_non_steady_baseline_cannot_legitimise_mixed_work() {
+        let mut baseline = report(10.0, 1);
+        baseline.measurements[0].steady_state = false;
+
+        let (text, regressions) = compare(&report(10.0, 1), &baseline, 0.15);
+
+        assert_eq!(regressions.len(), 1, "{regressions:?}");
+        assert!(
+            regressions[0]
+                .detail
+                .contains("baseline is not steady-state"),
+            "{regressions:?}"
+        );
+        assert!(text.contains("REGRESSION"), "{text}");
     }
 
     #[test]
