@@ -835,6 +835,73 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     })
 }
 
+/// Give a compiled module a deterministic private-name namespace.
+///
+/// The compiler's class counter intentionally starts at zero for each module. Graph execution
+/// evaluates those independent programs in one realm, however, so their textual private keys
+/// must be separated before closures and instances cross a module boundary. Only operands of
+/// explicit private instructions are rewritten; an ordinary string that happens to begin with
+/// the reserved spelling remains an ordinary JavaScript property. The namespace is hex encoded
+/// into the existing scope segment, keeping the key's two-colon shape (and diagnostic display)
+/// while making every namespace byte unambiguous.
+pub fn remap_private_namespace(module: &mut ModuleProgram, namespace: &str) {
+    let namespace = namespace
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    fn remap(
+        code: &mut [Instruction],
+        constants: &mut Vec<Constant>,
+        namespace: &str,
+        remapped: &mut HashMap<u32, u32>,
+    ) {
+        for instruction in code {
+            let index = match instruction {
+                Instruction::PrivateIn(index)
+                | Instruction::GetPrivate(index)
+                | Instruction::SetPrivate(index)
+                | Instruction::InitPrivate(index)
+                | Instruction::DefinePrivateAccessor { name: index, .. } => index,
+                _ => continue,
+            };
+            let old_index = *index;
+            let Some(Constant::String(value)) = constants.get(old_index as usize) else {
+                continue;
+            };
+            let Some(suffix) = value.strip_prefix("@@private:") else {
+                continue;
+            };
+            let new_index = if let Some(index) = remapped.get(&old_index) {
+                *index
+            } else {
+                let new_index = constants.len() as u32;
+                constants.push(Constant::String(format!("@@private:{namespace}-{suffix}")));
+                remapped.insert(old_index, new_index);
+                new_index
+            };
+            *index = new_index;
+        }
+    }
+
+    let mut remapped = HashMap::new();
+    remap(
+        &mut module.program.code,
+        &mut module.program.constants,
+        &namespace,
+        &mut remapped,
+    );
+    for function in &mut module.program.functions {
+        remap(
+            &mut function.code,
+            &mut module.program.constants,
+            &namespace,
+            &mut remapped,
+        );
+    }
+}
+
 /// Unpatched exits from one loop.
 ///
 /// Collected rather than patched as they are emitted, because neither target is known until the
@@ -5616,6 +5683,53 @@ mod tests {
         assert!(
             messages.iter().any(|m| m.contains("duplicate parameter")),
             "got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn private_namespace_remapping_only_touches_explicit_private_operands() {
+        let mut module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("@@private:0:x".into()),
+                    Constant::String("@@private:0:forged".into()),
+                ],
+                code: vec![Instruction::GetPrivate(0), Instruction::GetProperty(1)],
+                local_count: 0,
+                functions: vec![FunctionProto {
+                    asynchronous: false,
+                    name: None,
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    local_count: 0,
+                    code: vec![Instruction::PrivateIn(0)],
+                    upvalues: Vec::new(),
+                }],
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        remap_private_namespace(&mut module, "/project/dep.js");
+        assert_eq!(
+            module.program.constants[0],
+            Constant::String("@@private:0:x".into())
+        );
+        assert_eq!(
+            module.program.constants[1],
+            Constant::String("@@private:0:forged".into())
+        );
+        assert_eq!(module.program.code[0], Instruction::GetPrivate(2));
+        assert_eq!(
+            module.program.functions[0].code[0],
+            Instruction::PrivateIn(2)
+        );
+        assert_eq!(
+            module.program.constants[2],
+            Constant::String("@@private:2f70726f6a6563742f6465702e6a73-0:x".into())
         );
     }
 
