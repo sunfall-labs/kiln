@@ -5,11 +5,16 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use kiln_host_abi::{HostOps, HostValue};
+use kiln_host_abi::{
+    AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
+};
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
-use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
+use kiln_runtime::{
+    Realm, RealmRuntime, RuntimeBuildError, TimerId, TokioHost, WorkItem,
+    duration_from_milliseconds,
+};
 
 // `Temporal` is glue over a linked calendar engine, and it is long enough that inlining a ninth
 // built-in family here would bury the machine. ADR 0025 links the engine; ADR 0029 §4 names it.
@@ -173,6 +178,14 @@ pub enum Native {
     /// One variant with a payload for the reason `Temporal` has one: the six services answer
     /// to overlapping method names and the receiver decides what a name means.
     Intl(intl::Op),
+    /// The `node:fs/promises` namespace and its first asynchronous methods.
+    NodeFsPromises,
+    NodeFsReadFile,
+    NodeFsWriteFile,
+    NodeFsStat,
+    NodeStatIsFile,
+    NodeStatIsDirectory,
+    ProcessGetBuiltinModule,
     Error(ErrorKind),
     SymbolConstructor,
     ArrayConstructor,
@@ -731,6 +744,9 @@ impl Native {
 
     fn property(self, name: &str) -> Option<Value> {
         match (self, name) {
+            (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
+            (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
+            (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
             // Every `Temporal` namespace, constructor and prototype answers from one place, so
             // the eight types cannot drift on what they expose.
             (Self::Temporal(op), name) => temporal::static_property(op, name),
@@ -2284,6 +2300,15 @@ impl PartialEq for TypedArrayData {
 }
 
 impl TypedArrayData {
+    /// The raw bytes covered by this view.
+    fn bytes(&self) -> Vec<u8> {
+        if self.out_of_bounds() {
+            return Vec::new();
+        }
+        let length = self.len() * self.kind.width();
+        self.buffer.bytes.borrow()[self.offset..self.offset + length].to_vec()
+    }
+
     /// Whether the window no longer fits in the buffer.
     ///
     /// Only a resizable buffer can make this true, and only by shrinking under a view that was
@@ -3913,6 +3938,35 @@ pub fn execute<H: HostOps + ?Sized>(
     })
 }
 
+/// Execute one program with the Tokio-owned Node host Module installed.
+///
+/// This is intentionally opt-in: deterministic Test262 and build-time evaluation cannot observe
+/// ambient filesystem state, while a Node-compatible CLI run explicitly can. Both modes retain
+/// the same language queues and Promise implementation; only this Adapter supplies live I/O.
+pub fn execute_node<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<ExecutionResult, ExecutionError> {
+    let locals = vec![Value::Undefined; program.local_count as usize];
+    let mut vm = Vm::new(program, host, locals, limits);
+    let mut runtime = realm_runtime()?;
+    vm.async_host = Some(TokioHost::new().map_err(runtime_build_error)?);
+    let execution = runtime.enter(|| vm.run())?;
+    vm.run_node_event_loop(&mut runtime)?;
+    Ok(ExecutionResult {
+        steps: vm.steps,
+        ..execution
+    })
+}
+
+fn runtime_build_error(error: RuntimeBuildError) -> ExecutionError {
+    ExecutionError::Host {
+        instruction: 0,
+        message: error.to_string(),
+    }
+}
+
 /// Run a program whose values are all discarded, reclaiming the cycles it created.
 ///
 /// For an embedder that runs many independent programs in one process -- the Test262 harness is
@@ -4323,6 +4377,10 @@ struct Vm<'host, H: HostOps + ?Sized> {
     instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
     realm: Realm<Job, Timer>,
+    /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
+    pending_host: Vec<PendingHostRequest>,
+    /// Live I/O for an explicitly Node-compatible execution; absent in deterministic modes.
+    async_host: Option<TokioHost>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -4349,6 +4407,18 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// the closures again and cut the links.
     closures: Vec<Weak<Closure>>,
     limits: ExecutionLimits,
+}
+
+#[derive(Clone, Copy)]
+enum HostResultConversion {
+    Direct,
+    Utf8,
+}
+
+struct PendingHostRequest {
+    request: RequestId,
+    promise: Rc<RefCell<PromiseState>>,
+    conversion: HostResultConversion,
 }
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
@@ -4385,6 +4455,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             steps: 0,
             symbol_serial: 0,
             realm: Realm::new(),
+            pending_host: Vec::new(),
+            async_host: None,
             caught: None,
             unhandled: None,
             symbol_registry: Vec::new(),
@@ -4437,6 +4509,141 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn dispatch_node_native(
+        &mut self,
+        native: Native,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let path = match arguments.first() {
+            Some(Value::String(path)) => path.clone(),
+            value => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "path must be a string, received {}",
+                        value.map_or("undefined", Value::type_name)
+                    ),
+                });
+            }
+        };
+        let operation = match native {
+            Native::NodeFsReadFile => AsyncHostOp::ReadFile { path: path.clone() },
+            Native::NodeFsWriteFile => {
+                let data = match arguments.get(1) {
+                    Some(Value::String(data)) => data.as_bytes().to_vec(),
+                    Some(Value::TypedArray(data)) => data.bytes(),
+                    value => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "data must be a string or typed array, received {}",
+                                value.map_or("undefined", Value::type_name)
+                            ),
+                        });
+                    }
+                };
+                AsyncHostOp::WriteFile { path, data }
+            }
+            Native::NodeFsStat => AsyncHostOp::Stat { path },
+            _ => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: "unknown Node filesystem operation".to_owned(),
+                });
+            }
+        };
+        let promise = PromiseState::pending();
+        let node = self
+            .async_host
+            .as_mut()
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node filesystem operation requires the Node execution Adapter".to_owned(),
+            })?;
+        let request = node.start(operation, true);
+        let conversion = match native {
+            Native::NodeFsReadFile if node_encoding(arguments.get(1))? => {
+                HostResultConversion::Utf8
+            }
+            _ => HostResultConversion::Direct,
+        };
+        self.pending_host.push(PendingHostRequest {
+            request,
+            promise: Rc::clone(&promise),
+            conversion,
+        });
+        Ok(Value::Promise(promise))
+    }
+
+    fn settle_host_completion(&mut self, completion: Completion) -> Result<(), ExecutionError> {
+        let Some(position) = self
+            .pending_host
+            .iter()
+            .position(|pending| pending.request == completion.request)
+        else {
+            return Err(ExecutionError::Host {
+                instruction: self.instruction,
+                message: format!(
+                    "completion for unknown request {}",
+                    completion.request.get()
+                ),
+            });
+        };
+        let pending = self.pending_host.swap_remove(position);
+        let outcome = match completion.result {
+            Ok(AsyncHostValue::Bytes(bytes))
+                if matches!(pending.conversion, HostResultConversion::Utf8) =>
+            {
+                Settled::Fulfilled(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+            }
+            Ok(value) => Settled::Fulfilled(node_host_value(value)?),
+            Err(error) => {
+                let object =
+                    self.construct_error(ErrorKind::Error, &[Value::String(error.message.clone())]);
+                if let Value::Object(object) = &object {
+                    let mut object = object.borrow_mut();
+                    object.set_non_enumerable("code", Value::String(error.code));
+                    object.set_non_enumerable("syscall", Value::String(error.syscall));
+                    if let Some(path) = error.path {
+                        object.set_non_enumerable("path", Value::String(path));
+                    }
+                }
+                Settled::Rejected(object)
+            }
+        };
+        self.settle(&pending.promise, &outcome);
+        Ok(())
+    }
+
+    fn run_node_event_loop(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
+        loop {
+            self.drain_microtasks(runtime)?;
+            runtime.enter(|| self.check_unhandled_rejection())?;
+            if !self.pending_host.is_empty() {
+                let completion = self
+                    .async_host
+                    .as_mut()
+                    .and_then(AsyncHostOps::next_completion)
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction: self.instruction,
+                        message: "Node host lost a pending request".to_owned(),
+                    })?;
+                self.settle_host_completion(completion)?;
+                continue;
+            }
+            let Some(WorkItem::Timer { work: timer, .. }) = runtime.next_timer(&mut self.realm)
+            else {
+                return Ok(());
+            };
+            runtime.enter(|| {
+                self.call_value(
+                    &timer.callback,
+                    Value::Undefined,
+                    timer.arguments,
+                    self.instruction,
+                )
+            })?;
+        }
+    }
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
         // `Return` -- the end of the program.
@@ -6045,6 +6252,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Native::Intl(op) = native {
             return self.intl_dispatch(op, receiver, arguments, instruction);
         }
+        if matches!(
+            native,
+            Native::NodeFsReadFile | Native::NodeFsWriteFile | Native::NodeFsStat
+        ) {
+            return self.dispatch_node_native(native, arguments, instruction);
+        }
         // The same wrapper opening `call_native` does, applied before the machine's own arms so
         // that the two halves of a built-in cannot disagree about what its receiver is.
         if let Some(boxed) = receiver_for(native, receiver) {
@@ -6174,6 +6387,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         match native {
+            Native::ProcessGetBuiltinModule => match arguments.first() {
+                Some(Value::String(name))
+                    if matches!(name.as_str(), "fs/promises" | "node:fs/promises") =>
+                {
+                    Ok(Value::Native(Native::NodeFsPromises))
+                }
+                _ => Ok(Value::Undefined),
+            },
+            Native::NodeStatIsFile | Native::NodeStatIsDirectory => {
+                let Value::Object(stats) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Stats method called on an incompatible receiver".to_owned(),
+                    });
+                };
+                let key = if matches!(native, Native::NodeStatIsFile) {
+                    "@@kiln:node:is-file"
+                } else {
+                    "@@kiln:node:is-directory"
+                };
+                Ok(stats
+                    .borrow()
+                    .get_own(key)
+                    .cloned()
+                    .unwrap_or(Value::Boolean(false)))
+            }
             Native::ArrayFrom => self.array_from(arguments, instruction),
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, instruction)
@@ -9387,6 +9625,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // invites a program to take a path nothing here implements.
         process.set("platform", Value::String("kiln".to_owned()));
         process.set("version", Value::String("kiln".to_owned()));
+        process.set_non_enumerable(
+            "getBuiltinModule",
+            Value::Native(Native::ProcessGetBuiltinModule),
+        );
         let value = Value::Object(Rc::new(RefCell::new(process)));
         self.process_object = Some(value.clone());
         value
@@ -14034,12 +14276,90 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::Error(_)
+        | Native::NodeFsPromises
+        | Native::NodeFsReadFile
+        | Native::NodeFsWriteFile
+        | Native::NodeFsStat
+        | Native::NodeStatIsFile
+        | Native::NodeStatIsDirectory
+        | Native::ProcessGetBuiltinModule
         | Native::SymbolConstructor
         // A namespace, not a function: `Math` has no call behaviour of its own, and reaching
         // here means something called it.
         | Native::Math
         | Native::Json => Value::Undefined,
     })
+}
+
+/// Convert an owned host result at the Node Adapter boundary.
+fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
+    Ok(match value {
+        AsyncHostValue::Undefined => Value::Undefined,
+        AsyncHostValue::Bytes(bytes) => {
+            let length = bytes.len();
+            Value::TypedArray(Rc::new(TypedArrayData {
+                kind: TypedKind::Uint8,
+                buffer: Rc::new(BufferData {
+                    bytes: RefCell::new(bytes),
+                    max_byte_length: None,
+                    shared: false,
+                }),
+                offset: 0,
+                length: Some(length),
+            }))
+        }
+        AsyncHostValue::FileStat(stat) => {
+            let mut object = ObjectData::default();
+            object.set("size", Value::Number(stat.size as f64));
+            object.set_non_enumerable("@@kiln:node:is-file", Value::Boolean(stat.is_file));
+            object.set_non_enumerable(
+                "@@kiln:node:is-directory",
+                Value::Boolean(stat.is_directory),
+            );
+            object.set("isFile", Value::Native(Native::NodeStatIsFile));
+            object.set("isDirectory", Value::Native(Native::NodeStatIsDirectory));
+            Value::Object(Rc::new(RefCell::new(object)))
+        }
+        AsyncHostValue::Resource(resource) => {
+            return Err(ExecutionError::Host {
+                instruction: 0,
+                message: format!(
+                    "persistent Node resource {} has no JavaScript representation yet",
+                    resource.get()
+                ),
+            });
+        }
+    })
+}
+
+/// Whether a Node read option requests a UTF-8 string rather than a Buffer-like byte view.
+fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionError> {
+    match option {
+        None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
+        Some(Value::String(encoding)) => parse_node_encoding(encoding),
+        Some(Value::Object(options)) => match options.borrow().get_own("encoding") {
+            None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
+            Some(Value::String(encoding)) => parse_node_encoding(encoding),
+            Some(value) => Err(ExecutionError::TypeErrorMessage {
+                message: format!("encoding must be a string, received {}", value.type_name()),
+            }),
+        },
+        Some(value) => Err(ExecutionError::TypeErrorMessage {
+            message: format!(
+                "readFile options must be a string or object, received {}",
+                value.type_name()
+            ),
+        }),
+    }
+}
+
+fn parse_node_encoding(encoding: &str) -> Result<bool, ExecutionError> {
+    match encoding.to_ascii_lowercase().as_str() {
+        "utf8" | "utf-8" => Ok(true),
+        other => Err(ExecutionError::TypeErrorMessage {
+            message: format!("unsupported file encoding {other:?}"),
+        }),
+    }
 }
 
 /// `{ value, done }`, the shape every `next` returns.

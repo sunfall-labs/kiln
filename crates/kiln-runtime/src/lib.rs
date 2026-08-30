@@ -6,12 +6,16 @@
 //! runs. Tokio types are deliberately private to this crate.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
 
-use kiln_host_abi::{HostError, HostOp, HostOps, HostValue};
+use kiln_host_abi::{
+    AsyncHostError, AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, FileStat, HostError,
+    HostOp, HostOps, HostValue, RequestId,
+};
+use tokio::sync::mpsc;
 
 /// An opaque identity returned by [`Realm::set_timeout`] or [`Realm::set_interval`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,6 +176,170 @@ impl RealmRuntime {
         }
         self.runtime.block_on(next_timer(realm))
     }
+}
+
+/// Tokio-owned asynchronous host operations for one realm.
+///
+/// Requests are assigned a monotonic sequence at submission. Tokio may finish them in any order,
+/// but completions that are already ready at the same realm checkpoint are delivered in sequence
+/// order. This keeps executor scheduling from becoming observable JavaScript semantics while
+/// allowing independent filesystem work to execute concurrently.
+pub struct TokioHost {
+    runtime: tokio::runtime::Runtime,
+    next_request: u64,
+    next_sequence: u64,
+    pending: BTreeMap<RequestId, PendingRequest>,
+    ready: BTreeMap<u64, Completion>,
+    sender: mpsc::UnboundedSender<Completion>,
+    receiver: mpsc::UnboundedReceiver<Completion>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+struct PendingRequest {
+    sequence: u64,
+    referenced: bool,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for TokioHost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokioHost")
+            .field("pending", &self.pending.len())
+            .field("ready", &self.ready.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl TokioHost {
+    /// Build a current-thread Tokio host with filesystem and timer drivers enabled.
+    pub fn new() -> Result<Self, RuntimeBuildError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(RuntimeBuildError)?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Ok(Self {
+            runtime,
+            next_request: 1,
+            next_sequence: 0,
+            pending: BTreeMap::new(),
+            ready: BTreeMap::new(),
+            sender,
+            receiver,
+            _not_send: PhantomData,
+        })
+    }
+
+    fn receive_one(&mut self) -> Option<Completion> {
+        self.runtime.block_on(self.receiver.recv())
+    }
+
+    fn collect_ready(&mut self, completion: Completion) {
+        self.ready.insert(completion.sequence, completion);
+        while let Ok(completion) = self.receiver.try_recv() {
+            self.ready.insert(completion.sequence, completion);
+        }
+    }
+}
+
+impl Drop for TokioHost {
+    fn drop(&mut self) {
+        for request in self.pending.values() {
+            request.task.abort();
+        }
+        self.pending.clear();
+    }
+}
+
+impl AsyncHostOps for TokioHost {
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        let request = RequestId::new(self.next_request);
+        self.next_request = self.next_request.wrapping_add(1).max(1);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let sender = self.sender.clone();
+        let task = self.runtime.spawn(async move {
+            let result = execute_async_host_op(operation).await;
+            let _ = sender.send(Completion {
+                request,
+                sequence,
+                result,
+            });
+        });
+        self.pending.insert(
+            request,
+            PendingRequest {
+                sequence,
+                referenced,
+                task,
+            },
+        );
+        request
+    }
+
+    fn cancel(&mut self, request: RequestId) -> bool {
+        let Some(pending) = self.pending.remove(&request) else {
+            return false;
+        };
+        pending.task.abort();
+        self.ready.remove(&pending.sequence);
+        true
+    }
+
+    fn has_referenced_work(&self) -> bool {
+        self.pending.values().any(|request| request.referenced)
+    }
+
+    fn next_completion(&mut self) -> Option<Completion> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        if self.ready.is_empty() {
+            let completion = self.receive_one()?;
+            self.collect_ready(completion);
+        }
+        let sequence = *self.ready.keys().next()?;
+        let completion = self.ready.remove(&sequence)?;
+        self.pending.remove(&completion.request);
+        Some(completion)
+    }
+}
+
+async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue, AsyncHostError> {
+    match operation {
+        AsyncHostOp::ReadFile { path } => tokio::fs::read(&path)
+            .await
+            .map(AsyncHostValue::Bytes)
+            .map_err(|error| io_error("open", path, error)),
+        AsyncHostOp::WriteFile { path, data } => tokio::fs::write(&path, data)
+            .await
+            .map(|()| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("open", path, error)),
+        AsyncHostOp::Stat { path } => tokio::fs::metadata(&path)
+            .await
+            .map(|metadata| {
+                AsyncHostValue::FileStat(FileStat {
+                    size: metadata.len(),
+                    is_file: metadata.is_file(),
+                    is_directory: metadata.is_dir(),
+                })
+            })
+            .map_err(|error| io_error("stat", path, error)),
+    }
+}
+
+fn io_error(syscall: &str, path: String, error: std::io::Error) -> AsyncHostError {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => "ENOENT",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        std::io::ErrorKind::AlreadyExists => "EEXIST",
+        std::io::ErrorKind::InvalidInput => "EINVAL",
+        std::io::ErrorKind::IsADirectory => "EISDIR",
+        std::io::ErrorKind::NotADirectory => "ENOTDIR",
+        _ => "EIO",
+    };
+    AsyncHostError::new(code, syscall, Some(path), error.to_string())
 }
 
 /// A single-thread-owned realm scheduler.
@@ -474,13 +642,136 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("kiln-runtime-{label}-{}-{id}", std::process::id()));
+            fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn join(&self, path: &str) -> PathBuf {
+            self.0.join(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn entered_operations_run_under_the_owned_tokio_runtime() {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         assert!(tokio::runtime::Handle::try_current().is_err());
         assert!(runtime.enter(|| tokio::runtime::Handle::try_current().is_ok()));
+    }
+
+    #[test]
+    fn tokio_host_reads_and_writes_owned_bytes() {
+        let directory = TestDirectory::new("async-files");
+        let path = directory.join("value.bin");
+        let path = path.to_string_lossy().into_owned();
+        let mut host = TokioHost::new().expect("Tokio host builds");
+        let write = host.start(
+            AsyncHostOp::WriteFile {
+                path: path.clone(),
+                data: vec![0, 1, 2, 255],
+            },
+            true,
+        );
+        assert!(host.has_referenced_work());
+        assert_eq!(
+            host.next_completion().expect("write completes").request,
+            write
+        );
+        assert!(!host.has_referenced_work());
+
+        let read = host.start(AsyncHostOp::ReadFile { path }, true);
+        let completion = host.next_completion().expect("read completes");
+        assert_eq!(completion.request, read);
+        assert_eq!(
+            completion.result,
+            Ok(AsyncHostValue::Bytes(vec![0, 1, 2, 255]))
+        );
+    }
+
+    #[test]
+    fn tokio_host_returns_portable_stat_metadata() {
+        let directory = TestDirectory::new("async-stat");
+        let file = directory.join("value.txt");
+        fs::write(&file, b"kiln").expect("seed file");
+        let mut host = TokioHost::new().expect("Tokio host builds");
+        host.start(
+            AsyncHostOp::Stat {
+                path: file.to_string_lossy().into_owned(),
+            },
+            true,
+        );
+        assert_eq!(
+            host.next_completion().expect("stat completes").result,
+            Ok(AsyncHostValue::FileStat(FileStat {
+                size: 4,
+                is_file: true,
+                is_directory: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn tokio_host_maps_missing_paths_to_node_error_fields() {
+        let directory = TestDirectory::new("async-missing");
+        let path = directory.join("missing.txt").to_string_lossy().into_owned();
+        let mut host = TokioHost::new().expect("Tokio host builds");
+        host.start(AsyncHostOp::ReadFile { path: path.clone() }, true);
+        let error = host
+            .next_completion()
+            .expect("read completes")
+            .result
+            .expect_err("missing path fails");
+        assert_eq!(error.code, "ENOENT");
+        assert_eq!(error.syscall, "open");
+        assert_eq!(error.path.as_deref(), Some(path.as_str()));
+    }
+
+    #[test]
+    fn unreferenced_requests_do_not_keep_the_realm_alive() {
+        let directory = TestDirectory::new("async-unref");
+        let mut host = TokioHost::new().expect("Tokio host builds");
+        host.start(
+            AsyncHostOp::ReadFile {
+                path: directory.join("missing").to_string_lossy().into_owned(),
+            },
+            false,
+        );
+        assert!(!host.has_referenced_work());
+        assert!(host.next_completion().is_some());
+    }
+
+    #[test]
+    fn cancellation_removes_request_and_liveness() {
+        let directory = TestDirectory::new("async-cancel");
+        let mut host = TokioHost::new().expect("Tokio host builds");
+        let request = host.start(
+            AsyncHostOp::ReadFile {
+                path: directory.join("missing").to_string_lossy().into_owned(),
+            },
+            true,
+        );
+        assert!(host.cancel(request));
+        assert!(!host.cancel(request));
+        assert!(!host.has_referenced_work());
+        assert!(host.next_completion().is_none());
     }
 
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {
