@@ -306,6 +306,11 @@ pub enum Builtin {
     RangeError,
     ReferenceError,
     SyntaxError,
+    SetTimeout,
+    SetInterval,
+    ClearTimeout,
+    ClearInterval,
+    QueueMicrotask,
 }
 
 impl Builtin {
@@ -334,6 +339,11 @@ impl Builtin {
             "RangeError" => Some(Self::RangeError),
             "ReferenceError" => Some(Self::ReferenceError),
             "SyntaxError" => Some(Self::SyntaxError),
+            "setTimeout" => Some(Self::SetTimeout),
+            "setInterval" => Some(Self::SetInterval),
+            "clearTimeout" => Some(Self::ClearTimeout),
+            "clearInterval" => Some(Self::ClearInterval),
+            "queueMicrotask" => Some(Self::QueueMicrotask),
             _ => None,
         }
     }
@@ -362,6 +372,11 @@ impl Builtin {
             Self::RangeError => "RangeError",
             Self::ReferenceError => "ReferenceError",
             Self::SyntaxError => "SyntaxError",
+            Self::SetTimeout => "setTimeout",
+            Self::SetInterval => "setInterval",
+            Self::ClearTimeout => "clearTimeout",
+            Self::ClearInterval => "clearInterval",
+            Self::QueueMicrotask => "queueMicrotask",
         }
     }
 }

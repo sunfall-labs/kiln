@@ -8,6 +8,7 @@
 use std::fmt;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use kiln_host_abi::{HostOps, HostValue};
@@ -203,6 +204,12 @@ pub enum Native {
     ArrayUnshift,
     ArrayLastIndexOf,
     ArrayFill,
+    SetTimeout,
+    SetInterval,
+    /// `clearTimeout` and `clearInterval` are one operation: both remove a scheduled callback by
+    /// the id it was given, and the language does not distinguish which kind it was.
+    ClearTimer,
+    QueueMicrotask,
     BooleanConstructor,
     ParseInt,
     ParseFloat,
@@ -1026,9 +1033,21 @@ pub fn execute<H: HostOps + ?Sized>(
             .collect(),
         steps: 0,
         symbol_serial: 0,
+        now: 0.0,
+        timers: Vec::new(),
+        microtasks: VecDeque::new(),
+        next_timer_id: 1.0,
+        next_sequence: 0,
         limits,
     };
-    vm.run()
+    // The program is not finished when its last statement is: anything it scheduled still has
+    // to run, which is what makes a `setTimeout` observable at all.
+    let execution = vm.run()?;
+    vm.run_event_loop()?;
+    Ok(ExecutionResult {
+        steps: vm.steps,
+        ..execution
+    })
 }
 
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
@@ -1079,9 +1098,21 @@ pub fn execute_module<H: HostOps + ?Sized>(
             .collect(),
         steps: 0,
         symbol_serial: 0,
+        now: 0.0,
+        timers: Vec::new(),
+        microtasks: VecDeque::new(),
+        next_timer_id: 1.0,
+        next_sequence: 0,
         limits,
     };
     let execution = vm.run()?;
+    // Exports are read before the event loop runs: they are the module's interface, and a timer
+    // that mutates a binding afterwards has not changed what the module exported.
+    vm.run_event_loop()?;
+    let execution = ExecutionResult {
+        steps: vm.steps,
+        ..execution
+    };
     let mut exports = Vec::with_capacity(module.exports.len());
     for binding in &module.exports {
         let Some(value) = vm.locals.get(binding.local_slot as usize) else {
@@ -1095,6 +1126,25 @@ pub fn execute_module<H: HostOps + ?Sized>(
         });
     }
     Ok(ModuleExecutionResult { execution, exports })
+}
+
+/// A callback scheduled to run at a point on the virtual clock.
+///
+/// Time here is a number the machine controls rather than a reading of the host's clock, which is
+/// what design.md §11 asks for: no sleeping, exact ordering, and the same answer every run.
+#[derive(Debug)]
+struct Timer {
+    /// What `clearTimeout` is given back. A number, because that is what the language says.
+    id: f64,
+    /// The virtual instant this is due at.
+    due: f64,
+    /// Breaks ties between timers due at the same instant, so two `setTimeout(f, 0)` calls run in
+    /// the order they were made rather than in whatever order the list happens to hold them.
+    sequence: u64,
+    callback: Value,
+    arguments: Vec<Value>,
+    /// `Some(delay)` for `setInterval`, which reschedules itself after each run.
+    repeat: Option<f64>,
 }
 
 /// A `catch` or `finally` waiting for an exception.
@@ -1159,6 +1209,16 @@ struct Vm<'program, 'host, H: HostOps + ?Sized> {
     instruction: usize,
     /// One shared name per proto, so making a closure copies a pointer rather than a string.
     function_names: Vec<Option<Rc<str>>>,
+    /// The virtual clock, in milliseconds. Only a due timer moves it, so time passes exactly as
+    /// fast as the program asks for and never faster.
+    now: f64,
+    /// Scheduled callbacks, in no particular order -- the next one is chosen by due time.
+    timers: Vec<Timer>,
+    /// Jobs to run before the next timer, in order. Promise reactions will queue here.
+    microtasks: VecDeque<(Value, Vec<Value>)>,
+    /// Ids handed out to timers, and the tie-break order among those due together.
+    next_timer_id: f64,
+    next_sequence: u64,
     steps: u64,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
     /// symbol needs: it never leaves the run that made it.
@@ -1540,6 +1600,12 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                         kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
                         kiln_ir::Builtin::IsNaN => Native::IsNaN,
                         kiln_ir::Builtin::IsFinite => Native::IsFinite,
+                        kiln_ir::Builtin::SetTimeout => Native::SetTimeout,
+                        kiln_ir::Builtin::SetInterval => Native::SetInterval,
+                        kiln_ir::Builtin::ClearTimeout | kiln_ir::Builtin::ClearInterval => {
+                            Native::ClearTimer
+                        }
+                        kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
                         // Values rather than callables, so they leave the loop early like
                         // `globalThis` does rather than being wrapped in a `Native`.
                         kiln_ir::Builtin::NotANumber => {
@@ -2043,6 +2109,42 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
     ) -> Result<Value, ExecutionError> {
         match native {
             Native::ArrayFrom => self.array_from(arguments, instruction),
+            // The scheduling built-ins are the event loop's only entry points, and the loop lives
+            // on the machine, so they cannot be pure functions of their arguments.
+            Native::SetTimeout | Native::SetInterval => {
+                let delay = match arguments.get(1).map(Value::as_number) {
+                    // A negative, missing or NaN delay is zero: "as soon as possible", which is
+                    // still after everything already queued.
+                    Some(delay) if delay.is_finite() && delay > 0.0 => delay,
+                    _ => 0.0,
+                };
+                let id = self.next_timer_id;
+                self.next_timer_id += 1.0;
+                self.next_sequence += 1;
+                self.timers.push(Timer {
+                    id,
+                    due: self.now + delay,
+                    sequence: self.next_sequence,
+                    callback: arguments.first().cloned().unwrap_or(Value::Undefined),
+                    // Everything after the delay is handed to the callback, which is how a
+                    // timer carries state without a closure.
+                    arguments: arguments.get(2..).unwrap_or_default().to_vec(),
+                    repeat: matches!(native, Native::SetInterval).then_some(delay),
+                });
+                Ok(Value::Number(id))
+            }
+            Native::ClearTimer => {
+                let id = argument_number(arguments);
+                self.timers.retain(|timer| timer.id != id);
+                Ok(Value::Undefined)
+            }
+            Native::QueueMicrotask => {
+                self.microtasks.push_back((
+                    arguments.first().cloned().unwrap_or(Value::Undefined),
+                    Vec::new(),
+                ));
+                Ok(Value::Undefined)
+            }
             // Every call has to produce a symbol distinct from every other, so this needs the
             // counter rather than only its arguments.
             Native::SymbolConstructor => {
@@ -2525,6 +2627,63 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         }
         self.error_prototypes[kind.index()] = Some(prototype.clone());
         prototype
+    }
+
+    /// Run every queued job, moving the virtual clock forward to reach each timer.
+    ///
+    /// This is the event loop. Microtasks drain completely before any timer runs and again after
+    /// each one, which is the ordering the language specifies and the reason a promise settles
+    /// before a `setTimeout(f, 0)` queued earlier.
+    ///
+    /// Time only moves when a timer is due, so a program that schedules an hour out finishes
+    /// instantly and always in the same order. Nothing here reads the host clock.
+    fn run_event_loop(&mut self) -> Result<(), ExecutionError> {
+        loop {
+            self.drain_microtasks()?;
+            let Some(index) = self.next_due_timer() else {
+                return Ok(());
+            };
+            // Rescheduled *before* running, and under the same id, so a `clearInterval` inside
+            // the callback cancels the next run rather than a run that no longer exists.
+            let (callback, arguments) = {
+                let timer = &self.timers[index];
+                self.now = self.now.max(timer.due);
+                (timer.callback.clone(), timer.arguments.clone())
+            };
+            match self.timers[index].repeat {
+                Some(delay) => {
+                    self.next_sequence += 1;
+                    let timer = &mut self.timers[index];
+                    timer.due = self.now + delay.max(1.0);
+                    timer.sequence = self.next_sequence;
+                }
+                None => {
+                    self.timers.remove(index);
+                }
+            }
+            self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
+        }
+    }
+
+    /// Run microtasks until none are left, including ones queued by the ones already running.
+    fn drain_microtasks(&mut self) -> Result<(), ExecutionError> {
+        while let Some((callback, arguments)) = self.microtasks.pop_front() {
+            self.call_value(&callback, Value::Undefined, arguments, self.instruction)?;
+        }
+        Ok(())
+    }
+
+    /// The timer to run next: the earliest due, and among those the one scheduled first.
+    fn next_due_timer(&self) -> Option<usize> {
+        self.timers
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.due
+                    .total_cmp(&right.due)
+                    .then(left.sequence.cmp(&right.sequence))
+            })
+            .map(|(index, _)| index)
     }
 
     /// Take the result of a step, turning an error a program could catch into a thrown value.
@@ -3420,9 +3579,16 @@ fn call_native(
                 .unwrap_or(Value::Null),
             _ => Value::Null,
         },
-        // Peeled off by `dispatch_native`, which every call site goes through: walking an
-        // iterable and applying a mapping function both need the interpreter, and this function
-        // deliberately does not have one.
+        // Peeled off by `dispatch_native`, which every call site goes through: scheduling and
+        // walking an iterable both need the interpreter, and this function deliberately does
+        // not have one.
+        Native::SetTimeout
+        | Native::SetInterval
+        | Native::ClearTimer
+        | Native::QueueMicrotask => {
+            unreachable!("the scheduling built-ins are dispatched by the interpreter")
+        }
+        // Peeled off the same way, for the same reason.
         Native::ArrayFrom => unreachable!("`Array.from` is dispatched by the interpreter"),
         Native::ArrayPush => match receiver {
             Value::Array(items) => {
@@ -6627,5 +6793,97 @@ mod tests {
         assert_eq!(number_in_radix(0.5, 2), "0.1");
         assert_eq!(number_in_radix(-10.25, 4), "-22.1");
         assert_eq!(number_in_radix(0.0, 8), "0");
+    }
+
+    /// Run a program and return what it wrote to stdout, event loop included.
+    fn stdout_of(program: &Program) -> String {
+        struct Recorder {
+            lines: Vec<String>,
+        }
+        impl HostOps for Recorder {
+            fn call(
+                &mut self,
+                _operation: HostOp,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostError> {
+                self.lines.push(
+                    arguments
+                        .iter()
+                        .map(HostValue::to_console_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                Ok(HostValue::Undefined)
+            }
+        }
+        let mut host = Recorder { lines: Vec::new() };
+        execute(program, &mut host, ExecutionLimits::default()).expect("runs");
+        host.lines.join(",")
+    }
+
+    /// `setTimeout(() => console.log(tag), delay)` for each pair, in the order given.
+    fn timer_program(schedule: &[(&str, f64)]) -> Program {
+        let mut constants = Vec::new();
+        let mut code = Vec::new();
+        let mut functions = Vec::new();
+        for (tag, delay) in schedule {
+            let tag_index = constants.len() as u32;
+            constants.push(Constant::String((*tag).to_owned()));
+            let delay_index = constants.len() as u32;
+            constants.push(number(*delay));
+
+            code.push(Instruction::LoadBuiltin(kiln_ir::Builtin::SetTimeout));
+            code.push(Instruction::MakeFunction(functions.len() as u32));
+            code.push(Instruction::Const(delay_index));
+            code.push(Instruction::Call { argc: 2 });
+            code.push(Instruction::Pop);
+            functions.push(kiln_ir::FunctionProto {
+                name: None,
+                arrow: false,
+                generator: false,
+                parameter_count: 0,
+                local_count: 0,
+                code: vec![
+                    Instruction::Const(tag_index),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Return,
+                ],
+                upvalues: Vec::new(),
+            });
+        }
+        code.push(Instruction::Return);
+        Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants,
+            code,
+            local_count: 0,
+            functions,
+        }
+    }
+
+    #[test]
+    fn a_timers_delay_costs_nothing_to_wait_for() {
+        // The property the differential harness cannot check, because node would sleep for it:
+        // an hour-long delay is as cheap as a zero-length one, and the order is still by time.
+        let program = timer_program(&[("hour", 3_600_000.0), ("second", 1_000.0), ("now", 0.0)]);
+        assert_eq!(stdout_of(&program), "now,second,hour");
+    }
+
+    #[test]
+    fn timers_due_together_run_in_the_order_they_were_scheduled() {
+        // A due time is not a total order, so without a sequence number this depends on however
+        // the queue happens to be arranged.
+        let program = timer_program(&[("first", 0.0), ("second", 0.0), ("third", 0.0)]);
+        assert_eq!(stdout_of(&program), "first,second,third");
+    }
+
+    #[test]
+    fn a_program_is_not_finished_while_it_still_has_work_scheduled() {
+        // Returning at the end of the module body would make every timer unobservable.
+        let program = timer_program(&[("scheduled", 5.0)]);
+        assert_eq!(stdout_of(&program), "scheduled");
     }
 }
