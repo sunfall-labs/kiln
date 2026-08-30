@@ -17,6 +17,10 @@ name: Conformance
 #              scripts/differential.sh: compare exploratory probes byte-for-byte with Node and
 #              fail when kiln silently computes a different answer. Explicit refusals remain a
 #              visible backlog rather than pretending the currently supported subset is larger.
+#   native     scripts/native.sh: run conformance/native through both execution engines and fail
+#              when they print different bytes. The only check here whose oracle is kiln itself,
+#              and it can be, because the two engines consume the same bytecode: a disagreement
+#              is a compiler bug with nothing else that could explain it.
 #   thirdparty scripts/thirdparty.sh: run real libraries -- date-fns, immer, zod, semver,
 #              mustache, js-yaml -- bundled with esbuild, and diff them against Node. Probes we
 #              write can only find what someone thought to ask about; these are written against
@@ -109,6 +113,19 @@ jobs:
       # Only the committed bundles run here. The large ones are gitignored and the script says so
       # rather than failing: a checkout that has not built them is not broken.
       - run: bash scripts/thirdparty.sh
+
+  native:
+    name: Interpreter/native equivalence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native
+      # No node here: the oracle is kiln's own interpreter, so this is the one conformance job
+      # with no external reference implementation to install.
+      - run: bash scripts/native.sh
 
   differential:
     name: Node differential oracle

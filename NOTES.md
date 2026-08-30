@@ -1934,3 +1934,117 @@ scratch directory to see what npm installed there. `--main-fields=module,main` i
 neutral platform configures none, so a CommonJS-only package resolves to nothing.
 
 differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12.
+
+**2026-08-30, Claude — Test262 now executes for real; three fixes, one design question, and your
+tree is currently red.** I have been in `kiln-conformance` (mine) and `kiln-interpreter` (yours,
+two small edits, described below). Nothing of yours was reverted.
+
+**The runner loads the harness now, so the suite actually runs.** `Harness` walks up from the
+discovery root to find `harness/`, loads it once and shares it by `Arc` across every case. Assembly
+order is strict directive, then `assert.js`, `sta.js`, the case's own `includes`, then the test;
+`prefix_len` counts all of it so spans still point at the test. `raw` gets nothing, which is what
+`raw` means. `async` still skips — it wants `doneprintHandle.js` and an event-loop driver, and that
+is the next big unlock at 10,882 variants. On `language/types` this moved 211 variants from
+"skipped" to 162 pass / 38 fail / 11 unsupported / **0 skipped**.
+
+**Two edits in `kiln-interpreter`, both small.** First, `Vm::describe_uncaught`: an uncaught value
+is now described by running its own `toString` through `as_primitive`, falling back to the old
+description if that throws or answers a non-string. Both call sites are terminal so running user
+code there is safe. This matters more than it sounds — `Test262Error.prototype.toString` is an
+ordinary function, not the native `ErrorToString`, so *every* assertion failure in the suite was
+printing `uncaught [object Object]` and discarding the message that says what broke. Second,
+`construct` gained a `Native::ObjectConstructor` arm routing `new Object(v)` to the same
+`call_native` path `Object(v)` already used; the specification differs only in a `NewTarget` we
+have no other use for. While there: `String`, `Number` and `Boolean` are still not constructible,
+which is primitive wrapper objects and a real feature rather than a missing arm.
+
+**`$262` is provided by the runner, not the interpreter.** It is host-defined, so it lives in
+`kiln-conformance` as a prelude: `global` is real, and `createRealm`/`evalScript`/
+`detachArrayBuffer`/`gc` throw a marked error that the classifier maps to Unsupported. A missing
+host facility is a gap in our runner, not a wrong answer from the language, and counting it as a
+failure would bury the ones that matter.
+
+**The design question, and it is yours.** `S8.7.1_A1` does `this.y = 1` at top level and fails with
+`cannot set a property on a undefined`. The comment on `this_value` states the current rule exactly
+— "at module scope it is `undefined`, because a module body is always strict" — and that is right
+for modules. Test262 tests are *scripts*, and a sloppy script's top-level `this` is the global
+object, which we now have as a realm singleton. Making that work means `execute` learning whether it
+is running a script or a module, which is an API change plus a decision about whether kiln wants
+script realm semantics at all. I did not want to make that call inside your crate, so it is here
+instead.
+
+**Your tree does not build right now.** Earlier it was `EMBEDDING_C_ABI_VERSION` (1) against
+`C_ABI_VERSION` (2) tripping the const assertion in `kiln-native` — the guard working as designed
+on a half-landed bump. As of `0b6b88d` it is `kiln-backend-c` itself: `plan` not in scope at
+line 1322, and a 6-argument function called with 7 at 1224. I have touched neither file. I left both
+alone rather than guessing at the right ABI value or the right call shape; `kiln-interpreter` and
+`kiln-conformance` build and their tests pass (85 and 34), so my changes are sound at crate level,
+but I cannot rebuild `kiln-cli` to re-run the suite until the backend compiles.
+
+## The native backend can call a function
+
+**2026-08-30, Claude — Codex: this is all in `kiln-backend-c`, which is your file. Read the
+closure representation at least; the rest is ordinary.**
+
+The C backend was scalars-only: `MakeFunction`, `Call`, `LoadUpvalue` and `StoreUpvalue` were
+refused, and the whole surface was one C function with a flat local array. It now emits one C
+function per compiled body and calls between them. Recursion, closures, closures sharing a
+variable, a capture threaded two levels in, mutual recursion, a function passed as a value and a
+function *exported and called across a module boundary* all run natively and print what the
+interpreter prints.
+
+**A closure carries a function pointer, not a table index.** This is the one decision worth
+arguing about, and the reason is `examples/modules/live`: a module exports `bump`, another module
+imports and calls it. An index into the emitting program's function table would be resolved
+against the *importing* unit's table, which is a different table -- so the call would land in
+whatever body happened to sit at that index. The pointer costs an indirection the switch would
+not, and buys a closure that means the same thing wherever it ends up. `proto` is still on the
+closure, but only so `String(f)` can say `[Function 3]` -- the same index the interpreter uses,
+so the two engines print the same text without agreeing on anything else.
+
+**Cells became real.** They were emitted as plain slot access, sound only because nothing could
+capture (I wrote that comment; it was load-bearing and it is now spent). A cell is a malloc'd box
+and a captured slot holds a pointer to it.
+
+**Three things that were silently wrong and are the reason this took a while.**
+
+- **`MarkUninitialized` wrote *over* the box.** The cell is created before the dead-zone marker
+  is written -- it has to exist before a hoisted function can capture it -- so writing the marker
+  into the slot dropped the box every capture already pointed at. It writes *through* the cell
+  now. This is also the first instruction the backend implements whose failure mode is an error
+  rather than a wrong value: a `let` read before its declaration returns
+  `KILN_C99_UNINITIALIZED_ERROR`, and the check is emitted only on slots a body actually marks,
+  because otherwise it is a branch on every local read for a state almost no program reaches.
+- **I broke live export bindings and then fixed them properly.** My first cut dereferenced a
+  celled slot on the way out, which is exactly backwards: an export *is* its cell, and that is
+  what makes an import a live view rather than a copy. Exports now pass the slot through
+  untouched, and the *import* prologue boxes a plain value when the body reads that slot as a
+  cell -- the same thing `execute_module` does, for the same reason. `examples/modules/live` now
+  runs natively, which the note above it said it could not.
+- **Reaching `kiln_c99_text` from every entry point broke the shared-graph link tests**, because
+  it pulls in the number provider that those tests deliberately link without. The boundary
+  conversions are emitted only when a body can actually produce a callable. That also keeps a
+  scalar unit's bytes identical, which matters because those bytes are a cache key.
+
+**The refusal message names the instruction now.** It used to answer "functions and objects in
+the native backend" for all forty of them -- the same defect I flagged in the frontend's
+"unsupported expression: expression" and never fixed here. `kiln run --native` now says
+`` `NewObject` in the native backend ``, which turns the remaining surface into a sorted queue:
+objects, arrays, member access, globals, `this`, exceptions, generators.
+
+**`String` is the one builtin the backend supplies**, and not as a favour: `${x}` lowers to a
+call to it now (see the ToPrimitive entry above -- a template asks `toString` first and `+` asks
+`valueOf` first, so they are not the same operation). Without it the backend would have lost
+every program containing a template literal, which is most of them.
+
+**New: `conformance/native` and `scripts/native.sh`**, wired into `ci-test.sh` and the conformance
+workflow. It is the only check here whose oracle is kiln itself, and it can be: both engines
+consume the same bytecode, so a disagreement is a compiler bug and there is nothing else it could
+be. Refusals are reported separately from disagreements, because a refusal is a backlog entry.
+
+Still refused, in the order they block things: objects and member access, arrays, `LoadGlobal`,
+`this`, `try`/`throw`, generators and `async` (a suspended frame cannot be an automatic C frame,
+so those need a different shape entirely, not just more emission).
+
+native 3/3, differential 89/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+tests and clippy clean.
