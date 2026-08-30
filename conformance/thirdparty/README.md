@@ -12,9 +12,8 @@ than a missing feature:
   that no intrinsic value answered `constructor`.
 - **immer** found that `globalThis` was a fresh object on every read, so anything stored on it
   vanished and `globalThis === globalThis` was false. It is the one that does not pass yet. `Proxy` exists now
-  and immer gets much further with it -- drafts are created, writes go through -- but its
-  finalise path uses the `getOwnPropertyDescriptor` and `defineProperty` traps, which are not
-  implemented.
+  and immer gets much further with it -- drafts are created, writes go through -- but its finalisation leaves a nested
+  draft in the result where node replaces it with a plain object.
 - **zod** found that `Object.defineProperty` with a data descriptor ran an *inherited setter*
   instead of defining an own property, that a named function expression could not call itself,
   and that `Array(n)` and `Object(x)` were not callable without `new`. The first of those was an
