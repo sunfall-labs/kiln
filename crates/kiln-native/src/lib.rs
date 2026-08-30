@@ -20,15 +20,20 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
-use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path};
+#[cfg(test)]
+use kiln_backend_c::emit_module_with_logical_path;
+use kiln_backend_c::{
+    C_ABI_VERSION, EmitError, GRAPH_MODULE_C_ABI_VERSION, emit_c,
+    emit_graph_module_with_logical_path,
+};
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolvedExport};
 use kiln_native_runtime::{
-    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, NATIVE_RESULT_PATH_ENV,
-    NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result, launcher_source,
-    runtime_source,
+    EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, GRAPH_SCHEDULER_ABI_VERSION,
+    NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result,
+    launcher_source, runtime_source, scheduler_source,
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
@@ -906,8 +911,9 @@ impl NativeBuilder {
     /// Build an acyclic module graph as one embedding shared library.
     ///
     /// The public entry point is a graph-specific two-argument wrapper using the stable embedding
-    /// ABI. Individual generated modules retain their internal six-argument ABI; the wrapper
-    /// evaluates them in dependency-first order and wires imports from the provider export arrays.
+    /// ABI. Individual generated modules use a private seven-argument graph ABI carrying an
+    /// invocation-owned scheduler; the wrapper evaluates them in dependency-first order and
+    /// wires imports from the provider export arrays.
     /// Only the wrapper is declared in the emitted public header. No CLI runtime or launcher is
     /// linked into the resulting library.
     pub fn build_shared_graph(
@@ -921,7 +927,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_graph_module_with_logical_path(&node.program, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -961,8 +967,8 @@ impl NativeBuilder {
         let paths = SharedGraphLibraryPaths::new(workspace.path(), modules.len());
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
-        let module_abi = module_abi_identity();
-        let embedding_abi = runtime_abi_identity();
+        let module_abi = graph_module_abi_identity();
+        let embedding_abi = graph_module_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
@@ -970,7 +976,7 @@ impl NativeBuilder {
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-graph-abi-{GRAPH_MODULE_C_ABI_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -1013,7 +1019,7 @@ impl NativeBuilder {
         // Graph module symbols are an internal link protocol. Different shared libraries can
         // contain the same logical path with different bytecode, so exporting those symbols lets
         // a dynamic loader interpose one library's module into another library's wrapper. Keep
-        // the six-argument entries externally linkable inside this DSO but hidden outside it.
+        // the private seven-argument entries externally linkable inside this DSO but hidden outside it.
         let mut module_compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
@@ -1258,7 +1264,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_graph_module_with_logical_path(&node.program, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1276,8 +1282,8 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let dynamic_runtime = dynamic_cli_runtime_enabled(profile);
-        let module_abi = module_abi_identity();
-        let runtime_abi = runtime_abi_identity();
+        let module_abi = graph_module_abi_identity();
+        let runtime_abi = graph_module_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
@@ -1286,7 +1292,7 @@ impl NativeBuilder {
         for (_, module) in &modules {
             let source_key = key(
                 ArtifactKind::GeneratedC,
-                format!("kiln-c-abi-{C_ABI_VERSION}"),
+                format!("kiln-c-graph-abi-{GRAPH_MODULE_C_ABI_VERSION}"),
                 Backend::C,
                 &module_abi,
                 &target,
@@ -1859,6 +1865,15 @@ fn runtime_abi_identity() -> String {
     format!("{};runtime-{NATIVE_RUNTIME_VERSION}", module_abi_identity())
 }
 
+fn graph_module_abi_identity() -> String {
+    format!(
+        "{};graph-module-c-{};graph-scheduler-abi-{}",
+        runtime_abi_identity(),
+        GRAPH_MODULE_C_ABI_VERSION,
+        GRAPH_SCHEDULER_ABI_VERSION,
+    )
+}
+
 fn native_number_abi_identity() -> String {
     format!("kiln-native-number-provider-{PROVIDER_ABI_VERSION}")
 }
@@ -2219,6 +2234,8 @@ fn graph_launcher_source(
 #include <stddef.h>
 #include <stdint.h>
 
+#define KILN_C99_OK 0
+
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
     KILN_VALUE_NULL = 1,
@@ -2246,12 +2263,18 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure(int status, kiln_value value);
+typedef struct kiln_native_scheduler kiln_native_scheduler;
+extern kiln_native_scheduler *kiln_native_scheduler_create(void);
+extern void kiln_native_scheduler_begin(kiln_native_scheduler *scheduler);
+extern int kiln_native_scheduler_finish(kiln_native_scheduler *scheduler, kiln_host *host,
+                                        int depth, kiln_value *thrown);
+extern void kiln_native_scheduler_destroy(kiln_native_scheduler *scheduler);
 "#,
     );
     for (_, module) in modules {
         writeln!(
             output,
-            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count, kiln_native_scheduler *scheduler);",
             module.symbol
         )
         .unwrap();
@@ -2279,6 +2302,7 @@ extern void kiln_cli_report_failure(int status, kiln_value value);
 int main(void) {
     kiln_host host;
     kiln_value result;
+    kiln_native_scheduler *scheduler;
     int status;
 "#,
     );
@@ -2288,6 +2312,9 @@ int main(void) {
     }
     host.call = kiln_cli_host_call;
     host.context = NULL;
+    scheduler = kiln_native_scheduler_create();
+    if (scheduler == NULL) return 1;
+    kiln_native_scheduler_begin(scheduler);
 "#,
     );
     for (index, (node, module)) in modules.iter().enumerate() {
@@ -2315,7 +2342,7 @@ int main(void) {
         };
         writeln!(
             output,
-            "    status = {}(&host, &result, {}, (size_t){}, {}, (size_t){});",
+            "    status = {}(&host, &result, {}, (size_t){}, {}, (size_t){}, scheduler);",
             module.symbol,
             imports,
             node.program.imports.len(),
@@ -2326,14 +2353,9 @@ int main(void) {
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
-        output.push_str(
-            "    if (status != 0) { kiln_cli_report_failure(status, result); return 1; }\n",
-        );
-        if node.path == graph.entry() {
-            output.push_str("    if (kiln_cli_write_result(result) != 0) return 1;\n");
-        }
+        output.push_str("    if (status != 0) { kiln_cli_report_failure(status, result); kiln_native_scheduler_destroy(scheduler); return 1; }\n");
     }
-    output.push_str("    return 0;\n}\n");
+    output.push_str("    { kiln_value thrown = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }; status = kiln_native_scheduler_finish(scheduler, &host, 0, &thrown); if (status != KILN_C99_OK) { kiln_cli_report_failure(status, thrown); kiln_native_scheduler_destroy(scheduler); return 1; } }\n    if (kiln_cli_write_result(result) != 0) { kiln_native_scheduler_destroy(scheduler); return 1; }\n    kiln_native_scheduler_destroy(scheduler);\n    return 0;\n}\n");
     // Keep this check in the launcher generation path so an unexpectedly empty graph fails as a
     // structured graph error instead of producing a linker error with little context.
     if modules.is_empty() {
@@ -2376,10 +2398,13 @@ fn graph_shared_wrapper_source(
     );
     output.push_str(embedding_header());
     output.push('\n');
+    output.push_str("#define KILN_NATIVE_HIDE_SCHEDULER 1\n");
+    output.push_str(scheduler_source());
+    output.push('\n');
     for (_, module) in modules {
         writeln!(
             output,
-            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count, kiln_native_scheduler *scheduler);",
             module.symbol
         )
         .unwrap();
@@ -2456,7 +2481,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     );
     writeln!(
         output,
-        "\nint {wrapper_symbol}(kiln_host *host, kiln_value *result) {{\n    kiln_proxy_arena arena = {{ NULL, 0, 0 }};\n    kiln_proxy_host proxy = {{ host, &arena }};\n    kiln_host proxy_host = {{ kiln_proxy_call, &proxy }};\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+        "\nint {wrapper_symbol}(kiln_host *host, kiln_value *result) {{\n    kiln_proxy_arena arena = {{ NULL, 0, 0 }};\n    kiln_proxy_host proxy = {{ host, &arena }};\n    kiln_host proxy_host = {{ kiln_proxy_call, &proxy }};\n    kiln_native_scheduler *scheduler = NULL;\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    scheduler = kiln_native_scheduler_create();\n    if (scheduler == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    kiln_native_scheduler_begin(scheduler);\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -2496,7 +2521,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         let export_count = node.program.exports.len();
         writeln!(
             output,
-            "    status = {}(&proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) goto cleanup;",
+            "    status = {}(&proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count}, scheduler);\n    if (status != KILN_C99_OK) goto cleanup;",
             modules[index].1.symbol
         )
         .unwrap();
@@ -2504,8 +2529,8 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             output.push_str("    *result = module_result;\n");
         }
     }
-    output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
-    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    kiln_proxy_arena_clear(&arena);\n    return status;\n}}\n", modules.len()).unwrap();
+    output.push_str("cleanup:\n    if (scheduler != NULL && status == KILN_C99_OK) { kiln_value thrown = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }; status = kiln_native_scheduler_finish(scheduler, &proxy_host, 0, &thrown); if (status != KILN_C99_OK && result != NULL) *result = thrown; }\n    for (index = 0; index < (size_t)");
+    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    if (scheduler != NULL) kiln_native_scheduler_destroy(scheduler);\n    kiln_proxy_arena_clear(&arena);\n    return status;\n}}\n", modules.len()).unwrap();
     Ok(output)
 }
 
@@ -4866,8 +4891,9 @@ int main(void) {
         fs::write(
             &host_source,
             format!(
-                "#include \"wrapper.h\"\nint main(void) {{ kiln_value result; return {}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER; }}\n",
-                wrapper_symbol
+                "#include \"wrapper.h\"\nint main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 1; if ({}(NULL, &result) != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER) return 2; return 0; }}\n",
+                wrapper_symbol,
+                wrapper_symbol,
             ),
         )
         .expect("write null-host source");

@@ -16,6 +16,8 @@ use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
+/// ABI version of the private seven-argument graph module entry point.
+pub const GRAPH_MODULE_C_ABI_VERSION: u32 = 1;
 
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 const _: () = assert!(NUMBER_PARSE_VERSION == 1);
@@ -100,7 +102,7 @@ pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair(module);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, false);
     Ok(CModule {
         symbol,
         source,
@@ -125,7 +127,27 @@ pub fn emit_module_with_logical_path(
     let (program_hash, _) = hash_module_pair(module);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, false);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
+}
+
+/// Emit a module for the private graph launcher ABI. The extra scheduler argument is deliberately
+/// separate from [`emit_module_with_logical_path`] so existing embedders retain the six-argument
+/// module contract.
+pub fn emit_graph_module_with_logical_path(
+    module: &ModuleProgram,
+    logical_path: &str,
+) -> Result<CModule, EmitError> {
+    validate_logical_path(logical_path)?;
+    validate_module(module)?;
+    let (program_hash, _) = hash_module_pair(module);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let source = render_module(module, program_hash, &symbol, true);
     Ok(CModule {
         symbol,
         source,
@@ -599,6 +621,12 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+/* Private graph ABI. A graph invocation owns this scheduler; it is never process-global. */
+typedef struct kiln_native_scheduler kiln_native_scheduler;
+typedef kiln_native_scheduler *(*kiln_scheduler_switch_fn)(kiln_native_scheduler *next);
+typedef int (*kiln_scheduler_runner_fn)(kiln_native_scheduler *scheduler, kiln_host *host,
+                                       int depth, kiln_value *thrown);
+
 /* A closure is its body plus the boxes it captured.
  *
  * The body is a function pointer rather than an index into the emitting program's table,
@@ -614,6 +642,7 @@ typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upv
                             struct kiln_generator *frame);
 typedef struct kiln_closure {
     kiln_body_fn body;
+    kiln_scheduler_switch_fn scheduler_switch;
     /* Arrows have no call-time `this` or `new.target`; both are captured where made. */
     int arrow;
     kiln_value captured_new_target;
@@ -887,12 +916,43 @@ typedef struct kiln_timer {
  * the same as it would be on a real clock -- which is the only part of a timer a compiler test
  * can check anyway. The interpreter does exactly this, and the two agreeing about ordering is
  * what `conformance/native/timers.ts` is for. */
+#ifdef KILN_C99_GRAPH_RUNTIME
+struct kiln_native_scheduler {
+    kiln_microtask *queue;
+    size_t queue_head;
+    size_t queue_count;
+    size_t queue_capacity;
+    kiln_timer *timers;
+    size_t timer_count;
+    size_t timer_capacity;
+    double now;
+    double next_timer_id;
+    uint64_t next_sequence;
+    kiln_scheduler_runner_fn runner;
+    int graph;
+};
+static _Thread_local kiln_native_scheduler *kiln_c99_scheduler;
+#define kiln_c99_queue (kiln_c99_scheduler->queue)
+#define kiln_c99_queue_head (kiln_c99_scheduler->queue_head)
+#define kiln_c99_queue_count (kiln_c99_scheduler->queue_count)
+#define kiln_c99_queue_capacity (kiln_c99_scheduler->queue_capacity)
+#define kiln_c99_timers (kiln_c99_scheduler->timers)
+#define kiln_c99_timer_count (kiln_c99_scheduler->timer_count)
+#define kiln_c99_timer_capacity (kiln_c99_scheduler->timer_capacity)
+#define kiln_c99_now (kiln_c99_scheduler->now)
+#define kiln_c99_next_timer_id (kiln_c99_scheduler->next_timer_id)
+#define kiln_c99_next_sequence (kiln_c99_scheduler->next_sequence)
+extern int kiln_native_scheduler_graph_mode(const kiln_native_scheduler *scheduler);
+extern void kiln_native_scheduler_set_runner(kiln_native_scheduler *scheduler,
+                                             kiln_scheduler_runner_fn runner);
+#else
 static kiln_timer *kiln_c99_timers;
 static size_t kiln_c99_timer_count;
 static size_t kiln_c99_timer_capacity;
 static double kiln_c99_now;
 static double kiln_c99_next_timer_id = 1.0;
 static uint64_t kiln_c99_next_sequence;
+#endif
 
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
@@ -1062,6 +1122,11 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
                          kiln_value *out);
 static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
 static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown);
+#ifdef KILN_C99_GRAPH_RUNTIME
+static kiln_native_scheduler *kiln_c99_switch_scheduler(kiln_native_scheduler *next);
+static int kiln_c99_run_loop_entry(kiln_native_scheduler *scheduler, kiln_host *host, int depth,
+                                   kiln_value *thrown);
+#endif
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
@@ -2663,6 +2728,11 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
         }
     }
     closure->body = body;
+#ifdef KILN_C99_GRAPH_RUNTIME
+    closure->scheduler_switch = kiln_c99_switch_scheduler;
+#else
+    closure->scheduler_switch = NULL;
+#endif
     closure->arrow = arrow;
     closure->captured_new_target = new_target;
     closure->generator = generator;
@@ -2679,6 +2749,27 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->upvalues = upvalues;
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_invoke_body(kiln_closure *closure, kiln_host *host, kiln_value *result,
+                                kiln_value receiver, kiln_value new_target,
+                                const kiln_value *args, size_t argc, int depth,
+                                kiln_value *thrown, kiln_generator *frame) {
+    int status;
+#ifdef KILN_C99_GRAPH_RUNTIME
+    kiln_native_scheduler *previous = NULL;
+    if (closure->scheduler_switch != NULL) {
+        previous = closure->scheduler_switch(kiln_c99_scheduler);
+    }
+#endif
+    status = closure->body(host, result, closure->upvalues, receiver, new_target, args, argc,
+                           depth, thrown, frame);
+#ifdef KILN_C99_GRAPH_RUNTIME
+    if (closure->scheduler_switch != NULL) {
+        (void)closure->scheduler_switch(previous);
+    }
+#endif
+    return status;
 }
 
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
@@ -2815,8 +2906,8 @@ static int kiln_c99_call_with_target(kiln_host *host, kiln_value *result, kiln_v
     if (closure->arrow) {
         new_target = closure->captured_new_target;
     }
-    return closure->body(host, result, closure->upvalues, receiver, new_target, args, argc,
-                         depth + 1, thrown, NULL);
+    return kiln_c99_invoke_body(closure, host, result, receiver, new_target, args, argc,
+                                depth + 1, thrown, NULL);
 }
 
 /* Most runtime callbacks are ordinary calls. Keeping this wrapper makes that default explicit;
@@ -6825,8 +6916,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
-                status = closure->body(host, &produced, closure->upvalues, frame->receiver,
-                                       frame->new_target, NULL, 0, depth + 1, thrown, frame);
+                status = kiln_c99_invoke_body(closure, host, &produced, frame->receiver,
+                                              frame->new_target, NULL, 0, depth + 1, thrown,
+                                              frame);
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
                     finished = 0;
@@ -9680,17 +9772,14 @@ static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
     return KILN_C99_THROWN;
 }
 
-/* The microtask queue.
- *
- * One per generated unit rather than one per program, drained when the unit's entry point
- * finishes. For a single module -- which is what `kiln run` compiles and what every probe here
- * is -- that is exactly node's ordering: the body runs to completion and then the queue drains.
- * For a *graph* it is an approximation, because node drains after every module body rather than
- * after each one; see NOTES.md, where the shared-queue design that fixes it is written down. */
+/* The microtask queue. Scalar units keep their private queue; graph units map these names onto
+ * the invocation-owned scheduler supplied through the private graph ABI. */
+#ifndef KILN_C99_GRAPH_RUNTIME
 static kiln_microtask *kiln_c99_queue;
 static size_t kiln_c99_queue_head;
 static size_t kiln_c99_queue_count;
 static size_t kiln_c99_queue_capacity;
+#endif
 
 
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
@@ -9943,6 +10032,22 @@ static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
     return KILN_C99_OK;
 }
 
+#ifdef KILN_C99_GRAPH_RUNTIME
+static kiln_native_scheduler *kiln_c99_switch_scheduler(kiln_native_scheduler *next) {
+    kiln_native_scheduler *previous = kiln_c99_scheduler;
+    kiln_c99_scheduler = next;
+    return previous;
+}
+
+static int kiln_c99_run_loop_entry(kiln_native_scheduler *scheduler, kiln_host *host, int depth,
+                                   kiln_value *thrown) {
+    kiln_native_scheduler *previous = kiln_c99_switch_scheduler(scheduler);
+    int status = kiln_c99_run_loop(host, depth, thrown);
+    (void)kiln_c99_switch_scheduler(previous);
+    return status;
+}
+#endif
+
 /* One step of an async function: resume the body, and decide what to do with where it stopped.
  *
  * It yields when it awaits, so the value it hands back is what it is waiting on. Everything that
@@ -9967,8 +10072,8 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = closure->body(host, &produced, closure->upvalues, frame->receiver, frame->new_target,
-                           NULL, 0, depth + 1, thrown, frame);
+    status = kiln_c99_invoke_body(closure, host, &produced, frame->receiver, frame->new_target,
+                                  NULL, 0, depth + 1, thrown, frame);
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -11600,6 +11705,7 @@ fn render_function(
         handlers,
         site: ReturnSite::Body,
         guarded: dead_zone_slots(&proto.code),
+        shared_scheduler: false,
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
@@ -11692,6 +11798,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry { exports: None },
         guarded: dead_zone_slots(&program.code),
+        shared_scheduler: false,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -11703,11 +11810,19 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     output
 }
 
-fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> String {
+fn render_module(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    private_graph_abi: bool,
+) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
+    if private_graph_abi {
+        output.push_str("#define KILN_C99_GRAPH_RUNTIME 1\n");
+    }
     output.push_str(HEADER);
     writeln!(
         output,
@@ -11736,11 +11851,11 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         .unwrap();
     }
     render_functions(&mut output, program, &plan, symbol);
-    writeln!(
-        output,
-        "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
-    )
-    .unwrap();
+    if private_graph_abi {
+        writeln!(output, "static int {symbol}_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{").unwrap();
+    } else {
+        writeln!(output, "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{").unwrap();
+    }
     output.push_str("    size_t sp = 0;\n");
     output.push_str("    kiln_value new_target = kiln_c99_undefined();\n");
     output.push_str("    (void)new_target;\n");
@@ -11817,6 +11932,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
             exports: Some(&module.exports),
         },
         guarded: dead_zone_slots(&program.code),
+        shared_scheduler: private_graph_abi,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -11825,6 +11941,13 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    if private_graph_abi {
+        writeln!(
+            output,
+            "int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count, kiln_native_scheduler *scheduler) {{\n    kiln_native_scheduler *previous;\n    int status;\n    if (scheduler == NULL) return KILN_C99_INVALID_ARGUMENT;\n    previous = kiln_c99_scheduler;\n    kiln_c99_scheduler = scheduler;\n    kiln_native_scheduler_set_runner(scheduler, kiln_c99_run_loop_entry);\n    status = {symbol}_body(host, result, imports, import_count, exports, export_count);\n    kiln_c99_scheduler = previous;\n    return status;\n}}\n"
+        )
+        .unwrap();
+    }
     output
 }
 
@@ -11850,6 +11973,7 @@ struct Emitter<'a> {
     /// The local slots this body puts into the temporal dead zone, so a read of one is checked
     /// and every other read is not.
     guarded: HashSet<u32>,
+    shared_scheduler: bool,
 }
 
 enum ReturnSite<'a> {
@@ -11874,6 +11998,7 @@ fn emit_instruction(
         handlers,
         site,
         guarded,
+        shared_scheduler,
     } = emitter;
     match instruction {
         Instruction::LoadNewTarget => output.push_str("    stack[sp++] = new_target;\n"),
@@ -12525,9 +12650,11 @@ fn emit_instruction(
                 if *callables {
                     // Everything the body queued runs before the module is finished, which is
                     // what "after the synchronous part" means.
-                    output.push_str(
-                        "    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n",
-                    );
+                    if *shared_scheduler {
+                        output.push_str("    if (!kiln_native_scheduler_graph_mode(kiln_c99_scheduler)) { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n");
+                    } else {
+                        output.push_str("    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n");
+                    }
                 }
                 if *callables {
                     output.push_str(
