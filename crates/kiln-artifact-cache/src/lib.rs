@@ -21,6 +21,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use kiln_digest::{DIGEST_BYTES, Digest, DigestParseError};
 
+mod eviction;
+
+pub use eviction::{
+    DEFAULT_BUDGET_BYTES, DEFAULT_GRACE, DEFAULT_SWEEP_THRESHOLD_PERCENT, EvictionPolicy,
+    RebuildCost, SweepReport, SweepTrigger,
+};
+
 /// Version of the serialized cache record and key canonicalization.
 pub const CACHE_FORMAT_VERSION: u16 = 1;
 
@@ -307,6 +314,7 @@ impl Error for CacheError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactCache {
     layers: Vec<CacheLayer>,
+    refresh_recency_on_hit: bool,
 }
 
 impl ArtifactCache {
@@ -321,7 +329,23 @@ impl ArtifactCache {
     pub fn with_layers(layers: impl IntoIterator<Item = CacheLayer>) -> Self {
         Self {
             layers: layers.into_iter().collect(),
+            refresh_recency_on_hit: true,
         }
+    }
+
+    /// Choose whether a hit stamps the record's modification time as its last-use time.
+    ///
+    /// On by default, because without it the cache has no last-use clock and eviction can only
+    /// order by build time. Turn it off for a cache that must never write during a lookup.
+    #[must_use]
+    pub fn with_recency_refresh(mut self, refresh_recency_on_hit: bool) -> Self {
+        self.refresh_recency_on_hit = refresh_recency_on_hit;
+        self
+    }
+
+    /// Whether a hit refreshes the record's last-use time.
+    pub const fn refreshes_recency(&self) -> bool {
+        self.refresh_recency_on_hit
     }
 
     pub fn layers(&self) -> &[CacheLayer] {
@@ -364,6 +388,13 @@ impl ArtifactCache {
                 None => continue,
             };
             let (payload_digest, payload) = decode_record(&path, key_digest, &bytes)?;
+            // A hit is a use. Stamping the record's mtime here is what makes eviction's LRU order
+            // mean "least recently used" rather than "least recently built". It is best effort and
+            // metadata-only: the payload and both digests are unchanged, so a failure (a read-only
+            // filesystem, a record owned by another user) can only cost eviction accuracy.
+            if self.refresh_recency_on_hit && layer.is_writable() {
+                eviction::refresh_recency(&path);
+            }
             return Ok(Lookup::Hit(Artifact {
                 bytes: payload,
                 digest: payload_digest,
@@ -430,12 +461,22 @@ impl ArtifactCache {
         if result.is_err() {
             let _ = fs::remove_file(&temp_path);
         }
-        result.map(|()| StoreResult {
-            digest: payload_digest,
-            key_digest,
-            layer_index,
-            path,
-            bytes_written: payload.len() as u64,
+        result.map(|()| {
+            // Record the toolchain identity beside the record so a later sweep can prove that a
+            // record is unreachable after a toolchain or ABI bump. Best effort: the record is the
+            // artifact, the marker is only an eviction hint.
+            eviction::write_identity_marker(
+                &path,
+                key.identity_digest(),
+                &format!("{}-{counter}-{timestamp}", std::process::id()),
+            );
+            StoreResult {
+                digest: payload_digest,
+                key_digest,
+                layer_index,
+                path,
+                bytes_written: payload.len() as u64,
+            }
         })
     }
 
@@ -474,6 +515,12 @@ impl ArtifactCache {
             Ok(_) => return Err(non_regular_path(&path, "cache record")),
             Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(source) => return Err(io_error("inspect cache artifact", &path, source)),
+        }
+        let marker = eviction::identity_marker_path(&path);
+        match fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error("remove cache identity marker", &marker, source)),
         }
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
