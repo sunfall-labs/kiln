@@ -1,7 +1,7 @@
 //! Turning one [`Request`] into one [`Response`] against the query engine.
 //!
-//! Deliberately free of I/O on the socket and of any knowledge of threads: everything here runs
-//! while the engine lock is held, so it must be short, and it must be testable without a server.
+//! Deliberately free of I/O on the socket and of any knowledge of threads. Query preparation runs
+//! while the engine lock is held; owned interpreter/native work can then execute without it.
 
 use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
@@ -22,6 +22,32 @@ pub enum Next {
     CloseConnection,
     /// Answer, hang up, and stop the daemon.
     StopDaemon,
+}
+
+/// The owned input for an interpreted run. Preparation is performed while the query-engine
+/// mutex is held; execution consumes this value after the mutex has been released.
+pub(crate) enum PreparedRun {
+    Graph {
+        graph: Result<ModuleGraph, kiln_module_graph::ModuleGraphError>,
+        path: String,
+        file: kiln_db::FileId,
+        revision: u64,
+    },
+    Program {
+        program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
+        path: String,
+        file: kiln_db::FileId,
+        revision: u64,
+    },
+}
+
+impl PreparedRun {
+    #[cfg(test)]
+    fn path(&self) -> &str {
+        match self {
+            Self::Graph { path, .. } | Self::Program { path, .. } => path,
+        }
+    }
 }
 
 pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, Next) {
@@ -240,38 +266,180 @@ fn check<E: QueryEngine>(engine: &mut E, path: String) -> Response {
     })
 }
 
-fn run<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
-    let file = match ensure_source(engine, &path) {
-        Ok(file) => file,
-        Err(message) => return Response::Error { message },
-    };
-
-    // A daemon may still receive a relative, editor-only path (the historical single-file API
-    // allowed this). Use the graph whenever the entry exists on disk; retain the scalar fallback
-    // for an unsaved buffer so that existing `SetSource` + `Run` clients keep working.
+/// Prepare one interpreted run from a single engine snapshot.
+pub(crate) fn prepare_run<E: QueryEngine>(
+    engine: &mut E,
+    path: String,
+    project_root: String,
+) -> Result<PreparedRun, String> {
+    let file = ensure_source(engine, &path)?;
     let entry = std::fs::canonicalize(&path).or_else(|_| {
         let candidate = Path::new(&project_root).join(&path);
         std::fs::canonicalize(candidate)
     });
-    if let Ok(entry) = entry {
-        // Direct daemon clients historically used relative paths. Alias an existing overlay to
-        // the graph's canonical spelling so a relative `SetSource` remains authoritative.
+    let prepared = if let Ok(entry) = entry {
         alias_source(engine, file, &entry);
-        return run_graph(engine, path, project_root, file, entry);
-    }
-
-    run_single(engine, path, file)
+        PreparedRun::Graph {
+            graph: build_graph(engine, &entry, &project_root),
+            path,
+            file,
+            revision: engine.revision().0,
+        }
+    } else {
+        PreparedRun::Program {
+            program: engine.ir(file),
+            path,
+            file,
+            revision: engine.revision().0,
+        }
+    };
+    Ok(prepared)
 }
 
-fn run_graph<E: QueryEngine>(
-    engine: &mut E,
-    path: String,
-    project_root: String,
-    file: kiln_db::FileId,
-    entry: PathBuf,
-) -> Response {
-    let graph = build_graph(engine, &entry, &project_root);
+/// Execute an interpreted run after preparation has released the query-engine mutex.
+pub(crate) fn execute_prepared_run(prepared: PreparedRun) -> Response {
+    #[cfg(test)]
+    wait_for_run_gate(prepared.path());
 
+    match prepared {
+        PreparedRun::Graph {
+            graph,
+            path,
+            file,
+            revision,
+        } => execute_graph(graph, path, file, revision),
+        PreparedRun::Program {
+            program,
+            path,
+            file,
+            revision,
+        } => execute_program(program, path, file, revision),
+    }
+}
+
+#[cfg(test)]
+struct ExecutionGate {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+fn execution_gates() -> &'static std::sync::Mutex<BTreeMap<String, std::sync::Arc<ExecutionGate>>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<String, std::sync::Arc<ExecutionGate>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct ExecutionGateGuard {
+    key: String,
+    release: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(test)]
+pub(crate) fn install_run_gate(path: &str) -> (std::sync::mpsc::Receiver<()>, ExecutionGateGuard) {
+    install_execution_gate(format!("run:{path}"))
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_gate(root: &str) -> (std::sync::mpsc::Receiver<()>, ExecutionGateGuard) {
+    install_execution_gate(format!("test:{root}"))
+}
+
+#[cfg(test)]
+fn install_execution_gate(key: String) -> (std::sync::mpsc::Receiver<()>, ExecutionGateGuard) {
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let previous = execution_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            key.clone(),
+            std::sync::Arc::new(ExecutionGate {
+                entered,
+                release: std::sync::Mutex::new(release_rx),
+            }),
+        );
+    assert!(
+        previous.is_none(),
+        "execution gate `{key}` is already installed"
+    );
+    (
+        entered_rx,
+        ExecutionGateGuard {
+            key,
+            release: Some(release),
+        },
+    )
+}
+
+#[cfg(test)]
+impl ExecutionGateGuard {
+    pub(crate) fn release(mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        execution_gates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExecutionGateGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn wait_for_test_gate(root: &str) {
+    wait_for_execution_gate(&format!("test:{root}"));
+}
+
+#[cfg(test)]
+fn wait_for_run_gate(path: &str) {
+    wait_for_execution_gate(&format!("run:{path}"));
+}
+
+#[cfg(test)]
+fn wait_for_execution_gate(key: &str) {
+    let gate = execution_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .cloned();
+    if let Some(gate) = gate {
+        gate.entered
+            .send(())
+            .expect("execution gate receiver remains alive");
+        gate.release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv()
+            .expect("execution gate release remains alive");
+    }
+}
+
+fn run<E: QueryEngine>(engine: &mut E, path: String, project_root: String) -> Response {
+    match prepare_run(engine, path, project_root) {
+        Ok(prepared) => execute_prepared_run(prepared),
+        Err(message) => Response::Error { message },
+    }
+}
+
+fn execute_graph(
+    graph: Result<ModuleGraph, kiln_module_graph::ModuleGraphError>,
+    path: String,
+    file: kiln_db::FileId,
+    revision: u64,
+) -> Response {
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
         Ok(graph) => graph.execute(&mut host, Default::default()),
@@ -281,7 +449,7 @@ fn run_graph<E: QueryEngine>(
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
             Response::Ran(RunSummary {
-                revision: engine.revision().0,
+                revision,
                 path,
                 file: FileId(file.0),
                 succeeded: true,
@@ -293,7 +461,7 @@ fn run_graph<E: QueryEngine>(
             })
         }
         Err(error) => Response::Ran(RunSummary {
-            revision: engine.revision().0,
+            revision,
             path,
             file: FileId(file.0),
             succeeded: false,
@@ -368,12 +536,17 @@ pub(crate) fn native_graph<E: QueryEngine>(
         .map_err(|error| error.to_string())
 }
 
-fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileId) -> Response {
-    let program = match engine.ir(file) {
+fn execute_program(
+    program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
+    path: String,
+    file: kiln_db::FileId,
+    revision: u64,
+) -> Response {
+    let program = match program {
         Ok(program) => program,
         Err(diagnostics) => {
             return Response::Ran(RunSummary {
-                revision: engine.revision().0,
+                revision,
                 path,
                 file: FileId(file.0),
                 succeeded: false,
@@ -398,7 +571,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
             Response::Ran(RunSummary {
-                revision: engine.revision().0,
+                revision,
                 path,
                 file: FileId(file.0),
                 succeeded: true,
@@ -410,7 +583,7 @@ fn run_single<E: QueryEngine>(engine: &mut E, path: String, file: kiln_db::FileI
             })
         }
         Err(error) => Response::Ran(RunSummary {
-            revision: engine.revision().0,
+            revision,
             path,
             file: FileId(file.0),
             succeeded: false,

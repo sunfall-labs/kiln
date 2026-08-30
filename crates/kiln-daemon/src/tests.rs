@@ -4,11 +4,15 @@
 //! is written against is [`QueryEngine`], and a stub is the only way to provoke the failure modes
 //! that matter here - notably a query that panics, which a correct engine never does.
 
-use crate::dispatch::{Next, dispatch};
+use crate::dispatch::{
+    Next, dispatch, execute_prepared_run, install_run_gate, install_test_gate, prepare_run,
+};
 use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
-use kiln_proto::{NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash};
+use kiln_proto::{
+    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, TestMode, TestOutcome,
+};
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -279,6 +283,184 @@ fn request_and_response_round_trip_over_a_socket() {
     };
     assert_eq!(stats.parse_computed, 0, "reset clears counters");
     assert_eq!(stats.revision, 1, "but not the revision");
+}
+
+#[test]
+fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
+    let fixture = Fixture::started();
+    let source_path = fixture.dir.join("concurrent.js");
+    std::fs::write(&source_path, "console.log('disk');\n").expect("write graph entry");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical graph entry");
+    let path = source_path.to_string_lossy().into_owned();
+    let project_root = fixture.dir.to_string_lossy().into_owned();
+    let mut setup = fixture.client();
+    setup.handshake().expect("handshake");
+    setup
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "console.log('old');\n".into(),
+        })
+        .expect("set initial source");
+    let Response::Checked(initial) = setup
+        .request(&Request::Check { path: path.clone() })
+        .expect("check initial source")
+    else {
+        panic!("expected initial checked response");
+    };
+
+    let (entered_rx, gate) = install_run_gate(&path);
+    let socket = fixture.socket.clone();
+    let run_path = path.clone();
+    let run_root = project_root.clone();
+    let blocked = std::thread::spawn(move || {
+        let mut client = Client::connect(&socket).expect("connect run client");
+        client.handshake().expect("run handshake");
+        client
+            .request(&Request::Run {
+                path: run_path,
+                project_root: run_root,
+            })
+            .expect("blocked run")
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("run reached execution gate");
+
+    // This second client proves the execution gate is beyond the engine mutex: all three
+    // requests complete while the first run remains blocked.
+    let mut editor = fixture.client();
+    editor.handshake().expect("editor handshake");
+    let edit = editor
+        .request(&Request::SetSource {
+            path: path.clone(),
+            text: "console.log('new');\n".into(),
+        })
+        .expect("edit source while run is blocked");
+    assert!(matches!(edit, Response::Ok), "got {edit:?}");
+    let Response::Stats(stats) = editor.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats");
+    };
+    assert_eq!(stats.revision, 2);
+    let Response::Checked(summary) = editor
+        .request(&Request::Check { path: path.clone() })
+        .expect("check")
+    else {
+        panic!("expected checked response");
+    };
+    assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
+    assert_ne!(summary.implementation_hash, initial.implementation_hash);
+
+    gate.release();
+    let response =
+        within(Duration::from_secs(5), move || blocked.join()).expect("blocked run must finish");
+    let Response::Ran(first) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert_eq!(first.stdout, "old\n");
+    assert_eq!(first.revision, 1, "run reports its prepared snapshot");
+
+    // A later run should prepare against the edited revision and see the new source, while the
+    // already-prepared run above stays on the old bytecode.
+    let Response::Ran(second) = editor
+        .request(&Request::Run { path, project_root })
+        .expect("later run")
+    else {
+        panic!("expected later run response");
+    };
+    assert_eq!(second.stdout, "new\n");
+    assert_eq!(second.revision, 2);
+}
+
+#[test]
+fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
+    let fixture = Fixture::empty();
+    let path = "unsaved-buffer.js".to_owned();
+    let mut engine = StubEngine::default();
+    let file = engine.intern(&path);
+    engine.set_source(file, "console.log('old');\n".into());
+    let prepared = prepare_run(
+        &mut engine,
+        path,
+        fixture.dir.to_string_lossy().into_owned(),
+    )
+    .expect("prepare unsaved buffer");
+
+    engine.set_source(file, "console.log('new');\n".into());
+    let Response::Ran(summary) = execute_prepared_run(prepared) else {
+        panic!("expected run summary");
+    };
+    assert_eq!(summary.stdout, "old\n");
+    assert_eq!(summary.revision, 1);
+    assert_eq!(engine.revision().0, 2);
+}
+
+#[test]
+fn conformance_execution_does_not_block_query_clients() {
+    let fixture = Fixture::started();
+    let corpus = fixture.dir.join("concurrent-corpus");
+    std::fs::create_dir_all(&corpus).expect("create corpus");
+    std::fs::write(corpus.join("one.js"), "console.log('ok');\n").expect("write test program");
+    std::fs::write(
+        corpus.join("manifest.toml"),
+        r#"[[test]]
+id = "fixture/one"
+source = "one.js"
+expected_stdout = "ok\n"
+"#,
+    )
+    .expect("write manifest");
+    let root = corpus.to_string_lossy().into_owned();
+    let (entered_rx, gate) = install_test_gate(&root);
+
+    let socket = fixture.socket.clone();
+    let test_root = root.clone();
+    let blocked = std::thread::spawn(move || {
+        let mut client = Client::connect(&socket).expect("connect test client");
+        client.handshake().expect("test handshake");
+        client
+            .request(&Request::Test {
+                root: test_root,
+                mode: TestMode::Parse,
+                changed_paths: None,
+                previously_failed: Vec::new(),
+            })
+            .expect("blocked test request")
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("test reached execution gate");
+
+    let mut editor = fixture.client();
+    editor.handshake().expect("editor handshake");
+    let edit = editor
+        .request(&Request::SetSource {
+            path: "while-testing.js".into(),
+            text: "export const answer = 42;\n".into(),
+        })
+        .expect("set source while tests are blocked");
+    assert!(matches!(edit, Response::Ok), "got {edit:?}");
+    let Response::Stats(stats) = editor.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.revision, 1);
+
+    gate.release();
+    let response =
+        within(Duration::from_secs(5), move || blocked.join()).expect("test request must finish");
+    let Response::Tested(summary) = response else {
+        panic!("expected tested response, got {response:?}");
+    };
+    assert_eq!(summary.discovered, 1);
+    assert_eq!(summary.selected, 1);
+    assert_eq!(summary.passed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.unsupported, 0);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.cases.len(), 1);
+    assert_eq!(summary.cases[0].id, "fixture/one");
+    assert_eq!(summary.cases[0].variant, "sloppy");
+    assert_eq!(summary.cases[0].outcome, TestOutcome::Pass);
+    assert!(summary.reasons.is_empty());
 }
 
 #[test]

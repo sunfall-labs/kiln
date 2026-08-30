@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, native_build_graph, native_build_output, native_build_program,
-    native_build_shared_graph, native_build_shared_program, native_graph, native_program,
-    native_run_graph, native_run_program,
+    Next, dispatch, execute_prepared_run, native_build_graph, native_build_output,
+    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
+    native_program, native_run_graph, native_run_program, prepare_run,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 
@@ -375,10 +375,11 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
 
 /// Run one request, holding the engine lock only while a query actually needs it.
 ///
-/// The engine's methods take `&mut self`, so query preparation is serialized. Native compilation,
-/// linking, and process execution operate on an owned bytecode program after releasing the lock;
-/// an expensive platform toolchain must not block unrelated parse or check requests. Socket I/O is
-/// likewise outside the lock, so a client that stops reading cannot hold the engine hostage.
+/// The engine's methods take `&mut self`, so query preparation is serialized. Interpreter runs,
+/// conformance batches, native compilation, linking, and process execution operate on owned input
+/// after releasing the lock; expensive work must not block unrelated parse or check requests.
+/// Socket I/O is likewise outside the lock, so a client that stops reading cannot hold the engine
+/// hostage.
 ///
 /// The guard is held *outside* `catch_unwind` and only reborrowed into it, which is what keeps
 /// the mutex unpoisoned: nothing is dropped while the panic unwinds, and by the time the guard
@@ -388,6 +389,20 @@ fn respond(writer: &mut UnixStream, response: &Response) -> io::Result<()> {
 /// recomputable, so the next query rebuilds them.
 fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Next) {
     match request {
+        Request::Run { path, project_root } => handle_run(engine, path, project_root),
+        Request::Test {
+            root,
+            mode,
+            changed_paths,
+            previously_failed,
+        } => run_without_engine_lock(|| {
+            #[cfg(test)]
+            crate::dispatch::wait_for_test_gate(&root);
+            match crate::testing::run(&root, mode, changed_paths, previously_failed) {
+                Ok(summary) => Response::Tested(summary),
+                Err(message) => Response::Error { message },
+            }
+        }),
         Request::NativeBuildAtRevision {
             path,
             project_root,
@@ -478,6 +493,24 @@ fn handle<E: QueryEngine>(engine: &Mutex<E>, request: Request) -> (Response, Nex
         }
         request => handle_engine_request(engine, request),
     }
+}
+
+fn handle_run<E: QueryEngine>(
+    engine: &Mutex<E>,
+    path: String,
+    project_root: String,
+) -> (Response, Next) {
+    let prepared = {
+        let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            prepare_run(&mut *guard, path, project_root)
+        })) {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
+            Err(payload) => return (internal_error(&*payload), Next::Continue),
+        }
+    };
+    run_without_engine_lock(|| execute_prepared_run(prepared))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and
