@@ -11159,6 +11159,9 @@ fn own_property_exists(target: &Value, key: &Value) -> bool {
                 .is_some_and(|index| (index as usize) < text.encode_utf16().count()),
             _ => false,
         },
+        Value::Native(Native::PrototypeOf(table)) => {
+            intrinsic_prototype_property(*table, &key).is_some()
+        }
         _ => false,
     }
 }
@@ -12966,6 +12969,120 @@ fn function_property(name: &str) -> Value {
     }
 }
 
+/// The string-keyed methods physically represented by each intrinsic prototype marker.
+///
+/// Property reads already expose these virtual tables through [`Native::property`]. Reflection
+/// has to describe the same surface: libraries such as Immer deliberately walk a target's
+/// prototype descriptors instead of invoking a possibly-overridden property directly. Keeping
+/// the names in one table makes `getOwnPropertyDescriptor`, `getOwnPropertyNames`, and
+/// `Reflect.ownKeys` agree about which virtual slots are own properties.
+fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static str] {
+    match table {
+        PrototypeTable::Object => &[
+            "hasOwnProperty",
+            "isPrototypeOf",
+            "propertyIsEnumerable",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+        ],
+        PrototypeTable::Array => &[
+            "map",
+            "forEach",
+            "filter",
+            "reduce",
+            "sort",
+            "findIndex",
+            "find",
+            "some",
+            "every",
+            "flatMap",
+            "findLast",
+            "findLastIndex",
+            "reduceRight",
+            "join",
+            "push",
+            "pop",
+            "indexOf",
+            "includes",
+            "slice",
+            "at",
+            "flat",
+            "entries",
+            "keys",
+            "concat",
+            "reverse",
+            "shift",
+            "unshift",
+            "lastIndexOf",
+            "fill",
+            "splice",
+            "copyWithin",
+            "toString",
+            "values",
+        ],
+        PrototypeTable::String => &[
+            "values",
+            "toUpperCase",
+            "toLowerCase",
+            "includes",
+            "indexOf",
+            "slice",
+            "substring",
+            "substr",
+            "split",
+            "trim",
+            "startsWith",
+            "endsWith",
+            "repeat",
+            "at",
+            "codePointAt",
+            "localeCompare",
+            "toLocaleUpperCase",
+            "toLocaleLowerCase",
+            "normalize",
+            "charAt",
+            "charCodeAt",
+            "padStart",
+            "padEnd",
+            "replace",
+            "replaceAll",
+            "lastIndexOf",
+            "trimStart",
+            "trimEnd",
+            "concat",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+            "match",
+            "matchAll",
+            "search",
+        ],
+        PrototypeTable::Number => &["toString", "toFixed", "valueOf"],
+        PrototypeTable::Function => &["toString", "call", "apply", "bind"],
+        PrototypeTable::RegExp => &["test", "exec", "toString"],
+        PrototypeTable::Date => &["getTime", "valueOf", "toISOString", "toJSON", "toString"],
+    }
+}
+
+fn intrinsic_prototype_property(table: PrototypeTable, key: &PropertyKey) -> Option<Value> {
+    let name = string_key(key)?;
+    if name != "constructor" && !intrinsic_prototype_method_names(table).contains(&name) {
+        return None;
+    }
+    Native::PrototypeOf(table).property(name)
+}
+
+fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(PropertyKey, Property)> {
+    std::iter::once("constructor")
+        .chain(intrinsic_prototype_method_names(table).iter().copied())
+        .filter_map(|name| {
+            let key = PropertyKey::String(name.to_owned());
+            intrinsic_prototype_property(table, &key).map(|value| (key, Property::Value(value)))
+        })
+        .collect()
+}
+
 /// The own, program-visible keys of a value, in insertion order.
 fn own_property_keys(target: &Value) -> Vec<PropertyKey> {
     let from_object = |data: &ObjectData| -> Vec<PropertyKey> {
@@ -12989,6 +13106,10 @@ fn own_property_keys(target: &Value) -> Vec<PropertyKey> {
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
+        Value::Native(Native::PrototypeOf(table)) => intrinsic_prototype_entries(*table)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -13034,6 +13155,7 @@ fn own_property_entries(value: &Value) -> Vec<(PropertyKey, Property)> {
                 )
             })
             .collect(),
+        Value::Native(Native::PrototypeOf(table)) => intrinsic_prototype_entries(*table),
         _ => Vec::new(),
     }
 }
@@ -13070,6 +13192,9 @@ fn own_descriptor(target: &Value, key: &PropertyKey) -> Option<Value> {
                 .get_own_property(key.clone())
                 .cloned(),
         },
+        Value::Native(Native::PrototypeOf(table)) => {
+            intrinsic_prototype_property(*table, key).map(Property::Value)
+        }
         _ => None,
     };
     let mut data = ObjectData::default();
@@ -15050,6 +15175,39 @@ mod tests {
             Value::Object(object)
                 if object.borrow().get("configurable") == Some(Value::Boolean(false))
         ));
+    }
+
+    #[test]
+    fn intrinsic_prototype_reflection_describes_virtual_methods() {
+        let prototype = Value::Native(Native::PrototypeOf(PrototypeTable::Array));
+        let push = PropertyKey::String("push".into());
+
+        assert!(own_property_exists(&prototype, &key_value(&push)));
+        assert!(own_property_keys(&prototype).contains(&push));
+        assert!(
+            own_property_entries(&prototype)
+                .iter()
+                .any(|(key, property)| {
+                    key == &push
+                        && matches!(property, Property::Value(Value::Native(Native::ArrayPush)))
+                })
+        );
+
+        let descriptor = own_descriptor(&prototype, &push).expect("Array.prototype.push");
+        let Value::Object(descriptor) = descriptor else {
+            panic!("descriptor is an object");
+        };
+        let descriptor = descriptor.borrow();
+        assert_eq!(
+            descriptor.get("value"),
+            Some(Value::Native(Native::ArrayPush))
+        );
+        assert_eq!(descriptor.get("writable"), Some(Value::Boolean(true)));
+        assert_eq!(descriptor.get("enumerable"), Some(Value::Boolean(false)));
+        assert_eq!(descriptor.get("configurable"), Some(Value::Boolean(true)));
+        assert!(
+            own_descriptor(&prototype, &PropertyKey::String("notARealMethod".into())).is_none()
+        );
     }
 
     #[test]
