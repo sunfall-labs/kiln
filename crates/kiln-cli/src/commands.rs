@@ -891,6 +891,12 @@ mod tests {
                             .with_extension("h")
                             .to_string_lossy()
                             .into_owned(),
+                        loader_path: Path::new(&output_path)
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(".kiln-loaders/kiln-test-loader.so")
+                            .to_string_lossy()
+                            .into_owned(),
                         output_path,
                         compiler_identity: "test-cc".to_owned(),
                         generated_c_cache_hit: false,
@@ -1116,6 +1122,7 @@ mod tests {
             output.text
         );
         assert!(output.text.contains("shared library"), "{}", output.text);
+        assert!(output.text.contains("loader"), "{}", output.text);
         assert!(output.text.contains("header"), "{}", output.text);
         assert_eq!(backend.names(), ["Sync", "SetSource", "NativeSharedBuild"]);
         let Request::NativeSharedBuild { output, .. } = backend.seen.last().expect("request")

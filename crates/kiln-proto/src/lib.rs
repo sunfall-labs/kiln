@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -242,6 +242,8 @@ pub struct NativeBuildSummary {
 pub struct NativeSharedLibrarySummary {
     pub module_symbol: String,
     pub output_path: String,
+    /// Canonical library to package; add its parent directory to the host's loader search path.
+    pub loader_path: String,
     pub header_path: String,
     pub compiler_identity: String,
     pub generated_c_cache_hit: bool,
@@ -441,7 +443,7 @@ mod tests {
             let encoded = serde_json::json!({"path": "main.js", "hash": hash});
             assert!(
                 serde_json::from_value::<SourceHash>(encoded).is_err(),
-                "invalid source digest must not cross protocol v13"
+                "invalid source digest must not cross the wire"
             );
         }
     }
