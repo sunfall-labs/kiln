@@ -182,6 +182,7 @@ fn load_manifest(
     manifest_path: &Path,
     identity: &ToolIdentity,
 ) -> Result<NumberProvider, NumberProviderError> {
+    require_regular_package_file(manifest_path, manifest_path, "manifest")?;
     let bytes = read(manifest_path, "read number-provider manifest")?;
     let manifest: ArchiveManifest =
         serde_json::from_slice(&bytes).map_err(|source| NumberProviderError::InvalidManifest {
@@ -203,6 +204,7 @@ fn load_manifest(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(archive_name);
+    require_regular_package_file(&archive_path, manifest_path, "archive")?;
     let archive = read(&archive_path, "read number-provider archive")?;
     let actual_digest = Digest::hash(&archive);
     let expected_digest = Digest::from_hex(&manifest.archive_sha256).map_err(|source| {
@@ -226,6 +228,26 @@ fn load_manifest(
         identity: manifest_identity(&manifest),
         rust_target: manifest.rust_target,
     })
+}
+
+fn require_regular_package_file(
+    path: &Path,
+    manifest_path: &Path,
+    label: &str,
+) -> Result<(), NumberProviderError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| NumberProviderError::Read {
+        operation: "inspect number-provider package file",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(NumberProviderError::InvalidManifest {
+            path: manifest_path.to_path_buf(),
+            message: format!("number-provider {label} must be a regular package file"),
+        })
+    }
 }
 
 fn validate_manifest(
@@ -767,6 +789,22 @@ mod tests {
         let error = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"))
             .expect_err("digest mismatch is rejected");
         assert!(error.to_string().contains("digest mismatch"));
+
+        #[cfg(unix)]
+        {
+            let outside = TestDirectory::new();
+            let outside_archive = outside.0.join("outside.a");
+            fs::write(&outside_archive, archive).expect("write outside archive fixture");
+            fs::remove_file(root.0.join("provider.a")).expect("remove corrupt archive fixture");
+            std::os::unix::fs::symlink(outside_archive, root.0.join("provider.a"))
+                .expect("create escaping archive symlink");
+            let error = load_manifest(&manifest_path, &identity("arm64-apple-darwin25.6.0"))
+                .expect_err("archive symlink is rejected even when its bytes match");
+            assert!(
+                error.to_string().contains("regular package file"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

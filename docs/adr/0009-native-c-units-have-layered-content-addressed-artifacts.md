@@ -123,11 +123,20 @@ the namespace is not part of either embedded identity because a slash-bearing EL
 RPATH search. The builder publishes that canonical file first, the header second, and a byte-for-byte
 copy at the exact requested output path last. It reports all three paths. The loader namespace is
 reserved against explicit outputs, and an existing content name is never overwritten with different
-bytes. Embedders must package the canonical loader file and add its directory to RPATH; the requested
-path remains a stable human alias and publication-ready signal. Distinct content therefore cannot
-collapse merely because two requested paths share a basename, while identical linked content can
-safely share one loader identity. Old canonical generations remain until an explicit future
-cache/package cleanup policy; an in-use loader is never eagerly deleted during rebuild.
+bytes. The loader namespace and each loader leaf must be real directories/files rather than
+symlinks or other filesystem objects. A missing leaf is installed by atomically hard-linking a
+fully written temporary inode, which cannot replace a concurrent winner; an existing winner is
+accepted only after a byte-for-byte check. Embedders must package the canonical loader file and add
+its directory to RPATH; the requested path remains a stable human alias and publication-ready
+signal. Distinct content therefore cannot collapse merely because two requested paths share a
+basename, while identical linked content can safely share one loader identity. Old canonical
+generations remain until an explicit future cache/package cleanup policy; an in-use loader is never
+eagerly deleted during rebuild.
+
+Manifest-selected native runtime inputs use the same package confinement rule at their distribution
+boundary: the manifest and its single-component sibling archive must be regular files. Digest-valid
+bytes behind a symlink are rejected rather than silently making an installation depend on a path
+outside the package.
 
 An acyclic module graph is embedded behind one topology-derived wrapper symbol with the same
 two-argument entry ABI as a scalar shared library. The graph's generated module entries keep their
