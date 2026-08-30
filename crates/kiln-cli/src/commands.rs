@@ -407,8 +407,10 @@ pub fn native_run(
         }
     };
     let mut notes = project_notes;
-    if !summary.stderr.is_empty() {
-        notes.push(summary.stderr.clone());
+    if !summary.stderr.trim_end().is_empty() {
+        // Trimmed because the note is rendered as a line: a program's own trailing newline would
+        // otherwise print as a blank one.
+        notes.push(summary.stderr.trim_end().to_owned());
     }
     Ok(Output {
         text: summary.stdout,

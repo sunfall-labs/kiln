@@ -251,6 +251,8 @@ enum kiln_value_tag {
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
+#define KILN_C99_BUILTIN_BOOLEAN 16
+#define KILN_C99_BUILTIN_REFLECT 17
 
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
@@ -411,6 +413,40 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_ASYNC_RESUME 114
 #define KILN_C99_METHOD_ASYNC_THROW 115
 #define KILN_C99_METHOD_ALL_STEP 116
+
+/* The global functions. They are namespace methods with no namespace: nothing is reached through
+ * before them, so `LoadBuiltin` pushes the method value directly. Two of them share a name with a
+ * `Number` method and not its behaviour -- `isNaN('x')` coerces where `Number.isNaN('x')` does
+ * not -- so they are separate codes rather than the same one reached two ways. */
+#define KILN_C99_METHOD_PARSE_INT 117
+#define KILN_C99_METHOD_PARSE_FLOAT 118
+#define KILN_C99_METHOD_GLOBAL_IS_NAN 119
+#define KILN_C99_METHOD_GLOBAL_IS_FINITE 120
+
+/* Number methods. Read off the value rather than through a `Number.prototype` object, which is
+ * what the interpreter does and for the same reason: there is no such object yet. */
+#define KILN_C99_METHOD_NUMBER_TO_STRING 121
+#define KILN_C99_METHOD_NUMBER_TO_FIXED 122
+#define KILN_C99_METHOD_NUMBER_VALUE_OF 123
+
+/* The text-escaping globals. `escape`/`unescape` are Annex B and work in code units; the four URI
+ * functions work in UTF-8 bytes and differ only in which characters they leave alone. */
+#define KILN_C99_METHOD_ESCAPE 124
+#define KILN_C99_METHOD_UNESCAPE 125
+#define KILN_C99_METHOD_ENCODE_URI 126
+#define KILN_C99_METHOD_ENCODE_URI_COMPONENT 127
+#define KILN_C99_METHOD_DECODE_URI 128
+#define KILN_C99_METHOD_DECODE_URI_COMPONENT 129
+
+/* `queueMicrotask(fn)`: the queue promises already drain, reached directly. */
+#define KILN_C99_METHOD_QUEUE_MICROTASK 130
+
+/* The timer functions. `clearTimeout` and `clearInterval` do the same thing and are two codes
+ * because they are two names: a program can print either one. */
+#define KILN_C99_METHOD_SET_TIMEOUT 131
+#define KILN_C99_METHOD_SET_INTERVAL 132
+#define KILN_C99_METHOD_CLEAR_TIMEOUT 133
+#define KILN_C99_METHOD_CLEAR_INTERVAL 134
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -633,6 +669,36 @@ typedef struct kiln_microtask {
     int rejected;
 } kiln_microtask;
 
+/* One scheduled callback.
+ *
+ * `sequence` breaks ties between timers due at the same instant, so two `setTimeout(f, 0)` calls
+ * run in the order they were made rather than in whatever order the array happens to hold them --
+ * which is a difference a program can see and therefore one the two engines have to share. */
+typedef struct kiln_timer {
+    double id;
+    double due;
+    uint64_t sequence;
+    kiln_value callback;
+    kiln_value *args;
+    size_t argc;
+    /* An interval re-arms itself with this delay; a timeout does not re-arm. */
+    double repeat;
+    int repeats;
+} kiln_timer;
+/* The timers, and the clock they are due against.
+ *
+ * The clock is *virtual*: it advances to whatever the next timer is due at rather than waiting
+ * for it. `setTimeout(f, 1000)` therefore costs nothing, and a program's observable ordering is
+ * the same as it would be on a real clock -- which is the only part of a timer a compiler test
+ * can check anyway. The interpreter does exactly this, and the two agreeing about ordering is
+ * what `conformance/native/timers.ts` is for. */
+static kiln_timer *kiln_c99_timers;
+static size_t kiln_c99_timer_count;
+static size_t kiln_c99_timer_capacity;
+static double kiln_c99_now;
+static double kiln_c99_next_timer_id = 1.0;
+static uint64_t kiln_c99_next_sequence;
+
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
     const char *bytes;
@@ -700,6 +766,14 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
+static const char *kiln_c99_builtin_name(uint64_t builtin);
+static int kiln_c99_is_namespace(uint64_t builtin);
+static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix);
+static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
+static int kiln_c99_hex_digit(char character);
+static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
+static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
 static double kiln_c99_date_time(kiln_value value);
@@ -723,6 +797,9 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
                          kiln_value *out);
 static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown);
+static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown);
+static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
+                            int rejected);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
@@ -1114,6 +1191,24 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_MATH_ASIN: return "asin";
     case KILN_C99_METHOD_MATH_ACOS: return "acos";
     case KILN_C99_METHOD_MATH_ATAN: return "atan";
+    case KILN_C99_METHOD_QUEUE_MICROTASK: return "queueMicrotask";
+    case KILN_C99_METHOD_SET_TIMEOUT: return "setTimeout";
+    case KILN_C99_METHOD_SET_INTERVAL: return "setInterval";
+    case KILN_C99_METHOD_CLEAR_TIMEOUT: return "clearTimeout";
+    case KILN_C99_METHOD_CLEAR_INTERVAL: return "clearInterval";
+    case KILN_C99_METHOD_ESCAPE: return "escape";
+    case KILN_C99_METHOD_UNESCAPE: return "unescape";
+    case KILN_C99_METHOD_ENCODE_URI: return "encodeURI";
+    case KILN_C99_METHOD_ENCODE_URI_COMPONENT: return "encodeURIComponent";
+    case KILN_C99_METHOD_DECODE_URI: return "decodeURI";
+    case KILN_C99_METHOD_DECODE_URI_COMPONENT: return "decodeURIComponent";
+    case KILN_C99_METHOD_NUMBER_TO_STRING: return "toString";
+    case KILN_C99_METHOD_NUMBER_TO_FIXED: return "toFixed";
+    case KILN_C99_METHOD_NUMBER_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_PARSE_INT: return "parseInt";
+    case KILN_C99_METHOD_PARSE_FLOAT: return "parseFloat";
+    case KILN_C99_METHOD_GLOBAL_IS_NAN: return "isNaN";
+    case KILN_C99_METHOD_GLOBAL_IS_FINITE: return "isFinite";
     case KILN_C99_METHOD_IS_INTEGER: return "isInteger";
     case KILN_C99_METHOD_IS_SAFE_INTEGER: return "isSafeInteger";
     case KILN_C99_METHOD_IS_NAN: return "isNaN";
@@ -1183,6 +1278,319 @@ static const char *kiln_c99_method_name(uint64_t code) {
     }
 }
 
+/* One hex digit's value, or -1. Used by every unescaping path, none of which may accept the
+ * `0x` prefixes or the locale-dependent classifications that `strtol` would. */
+static int kiln_c99_hex_digit(char character) {
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
+
+static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    char digits[4];
+    int place;
+    for (place = width - 1; place >= 0; --place) {
+        digits[place] = alphabet[value & 0xFu];
+        value >>= 4;
+    }
+    return kiln_c99_text_append(text, digits, (size_t)width);
+}
+
+/* Whether a byte span is well-formed UTF-8.
+ *
+ * `decodeURI` is the only place this is asked: percent-escapes name bytes, and a program can name
+ * bytes that are not a string. Rust's `String::from_utf8` is what rejects them on the interpreter
+ * side, and this is that check -- overlong forms, surrogates and out-of-range scalars included,
+ * because accepting any of them would let the two engines hold different strings. */
+static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
+    size_t at = 0;
+    while (at < len) {
+        unsigned char lead = (unsigned char)bytes[at];
+        uint32_t codepoint;
+        size_t extra;
+        size_t index;
+        if (lead < 0x80u) {
+            at += 1;
+            continue;
+        }
+        if (lead >= 0xC2u && lead <= 0xDFu) {
+            extra = 1;
+            codepoint = lead & 0x1Fu;
+        } else if (lead >= 0xE0u && lead <= 0xEFu) {
+            extra = 2;
+            codepoint = lead & 0x0Fu;
+        } else if (lead >= 0xF0u && lead <= 0xF4u) {
+            extra = 3;
+            codepoint = lead & 0x07u;
+        } else {
+            /* A continuation byte on its own, or an overlong two-byte lead. */
+            return 0;
+        }
+        if (at + extra >= len) {
+            /* The sequence runs off the end. */
+            return 0;
+        }
+        for (index = 1; index <= extra; ++index) {
+            unsigned char next = (unsigned char)bytes[at + index];
+            if ((next & 0xC0u) != 0x80u) {
+                return 0;
+            }
+            codepoint = (codepoint << 6) | (next & 0x3Fu);
+        }
+        if (codepoint > UINT32_C(0x10FFFF) ||
+            (codepoint >= UINT32_C(0xD800) && codepoint <= UINT32_C(0xDFFF)) ||
+            (extra == 2 && codepoint < UINT32_C(0x800)) ||
+            (extra == 3 && codepoint < UINT32_C(0x10000))) {
+            return 0;
+        }
+        at += extra + 1;
+    }
+    return 1;
+}
+
+/* `Number.prototype.toFixed`, rounded on the value's *exact* decimal expansion.
+ *
+ * Not the printf `%.*f` conversion: it reads the process locale's decimal point, and an embedded
+ * module runs in whatever locale its host set. The same objection is why a number's shortest
+ * spelling comes from the number provider (ADR 0018); this is that rule applied to the other
+ * direction.
+ *
+ * Not `floor(value * 10^f + 0.5)` either, which is the obvious arithmetic and is wrong:
+ * `(1.45).toFixed(1)` is `"1.4"` because 1.45 is really 1.44999..., and multiplying by ten rounds
+ * that up to exactly 14.5 before any rounding decision is made. The digits that decide have to be
+ * the value's own.
+ *
+ * So the expansion is computed exactly. A binary64 is `m * 2^e` with `m` under 2^53, and for
+ * negative `e` that is `m * 5^(-e)` with the point `-e` digits from the right -- an exact integer
+ * a decimal digit array can hold, and repeated multiplication by five is the whole of the
+ * arithmetic. 5^1074 is 751 digits, `m` adds sixteen, and values at or above 1e21 are handed back
+ * to `ToString` by the specification, so the array is bounded and so is the loop. */
+static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
+    /* Little-endian decimal digits: `digits[0]` is the least significant. */
+    unsigned char digits[1200];
+    size_t count = 0;
+    size_t fractional;
+    size_t index;
+    kiln_text text = {NULL, 0, 0};
+    double mantissa;
+    uint64_t scaled;
+    int exponent;
+    int negative = value < 0.0;
+    int round_up;
+    if (!isfinite(value) || fabs(value) >= 1e21) {
+        *out = kiln_c99_text(kiln_c99_number(value));
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    mantissa = frexp(fabs(value), &exponent);
+    scaled = (uint64_t)ldexp(mantissa, 53);
+    exponent -= 53;
+    while (scaled != 0 && count < sizeof digits) {
+        digits[count++] = (unsigned char)(scaled % 10u);
+        scaled /= 10u;
+    }
+    if (count == 0) {
+        digits[count++] = 0;
+    }
+    if (exponent >= 0) {
+        int step;
+        for (step = 0; step < exponent; ++step) {
+            unsigned carry = 0;
+            for (index = 0; index < count; ++index) {
+                unsigned product = (unsigned)digits[index] * 2u + carry;
+                digits[index] = (unsigned char)(product % 10u);
+                carry = product / 10u;
+            }
+            while (carry != 0 && count < sizeof digits) {
+                digits[count++] = (unsigned char)(carry % 10u);
+                carry /= 10u;
+            }
+        }
+        fractional = 0;
+    } else {
+        int step;
+        for (step = 0; step < -exponent; ++step) {
+            unsigned carry = 0;
+            for (index = 0; index < count; ++index) {
+                unsigned product = (unsigned)digits[index] * 5u + carry;
+                digits[index] = (unsigned char)(product % 10u);
+                carry = product / 10u;
+            }
+            while (carry != 0 && count < sizeof digits) {
+                digits[count++] = (unsigned char)(carry % 10u);
+                carry /= 10u;
+            }
+        }
+        fractional = (size_t)(-exponent);
+    }
+    /* Pad so there is a digit at every place the answer names, above the point and below it. */
+    while (count < fractional + 1 && count < sizeof digits) {
+        digits[count++] = 0;
+    }
+    if (fractional <= (size_t)places) {
+        round_up = 0;
+    } else {
+        /* Round half *up*: "if there are two such n, pick the larger n". Only the deciding digit
+         * is consulted, because at or above five the answer is up whatever follows. */
+        round_up = digits[fractional - (size_t)places - 1] >= 5;
+        for (index = 0; index < fractional - (size_t)places; ++index) {
+            digits[index] = 0;
+        }
+        memmove(digits, digits + (fractional - (size_t)places),
+                count - (fractional - (size_t)places));
+        count -= fractional - (size_t)places;
+        fractional = (size_t)places;
+    }
+    while (fractional < (size_t)places && count < sizeof digits) {
+        /* The value terminated above the requested precision, so the rest is zeros. */
+        memmove(digits + 1, digits, count);
+        digits[0] = 0;
+        count += 1;
+        fractional += 1;
+    }
+    if (round_up) {
+        for (index = 0; index < count; ++index) {
+            if (digits[index] == 9) {
+                digits[index] = 0;
+                continue;
+            }
+            digits[index] += 1;
+            break;
+        }
+        if (index == count && count < sizeof digits) {
+            digits[count++] = 1;
+        }
+    }
+    while (count > fractional + 1 && digits[count - 1] == 0) {
+        /* A leading zero above the point is not part of the spelling, but the one before the
+         * point is: `.5` is `0.5`. */
+        count -= 1;
+    }
+    /* The sign survives rounding: `(-0.0004).toFixed(2)` is `"-0.00"`, which says the value was
+     * negative rather than that it was nonzero. Negative zero is not negative here, so
+     * `(-0).toFixed(2)` is `"0.00"`. */
+    if (negative && kiln_c99_text_append_c(&text, "-") != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = count; index > 0; --index) {
+        char character = (char)('0' + digits[index - 1]);
+        if (index == fractional && kiln_c99_text_append_c(&text, ".") != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (kiln_c99_text_append(&text, &character, 1) != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
+/* A number written in a base other than ten, which `Number.prototype.toString` is the only way
+ * to ask for. Digits are produced by repeated division rather than by the number formatter,
+ * because the formatter only knows base ten -- and the fraction is bounded at 52 digits, which is
+ * every bit a double has to say. */
+static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
+    kiln_text text = {NULL, 0, 0};
+    static const char alphabet[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    char digits[1120];
+    size_t count = 0;
+    double whole;
+    double fraction;
+    int negative;
+    if (!isfinite(value)) {
+        *out = kiln_c99_text(kiln_c99_number(value));
+        return KILN_C99_OK;
+    }
+    negative = value < 0.0;
+    value = fabs(value);
+    whole = trunc(value);
+    fraction = value - whole;
+    while (whole >= 1.0 && count < sizeof digits) {
+        digits[count++] = alphabet[(int)fmod(whole, (double)radix)];
+        whole = trunc(whole / (double)radix);
+    }
+    if (negative && kiln_c99_text_append_c(&text, "-") != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (count == 0 && kiln_c99_text_append_c(&text, "0") != KILN_C99_OK) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    while (count > 0) {
+        count -= 1;
+        if (kiln_c99_text_append(&text, digits + count, 1) != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    if (fraction > 0.0) {
+        int place;
+        if (kiln_c99_text_append_c(&text, ".") != KILN_C99_OK) {
+            free(text.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (place = 0; place < 52 && fraction > 0.0; ++place) {
+            double digit;
+            char character;
+            fraction *= (double)radix;
+            digit = trunc(fraction);
+            character = alphabet[(int)digit];
+            fraction -= digit;
+            if (kiln_c99_text_append(&text, &character, 1) != KILN_C99_OK) {
+                free(text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
+/* The JavaScript name of a runtime-supplied value, which is what a console shows and what
+ * `String(x)` produces. The interpreter derives its equivalent from the variant's spelling; here
+ * the tags carry no spelling to derive from, so this is the derivation -- and
+ * `conformance/differential/builtin-names.js` is what checks the two agree with node. */
+static const char *kiln_c99_builtin_name(uint64_t builtin) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_STRING: return "String";
+    case KILN_C99_BUILTIN_MATH: return "Math";
+    case KILN_C99_BUILTIN_NUMBER: return "Number";
+    case KILN_C99_BUILTIN_OBJECT: return "Object";
+    case KILN_C99_BUILTIN_ARRAY: return "Array";
+    case KILN_C99_BUILTIN_JSON: return "JSON";
+    case KILN_C99_BUILTIN_DATE: return "Date";
+    case KILN_C99_BUILTIN_MAP: return "Map";
+    case KILN_C99_BUILTIN_SET: return "Set";
+    case KILN_C99_BUILTIN_PROMISE: return "Promise";
+    case KILN_C99_BUILTIN_BOOLEAN: return "Boolean";
+    case KILN_C99_BUILTIN_REFLECT: return "Reflect";
+    default: {
+        /* Every other tag is an error constructor; a tag with no name at all is a tag added
+         * without one, which shows as anonymous rather than dereferencing a null. */
+        const char *name = kiln_c99_error_name(builtin);
+        return name == NULL ? "anonymous" : name;
+    }
+    }
+}
+
+/* A namespace is an object holding functions rather than a callable, which decides both how it
+ * prints and what `typeof` answers about it. */
+static int kiln_c99_is_namespace(uint64_t builtin) {
+    return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||
+           builtin == KILN_C99_BUILTIN_REFLECT;
+}
+
 /* The method a name resolves to on a given receiver, or 0.  One table, so a read and a call
  * cannot disagree about which names exist -- and the range searched is what tells `slice` on an
  * array from `slice` on a string. */
@@ -1220,6 +1628,15 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_MATH_FLOOR,
                                       KILN_C99_METHOD_MATH_ATAN);
     case KILN_C99_BUILTIN_NUMBER:
+        /* `Number.parseInt` and the global `parseInt` are the same function in the language, so
+         * they are the same code here. Named outside the contiguous range because the range is
+         * how a namespace's methods are found, and these two belong to two namespaces. */
+        if (kiln_c99_same_name(key, key_len, "parseInt")) {
+            return KILN_C99_METHOD_PARSE_INT;
+        }
+        if (kiln_c99_same_name(key, key_len, "parseFloat")) {
+            return KILN_C99_METHOD_PARSE_FLOAT;
+        }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_INTEGER,
                                       KILN_C99_METHOD_IS_FINITE);
     case KILN_C99_BUILTIN_OBJECT:
@@ -1426,6 +1843,15 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             *result = argc == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0)
                                 : kiln_c99_text(args[0]);
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_NUMBER:
+            /* `Number()` with no argument is zero, not NaN: there is nothing to fail to convert. */
+            *result = kiln_c99_number(argc == 0 ? 0.0 : kiln_c99_as_number(args[0]));
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_BOOLEAN:
+            /* `Boolean(x)` is `!!x` spelled as a call, and `Boolean()` is false. */
+            *result = kiln_c99_boolean(
+                argc == 0 ? 0 : kiln_c99_truthy(args[0]));
+            return KILN_C99_OK;
         default:
             return KILN_C99_CONTROL_ERROR;
         }
@@ -1627,15 +2053,27 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
     }
+    case KILN_VALUE_METHOD:
     case KILN_VALUE_BUILTIN: {
         /* The interpreter names a runtime-supplied callable by the native it resolves to, and
-         * this has to be the same text for the same program. */
-        static const char string_constructor[] = "[Function: String]";
-        if (value.bits == KILN_C99_BUILTIN_STRING) {
-            return kiln_c99_value(KILN_VALUE_STRING, 0, string_constructor,
-                                  sizeof(string_constructor) - 1);
+         * this has to be the same text for the same program. A namespace converts as the object
+         * it is -- `String(Math)` is `[object Math]`, not a function's name. */
+        kiln_text built = {NULL, 0, 0};
+        const char *name = value.tag == KILN_VALUE_METHOD ? kiln_c99_method_name(value.bits)
+                                                          : kiln_c99_builtin_name(value.bits);
+        if (name == NULL) {
+            return kiln_c99_undefined();
         }
-        return kiln_c99_undefined();
+        if (kiln_c99_text_append_c(&built, value.tag == KILN_VALUE_BUILTIN &&
+                                                   kiln_c99_is_namespace(value.bits)
+                                               ? "[object "
+                                               : "[Function: ") != KILN_C99_OK ||
+            kiln_c99_text_append_c(&built, name) != KILN_C99_OK ||
+            kiln_c99_text_append_c(&built, "]") != KILN_C99_OK) {
+            free(built.bytes);
+            return kiln_c99_undefined();
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
     }
     case KILN_VALUE_FUNCTION: {
         /* `Function.prototype.toString` returns the source text, which needs the span and the
@@ -1965,7 +2403,19 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
                 return KILN_C99_OK;
             }
             if (kiln_c99_same_name(key, key_len, "constructor")) {
+                /* An error already records its kind, and `error.constructor.name` is the ordinary
+                 * way a program asks which one it caught -- so the answer comes from the kind
+                 * rather than from the fact that an error is an object. */
+                kiln_object *own = kiln_c99_object_of(target);
+                size_t slot;
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT);
+                for (slot = 0; slot < own->count; ++slot) {
+                    if (kiln_c99_same_key(&own->properties[slot], "@@error", 7)) {
+                        *out = kiln_c99_builtin(
+                            (uint64_t)kiln_c99_as_number(own->properties[slot].value));
+                        break;
+                    }
+                }
                 return KILN_C99_OK;
             }
         }
@@ -1990,6 +2440,10 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
+            return KILN_C99_OK;
+        }
         if (is_length) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
@@ -2013,6 +2467,10 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
     }
     case KILN_VALUE_STRING: {
         uint64_t code;
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
+            return KILN_C99_OK;
+        }
         if (is_length) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
             return KILN_C99_OK;
@@ -2098,8 +2556,26 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         }
         return KILN_C99_CONTROL_ERROR;
     }
+    case KILN_VALUE_METHOD:
+        /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
+         * here reads as a missing function three frames later. */
+        if (kiln_c99_same_name(key, key_len, "name")) {
+            const char *method = kiln_c99_method_name(target.bits);
+            *out = method == NULL ? kiln_c99_from_units(NULL, 0)
+                                  : kiln_c99_copy_text(method, strlen(method));
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
     case KILN_VALUE_BUILTIN: {
         uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
+        /* `RangeError.name` is how `error.constructor.name` gets its answer, which is the ordinary
+         * way a program asks what kind of error it caught. A namespace is not a constructor and
+         * has no name to give. */
+        if (!kiln_c99_is_namespace(target.bits) && kiln_c99_same_name(key, key_len, "name")) {
+            const char *builtin = kiln_c99_builtin_name(target.bits);
+            *out = kiln_c99_copy_text(builtin, strlen(builtin));
+            return KILN_C99_OK;
+        }
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
@@ -2156,8 +2632,26 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
                                     target.tag == KILN_VALUE_NULL
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
+    case KILN_VALUE_NUMBER:
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toFixed")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_FIXED);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
+            return KILN_C99_OK;
+        }
+        return KILN_C99_CONTROL_ERROR;
     default:
-        /* A number, boolean or callable has no own properties here. */
+        /* A boolean or callable has no own properties here. */
         return KILN_C99_CONTROL_ERROR;
     }
 }
@@ -2522,8 +3016,23 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
     case KILN_VALUE_HOLE:
         return kiln_c99_text_append_c(text, "undefined");
-    case KILN_VALUE_BUILTIN:
-        return kiln_c99_text_append_c(text, "[Function: String]");
+    case KILN_VALUE_BUILTIN: {
+        const char *name = kiln_c99_builtin_name(value.bits);
+        if (kiln_c99_is_namespace(value.bits)) {
+            /* `Object [Math] {}`: a namespace shows as the object it is, with no members --
+             * node lists none of the built-in ones either. */
+            if (kiln_c99_text_append_c(text, "Object [") != KILN_C99_OK ||
+                kiln_c99_text_append_c(text, name) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            return kiln_c99_text_append_c(text, "] {}");
+        }
+        if (kiln_c99_text_append_c(text, "[Function: ") != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, name) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append_c(text, "]");
+    }
     case KILN_VALUE_METHOD: {
         const char *name = kiln_c99_method_name(value.bits);
         if (name == NULL) {
@@ -3022,6 +3531,423 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         double first = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
         double second = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
         switch (code) {
+        case KILN_C99_METHOD_NUMBER_VALUE_OF:
+            /* The three below are the exception to the comment above: they are reached through a
+             * number rather than through a namespace, so the receiver is the whole subject. */
+            *result = kiln_c99_number(kiln_c99_as_number(receiver));
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_NUMBER_TO_STRING: {
+            double subject = kiln_c99_as_number(receiver);
+            double radix = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED ? first : 10.0;
+            if (radix == 10.0) {
+                /* Radix 10 is exactly `String(n)`, exponent rules included. */
+                *result = kiln_c99_text(kiln_c99_number(subject));
+                return KILN_C99_OK;
+            }
+            if (!(radix >= 2.0 && radix <= 36.0)) {
+                /* A RangeError rather than a NaN, which would read as a result. */
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "toString() radix must be between 2 and 36");
+            }
+            return kiln_c99_number_in_radix(result, subject, (int)radix);
+        }
+        case KILN_C99_METHOD_NUMBER_TO_FIXED: {
+            double digits = argc > 0 ? first : 0.0;
+            if (!(digits >= 0.0 && digits <= 100.0)) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "toString() radix must be between 2 and 36");
+            }
+            return kiln_c99_to_fixed(result, kiln_c99_as_number(receiver), (int)digits);
+        }
+        case KILN_C99_METHOD_SET_TIMEOUT:
+        case KILN_C99_METHOD_SET_INTERVAL: {
+            kiln_timer entry;
+            double delay = argc > 1 ? second : 0.0;
+            /* A negative, missing or NaN delay is zero: "as soon as possible", which is still
+             * after everything already queued. */
+            if (!(isfinite(delay) && delay > 0.0)) {
+                delay = 0.0;
+            }
+            status = kiln_c99_reserve((void **)&kiln_c99_timers, &kiln_c99_timer_capacity,
+                                      kiln_c99_timer_count + 1, sizeof *kiln_c99_timers);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            kiln_c99_next_sequence += 1;
+            entry.id = kiln_c99_next_timer_id;
+            kiln_c99_next_timer_id += 1.0;
+            entry.due = kiln_c99_now + delay;
+            entry.sequence = kiln_c99_next_sequence;
+            entry.callback = argc > 0 ? args[0] : kiln_c99_undefined();
+            entry.repeats = code == KILN_C99_METHOD_SET_INTERVAL;
+            entry.repeat = delay;
+            /* Everything after the delay is handed to the callback, which is how a timer carries
+             * state without a closure. */
+            entry.argc = argc > 2 ? argc - 2 : 0;
+            entry.args = NULL;
+            if (entry.argc != 0) {
+                entry.args = (kiln_value *)malloc(entry.argc * sizeof *entry.args);
+                if (entry.args == NULL) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                memcpy(entry.args, args + 2, entry.argc * sizeof *entry.args);
+            }
+            kiln_c99_timers[kiln_c99_timer_count] = entry;
+            kiln_c99_timer_count += 1;
+            *result = kiln_c99_number(entry.id);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_CLEAR_TIMEOUT:
+        case KILN_C99_METHOD_CLEAR_INTERVAL: {
+            double id = argc > 0 ? first : 0.0 / 0.0;
+            size_t index = 0;
+            while (index < kiln_c99_timer_count) {
+                if (kiln_c99_timers[index].id == id) {
+                    memmove(kiln_c99_timers + index, kiln_c99_timers + index + 1,
+                            (kiln_c99_timer_count - index - 1) * sizeof *kiln_c99_timers);
+                    kiln_c99_timer_count -= 1;
+                    continue;
+                }
+                index += 1;
+            }
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_QUEUE_MICROTASK: {
+            /* The same queue a promise reaction goes on, which is the whole point of the
+             * function: it is how a program gets in line behind the reactions already there
+             * rather than in front of them. */
+            if (argc == 0 || !kiln_c99_is_callable(args[0])) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "is not a function");
+            }
+            *result = kiln_c99_undefined();
+            return kiln_c99_enqueue(args[0], kiln_c99_undefined(), kiln_c99_undefined(), 0);
+        }
+        case KILN_C99_METHOD_ESCAPE:
+        case KILN_C99_METHOD_UNESCAPE: {
+            /* Annex B's pre-Unicode pair, which real code still reaches for:
+             * `unescape(encodeURIComponent(s))` is how a library gets a string's UTF-8 bytes one
+             * per code unit. They work in code units rather than scalars, which is exactly why
+             * they were replaced and exactly why they cannot be written in terms of the four
+             * below. */
+            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_text built = {NULL, 0, 0};
+            uint16_t *units = NULL;
+            size_t count = 0;
+            size_t at = 0;
+            int failed = 0;
+            if (subject.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (code == KILN_C99_METHOD_ESCAPE) {
+                for (at = 0; at < count && !failed; ++at) {
+                    uint16_t unit = units[at];
+                    char character = (char)unit;
+                    if (unit < 128 &&
+                        (isalnum((unsigned char)character) || character == '@' ||
+                         character == '*' || character == '_' || character == '+' ||
+                         character == '-' || character == '.' || character == '/')) {
+                        failed = kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK;
+                        continue;
+                    }
+                    /* Two hex digits below 256, four with a `%u` prefix above it. That split is
+                     * the whole reason `escape` was replaced. */
+                    failed = kiln_c99_text_append_c(&built, unit < 256 ? "%" : "%u") !=
+                                 KILN_C99_OK ||
+                             kiln_c99_append_hex(&built, unit, unit < 256 ? 2 : 4) != KILN_C99_OK;
+                }
+                free(units);
+                if (failed) {
+                    free(built.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                return KILN_C99_OK;
+            }
+            {
+                uint16_t *decoded = (uint16_t *)malloc((count == 0 ? 1 : count) * sizeof *decoded);
+                size_t written = 0;
+                if (decoded == NULL) {
+                    free(units);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                while (at < count) {
+                    int high;
+                    int low;
+                    if (units[at] != (uint16_t)'%') {
+                        decoded[written++] = units[at++];
+                        continue;
+                    }
+                    if (at + 5 < count && units[at + 1] == (uint16_t)'u') {
+                        int digit;
+                        uint32_t value = 0;
+                        int usable = 1;
+                        for (digit = 0; digit < 4 && usable; ++digit) {
+                            uint16_t unit = units[at + 2 + (size_t)digit];
+                            int nibble = unit < 128 ? kiln_c99_hex_digit((char)unit) : -1;
+                            usable = nibble >= 0;
+                            value = (value << 4) | (uint32_t)(nibble < 0 ? 0 : nibble);
+                        }
+                        if (usable) {
+                            decoded[written++] = (uint16_t)value;
+                            at += 6;
+                            continue;
+                        }
+                    }
+                    high = at + 2 < count && units[at + 1] < 128
+                               ? kiln_c99_hex_digit((char)units[at + 1])
+                               : -1;
+                    low = at + 2 < count && units[at + 2] < 128
+                              ? kiln_c99_hex_digit((char)units[at + 2])
+                              : -1;
+                    if (high >= 0 && low >= 0) {
+                        decoded[written++] = (uint16_t)(high * 16 + low);
+                        at += 3;
+                        continue;
+                    }
+                    /* A `%` that does not introduce an escape stands for itself, unlike
+                     * `decodeURI` where the same text is an error. */
+                    decoded[written++] = units[at++];
+                }
+                free(units);
+                *result = kiln_c99_from_units(decoded, written);
+                free(decoded);
+                return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        case KILN_C99_METHOD_ENCODE_URI:
+        case KILN_C99_METHOD_ENCODE_URI_COMPONENT: {
+            /* The four URI functions differ only in which characters they leave alone.
+             * `encodeURI` keeps the ones that structure a URI, because it is encoding a whole
+             * one; `encodeURIComponent` encodes those too, because a component containing a `/`
+             * must not look like a path separator. */
+            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_text built = {NULL, 0, 0};
+            size_t at;
+            if (subject.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (at = 0; at < subject.len; ++at) {
+                char character = subject.ptr[at];
+                unsigned char byte = (unsigned char)character;
+                int unreserved =
+                    byte < 128 &&
+                    (isalnum(byte) || character == '-' || character == '_' || character == '.' ||
+                     character == '!' || character == '~' || character == '*' ||
+                     character == '\'' || character == '(' || character == ')');
+                int reserved = byte < 128 && (character == ';' || character == '/' ||
+                                              character == '?' || character == ':' ||
+                                              character == '@' || character == '&' ||
+                                              character == '=' || character == '+' ||
+                                              character == '$' || character == ',' ||
+                                              character == '#');
+                int ok;
+                if (unreserved || (code == KILN_C99_METHOD_ENCODE_URI && reserved)) {
+                    ok = kiln_c99_text_append(&built, &character, 1) == KILN_C99_OK;
+                } else {
+                    /* A non-ASCII byte is never in either set, so walking bytes rather than
+                     * scalars percent-encodes each byte of a multi-byte character, which is what
+                     * the specification says to do. */
+                    ok = kiln_c99_text_append_c(&built, "%") == KILN_C99_OK &&
+                         kiln_c99_append_hex(&built, byte, 2) == KILN_C99_OK;
+                }
+                if (!ok) {
+                    free(built.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_DECODE_URI:
+        case KILN_C99_METHOD_DECODE_URI_COMPONENT: {
+            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_text built = {NULL, 0, 0};
+            size_t at = 0;
+            if (subject.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            while (at < subject.len) {
+                int high;
+                int low;
+                char byte;
+                if (subject.ptr[at] != '%') {
+                    if (kiln_c99_text_append(&built, subject.ptr + at, 1) != KILN_C99_OK) {
+                        free(built.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    at += 1;
+                    continue;
+                }
+                high = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 1]) : -1;
+                low = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 2]) : -1;
+                if (high < 0 || low < 0) {
+                    /* A `%` not followed by two hex digits is malformed, not a literal percent. */
+                    free(built.bytes);
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "URI malformed");
+                }
+                byte = (char)(high * 16 + low);
+                /* `decodeURI` leaves the reserved set encoded: undoing it would change what the
+                 * URI means, which is the one thing decoding must not do. */
+                if (code == KILN_C99_METHOD_DECODE_URI &&
+                    (byte == ';' || byte == '/' || byte == '?' || byte == ':' || byte == '@' ||
+                     byte == '&' || byte == '=' || byte == '+' || byte == '$' || byte == ',' ||
+                     byte == '#')) {
+                    if (kiln_c99_text_append(&built, subject.ptr + at, 3) != KILN_C99_OK) {
+                        free(built.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                } else if (kiln_c99_text_append(&built, &byte, 1) != KILN_C99_OK) {
+                    free(built.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                at += 3;
+            }
+            if (!kiln_c99_valid_utf8(built.bytes, built.len)) {
+                /* The escapes named bytes that are not a string. */
+                free(built.bytes);
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "URI malformed");
+            }
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_GLOBAL_IS_NAN:
+            /* The global pair coerces where the `Number` pair does not: `isNaN('x')` is true and
+             * `Number.isNaN('x')` is false, because the second asks whether the value *is* the
+             * NaN number rather than whether it reads as one. */
+            *result = kiln_c99_boolean(isnan(first));
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_GLOBAL_IS_FINITE:
+            *result = kiln_c99_boolean(isfinite(first) ? 1 : 0);
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_PARSE_INT:
+        case KILN_C99_METHOD_PARSE_FLOAT: {
+            kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            const char *bytes;
+            size_t len;
+            size_t at = 0;
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            bytes = text.ptr;
+            len = text.len;
+            /* Both read as far as they can and stop, rather than rejecting a string with a tail:
+             * `parseInt('12px')` is 12. That tolerance is the whole difference between these and
+             * `Number(x)`, which rejects the same input. */
+            while (at < len && kiln_c99_is_trimmed((uint16_t)(unsigned char)bytes[at])) {
+                at += 1;
+            }
+            if (code == KILN_C99_METHOD_PARSE_INT) {
+                double radix = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0;
+                double magnitude = 0.0;
+                int base;
+                int negative = 0;
+                size_t digits_at;
+                radix = isfinite(radix) ? trunc(radix) : 0.0;
+                if (!(radix == 0.0 || (radix >= 2.0 && radix <= 36.0))) {
+                    *result = kiln_c99_number(0.0 / 0.0);
+                    return KILN_C99_OK;
+                }
+                base = (int)radix;
+                if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
+                    negative = bytes[at] == '-';
+                    at += 1;
+                }
+                /* `0x` selects hexadecimal when no radix was given, and is allowed when 16 was. */
+                if ((base == 0 || base == 16) && at + 1 < len && bytes[at] == '0' &&
+                    (bytes[at + 1] == 'x' || bytes[at + 1] == 'X')) {
+                    base = 16;
+                    at += 2;
+                } else if (base == 0) {
+                    base = 10;
+                }
+                digits_at = at;
+                while (at < len) {
+                    int digit;
+                    char character = bytes[at];
+                    if (character >= '0' && character <= '9') {
+                        digit = character - '0';
+                    } else if (character >= 'a' && character <= 'z') {
+                        digit = character - 'a' + 10;
+                    } else if (character >= 'A' && character <= 'Z') {
+                        digit = character - 'A' + 10;
+                    } else {
+                        break;
+                    }
+                    if (digit >= base) {
+                        break;
+                    }
+                    /* Folded as a double rather than accumulated as an integer: the result is a
+                     * double either way, and a long run of digits has to saturate toward infinity
+                     * rather than overflow. */
+                    magnitude = magnitude * (double)base + (double)digit;
+                    at += 1;
+                }
+                *result = kiln_c99_number(at == digits_at ? 0.0 / 0.0
+                                                          : (negative ? -magnitude : magnitude));
+                return KILN_C99_OK;
+            }
+            {
+                /* The longest prefix that is a decimal literal, scanned rather than handed to
+                 * `strtod` outright: C's parser also accepts `0x1f`, `inf` and `nan`, none of
+                 * which this grammar has -- `parseFloat('0x1f')` is 0. */
+                size_t start = at;
+                size_t scan;
+                size_t end;
+                size_t before = 0;
+                size_t after = 0;
+                double parsed;
+                if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
+                    at += 1;
+                }
+                if (len - at >= 8 && memcmp(bytes + at, "Infinity", 8) == 0) {
+                    *result = kiln_c99_number(bytes[start] == '-' ? -1.0 / 0.0 : 1.0 / 0.0);
+                    return KILN_C99_OK;
+                }
+                scan = at;
+                while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
+                    scan += 1;
+                    before += 1;
+                }
+                if (scan < len && bytes[scan] == '.') {
+                    scan += 1;
+                    while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
+                        scan += 1;
+                        after += 1;
+                    }
+                }
+                if (before + after == 0) {
+                    *result = kiln_c99_number(0.0 / 0.0);
+                    return KILN_C99_OK;
+                }
+                end = scan;
+                if (scan < len && (bytes[scan] == 'e' || bytes[scan] == 'E')) {
+                    size_t probe = scan + 1;
+                    if (probe < len && (bytes[probe] == '+' || bytes[probe] == '-')) {
+                        probe += 1;
+                    }
+                    if (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
+                        while (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
+                            probe += 1;
+                        }
+                        /* An exponent with no digits is not part of the literal: `1e` is 1. */
+                        end = probe;
+                    }
+                }
+                /* The scanned prefix is a `StringNumericLiteral` by construction, so the
+                 * provider's parser is exactly the right reader for it -- and it is the same one
+                 * `Number(x)` uses, which is what keeps the two agreeing. `strtod` would read the
+                 * process locale's decimal point, and an embedded module runs in its host's. */
+                parsed = kiln_string_to_number(bytes + start, end - start);
+                *result = kiln_c99_number(parsed);
+                return KILN_C99_OK;
+            }
+        }
         case KILN_C99_METHOD_MATH_FLOOR: *result = kiln_c99_number(floor(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CEIL: *result = kiln_c99_number(ceil(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_ROUND: {
@@ -5419,6 +6345,7 @@ static size_t kiln_c99_queue_head;
 static size_t kiln_c99_queue_count;
 static size_t kiln_c99_queue_capacity;
 
+
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected) {
     int status;
@@ -5570,6 +6497,60 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
 }
 
 /* Run the queue until it is empty, which is what "after the synchronous part" means. */
+/* The event loop: microtasks until there are none, then the earliest due timer, then round
+ * again.
+ *
+ * The order is the observable one. Everything already queued runs before any timer, which is why
+ * `Promise.resolve().then(f)` beats `setTimeout(g, 0)` however early `g` was scheduled -- and it
+ * is checked between turns rather than at each settlement, so a `.catch` attached on the next
+ * line still counts as attached. */
+static int kiln_c99_run_loop(kiln_host *host, int depth, kiln_value *thrown) {
+    for (;;) {
+        size_t index;
+        size_t chosen;
+        kiln_timer timer;
+        kiln_value produced;
+        int status = kiln_c99_drain(host, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        chosen = kiln_c99_timer_count;
+        for (index = 0; index < kiln_c99_timer_count; ++index) {
+            if (chosen == kiln_c99_timer_count ||
+                kiln_c99_timers[index].due < kiln_c99_timers[chosen].due ||
+                (kiln_c99_timers[index].due == kiln_c99_timers[chosen].due &&
+                 kiln_c99_timers[index].sequence < kiln_c99_timers[chosen].sequence)) {
+                chosen = index;
+            }
+        }
+        if (chosen == kiln_c99_timer_count) {
+            return KILN_C99_OK;
+        }
+        timer = kiln_c99_timers[chosen];
+        if (kiln_c99_now < timer.due) {
+            kiln_c99_now = timer.due;
+        }
+        if (timer.repeats) {
+            /* Re-armed *before* running, and under the same id, so a `clearInterval` inside the
+             * callback cancels the next run rather than one that no longer exists. A zero delay
+             * becomes one, or an interval would starve every timer behind it. */
+            kiln_c99_next_sequence += 1;
+            kiln_c99_timers[chosen].due =
+                kiln_c99_now + (timer.repeat > 1.0 ? timer.repeat : 1.0);
+            kiln_c99_timers[chosen].sequence = kiln_c99_next_sequence;
+        } else {
+            memmove(kiln_c99_timers + chosen, kiln_c99_timers + chosen + 1,
+                    (kiln_c99_timer_count - chosen - 1) * sizeof *kiln_c99_timers);
+            kiln_c99_timer_count -= 1;
+        }
+        status = kiln_c99_call(host, &produced, timer.callback, kiln_c99_undefined(),
+                               timer.argc == 0 ? NULL : timer.args, timer.argc, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+}
+
 static int kiln_c99_drain(kiln_host *host, int depth, kiln_value *thrown) {
     while (kiln_c99_queue_head < kiln_c99_queue_count) {
         kiln_microtask task = kiln_c99_queue[kiln_c99_queue_head];
@@ -5974,7 +6955,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_BUILTIN:
         /* A namespace is an object holding functions and cannot be called; a constructor is a
          * function. `typeof Math === "object"` is what a library feature-detects on. */
-        if (value.bits == KILN_C99_BUILTIN_MATH || value.bits == KILN_C99_BUILTIN_JSON) {
+        if (kiln_c99_is_namespace(value.bits)) {
             return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
         }
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
@@ -6391,7 +7372,24 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::ReferenceError
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::NotANumber
-            | kiln_ir::Builtin::Infinity,
+            | kiln_ir::Builtin::Infinity
+            | kiln_ir::Builtin::Boolean
+            | kiln_ir::Builtin::ParseInt
+            | kiln_ir::Builtin::ParseFloat
+            | kiln_ir::Builtin::IsNaN
+            | kiln_ir::Builtin::IsFinite
+            | kiln_ir::Builtin::Escape
+            | kiln_ir::Builtin::Unescape
+            | kiln_ir::Builtin::EncodeUri
+            | kiln_ir::Builtin::EncodeUriComponent
+            | kiln_ir::Builtin::DecodeUri
+            | kiln_ir::Builtin::DecodeUriComponent
+            | kiln_ir::Builtin::Reflect
+            | kiln_ir::Builtin::QueueMicrotask
+            | kiln_ir::Builtin::SetTimeout
+            | kiln_ir::Builtin::SetInterval
+            | kiln_ir::Builtin::ClearTimeout
+            | kiln_ir::Builtin::ClearInterval,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -6755,16 +7753,12 @@ fn stack_effect(
                 Ok((height - argc + 1, false))
             }
         }
-        Instruction::Return => {
-            if height > 1 {
-                Err(invalid(
-                    index,
-                    "return has more than one value on the stack",
-                ))
-            } else {
-                Ok((height, true))
-            }
-        }
+        // A return takes the top of the stack and abandons the frame, so anything under it is
+        // simply gone. Residue is not a malformed program: `try { return 1 } finally { return 2 }`
+        // reaches the second return with the first one's value still pending underneath, and the
+        // interpreter has always truncated rather than complained. Requiring an empty stack here
+        // rejected that shape outright, which is a refusal the language does not licence.
+        Instruction::Return => Ok((height, true)),
     }
 }
 
@@ -6879,12 +7873,35 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
 }
 
 /// What a call site does when the callee threw: jump to this body's handler, or hand it on.
-fn unwind_or_return(handlers: &[u32]) -> &'static str {
-    if handlers.is_empty() {
-        "return status;"
-    } else {
+/// Where a thrown status goes from the site that produced it.
+///
+/// A body with a handler jumps to its own unwind. A body without one propagates, except at the
+/// entry point, where there is nothing left to propagate to: the throw is uncaught, and the only
+/// thing that can still be done with it is say so. That is what `kiln_uncaught` is for, and why
+/// the entry is the one place a bare `return status;` would lose the program's own error.
+fn unwind_or_return(handlers: &[u32], site: &ReturnSite<'_>) -> &'static str {
+    if !handlers.is_empty() {
         "goto kiln_unwind;"
+    } else if matches!(site, ReturnSite::Entry { .. }) {
+        "goto kiln_uncaught;"
+    } else {
+        "return status;"
     }
+}
+
+/// The entry point's last word on a throw nothing caught.
+///
+/// The thrown value is converted here rather than handed over, because the embedding signature
+/// carries one `kiln_value` and a reference must not cross it. Text is what survives, and text is
+/// what a launcher can print.
+fn render_uncaught(output: &mut String) {
+    if !output.contains("goto kiln_uncaught;") {
+        // No site can reach it, and an unused label is a warning in every compiler worth using.
+        return;
+    }
+    output.push_str("kiln_uncaught:;\n");
+    output.push_str("    *result = kiln_c99_text(*thrown);\n");
+    output.push_str("    return KILN_C99_THROWN;\n");
 }
 
 /// The instruction indices a body registers as exception handlers.
@@ -6972,12 +7989,16 @@ fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize, 
 ///
 /// A body whose handler stack is empty has nothing to catch with, so the throw keeps travelling
 /// -- which is the same path a body with no handlers at all takes.
-fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool) {
+fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool, uncaught: bool) {
     if handlers.is_empty() {
         return;
     }
     output.push_str("kiln_unwind:;\n");
-    output.push_str("    if (kiln_handler_top == 0) return KILN_C99_THROWN;\n");
+    output.push_str(if uncaught {
+        "    if (kiln_handler_top == 0) goto kiln_uncaught;\n"
+    } else {
+        "    if (kiln_handler_top == 0) return KILN_C99_THROWN;\n"
+    });
     output.push_str("    --kiln_handler_top;\n");
     output.push_str("    sp = kiln_handler_stack[kiln_handler_top];\n");
     output.push_str("    stack[sp++] = *thrown;\n");
@@ -7105,7 +8126,7 @@ fn render_function(
         writeln!(output, "kiln_label_{position}:;").unwrap();
         emit_instruction(output, &proto.code[position], position, &emitter);
     }
-    render_unwind(output, &emitter.handlers, suspends);
+    render_unwind(output, &emitter.handlers, suspends, false);
     // A body whose control reaches the end without a `Return` is a compiler bug, not a program
     // error: the lowering always ends a body with one.
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
@@ -7194,7 +8215,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
-    render_unwind(&mut output, &emitter.handlers, false);
+    render_unwind(&mut output, &emitter.handlers, false, true);
+    render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -7315,7 +8337,8 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
-    render_unwind(&mut output, &emitter.handlers, false);
+    render_unwind(&mut output, &emitter.handlers, false, true);
+    render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -7487,7 +8510,7 @@ fn emit_instruction(
         }
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
@@ -7510,7 +8533,7 @@ fn emit_instruction(
         // and only then replaces it -- a key that failed to convert must not leave a half-built
         // object where the program can see it.
         Instruction::NewObject { count } => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             let count = usize::try_from(*count).unwrap();
             output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
             output.push_str("        status = kiln_c99_new_object(&built);\n");
@@ -7545,7 +8568,7 @@ fn emit_instruction(
             output.push_str("        stack[sp++] = built;\n    }\n");
         }
         Instruction::GetProperty(name) => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
@@ -7557,7 +8580,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::SetProperty(name) => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
@@ -7570,7 +8593,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::GetComputed => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
@@ -7578,7 +8601,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::SetComputed => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}"
@@ -7611,7 +8634,7 @@ fn emit_instruction(
         // whole difference between `super()` and `new Parent()`.
         Instruction::SuperCall { argc } => {
             let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
@@ -7623,7 +8646,7 @@ fn emit_instruction(
         // Its arity is not known where it is synthesized, so the forwarding happens here from
         // whatever the frame was actually given.
         Instruction::SuperForward => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value produced; int status = kiln_c99_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
@@ -7632,7 +8655,7 @@ fn emit_instruction(
         }
         Instruction::New { argc } => {
             let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value built; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
@@ -7700,7 +8723,7 @@ fn emit_instruction(
         // The arity comes from an array the program built, so the arguments are read out of it
         // rather than off the stack.
         Instruction::Apply => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
@@ -7708,7 +8731,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::SpreadInto => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_iterate(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -7716,7 +8739,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::IterableToArray => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_iterate(host, built, stack[sp - 1], depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = built; }}"
@@ -7724,7 +8747,7 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::SpreadObject => {
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_spread_object(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
@@ -7761,12 +8784,17 @@ fn emit_instruction(
         }
         Instruction::Throw => {
             output.push_str("    *thrown = stack[--sp];\n");
-            if handlers.is_empty() {
-                // Nothing here can catch it, so it leaves immediately.
-                output.push_str("    return KILN_C99_THROWN;\n");
+            // Nothing here can catch it, so it leaves immediately -- as a status from a body,
+            // and as text through the uncaught epilogue from the entry point. Spelled out rather
+            // than shared with `unwind_or_return`, whose propagating arm returns the `status` a
+            // failed call left behind and there is no call here to have left one.
+            output.push_str(if !handlers.is_empty() {
+                "    goto kiln_unwind;\n"
+            } else if matches!(site, ReturnSite::Entry { .. }) {
+                "    goto kiln_uncaught;\n"
             } else {
-                output.push_str("    goto kiln_unwind;\n");
-            }
+                "    return KILN_C99_THROWN;\n"
+            });
         }
         // Not a `GetProperty` followed by a `Call`: that would discard the receiver, and the
         // read has to yield the *unbound* function so `a.f === a.f` holds. The receiver stays on
@@ -7776,7 +8804,7 @@ fn emit_instruction(
                 unreachable!("verification rejects a non-string method name before emission")
             };
             let argc = usize::from(*argc);
-            let unwind = unwind_or_return(handlers);
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
                 "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
@@ -7806,6 +8834,35 @@ fn emit_instruction(
                     "kiln_c99_builtin(KILN_C99_BUILTIN_REFERENCE_ERROR)"
                 }
                 kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
+                kiln_ir::Builtin::Boolean => "kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)",
+                // A global function is a namespace method with no namespace: nothing is reached
+                // through to get at it, so the method value is what the name resolves to.
+                kiln_ir::Builtin::ParseInt => "kiln_c99_method(KILN_C99_METHOD_PARSE_INT)",
+                kiln_ir::Builtin::ParseFloat => "kiln_c99_method(KILN_C99_METHOD_PARSE_FLOAT)",
+                kiln_ir::Builtin::IsNaN => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_NAN)",
+                kiln_ir::Builtin::IsFinite => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_FINITE)",
+                kiln_ir::Builtin::Reflect => "kiln_c99_builtin(KILN_C99_BUILTIN_REFLECT)",
+                kiln_ir::Builtin::SetTimeout => "kiln_c99_method(KILN_C99_METHOD_SET_TIMEOUT)",
+                kiln_ir::Builtin::SetInterval => "kiln_c99_method(KILN_C99_METHOD_SET_INTERVAL)",
+                kiln_ir::Builtin::ClearTimeout => {
+                    "kiln_c99_method(KILN_C99_METHOD_CLEAR_TIMEOUT)"
+                }
+                kiln_ir::Builtin::ClearInterval => {
+                    "kiln_c99_method(KILN_C99_METHOD_CLEAR_INTERVAL)"
+                }
+                kiln_ir::Builtin::QueueMicrotask => {
+                    "kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK)"
+                }
+                kiln_ir::Builtin::Escape => "kiln_c99_method(KILN_C99_METHOD_ESCAPE)",
+                kiln_ir::Builtin::Unescape => "kiln_c99_method(KILN_C99_METHOD_UNESCAPE)",
+                kiln_ir::Builtin::EncodeUri => "kiln_c99_method(KILN_C99_METHOD_ENCODE_URI)",
+                kiln_ir::Builtin::EncodeUriComponent => {
+                    "kiln_c99_method(KILN_C99_METHOD_ENCODE_URI_COMPONENT)"
+                }
+                kiln_ir::Builtin::DecodeUri => "kiln_c99_method(KILN_C99_METHOD_DECODE_URI)",
+                kiln_ir::Builtin::DecodeUriComponent => {
+                    "kiln_c99_method(KILN_C99_METHOD_DECODE_URI_COMPONENT)"
+                }
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -7847,7 +8904,7 @@ fn emit_instruction(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry { exports: None } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    { int drained = kiln_c99_drain(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
@@ -7859,7 +8916,7 @@ fn emit_instruction(
                     // Everything the body queued runs before the module is finished, which is
                     // what "after the synchronous part" means.
                     output.push_str(
-                        "    { int drained = kiln_c99_drain(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n",
+                        "    { int drained = kiln_c99_run_loop(host, depth, thrown); if (drained != KILN_C99_OK) return drained; }\n",
                     );
                 }
                 if *callables {
@@ -8770,7 +9827,9 @@ mod tests {
                 .source
                 .contains("kiln_string_to_number(value.ptr, value.len)")
         );
-        assert!(!generated.source.contains("strtod"));
+        // A *call*, matching the printf check below. Both names still appear in the runtime's
+        // prose, where they are naming the things that must not be reached for.
+        assert!(!generated.source.contains("strtod("));
         assert!(!generated.source.contains("kiln_c99_strtod_c"));
         assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
         assert!(generated.source.contains("KILN_NUMBER_PARSE_VERSION 1"));
