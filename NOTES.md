@@ -3342,3 +3342,49 @@ which is the failure mode this repo cares about most, and they are next.
 
 **The flake is still there.** `stale_direct_watch_update_reconciles_authoritatively_once` fails in
 a full-workspace run and passes alone.
+
+### The native backend's silent wrong answers, first four
+
+**2026-08-30, Claude.** Running the differential corpus through `--native` and comparing against
+the *interpreter* rather than counting refusals turned up seven probes that ran to completion and
+printed something else. Those are the failure mode this repo cares about most, and four are fixed.
+
+**A frozen array was not frozen.** `Object.freeze` set a flag on `kiln_object`, and an array is
+not one -- so `Object.freeze([1,2])[0] = 9` wrote, and `Object.isFrozen([1])` answered true
+because the code read "not an object, therefore a primitive, therefore frozen". An array and a
+function now carry the flag too. An element write on a frozen array is ignored, the way a property
+write on a frozen object is; a method that would *change the length* throws instead, because an
+element write has an answer to give without doing anything -- the value it was handed -- and
+`push` does not.
+
+**`delete` said true when it had done nothing.** On a frozen target, and on a string's `length`,
+which is a real property that cannot be configured away. The interpreter had the same two bugs
+and `Object.freeze(list); list.splice(0,1)` besides, which is a length change its
+`changes_array_length` did not list. Both engines were wrong in the same way, which is why no
+corpus caught it: they agreed.
+
+**`reduce` without a seed started at index zero.** A hole is not an element, so the seed is the
+first element that is *there* -- otherwise every sum over a sparse array is NaN. `reduceRight`
+already had this right, which is how it was found. While there, `[].reduce(f)` became a catchable
+TypeError rather than a fatal status: it is ordinary code with an ordinary error.
+
+**A collection iterator walked a snapshot.** `for (const k of map.keys()) { ...; map.delete(other) }`
+kept handing back the deleted key. The iterator now holds the collection itself, and a delete is a
+*tombstone* rather than a removal -- compacting would shift every later entry past a live cursor
+and skip one. `size` counts the living, `count` bounds the walk, and re-adding a deleted key puts
+it at the end, because insertion order is the order of first appearance now rather than of the
+entry that used to be there. This is what the interpreter already did; the note in the C said a
+snapshot was indistinguishable, and it was wrong about that.
+
+**Three left, and they are one problem.** `class-members` prints `[object Object]` where node
+prints `A`, because `String(x)` cannot call a `toString` the program wrote: `kiln_c99_text` is a
+pure function with no host and no way to throw. `to-primitive` and `tagged-templates` are the same
+gap seen from other angles. The fix is a `kiln_c99_to_primitive(host, value, hint, ...)` that
+consults `@@toPrimitive`, `valueOf` and `toString` in the specified order, called from the `String`
+builtin, template literals and the coercing operators -- all of which now have a host and a
+`thrown` to hand. That is the next piece.
+
+**Disk, again.** `target/debug/deps` reached 11 GiB and 431k entries and filled the volume
+mid-run; `.kiln/cache` was another 1.2 GiB for 31 native probes. Deleting `target/debug/deps` cost
+an 11-second rebuild because mbx had every compilation cached, which makes it a much cheaper
+recovery than it looks. `.kiln/cache` still has no eviction policy.

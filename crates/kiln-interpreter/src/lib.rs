@@ -467,7 +467,11 @@ impl Native {
     fn changes_array_length(self) -> bool {
         matches!(
             self,
-            Self::ArrayPush | Self::ArrayPop | Self::ArrayShift | Self::ArrayUnshift
+            Self::ArrayPush
+                | Self::ArrayPop
+                | Self::ArrayShift
+                | Self::ArrayUnshift
+                | Self::ArraySplice
         )
     }
 
@@ -10558,6 +10562,11 @@ fn join(items: &[Value], separator: &str) -> String {
 fn delete_property(target: &Value, key: &Value) -> bool {
     match target {
         Value::Object(object) => {
+            // A frozen object's properties are non-configurable, so the delete fails and says
+            // so. `remove` already declines to do the work; only the answer was wrong.
+            if object.borrow().is_frozen() {
+                return false;
+            }
             object.borrow_mut().remove(&key.property_key());
             true
         }
@@ -10566,6 +10575,9 @@ fn delete_property(target: &Value, key: &Value) -> bool {
         // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the
         // one place the difference between the two is directly observable.
         Value::Array(items) => {
+            if items.properties.borrow().is_frozen() {
+                return false;
+            }
             if let Some(index) = array_index(key)
                 && let Some(slot) = items.borrow_mut().get_mut(index)
             {

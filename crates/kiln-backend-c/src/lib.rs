@@ -583,6 +583,12 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_REGEXP_TEST 172
 #define KILN_C99_METHOD_REGEXP_EXEC 173
 #define KILN_C99_METHOD_REGEXP_TO_STRING 174
+/* A collection's own `next`, distinct from the array iterator's because it walks the collection
+ * itself rather than a copy of it -- which is the only way a delete during a loop can be seen.
+ * Numbered here rather than beside the collection block because the guard that routes a code to
+ * a receiver kind is a range, and this has to land inside the one that answers a method reached
+ * through an object. */
+#define KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT 175
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -692,9 +698,8 @@ typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
- * grows it and the gap reads as undefined.  Holes are not represented -- a program that can
- * observe the difference between a hole and an undefined element needs `in`, which this backend
- * refuses. */
+ * grows it and the gap is filled with holes, which read as undefined and are not the same thing --
+ * `1 in [1, , 3]` is false and `[1, , 3].map(f)` does not call `f` for the middle. */
 typedef struct kiln_array {
     kiln_value *elements;
     size_t count;
@@ -703,6 +708,9 @@ typedef struct kiln_array {
      * match result carries. Undefined until the first one is written, so an ordinary array is one
      * pointer smaller than it looks and costs nothing. */
     kiln_value properties;
+    /* `Object.freeze`. An element write is ignored, like a property write on a frozen object;
+     * a method that would change the length throws, because there is no way to do half of it. */
+    int frozen;
 } kiln_array;
 
 /* A suspended body.
@@ -776,11 +784,17 @@ typedef struct kiln_date_parts {
 typedef struct kiln_entry {
     kiln_value key;
     kiln_value value;
+    /* A deleted entry is a hole, not a removal: compacting here would shift every later entry
+     * past a live iterator's cursor and skip one. */
+    int dead;
 } kiln_entry;
 
 typedef struct kiln_collection {
     kiln_entry *entries;
+    /* How many slots have ever been used, dead ones included -- what iteration walks. */
     size_t count;
+    /* How many are still there, which is what `size` reports. */
+    size_t live;
     size_t capacity;
     int is_map;
 } kiln_collection;
@@ -988,6 +1002,7 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
 static const char *kiln_c99_builtin_name(uint64_t builtin);
 static int kiln_c99_is_namespace(uint64_t builtin);
+static int kiln_c99_changes_length(uint64_t code);
 static uint64_t kiln_c99_callable_method(const char *key, size_t key_len);
 static kiln_value kiln_c99_property_key(kiln_value key);
 static uint32_t kiln_c99_to_uint32(double value);
@@ -1128,6 +1143,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->count = 0;
     array->capacity = 0;
     array->properties = kiln_c99_undefined();
+    array->frozen = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
 }
@@ -1410,6 +1426,16 @@ static double kiln_c99_instant_from_parts(const double parts[7]) {
            parts[6];
 }
 
+/* Whether an array method changes how many elements there are.
+ *
+ * `sort` and `reverse` are not on the list: they write elements a frozen array already refuses,
+ * and the length they leave is the one they were given. */
+static int kiln_c99_changes_length(uint64_t code) {
+    return code == KILN_C99_METHOD_PUSH || code == KILN_C99_METHOD_POP ||
+           code == KILN_C99_METHOD_ARRAY_SHIFT || code == KILN_C99_METHOD_ARRAY_UNSHIFT ||
+           code == KILN_C99_METHOD_ARRAY_SPLICE;
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -1573,6 +1599,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_COLLECTION_ENTRIES: return "entries";
     case KILN_C99_METHOD_COLLECTION_SELF: return "@@iterator";
     case KILN_C99_METHOD_ITERATOR_NEXT: return "next";
+    case KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT: return "next";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
     case KILN_C99_METHOD_ARRAY_VALUES: return "values";
     case KILN_C99_METHOD_THEN: return "then";
@@ -3624,7 +3651,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "size")) {
-            *out = kiln_c99_number((double)collection->count);
+            *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
         }
         code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
@@ -3989,14 +4016,17 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         kiln_array *array = kiln_c99_array_of(target);
         size_t slot = (size_t)index;
         size_t fill;
-        int status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
-                                      sizeof *array->elements);
+        int status;
+        if (array->frozen) {
+            /* Silently, which is what a write to a frozen object does and therefore what this
+             * has to do -- the two are the same rule seen from different sides. */
+            return KILN_C99_OK;
+        }
+        status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
+                                  sizeof *array->elements);
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* Writing past the end grows the array and leaves undefined behind, which is what the
-         * language does; a hole and an undefined element are only distinguishable through `in`,
-         * which this backend refuses. */
         /* Growing leaves holes, which read as undefined and are not the same thing. */
         for (fill = array->count; fill < slot; ++fill) {
             array->elements[fill] = kiln_c99_hole();
@@ -4311,16 +4341,21 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
         kiln_collection *collection = kiln_c99_collection_of(value);
         size_t index;
         if (kiln_c99_text_append_c(text, collection->is_map ? "Map(" : "Set(") != KILN_C99_OK ||
-            kiln_c99_pad_number(text, (int64_t)collection->count, 1) != KILN_C99_OK ||
-            kiln_c99_text_append_c(text, collection->count == 0 ? ") {}" : ") { ") !=
+            kiln_c99_pad_number(text, (int64_t)collection->live, 1) != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, collection->live == 0 ? ") {}" : ") { ") !=
                 KILN_C99_OK) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        if (collection->count == 0) {
+        if (collection->live == 0) {
             return KILN_C99_OK;
         }
+        {
+        size_t shown = 0;
         for (index = 0; index < collection->count; ++index) {
-            if (index != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+            if (collection->entries[index].dead) {
+                continue;
+            }
+            if (shown++ != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (collection->is_map) {
@@ -4334,6 +4369,7 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
                 KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+        }
         }
         return kiln_c99_text_append_c(text, " }");
     }
@@ -6043,16 +6079,16 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     *result = kiln_c99_boolean(0);
                     return KILN_C99_OK;
                 }
-                /* Shifted rather than swapped with the last: iteration order is observable, and
-                 * a delete must not reorder what remains. */
-                for (index = (size_t)at; index + 1 < collection->count; ++index) {
-                    collection->entries[index] = collection->entries[index + 1];
-                }
-                collection->count -= 1;
+                /* A hole, not a removal: a walk already past this point must not have what
+                 * follows shifted under it, and one not yet there must not see this entry
+                 * again. `x,z` rather than `x,y,z` when the loop deletes `y` after visiting `x`. */
+                collection->entries[(size_t)at].dead = 1;
+                collection->live -= 1;
                 *result = kiln_c99_boolean(1);
                 return KILN_C99_OK;
             case KILN_C99_METHOD_COLLECTION_CLEAR:
                 collection->count = 0;
+                collection->live = 0;
                 *result = kiln_c99_undefined();
                 return KILN_C99_OK;
             case KILN_C99_METHOD_COLLECTION_FOR_EACH: {
@@ -6062,6 +6098,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 for (index = 0; index < length && index < collection->count; ++index) {
                     kiln_value visit[3];
                     kiln_value ignored;
+                    if (collection->entries[index].dead) {
+                        continue;
+                    }
                     visit[0] = collection->entries[index].value;
                     visit[1] = collection->entries[index].key;
                     visit[2] = receiver;
@@ -6076,38 +6115,44 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_OK;
             }
             default: {
-                /* `keys`, `values`, `entries` and the default iteration all produce a snapshot
-                 * array, which the iteration protocol then walks. A real engine hands back a
-                 * live iterator; nothing here can observe the difference, because a collection
-                 * changed mid-walk would need a live one to notice. */
-                kiln_value built;
+                /* A *live* iterator, holding the collection rather than a copy of it: a delete
+                 * during the walk has to be seen, and a snapshot is exactly what cannot see one.
+                 * What each step hands back is decided here, where the collection's kind is
+                 * known, so the iterator itself needs no reference back to it. */
                 int pairs = code == KILN_C99_METHOD_COLLECTION_ENTRIES ||
                             (code == KILN_C99_METHOD_COLLECTION_SELF && collection->is_map);
                 int wants_keys = code == KILN_C99_METHOD_COLLECTION_KEYS;
-                status = kiln_c99_new_array(&built);
-                for (index = 0; index < collection->count && status == KILN_C99_OK; ++index) {
-                    if (pairs) {
-                        kiln_value pair;
-                        status = kiln_c99_new_array(&pair);
-                        if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(pair, collection->entries[index].key);
-                        }
-                        if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(pair, collection->entries[index].value);
-                        }
-                        if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(built, pair);
-                        }
-                    } else {
-                        status = kiln_c99_array_push(built, wants_keys
-                                                                ? collection->entries[index].key
-                                                                : collection->entries[index].value);
-                    }
+                kiln_value iterator;
+                status = kiln_c99_new_object(&iterator);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, iterator, "@@iterated", 10, receiver, depth,
+                                          thrown);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, iterator, "@@index", 7, kiln_c99_number(0.0),
+                                          depth, thrown);
+                }
+                if (status == KILN_C99_OK) {
+                    /* 0 the value, 1 the key, 2 a `[key, value]` pair. */
+                    status = kiln_c99_put(host, iterator, "@@part", 6,
+                                          kiln_c99_number(pairs ? 2.0 : (wants_keys ? 1.0 : 0.0)),
+                                          depth, thrown);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, iterator, "next", 4,
+                                          kiln_c99_method(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT),
+                                          depth, thrown);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, iterator, "@@iterator", 10,
+                                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), depth,
+                                          thrown);
                 }
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                return kiln_c99_new_iterator(result, built);
+                *result = iterator;
+                return KILN_C99_OK;
             }
             }
         }
@@ -6462,6 +6507,77 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                        : kiln_c99_async_step(host, receiver,
                                              argc > 0 ? args[0] : kiln_c99_undefined(),
                                              code == KILN_C99_METHOD_ASYNC_THROW, depth, thrown);
+        case KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT: {
+            kiln_value source;
+            kiln_value at;
+            kiln_value part;
+            kiln_value step;
+            kiln_value produced = kiln_c99_undefined();
+            kiln_collection *collection;
+            size_t position;
+            int finished;
+            if (receiver.tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_get(host, receiver, "@@iterated", 10, &source, depth, thrown);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, receiver, "@@part", 6, &part, depth, thrown);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (source.tag != KILN_VALUE_COLLECTION) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            collection = kiln_c99_collection_of(source);
+            position = (size_t)kiln_c99_as_number(at);
+            /* Past every dead entry: one deleted ahead of the cursor is gone, and one deleted
+             * behind it has already been handed over. */
+            while (position < collection->count && collection->entries[position].dead) {
+                position += 1;
+            }
+            finished = position >= collection->count;
+            if (!finished) {
+                double which = kiln_c99_as_number(part);
+                if (which == 2.0) {
+                    status = kiln_c99_new_array(&produced);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_array_push(produced,
+                                                     collection->entries[position].key);
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_array_push(produced,
+                                                     collection->entries[position].value);
+                    }
+                } else {
+                    produced = which == 1.0 ? collection->entries[position].key
+                                            : collection->entries[position].value;
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, receiver, "@@index", 7,
+                                          kiln_c99_number((double)(position + 1)), depth, thrown);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            status = kiln_c99_new_object(&step);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(finished), depth,
+                                      thrown);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            *result = step;
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_ITERATOR_NEXT: {
             kiln_value items;
             kiln_value at;
@@ -7026,18 +7142,38 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_OBJECT_FREEZE:
         case KILN_C99_METHOD_OBJECT_IS_FROZEN: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (subject.tag != KILN_VALUE_OBJECT) {
+            int *flag = NULL;
+            if (subject.tag == KILN_VALUE_OBJECT) {
+                flag = &kiln_c99_object_of(subject)->frozen;
+            } else if (subject.tag == KILN_VALUE_ARRAY) {
+                /* An array is not a `kiln_object` here, so freezing one has to reach the flag on
+                 * the array itself -- and its elements are not properties of a store, which is
+                 * why they need their own check rather than inheriting the object one. */
+                flag = &kiln_c99_array_of(subject)->frozen;
+            } else if (subject.tag == KILN_VALUE_FUNCTION) {
+                /* A function's own properties live in an object it makes on first use. Freezing
+                 * the function is freezing that store, so it has to exist first. */
+                kiln_closure *closure = kiln_c99_closure_of(subject);
+                if (closure->properties.tag != KILN_VALUE_OBJECT) {
+                    int status = kiln_c99_new_object(&closure->properties);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+                flag = &kiln_c99_object_of(closure->properties)->frozen;
+            }
+            if (flag == NULL) {
                 /* A primitive has nothing to freeze and is already as frozen as it gets. */
                 *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject : kiln_c99_boolean(1);
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
-                kiln_c99_object_of(subject)->frozen = 1;
+                *flag = 1;
                 /* The object itself, so `Object.freeze(o) === o` and a freeze can be inlined into
                  * the expression that built it. */
                 *result = subject;
             } else {
-                *result = kiln_c99_boolean(kiln_c99_object_of(subject)->frozen);
+                *result = kiln_c99_boolean(*flag);
             }
             return KILN_C99_OK;
         }
@@ -7094,6 +7230,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         return KILN_C99_CONTROL_ERROR;
     }
     array = kiln_c99_array_of(receiver);
+    if (array->frozen && kiln_c99_changes_length(code)) {
+        /* A TypeError rather than a silent no-op: an element write has an answer to give without
+         * doing anything -- the value it was handed -- and `push` does not. Its answer is the new
+         * length, and there is no honest one. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot add or remove an element of a frozen array");
+    }
     switch (code) {
     case KILN_C99_METHOD_PUSH:
         for (index = 0; index < argc; ++index) {
@@ -7340,7 +7483,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 at -= 1;
             }
             if (at == 0) {
-                return KILN_C99_CONTROL_ERROR;
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Reduce of empty array with no initial value");
             }
             at -= 1;
             accumulator = array->elements[at];
@@ -7683,13 +7827,20 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         if (argc > 1) {
             accumulator = args[1];
         } else {
-            /* Without a seed the first element is the accumulator, and an empty array is a
-             * TypeError rather than undefined -- there is no answer to give. */
-            if (length == 0) {
-                return KILN_C99_CONTROL_ERROR;
+            /* Without a seed the accumulator is the first element that is *there*: folding a
+             * hole in would turn every sum over a sparse array into NaN. An array of nothing but
+             * holes has no answer to give, exactly as an empty one does not. */
+            while (index < length && kiln_c99_is_hole(array->elements[index])) {
+                index += 1;
             }
-            accumulator = array->elements[0];
-            index = 1;
+            if (index >= length) {
+                /* A TypeError the program can catch, not a refusal: `[].reduce(f)` is ordinary
+                 * code with an ordinary error, and a fatal status would make it unwritable. */
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Reduce of empty array with no initial value");
+            }
+            accumulator = array->elements[index];
+            index += 1;
         }
         for (; index < length && index < array->count; ++index) {
             kiln_value visit[4];
@@ -7748,7 +7899,11 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         kiln_collection *collection = kiln_c99_collection_of(source);
         size_t length = collection->count;
         for (index = 0; index < length && index < collection->count; ++index) {
-            kiln_value produced = collection->entries[index].value;
+            kiln_value produced;
+            if (collection->entries[index].dead) {
+                continue;
+            }
+            produced = collection->entries[index].value;
             if (collection->is_map) {
                 status = kiln_c99_new_array(&produced);
                 if (status == KILN_C99_OK) {
@@ -7900,12 +8055,21 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
     kiln_object *object;
     size_t index;
     *answer = 1;
+    if (target.tag == KILN_VALUE_STRING) {
+        /* `delete "text".length` is false: the property is real and cannot be configured away.
+         * Anything else on a string was never there, and deleting what is not there is true. */
+        *answer = !kiln_c99_same_name(key, key_len, "length");
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
-        /* Deleting an element leaves undefined behind rather than shortening the array; a hole
-         * and an undefined element are only distinguishable through `in`, and this backend
-         * cannot represent the difference. */
+        /* Deleting an element leaves a *hole*, not an undefined and not a shorter array: the
+         * slot reads as undefined, `length` is unchanged, and `in` says the element is gone. */
         double slot = kiln_c99_key_index(key, key_len);
         kiln_array *array = kiln_c99_array_of(target);
+        if (array->frozen) {
+            *answer = 0;
+            return KILN_C99_OK;
+        }
         if (slot >= 0.0 && (size_t)slot < array->count) {
             array->elements[(size_t)slot] = kiln_c99_hole();
         }
@@ -7915,6 +8079,10 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         return KILN_C99_OK;
     }
     object = kiln_c99_object_of(target);
+    if (object->frozen) {
+        *answer = 0;
+        return KILN_C99_OK;
+    }
     for (index = 0; index < object->count; ++index) {
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
@@ -8819,6 +8987,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map) {
     }
     collection->entries = NULL;
     collection->count = 0;
+    collection->live = 0;
     collection->capacity = 0;
     collection->is_map = is_map;
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
@@ -8830,6 +8999,9 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map) {
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
     size_t index;
     for (index = 0; index < collection->count; ++index) {
+        if (collection->entries[index].dead) {
+            continue;
+        }
         if (kiln_c99_same_value_zero(collection->entries[index].key, key)) {
             return (double)index;
         }
@@ -8854,7 +9026,9 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
     }
     collection->entries[collection->count].key = key;
     collection->entries[collection->count].value = value;
+    collection->entries[collection->count].dead = 0;
     collection->count += 1;
+    collection->live += 1;
     return KILN_C99_OK;
 }
 
