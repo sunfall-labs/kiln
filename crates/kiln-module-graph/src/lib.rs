@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 
 use kiln_hir::Module;
 use kiln_host_abi::HostOps;
-use kiln_interpreter::{ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module};
+use kiln_interpreter::{
+    ExecutionError, ExecutionLimits, ExecutionResult, Realm, Value, drain_realm,
+    execute_module_in_realm,
+};
 use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
 use kiln_module_resolver::{
     ModuleResolver, PathRole, ResolutionPolicy, ResolveError, SUPPORTED_EXTENSIONS,
@@ -543,6 +546,7 @@ impl ModuleGraph {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
+        let realm = Realm::new();
 
         for path in &self.order {
             let node = self
@@ -599,23 +603,23 @@ impl ModuleGraph {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let result = execute_module(&node.program, &imports, host, remaining_limits).map_err(
-                |error| {
-                    let error = match error {
-                        ExecutionError::StepLimitExceeded { steps, .. } => {
-                            ExecutionError::StepLimitExceeded {
-                                steps: total_steps.saturating_add(steps),
-                                limit: limits.max_steps,
+            let result =
+                execute_module_in_realm(&node.program, &imports, host, remaining_limits, &realm)
+                    .map_err(|error| {
+                        let error = match error {
+                            ExecutionError::StepLimitExceeded { steps, .. } => {
+                                ExecutionError::StepLimitExceeded {
+                                    steps: total_steps.saturating_add(steps),
+                                    limit: limits.max_steps,
+                                }
                             }
+                            error => error,
+                        };
+                        ModuleGraphError::Execution {
+                            module: path.clone(),
+                            error,
                         }
-                        error => error,
-                    };
-                    ModuleGraphError::Execution {
-                        module: path.clone(),
-                        error,
-                    }
-                },
-            )?;
+                    })?;
             total_steps = total_steps
                 .checked_add(result.execution.steps)
                 .ok_or(ModuleGraphError::StepOverflow)?;
@@ -654,6 +658,29 @@ impl ModuleGraph {
                 entry_result = Some(result.execution);
             }
         }
+
+        let scheduler_limits = ExecutionLimits {
+            max_steps: limits.max_steps.saturating_sub(total_steps),
+            ..limits
+        };
+        let scheduler_steps = drain_realm(&realm, host, scheduler_limits).map_err(|error| {
+            let error = match error {
+                ExecutionError::StepLimitExceeded { steps, .. } => {
+                    ExecutionError::StepLimitExceeded {
+                        steps: total_steps.saturating_add(steps),
+                        limit: limits.max_steps,
+                    }
+                }
+                error => error,
+            };
+            ModuleGraphError::Execution {
+                module: self.entry.clone(),
+                error,
+            }
+        })?;
+        total_steps = total_steps
+            .checked_add(scheduler_steps)
+            .ok_or(ModuleGraphError::StepOverflow)?;
 
         let mut result = entry_result.ok_or_else(|| ModuleGraphError::InternalMissingModule {
             path: self.entry.clone(),
@@ -1365,6 +1392,92 @@ mod tests {
         assert_eq!(host.output, ["0 10", "2 10"]);
     }
 
+    #[test]
+    fn modules_share_one_global_object() {
+        let project = TempProject::new();
+        project.write("dependency.js", "globalThis.answer = 42;");
+        let entry = project.write(
+            "main.js",
+            "import './dependency.js'; console.log(globalThis.answer);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["42"]);
+    }
+
+    #[test]
+    fn graph_drains_microtasks_after_all_module_bodies() {
+        let project = TempProject::new();
+        project.write(
+            "dependency.js",
+            "console.log('dependency body');\n\
+             queueMicrotask(() => console.log('dependency microtask'));",
+        );
+        let entry = project.write(
+            "main.js",
+            "import './dependency.js';\n\
+             console.log('entry body');\n\
+             queueMicrotask(() => console.log('entry microtask'));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(
+            host.output,
+            [
+                "dependency body",
+                "entry body",
+                "dependency microtask",
+                "entry microtask"
+            ]
+        );
+    }
+
+    #[test]
+    fn modules_share_symbol_for_identity() {
+        let project = TempProject::new();
+        project.write("dependency.js", "export const key = Symbol.for('shared');");
+        let entry = project.write(
+            "main.js",
+            "import { key } from './dependency.js';\n\
+             console.log(key === Symbol.for('shared'));",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["true"]);
+    }
+
+    #[test]
+    fn graph_drains_timers_after_all_module_bodies() {
+        let project = TempProject::new();
+        project.write(
+            "dependency.js",
+            "console.log('dependency body');\n\
+             setTimeout(() => console.log('dependency timer'), 0);",
+        );
+        let entry = project.write(
+            "main.js",
+            "import './dependency.js'; console.log('entry body');",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(
+            host.output,
+            ["dependency body", "entry body", "dependency timer"]
+        );
+    }
+
     /// A namespace object is a snapshot, and says so.
     ///
     /// Node's namespace objects are live; this one reads the exported cells once, when the
@@ -1552,6 +1665,30 @@ mod tests {
             ),
             Err(ModuleGraphError::Execution {
                 error: ExecutionError::StepLimitExceeded { steps: 1, limit: 1 },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn step_limit_includes_shared_scheduler_steps() {
+        let project = TempProject::new();
+        let entry = project.write("main.js", "queueMicrotask(() => { while (true) {} });");
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        assert!(matches!(
+            graph.execute(
+                &mut host,
+                ExecutionLimits {
+                    max_steps: 10,
+                    ..ExecutionLimits::default()
+                }
+            ),
+            Err(ModuleGraphError::Execution {
+                error: ExecutionError::StepLimitExceeded {
+                    steps: 10,
+                    limit: 10
+                },
                 ..
             })
         ));
