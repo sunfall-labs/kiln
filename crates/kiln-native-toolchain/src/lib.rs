@@ -38,6 +38,99 @@ pub enum CompilerKind {
     Cc,
 }
 
+/// The operating-system family targeted by a C compiler.
+///
+/// This is derived from the compiler's reported target triple rather than Rust's compilation
+/// target.  In particular, a compiler running on macOS can target Linux, and a compiler running
+/// on Linux can target macOS.  `Unknown` means the compiler did not provide a target probe, while
+/// `Other` is a target triple that was reported successfully but is not one of the platform
+/// families currently understood by Kiln.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TargetPlatform {
+    Macos,
+    Linux,
+    Windows,
+    Other,
+    Unknown,
+}
+
+impl TargetPlatform {
+    /// Classify a compiler-reported target triple.
+    pub fn from_target(target: &str) -> Self {
+        let target = target.trim();
+        if target.is_empty() || target.eq_ignore_ascii_case("unknown") {
+            return Self::Unknown;
+        }
+
+        // Target triples use `-` as their primary separator, but accepting `_` and `.` here
+        // keeps this classifier useful for Zig's shorter aliases and versioned Darwin triples.
+        let components = target
+            .to_ascii_lowercase()
+            .split(['-', '_', '.'])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let starts_with = |prefix: &str| {
+            components
+                .iter()
+                .any(|component| component.starts_with(prefix))
+        };
+        if starts_with("darwin") || starts_with("macos") {
+            Self::Macos
+        } else if starts_with("linux") {
+            Self::Linux
+        } else if starts_with("windows") || starts_with("mingw") || starts_with("msvc") {
+            Self::Windows
+        } else {
+            Self::Other
+        }
+    }
+
+    /// Shared-library filename suffix without a leading dot.
+    pub const fn shared_library_suffix(self) -> Option<&'static str> {
+        match self {
+            Self::Macos => Some("dylib"),
+            Self::Linux => Some("so"),
+            Self::Windows => Some("dll"),
+            Self::Other | Self::Unknown => None,
+        }
+    }
+
+    /// Default temporary shared-library filename for this target family.
+    pub const fn shared_library_name(self) -> Option<&'static str> {
+        match self {
+            Self::Macos => Some("program.dylib"),
+            Self::Linux => Some("program.so"),
+            Self::Windows => Some("program.dll"),
+            Self::Other | Self::Unknown => None,
+        }
+    }
+
+    /// Executable filename suffix for this target family.
+    pub const fn executable_suffix(self) -> &'static str {
+        match self {
+            Self::Windows => ".exe",
+            Self::Macos | Self::Linux | Self::Other | Self::Unknown => "",
+        }
+    }
+
+    /// System math library required by generated C for this target family.
+    pub const fn system_math_library(self) -> Option<&'static str> {
+        match self {
+            Self::Macos | Self::Linux => Some("m"),
+            Self::Windows | Self::Other | Self::Unknown => None,
+        }
+    }
+
+    /// Linker mode flags for a shared library, if this target family is supported.
+    pub const fn shared_link_flags(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Macos => Some(&["-dynamiclib"]),
+            Self::Linux => Some(&["-shared"]),
+            Self::Windows | Self::Other | Self::Unknown => None,
+        }
+    }
+}
+
 impl fmt::Display for CompilerKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -69,6 +162,13 @@ pub struct ToolIdentity {
     /// discovery remains usable with unusual wrappers and older drivers; callers must retain the
     /// sentinel in cache keys rather than substituting the host target.
     pub target: String,
+}
+
+impl ToolIdentity {
+    /// Classify the target reported by this compiler.
+    pub fn target_platform(&self) -> TargetPlatform {
+        TargetPlatform::from_target(&self.target)
+    }
 }
 
 impl ToolIdentity {
@@ -719,7 +819,8 @@ impl Toolchain {
         library: impl AsRef<Path>,
         options: &LinkOptions,
     ) -> Result<ArtifactReport, ToolchainError> {
-        let shared_flags = shared_library_flags(&self.identity.target)?;
+        let shared_flags =
+            shared_library_flags(self.identity.target_platform(), &self.identity.target)?;
         self.link_artifact(objects, library.as_ref(), options, shared_flags)
     }
 
@@ -869,21 +970,16 @@ fn resolve_path(path: &Path, current_dir: Option<&Path>) -> PathBuf {
     }
 }
 
-fn shared_library_flags(target: &str) -> Result<&'static [&'static str], ToolchainError> {
-    if target.contains("darwin") {
-        Ok(&["-dynamiclib"])
-    } else if target.contains("linux") {
-        Ok(&["-shared"])
-    } else if target == "unknown" && cfg!(target_os = "macos") {
-        Ok(&["-dynamiclib"])
-    } else if target == "unknown" && cfg!(target_os = "linux") {
-        Ok(&["-shared"])
-    } else {
-        Err(ToolchainError::UnsupportedPlatform {
+fn shared_library_flags(
+    platform: TargetPlatform,
+    target: &str,
+) -> Result<&'static [&'static str], ToolchainError> {
+    platform
+        .shared_link_flags()
+        .ok_or_else(|| ToolchainError::UnsupportedPlatform {
             operation: "shared-library linking",
             platform: target.to_owned(),
         })
-    }
 }
 
 fn first_non_empty_line(bytes: &[u8]) -> Option<String> {
@@ -1048,6 +1144,111 @@ mod tests {
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
     }
 
+    #[test]
+    fn target_platform_classifies_reported_triples_and_policies() {
+        let cases = [
+            (
+                "x86_64-unknown-linux-gnu",
+                TargetPlatform::Linux,
+                Some("so"),
+                Some("program.so"),
+                Some("m"),
+                Some(&["-shared"][..]),
+            ),
+            (
+                "aarch64-apple-darwin24.0.0",
+                TargetPlatform::Macos,
+                Some("dylib"),
+                Some("program.dylib"),
+                Some("m"),
+                Some(&["-dynamiclib"][..]),
+            ),
+            (
+                "aarch64-macos",
+                TargetPlatform::Macos,
+                Some("dylib"),
+                Some("program.dylib"),
+                Some("m"),
+                Some(&["-dynamiclib"][..]),
+            ),
+            (
+                "x86_64-pc-windows-msvc",
+                TargetPlatform::Windows,
+                Some("dll"),
+                Some("program.dll"),
+                None,
+                None,
+            ),
+            ("", TargetPlatform::Unknown, None, None, None, None),
+            (
+                "x86_64-unknown-haiku",
+                TargetPlatform::Other,
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        for (target, expected, suffix, name, math, shared_flags) in cases {
+            let platform = TargetPlatform::from_target(target);
+            assert_eq!(platform, expected, "target `{target}`");
+            assert_eq!(
+                platform.shared_library_suffix(),
+                suffix,
+                "target `{target}`"
+            );
+            assert_eq!(platform.shared_library_name(), name, "target `{target}`");
+            assert_eq!(platform.system_math_library(), math, "target `{target}`");
+            assert_eq!(
+                platform.shared_link_flags(),
+                shared_flags,
+                "target `{target}`"
+            );
+        }
+        assert_eq!(TargetPlatform::Windows.executable_suffix(), ".exe");
+        assert_eq!(TargetPlatform::Linux.executable_suffix(), "");
+        assert_eq!(TargetPlatform::Unknown.executable_suffix(), "");
+    }
+
+    #[test]
+    fn unknown_target_never_uses_host_shared_link_mode() {
+        let directory = temp_dir("unknown-target");
+        let object = directory.join("module.o");
+        fs::write(&object, b"object").expect("object");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("cc wrapper 1.0\n", ""),
+                ProcessOutput::failure(Some(1), "", "no target probe"),
+            ],
+            false,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/custom-cc", runner).expect("compiler probe");
+        assert_eq!(
+            toolchain.identity().target_platform(),
+            TargetPlatform::Unknown
+        );
+        let error = toolchain
+            .link_shared_library(
+                &[object],
+                directory.join("module.so"),
+                &LinkOptions::default(),
+            )
+            .expect_err("unknown target must not select host shared-link flags");
+        assert!(matches!(
+            error,
+            ToolchainError::UnsupportedPlatform { ref platform, .. } if platform == "unknown"
+        ));
+        assert_eq!(
+            runner_impl.commands().len(),
+            2,
+            "linker must not be invoked"
+        );
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn fake_shared_link_reports_pic_and_platform_flags() {
@@ -1096,10 +1297,13 @@ mod tests {
         assert_eq!(commands.len(), 4);
         assert!(commands[2].args.iter().any(|argument| argument == "-fPIC"));
         assert!(commands[3].args.iter().any(|argument| {
-            shared_library_flags(toolchain.identity().target.as_str())
-                .expect("supported platform")
-                .iter()
-                .any(|flag| argument == flag)
+            shared_library_flags(
+                toolchain.identity().target_platform(),
+                toolchain.identity().target.as_str(),
+            )
+            .expect("supported platform")
+            .iter()
+            .any(|flag| argument == flag)
         }));
         assert!(
             commands[3]
