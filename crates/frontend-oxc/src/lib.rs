@@ -671,10 +671,8 @@ impl Lowerer {
                                 self.expression(&spread.argument),
                             ));
                         }
-                        // A hole is not an undefined element -- it is absent, which `in` and
-                        // iteration can tell apart -- so it cannot be lowered as one.
                         ArrayExpressionElement::Elision(_) => {
-                            return self.unsupported_expression("array hole", expression_span);
+                            elements.push(kiln_hir::ListElement::Hole);
                         }
                         other => {
                             let Some(value) = other.as_expression() else {

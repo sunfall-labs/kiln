@@ -200,6 +200,11 @@ pub enum Instruction {
     /// Remove an own property, leaving `true` -- which is what the `delete` operator evaluates
     /// to. Stack: `[target] -> [true]`.
     DeleteProperty(u32),
+    /// Push the marker that fills a hole in an array literal.
+    ///
+    /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
+    /// walks elements can tell the two apart.
+    PushHole,
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
     /// Read `object.#name`, where the name is a constant. Stack: `[object] -> [value]`.
@@ -3129,10 +3134,15 @@ impl Compiler {
             .any(|element| matches!(element, ListElement::Spread(_)))
         {
             for element in elements {
-                let ListElement::Item(value) = element else {
-                    unreachable!("just checked that there are no spreads");
-                };
-                self.expression(value);
+                match element {
+                    ListElement::Item(value) => self.expression(value),
+                    // A hole occupies its position without contributing a value, which is what
+                    // makes it different from an element that happens to be undefined.
+                    ListElement::Hole => self.code.push(Instruction::PushHole),
+                    ListElement::Spread(_) => {
+                        unreachable!("just checked that there are no spreads")
+                    }
+                }
             }
             self.code.push(Instruction::NewArray {
                 count: elements.len() as u32,
@@ -3146,6 +3156,10 @@ impl Compiler {
             match element {
                 ListElement::Item(value) => {
                     self.expression(value);
+                    pending += 1;
+                }
+                ListElement::Hole => {
+                    self.code.push(Instruction::PushHole);
                     pending += 1;
                 }
                 ListElement::Spread(value) => {
@@ -3904,13 +3918,17 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
             collect_identifiers(callee, names, collecting);
             for argument in arguments {
-                let (ListElement::Item(value) | ListElement::Spread(value)) = argument;
+                let (ListElement::Item(value) | ListElement::Spread(value)) = argument else {
+                    continue;
+                };
                 collect_identifiers(value, names, collecting);
             }
         }
         ExpressionKind::Array { elements } => {
             for element in elements {
-                let (ListElement::Item(value) | ListElement::Spread(value)) = element;
+                let (ListElement::Item(value) | ListElement::Spread(value)) = element else {
+                    continue;
+                };
                 collect_identifiers(value, names, collecting);
             }
         }
@@ -4017,15 +4035,18 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         }
         ExpressionKind::Call { callee, arguments } | ExpressionKind::New { callee, arguments } => {
             expression_references(callee, name)
-                || arguments.iter().any(|argument| {
-                    let (ListElement::Item(value) | ListElement::Spread(value)) = argument;
-                    expression_references(value, name)
+                || arguments.iter().any(|argument| match argument {
+                    ListElement::Item(value) | ListElement::Spread(value) => {
+                        expression_references(value, name)
+                    }
+                    ListElement::Hole => false,
                 })
         }
         ExpressionKind::Array { elements } => elements.iter().any(|element| match element {
             ListElement::Item(value) | ListElement::Spread(value) => {
                 expression_references(value, name)
             }
+            ListElement::Hole => false,
         }),
         ExpressionKind::Sequence { operands } => operands
             .iter()
