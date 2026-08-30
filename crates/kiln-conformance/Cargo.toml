@@ -10,9 +10,12 @@ repository.workspace = true
 # routed through the same frontend, IR, interpreter, and runtime used by the CLI.
 [dependencies]
 frontend-oxc = { path = "../frontend-oxc" }
+kiln-digest = { path = "../kiln-digest" }
 kiln-hir = { path = "../kiln-hir" }
 kiln-ir = { path = "../kiln-ir" }
 kiln-interpreter = { path = "../kiln-interpreter" }
 kiln-module-graph = { path = "../kiln-module-graph" }
 kiln-runtime = { path = "../kiln-runtime" }
 kiln-test262 = { path = "../kiln-test262" }
+serde = { workspace = true }
+serde_json = { workspace = true }
