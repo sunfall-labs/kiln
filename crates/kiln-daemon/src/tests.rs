@@ -1960,6 +1960,28 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
             .expect("set source");
     }
 
+    let Response::Checked(summary) = client
+        .request(&Request::Check {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("check graph")
+    else {
+        panic!("expected checked response");
+    };
+    assert!(summary.diagnostics.is_empty(), "{:?}", summary.diagnostics);
+    let Response::Stats(after_check) = client.request(&Request::Stats).expect("check stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_check.graph_cache_hits, 0);
+    assert_eq!(after_check.graph_cache_misses, 1);
+    assert_eq!(after_check.graph_cache_entries, 1);
+    assert_eq!(after_check.graph_cache_modules, 2);
+
     let response = client
         .request(&Request::Run {
             source_view: SourceView(0),
@@ -1976,6 +1998,12 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     assert!(first.succeeded, "{:?}", first.diagnostics);
     assert_eq!(first.stdout, "dependency\n42\n");
     assert!(first.instructions > 0);
+
+    let Response::Stats(after_run) = client.request(&Request::Stats).expect("run stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_run.graph_cache_hits, 1);
+    assert_eq!(after_run.graph_cache_misses, 1);
 
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
@@ -1997,6 +2025,10 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     };
     assert_eq!(stats.parse_computed, 0);
     assert_eq!(stats.ir_computed, 0);
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 0);
+    assert_eq!(stats.graph_cache_entries, 1);
+    assert_eq!(stats.graph_cache_modules, 2);
 
     std::fs::write(
         &dependency,

@@ -38,6 +38,7 @@ mod cache_gc;
 mod client;
 mod dispatch;
 mod framing;
+mod graph_cache;
 mod output;
 mod server;
 mod socket;

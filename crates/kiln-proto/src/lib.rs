@@ -687,6 +687,20 @@ pub struct Stats {
     pub validated: u64,
     /// Times a recompute produced an identical value, cutting off its dependents.
     pub early_cutoff: u64,
+    /// Daemon-owned entry-rooted graph snapshot cache hits.  Query engines that do not own a
+    /// graph cache report zero for these additive fields.
+    #[serde(default)]
+    pub graph_cache_hits: u64,
+    #[serde(default)]
+    pub graph_cache_misses: u64,
+    #[serde(default)]
+    pub graph_cache_evictions: u64,
+    #[serde(default)]
+    pub graph_cache_invalidations: u64,
+    #[serde(default)]
+    pub graph_cache_entries: u64,
+    #[serde(default)]
+    pub graph_cache_modules: u64,
 }
 
 #[cfg(test)]
@@ -1031,6 +1045,23 @@ mod tests {
         });
         let summary: RunSummary = serde_json::from_value(encoded).expect("decode old summary");
         assert_eq!(summary.scalar_value, None);
+    }
+
+    #[test]
+    fn older_stats_without_graph_cache_fields_decode_with_zeroes() {
+        let stats: Stats = serde_json::from_value(serde_json::json!({
+            "revision": 7,
+            "parse_computed": 2,
+            "ir_computed": 1,
+            "interface_computed": 1,
+            "project_computed": 0,
+            "validated": 3,
+            "early_cutoff": 1
+        }))
+        .expect("older stats remain decodable");
+        assert_eq!(stats.revision, 7);
+        assert_eq!(stats.graph_cache_hits, 0);
+        assert_eq!(stats.graph_cache_modules, 0);
     }
 
     #[test]

@@ -3,16 +3,18 @@
 //! Deliberately free of I/O on the socket and of any knowledge of threads. Query preparation runs
 //! while the engine lock is held; owned interpreter/native work can then execute without it.
 
+use crate::graph_cache::{GraphCache, GraphCacheKey};
 use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, Stats,
+    RunSummary, ScalarValueSummary, SourceView, Stats,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// What the connection loop should do once the response has been written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +31,7 @@ pub enum Next {
 /// mutex is held; execution consumes this value after the mutex has been released.
 pub(crate) enum PreparedRun {
     Graph {
-        graph: Result<ModuleGraph, kiln_module_graph::ModuleGraphError>,
+        graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
         path: String,
         file: kiln_db::FileId,
         revision: u64,
@@ -142,7 +144,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             source_view: _,
         } => (
             match native_graph(engine, resolutions, &path, &project_root) {
-                Ok(Some(graph)) => native_build_graph(graph, path, project_root, output, profile),
+                Ok(Some(graph)) => native_build_graph(&graph, path, project_root, output, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
                         native_build_program(program, path, project_root, output, profile)
@@ -168,7 +170,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         } => (
             match native_graph(engine, resolutions, &path, &project_root) {
                 Ok(Some(graph)) if graph.module_count() > 1 => {
-                    native_build_shared_graph(graph, path, project_root, output, profile)
+                    native_build_shared_graph(&graph, path, project_root, output, profile)
                 }
                 Ok(Some(_)) | Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
@@ -187,7 +189,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             source_view: _,
         } => (
             match native_graph(engine, resolutions, &path, &project_root) {
-                Ok(Some(graph)) => native_run_graph(graph, path, project_root, profile),
+                Ok(Some(graph)) => native_run_graph(&graph, path, project_root, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => native_run_program(program, path, project_root, profile),
                     Err(message) => Response::Error { message },
@@ -250,6 +252,17 @@ fn check<E: QueryEngine>(
     path: String,
     project_root: String,
 ) -> Response {
+    check_with_cache(engine, None, SourceView(0), path, project_root, resolutions)
+}
+
+pub(crate) fn check_with_cache<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    source_view: SourceView,
+    path: String,
+    project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+) -> Response {
     let entry = resolve_source_path(&path, &project_root);
     let source = match entry.as_deref() {
         Some(entry) => ensure_canonical_source(engine, &path, entry, &project_root),
@@ -277,15 +290,22 @@ fn check<E: QueryEngine>(
         })
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
-        entry.and_then(
-            |entry| match build_graph(engine, resolutions, &entry, &project_root) {
+        entry.and_then(|entry| {
+            match graph_snapshot(
+                engine,
+                cache,
+                source_view,
+                &entry,
+                &project_root,
+                resolutions,
+            ) {
                 Ok(graph) => graph.resolved_export_names(&entry),
                 Err(error) => {
                     diagnostics.extend(module_graph_diagnostics(error));
                     None
                 }
-            },
-        )
+            }
+        })
     } else {
         None
     };
@@ -308,11 +328,29 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     path: String,
     project_root: String,
 ) -> Result<PreparedRun, String> {
+    prepare_run_with_cache(engine, None, SourceView(0), path, project_root, resolutions)
+}
+
+pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    source_view: SourceView,
+    path: String,
+    project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+) -> Result<PreparedRun, String> {
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
-            graph: build_graph(engine, resolutions, &entry, &project_root),
+            graph: graph_snapshot(
+                engine,
+                cache,
+                source_view,
+                &entry,
+                &project_root,
+                resolutions,
+            ),
             path,
             file,
             revision: engine.revision().0,
@@ -473,7 +511,7 @@ fn run<E: QueryEngine>(
 }
 
 fn execute_graph(
-    graph: Result<ModuleGraph, kiln_module_graph::ModuleGraphError>,
+    graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
     file: kiln_db::FileId,
     revision: u64,
@@ -554,6 +592,55 @@ fn build_graph<E: QueryEngine>(
             }
         })
     })
+}
+
+/// Return one immutable graph snapshot for the exact committed daemon state.  The caller holds
+/// the daemon-state lock while this function runs; the returned `Arc` is then safe to move into
+/// interpreter or native work after that lock is released.
+pub(crate) fn graph_snapshot<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    source_view: SourceView,
+    entry: &Path,
+    project_root: &str,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
+        kiln_module_graph::ModuleGraphError::Source {
+            path: PathBuf::from(project_root),
+            message: format!("cannot canonicalize request project root: {error}"),
+        }
+    })?;
+    if let Some(resolutions) = resolutions
+        && canonical_root != Path::new(&resolutions.project_root)
+    {
+        return Err(kiln_module_graph::ModuleGraphError::Source {
+            path: entry.to_path_buf(),
+            message: format!(
+                "request project root {} does not match pinned resolution root {}",
+                canonical_root.display(),
+                resolutions.project_root
+            ),
+        });
+    }
+    let canonical_entry = std::fs::canonicalize(entry).map_err(|error| {
+        kiln_module_graph::ModuleGraphError::Entry {
+            path: entry.to_path_buf(),
+            kind: error.kind(),
+        }
+    })?;
+    let key = GraphCacheKey::new(
+        canonical_root,
+        canonical_entry.clone(),
+        source_view,
+        engine.revision().0,
+        resolutions,
+    );
+    let mut build = || build_graph(engine, resolutions, &canonical_entry, project_root);
+    match cache {
+        Some(cache) => cache.get_or_build(key, build),
+        None => build().map(Arc::new),
+    }
 }
 
 fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<Diagnostic> {
@@ -812,7 +899,7 @@ pub(crate) fn native_build_shared_program(
 }
 
 pub(crate) fn native_build_shared_graph(
-    graph: ModuleGraph,
+    graph: &ModuleGraph,
     path: String,
     project_root: String,
     output: Option<String>,
@@ -890,7 +977,7 @@ fn prepare_native_shared_build(
 }
 
 pub(crate) fn native_build_graph(
-    graph: ModuleGraph,
+    graph: &ModuleGraph,
     path: String,
     project_root: String,
     output: Option<String>,
@@ -918,7 +1005,7 @@ pub(crate) fn native_build_graph(
             }
         };
     match builder.build_graph(
-        &graph,
+        graph,
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
@@ -963,7 +1050,7 @@ pub(crate) fn native_run_program(
 }
 
 pub(crate) fn native_run_graph(
-    graph: ModuleGraph,
+    graph: &ModuleGraph,
     path: String,
     project_root: String,
     profile: NativeProfile,
@@ -980,7 +1067,7 @@ pub(crate) fn native_run_graph(
             }
         };
     match builder.run_graph(
-        &graph,
+        graph,
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
@@ -1188,7 +1275,7 @@ fn ensure_canonical_source<E: QueryEngine>(
     Ok(canonical_file)
 }
 
-fn stats<E: QueryEngine>(engine: &E) -> Stats {
+pub(crate) fn stats<E: QueryEngine>(engine: &E) -> Stats {
     let stats = engine.stats();
     Stats {
         revision: stats.revision,
@@ -1198,5 +1285,6 @@ fn stats<E: QueryEngine>(engine: &E) -> Stats {
         project_computed: stats.project_computed,
         validated: stats.validated,
         early_cutoff: stats.early_cutoff,
+        ..Stats::default()
     }
 }
