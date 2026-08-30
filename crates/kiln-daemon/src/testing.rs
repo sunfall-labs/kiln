@@ -73,6 +73,7 @@ pub fn run(
                     .diagnostics
                     .iter()
                     .map(|diagnostic| Diagnostic {
+                        path: Some(selected.id.to_string()),
                         message: format!("{}: {}", diagnostic.phase.tag(), diagnostic.message),
                         start: diagnostic.span.map(|span| span.start),
                         end: diagnostic.span.map(|span| span.end),
