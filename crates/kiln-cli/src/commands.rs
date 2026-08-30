@@ -4,7 +4,7 @@
 //! incremental behaviour observable to a person instead of only to a test, and it is cheap:
 //! two extra round trips against a check that is meant to be a millisecond.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -55,7 +55,22 @@ pub(crate) fn run_source(
     canonical: &str,
     text: String,
 ) -> Result<Output> {
-    let (project_notes, synced_paths) =
+    run_source_with_manifest(backend, path, project_root, canonical, text).map(|(output, _)| output)
+}
+
+pub(crate) type SourceManifest = HashMap<String, u64>;
+
+/// Establish the authoritative source view for a watch and return the hashes derived from that
+/// same single read. Subsequent filesystem events use the manifest to ignore duplicate notify
+/// batches and byte-identical dependency rewrites without another project walk.
+pub(crate) fn run_source_with_manifest(
+    backend: &mut dyn Backend,
+    path: &Path,
+    project_root: &Path,
+    canonical: &str,
+    text: String,
+) -> Result<(Output, SourceManifest)> {
+    let (project_notes, synced_paths, manifest) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
@@ -63,15 +78,16 @@ pub(crate) fn run_source(
     if !synced_paths.contains(canonical) {
         backend.set_source(canonical.to_owned(), text)?;
     }
-    finish_run(backend, path, project_root, canonical, project_notes)
+    let output = finish_run(backend, path, project_root, canonical, project_notes)?;
+    Ok((output, manifest))
 }
 
 /// Execute a new snapshot of the single file owned by an already-initialized watch.
 ///
 /// The first watch iteration uses [`run_source`] to establish the authoritative project view.
-/// Later iterations observe only this target, so walking and reading the whole project again
-/// cannot discover an event that the watcher itself would act on. Uploading the bytes already
-/// read by the watcher also keeps comparison, compilation, and execution on the same save.
+/// Later iterations upload changed dependencies directly from the recursive event stream, then
+/// use this path for the target. Uploading the bytes already read by the watcher keeps comparison,
+/// compilation, and execution on the same save.
 pub(crate) fn run_watched_source(
     backend: &mut dyn Backend,
     path: &Path,
@@ -122,7 +138,7 @@ pub fn build(
     shared: bool,
 ) -> Result<Output> {
     let display = path.display().to_string();
-    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
+    let (project_notes, synced_paths, _) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     if !synced_paths.contains(&canonical) {
@@ -163,7 +179,7 @@ pub fn native_run(
     project_root: &Path,
     profile: NativeProfile,
 ) -> Result<Output> {
-    let (project_notes, synced_paths) = sync_project_sources(backend, project_root)?;
+    let (project_notes, synced_paths, _) = sync_project_sources(backend, project_root)?;
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     if !synced_paths.contains(&canonical) {
@@ -283,7 +299,7 @@ pub fn check_source(
 pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let before = backend.stats()?;
     let started = Instant::now();
-    let (notes, _) = sync_project_sources(backend, root)?;
+    let (notes, _, _) = sync_project_sources(backend, root)?;
     let summary = backend.project()?;
     let elapsed = started.elapsed();
     let after = backend.stats()?;
@@ -302,7 +318,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 fn sync_project_sources(
     backend: &mut dyn Backend,
     root: &Path,
-) -> Result<(Vec<String>, HashSet<String>)> {
+) -> Result<(Vec<String>, HashSet<String>, SourceManifest)> {
     sync_project_sources_with_override(backend, root, None)
 }
 
@@ -314,7 +330,7 @@ fn sync_project_sources_with_override(
     backend: &mut dyn Backend,
     root: &Path,
     source_override: Option<(&str, &str)>,
-) -> Result<(Vec<String>, HashSet<String>)> {
+) -> Result<(Vec<String>, HashSet<String>, SourceManifest)> {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -341,6 +357,10 @@ fn sync_project_sources_with_override(
         };
         texts.push((path, text));
     }
+    let manifest = texts
+        .iter()
+        .map(|(path, text)| (path.clone(), kiln_db::content_hash(text)))
+        .collect::<SourceManifest>();
     let needed: HashSet<String> = backend
         .sync(
             texts
@@ -362,7 +382,7 @@ fn sync_project_sources_with_override(
             backend.set_source(path, text)?;
         }
     }
-    Ok((notes, synced_paths))
+    Ok((notes, synced_paths, manifest))
 }
 
 pub fn stats(backend: &mut dyn Backend) -> Result<Output> {
