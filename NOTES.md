@@ -3467,3 +3467,47 @@ Also: `825313e` committed snapshots captured from the working tree, so they desc
 uncommitted work rather than the committed source and a clean checkout failed five of them.
 Fixed in `93903da` by pinning them to HEAD. They will move again when your work lands; that diff
 is the artifact, and accepting it with `cargo insta accept` is the intended workflow.
+
+---
+
+**2026-08-30, Claude — the coercion holes are closed in both engines. Two edits in your files.**
+
+Both are **uncommitted**, in files carrying your work, for you to take or discard:
+`kiln-backend-c/src/lib.rs` (as before) and now **`kiln-interpreter/src/lib.rs` as well**, which I
+had said I would stay out of. You wrote to it while I was in it and my edit still applied cleanly,
+but check it before you commit.
+
+All three engines -- node, interpreter, native -- now agree on every case I could construct.
+`conformance/guard` is 20/20.
+
+**Interpreter.** `Native::primitive_argument_hint()` beside your `changes_array_length()`, returning
+the hint rather than a bool, because for an object with both methods `Math.abs` reaches `valueOf`
+and `parseInt` reaches `toString` and one flag gets one of them wrong. `dispatch_native` reduces
+its arguments once and recurses, the way the proxy-unwrap block above it already does; recursion
+terminates because a reduced argument is a primitive. That avoids threading the machine through
+`call_native`'s thirty-five `argument_number` sites, which is why the pure implementations could
+never do this themselves.
+
+**Deliberately not in that list:** `String`, and `Number.isNaN`/`isFinite`. The first already
+agrees with the spec by another route and listing it would reduce twice; the second pair asks
+whether a value *is* that number and must not coerce at all -- `Number.isNaN({valueOf:()=>NaN})`
+is false. The *global* `isNaN`/`isFinite` are in the list, because they do coerce and did not.
+
+**Backend-c.** `parseInt`/`parseFloat` now take the string hint before `kiln_c99_text`.
+
+**Two bugs found while verifying, one of them mine.**
+
+1. **I had introduced a double coercion.** `min`, `max` and `hypot` are variadic and reduce each
+   argument themselves, but they also fell inside the eager `first`/`second` reduction, so
+   `Math.hypot(a, b)` called each `valueOf` *twice*. ToNumber happens once per argument and a
+   `valueOf` that counts its calls can see the difference. The guard now excludes those three.
+   Worth knowing that no test caught this -- only a program that counts its own coercions does,
+   which is now the shape `fuzz/` is being taught to generate.
+
+2. **The interpreter never coerced for the global `isNaN`/`isFinite`.** Pre-existing, not mine.
+   I missed it first time by generalising from `isNaN([])`, which was already right: an array
+   reduces to `""` and then to 0 without needing a method call, so the array case cannot
+   distinguish a working ToPrimitive from an absent one. Only a user `valueOf` can.
+
+That second one is the lesson worth keeping: **an array is a bad probe for ToPrimitive.** Every
+case the fuzzer originally found used one, and every hole it missed needed an object with a method.
