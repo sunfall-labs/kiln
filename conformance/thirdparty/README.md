@@ -32,6 +32,15 @@ All six pass. What each found is kept because it is the record of what only real
   document silently rendered as plain text -- the worst shape a missing global can take. It also
   found that `String.replace` with a *string* pattern ignored `$&`, `` $` ``, `$'` and `$$` in the
   replacement, where the regexp path handled them.
+- **acorn** parses JavaScript, so it exercises the language against itself: heavy regexes,
+  classes, string scanning, a hand-written state machine. It passed on its first run, which is
+  the only entry here that did.
+- **lodash** found that `typeof capturedName` answered `"undefined"` for a name belonging to an
+  *enclosing function* -- the check jumped to module scope and skipped everything between. Every
+  CommonJS shim a bundler emits writes `typeof exports == "object"` inside a nested function, so
+  lodash decided it was in a browser, published itself on the global object, and left
+  `module.exports` empty. It also found that `Object.getOwnPropertyNames` ignored a function's
+  own properties, which is how the same shims copy a module whose exports *are* a function.
 - **uuid** was the one that wanted a *feature* rather than a fix: `Uint8Array`, `ArrayBuffer` and
   the legacy `unescape`. It hashes a name into bytes, so it exercises the byte-level half of the
   language nothing else here touches.

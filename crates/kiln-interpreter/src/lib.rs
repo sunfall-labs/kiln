@@ -556,6 +556,8 @@ impl Native {
             (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
                 Some(Value::Number(kind.width() as f64))
             }
+            // Every function inherits from `Function.prototype`, which is what the interop
+            // shims test when they clone a module's shape.
             (Self::FunctionConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Function)))
             }
@@ -1407,6 +1409,11 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
+            // A method table stands for a prototype *object*, and `typeof Object.prototype` is
+            // "object". `Function.prototype` is the exception the specification makes: it is a
+            // function that does nothing.
+            Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
+            Self::Native(Native::PrototypeOf(_)) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
@@ -1435,6 +1442,8 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
+            Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
+            Self::Native(Native::PrototypeOf(_)) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
@@ -1773,6 +1782,8 @@ pub enum ExecutionError {
     MalformedUri,
     /// `push` and its siblings on a frozen array.
     FrozenArray,
+    /// `new Function(source)`, which needs a compiler at run time.
+    FunctionFromSource,
     /// A property assignment on something that is not an object.
     NotAnObject {
         instruction: usize,
@@ -1855,6 +1866,10 @@ impl fmt::Display for ExecutionError {
             Self::InvalidArrayLength => write!(formatter, "invalid array length"),
             Self::MalformedUri => write!(formatter, "URI malformed"),
             Self::FrozenArray => write!(formatter, "cannot change the length of a frozen array"),
+            Self::FunctionFromSource => write!(
+                formatter,
+                "`Function` cannot build a function from source at run time"
+            ),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -1933,6 +1948,10 @@ impl ExecutionError {
             Self::FrozenArray => (
                 ErrorKind::Type,
                 "Cannot add property, object is not extensible".to_owned(),
+            ),
+            Self::FunctionFromSource => (
+                ErrorKind::Type,
+                "Function cannot be built from source at run time".to_owned(),
             ),
             Self::ProxyNotSerialisable => (
                 ErrorKind::Type,
@@ -5747,7 +5766,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         globals.set("NaN", Value::Number(f64::NAN));
         globals.set("Infinity", Value::Number(f64::INFINITY));
-        let value = Value::Object(Rc::new(RefCell::new(globals)));
+        let object = Rc::new(RefCell::new(globals));
+        let value = Value::Object(Rc::clone(&object));
+        // The global object holds itself under both of its names, which is how a program reaches
+        // it without a keyword: `global.Object === Object` is the standard test for "am I in a
+        // realm that has one".
+        object.borrow_mut().set("globalThis", value.clone());
+        object.borrow_mut().set("global", value.clone());
         self.global_object = Some(value.clone());
         value
     }
@@ -6476,10 +6501,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     method => method,
                 }
             }
-            Value::Object(object) => object
-                .borrow()
-                .get(name)
-                .unwrap_or_else(|| inherited_object_property(name)),
+            Value::Object(object) => {
+                let object = object.borrow();
+                object.get(name).unwrap_or_else(|| {
+                    // An object whose prototype is explicitly `null` inherits nothing --
+                    // `Object.create(null)` is how a program asks for a bare dictionary, and
+                    // handing it `hasOwnProperty` would defeat the point.
+                    if matches!(object.prototype(), Some(Value::Null)) {
+                        Value::Undefined
+                    } else {
+                        inherited_object_property(name)
+                    }
+                })
+            }
             Value::Native(native) => native
                 .property(name)
                 .unwrap_or_else(|| function_property(name)),
@@ -7522,6 +7556,11 @@ fn json_stringify(
     Ok(match value {
         // Omitted rather than serialised: JSON has no way to spell any of these. An array
         // element that is omitted becomes null, which is also what a hole serialises as.
+        // A method table serialises as the empty object it stands for; a function serialises as
+        // nothing, which is what drops it from an object and turns it into null in an array.
+        Value::Native(Native::PrototypeOf(table)) if *table != PrototypeTable::Function => {
+            Some("{}".to_owned())
+        }
         Value::Undefined | Value::Function(_) | Value::Native(_) | Value::Callback(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
         Value::Symbol(_) => None,
@@ -7748,6 +7787,20 @@ fn call_native(
                 _ => return Err(ExecutionError::RadixOutOfRange),
             }
         }
+        // A method table's own properties are the methods it holds, which is what a
+        // plain-object check reads when it asks whether `Object.prototype` has a `constructor`.
+        Native::ObjectHasOwnProperty if matches!(receiver, Value::Native(Native::PrototypeOf(_))) => {
+            let Value::Native(table) = receiver else {
+                unreachable!("checked by the guard");
+            };
+            let name = arguments
+                .first()
+                .map_or_else(String::new, |key| key.clone().property_key());
+            Value::Boolean(!matches!(
+                table.property(&name),
+                None | Some(Value::Undefined)
+            ))
+        }
         Native::ObjectHasOwnProperty => Value::Boolean(match receiver {
             Value::Object(object) => object
                 .borrow()
@@ -7810,8 +7863,13 @@ fn call_native(
         // makes `ToPrimitive` fall through to `toString` for a plain object.
         Native::ObjectValueOf => receiver.clone(),
         Native::FunctionToString => Value::String(receiver.to_display_string()),
-        // `Function` is here for its prototype and its `toString`; building a function from a
-        // string would need the compiler at run time, which is a different kind of realm.
+        // `Function` is here for its prototype and its `toString`. Building a function from a
+        // string needs the compiler at run time, which is a different kind of realm from the one
+        // an ahead-of-time compiler targets -- and saying so is better than the `undefined` this
+        // used to return, which turned up three frames later as "undefined is not a function".
+        Native::FunctionConstructor if !arguments.is_empty() => {
+            return Err(ExecutionError::FunctionFromSource);
+        }
         Native::FunctionConstructor => Value::Undefined,
         // `Proxy()` without `new` is a TypeError in the specification; there is nothing useful
         // to return either way.
@@ -7948,10 +8006,12 @@ fn call_native(
         }),
         Native::ObjectCreate => {
             let mut data = ObjectData::default();
-            if let Some(prototype) = arguments.first()
-                && !matches!(prototype, Value::Null | Value::Undefined)
-            {
-                data.set_prototype(prototype.clone());
+            match arguments.first() {
+                // `Object.create(null)` records the absence, which is not the same as recording
+                // nothing: an object with no link at all inherits `Object.prototype`.
+                Some(Value::Null) => data.set_prototype(Value::Null),
+                Some(Value::Undefined) | None => {}
+                Some(prototype) => data.set_prototype(prototype.clone()),
             }
             Value::Object(Rc::new(RefCell::new(data)))
         }
@@ -8003,6 +8063,17 @@ fn call_native(
         Native::Reflect => Value::Undefined,
         Native::ObjectKeys => {
             let keys = match arguments.first() {
+                // A function's own properties are the ones assigned to it. This matters more
+                // than it looks: the CommonJS interop every bundler emits copies a module's
+                // exports with `getOwnPropertyNames`, and a module whose exports *are* a
+                // function -- lodash, and most of the older ecosystem -- copied nothing.
+                Some(Value::Function(closure)) => closure
+                    .properties
+                    .borrow()
+                    .keys()
+                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                    .map(|key| Value::String(key.to_owned()))
+                    .collect(),
                 Some(Value::Object(object)) => object
                     .borrow()
                     .keys()
@@ -8234,18 +8305,9 @@ fn call_native(
             }
             target
         }
-        Native::ObjectGetPrototypeOf => match arguments.first() {
-            Some(Value::Object(object)) => {
-                object.borrow().prototype().cloned().unwrap_or(Value::Null)
-            }
-            Some(Value::Function(closure)) => closure
-                .properties
-                .borrow()
-                .prototype()
-                .cloned()
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
+        Native::ObjectGetPrototypeOf => {
+            prototype_of(arguments.first().unwrap_or(&Value::Undefined))
+        }
         // Both read the clock, which lives on the machine and is virtual -- see ADR 0015.
         Native::SymbolFor | Native::SymbolKeyFor => {
             unreachable!("the symbol registry is dispatched by the interpreter")
@@ -9390,27 +9452,64 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             return object.get_own("@@entries").is_some()
                 && object.get_own("@@map").is_some() == matches!(kind, Native::MapConstructor);
         }
+        // Any other built-in that has a `prototype`: the chain is walked against it, which is
+        // what makes `Object instanceof Object` true -- `Object` is a function, so its chain
+        // reaches `Function.prototype` and then `Object.prototype`, which is what it is being
+        // compared against. A plain-object check asks exactly that.
+        Value::Native(native) => match native.property("prototype") {
+            Some(table) => table,
+            None => return false,
+        },
         _ => return false,
     };
 
-    let mut current = match value {
+    // Bounded like every other prototype walk: the chain belongs to the program, and running out
+    // of Rust stack -- or looping -- is not a way to answer a question.
+    let mut current = prototype_of(value);
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        if matches!(current, Value::Null) {
+            return false;
+        }
+        if strict_equal(&current, &prototype) {
+            return true;
+        }
+        current = prototype_of(&current);
+    }
+    false
+}
+
+/// A value's `[[Prototype]]`, or `Value::Null` at the end of the chain.
+///
+/// One function so `Object.getPrototypeOf` and `instanceof` cannot disagree about the shape of
+/// the chain -- which is the sort of disagreement that makes `x instanceof C` false for an `x`
+/// the program just built.
+fn prototype_of(value: &Value) -> Value {
+    let recorded = match value {
         Value::Object(object) => object.borrow().prototype().cloned(),
         // A subclassed array keeps its prototype with its other non-element properties, which is
         // what makes `new (class extends Array {})() instanceof that class` true.
         Value::Array(array) => array.properties.borrow().prototype().cloned(),
+        Value::Function(closure) => closure.properties.borrow().prototype().cloned(),
         _ => None,
     };
-    while let Some(link) = current {
-        if strict_equal(&link, &prototype) {
-            return true;
-        }
-        current = match &link {
-            Value::Object(object) => object.borrow().prototype().cloned(),
-            Value::Array(array) => array.properties.borrow().prototype().cloned(),
-            _ => None,
-        };
+    if let Some(link) = recorded {
+        return link;
     }
-    false
+    match value {
+        // `Object.prototype` is the end of every chain; the other tables inherit from it.
+        Value::Native(Native::PrototypeOf(PrototypeTable::Object)) => Value::Null,
+        Value::Native(Native::PrototypeOf(_)) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        }
+        // Every callable inherits `Function.prototype`, and every ordinary object
+        // `Object.prototype`. A primitive has no chain of its own to walk.
+        Value::Native(_) | Value::Bound(_) | Value::Callback(_) | Value::Function(_) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Function))
+        }
+        Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
+        Value::Object(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
+        _ => Value::Null,
+    }
 }
 
 /// `key in target`.
@@ -10965,7 +11064,10 @@ fn function_property(name: &str) -> Value {
         "call" => Value::Native(Native::FunctionCall),
         "apply" => Value::Native(Native::FunctionApply),
         "bind" => Value::Native(Native::FunctionBind),
-        _ => Value::Undefined,
+        // A function is an object, so it inherits `Object.prototype`'s methods too --
+        // `Object.hasOwnProperty.call(x, k)` reads them off the *constructor*, which is how the
+        // plain-object check every library ships is written.
+        other => inherited_object_property(other),
     }
 }
 
