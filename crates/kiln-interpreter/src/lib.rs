@@ -3456,22 +3456,43 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 }
                 self.call_with_this(closure, argc as u16, current, this_value, None)?;
             }
-            Value::Native(Native::Error(kind)) => {
-                // A native parent leaves no frame, so the expression's value has to
-                // be pushed here to match what a compiled parent's `Return` does.
+            // A native parent builds its own object, and `this` *becomes* that object rather
+            // than being handed its properties. That is the whole of `class A extends Array`:
+            // an array is not an ordinary object with elements copied onto it, it is an array.
+            // It also replaces what used to be an Error-shaped special case here.
+            Value::Native(parent) => {
+                let Some(built) = self.construct_exotic(parent, &arguments, current)? else {
+                    return Err(ExecutionError::NotConstructable {
+                        instruction: current,
+                        value: "native",
+                    });
+                };
+                // A native parent leaves no frame, so the expression's value has to be pushed
+                // here to match what a compiled parent's `Return` does.
                 self.stack.push(Value::Undefined);
-                // A native constructor builds its own object, so its own properties
-                // are copied onto the instance. That is what `class E extends Error`
-                // needs: message, name, stack and cause end up on `this`.
-                let built = self.construct_error(kind, &arguments);
-                if let (Value::Object(instance), Value::Object(built)) = (&this_value, &built) {
-                    let built = built.borrow();
-                    let mut instance = instance.borrow_mut();
-                    for key in built.keys().map(str::to_owned).collect::<Vec<_>>() {
-                        if let Some(value) = built.get_own(&key) {
-                            instance.set(&key, value.clone());
+
+                // The derived class's prototype was put on the instance allocated up front; it
+                // has to move to the object that is actually being returned, or the subclass's
+                // methods would be unreachable and `instanceof A` would be false.
+                let prototype = match &this_value {
+                    Value::Object(instance) => instance.borrow().prototype().cloned(),
+                    _ => None,
+                };
+                if let Some(prototype) = prototype {
+                    match &built {
+                        Value::Object(object) => object.borrow_mut().set_prototype(prototype),
+                        Value::Array(array) => {
+                            array.properties.borrow_mut().set_prototype(prototype);
                         }
+                        _ => {}
                     }
+                }
+
+                // `this` is the parent's object from here on, and the frame's record of what is
+                // being constructed has to follow -- otherwise `Return` yields the abandoned one.
+                self.this_value = built.clone();
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.constructing = Some(built);
                 }
             }
             other => {
@@ -4018,6 +4039,72 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
         self.unwind(error, instruction)
     }
 
+    /// `new Set(iterable)` or `new Map(entries)`.
+    fn construct_collection(
+        &mut self,
+        kind: Native,
+        arguments: &[Value],
+        current: usize,
+    ) -> Result<Value, ExecutionError> {
+        let is_map = matches!(kind, Native::MapConstructor);
+        let mut data = ObjectData::default();
+        data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
+        if is_map {
+            data.set("@@map", Value::Boolean(true));
+        }
+        data.set("size", Value::Number(0.0));
+        let collection = Value::Object(Rc::new(RefCell::new(data)));
+        // A seeded collection goes through `add`/`set`, so deduplication and size accounting are
+        // the same code the explicit calls use rather than a second copy of it.
+        if let Some(source) = arguments.first().cloned()
+            && !matches!(source, Value::Undefined | Value::Null)
+        {
+            for item in self.drain_iterable(&source, current)? {
+                let (key, value) = if is_map {
+                    (
+                        self.computed(&item, &Value::Number(0.0)),
+                        self.computed(&item, &Value::Number(1.0)),
+                    )
+                } else {
+                    (item, Value::Undefined)
+                };
+                call_native(
+                    if is_map {
+                        Native::MapSet
+                    } else {
+                        Native::SetAdd
+                    },
+                    &collection,
+                    &[key, value],
+                )?;
+            }
+        }
+        Ok(collection)
+    }
+
+    /// Build the object a native parent constructor produces, for `super()` in a derived class.
+    ///
+    /// `None` for a parent that has no object of its own to make -- the derived class then keeps
+    /// the instance it allocated, which is the ordinary case.
+    fn construct_exotic(
+        &mut self,
+        parent: Native,
+        arguments: &[Value],
+        current: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        Ok(Some(match parent {
+            Native::Error(kind) => self.construct_error(kind, arguments),
+            Native::ArrayConstructor => construct_array(arguments),
+            Native::SetConstructor | Native::MapConstructor => {
+                self.construct_collection(parent, arguments, current)?
+            }
+            Native::DateConstructor | Native::RegExpConstructor => {
+                self.dispatch_native(parent, &Value::Undefined, arguments, current)?
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     /// `new callee(...arguments)`.
     ///
     /// Leaves the instance on the stack for a native constructor. For a user function it pushes a
@@ -4033,6 +4120,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             Value::Native(Native::Error(kind)) => {
                 let error = self.construct_error(kind, &arguments);
                 self.stack.push(error);
+            }
+            Value::Native(Native::ArrayConstructor) => {
+                let array = construct_array(&arguments);
+                self.stack.push(array);
             }
             Value::Native(Native::DateConstructor) => {
                 let date = self.dispatch_native(
@@ -4074,40 +4165,7 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
                 self.stack.push(Value::Promise(promise));
             }
             Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
-                let is_map = matches!(kind, Native::MapConstructor);
-                let mut data = ObjectData::default();
-                data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
-                if is_map {
-                    data.set("@@map", Value::Boolean(true));
-                }
-                data.set("size", Value::Number(0.0));
-                let collection = Value::Object(Rc::new(RefCell::new(data)));
-                // `new Set(iterable)` and `new Map(entries)` seed themselves through
-                // `add`/`set`, so deduplication and size accounting are the same code
-                // the explicit calls use rather than a second copy of it.
-                if let Some(source) = arguments.first().cloned()
-                    && !matches!(source, Value::Undefined | Value::Null)
-                {
-                    for item in self.drain_iterable(&source, current)? {
-                        let (key, value) = if is_map {
-                            (
-                                self.computed(&item, &Value::Number(0.0)),
-                                self.computed(&item, &Value::Number(1.0)),
-                            )
-                        } else {
-                            (item, Value::Undefined)
-                        };
-                        call_native(
-                            if is_map {
-                                Native::MapSet
-                            } else {
-                                Native::SetAdd
-                            },
-                            &collection,
-                            &[key, value],
-                        )?;
-                    }
-                }
+                let collection = self.construct_collection(kind, &arguments, current)?;
                 self.stack.push(collection);
             }
             Value::Function(closure) => {
@@ -4452,9 +4510,10 @@ impl<'program, H: HostOps + ?Sized> Vm<'program, '_, H> {
             }
             Value::String(_) => string_property(name),
             Value::Number(_) => number_property(name),
+            // The built-in methods first, then the array's own named properties, then whatever
+            // a subclass put on its prototype -- which is the order the chain would give if the
+            // realm had an `Array.prototype` object to hang the built-ins on.
             Value::Array(items) => match array_property(name) {
-                // A property that is not an element and not a method: `index` on an `exec`
-                // result, or anything the program assigned by name.
                 Value::Undefined => items
                     .properties
                     .borrow()
@@ -6110,11 +6169,24 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         Value::Native(Native::DateConstructor) => return matches!(value, Value::Date(_)),
         Value::Native(Native::RegExpConstructor) => return matches!(value, Value::RegExp(_)),
         Value::Native(Native::ArrayConstructor) => return matches!(value, Value::Array(_)),
+        // A Set or Map is an object carrying reserved state, so the test is for that state
+        // rather than for a prototype the realm does not yet have as an object.
+        Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
+            let Value::Object(object) = value else {
+                return false;
+            };
+            let object = object.borrow();
+            return object.get_own("@@entries").is_some()
+                && object.get_own("@@map").is_some() == matches!(kind, Native::MapConstructor);
+        }
         _ => return false,
     };
 
     let mut current = match value {
         Value::Object(object) => object.borrow().prototype().cloned(),
+        // A subclassed array keeps its prototype with its other non-element properties, which is
+        // what makes `new (class extends Array {})() instanceof that class` true.
+        Value::Array(array) => array.properties.borrow().prototype().cloned(),
         _ => None,
     };
     while let Some(link) = current {
@@ -6123,6 +6195,7 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         }
         current = match &link {
             Value::Object(object) => object.borrow().prototype().cloned(),
+            Value::Array(array) => array.properties.borrow().prototype().cloned(),
             _ => None,
         };
     }
@@ -6940,6 +7013,26 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
     }
     let groups = found.groups().collect();
     Some((found.range(), groups))
+}
+
+/// `new Array(...)`: a length when given one number, the elements themselves otherwise.
+///
+/// The one-argument form is the language's oldest ambiguity -- `new Array(3)` is three holes and
+/// `new Array('3')` is one string -- and it is not this compiler's to fix.
+fn construct_array(arguments: &[Value]) -> Value {
+    if let [Value::Number(length)] = arguments {
+        let length = *length;
+        if length < 0.0 || length.fract() != 0.0 || length > 4_294_967_295.0 {
+            // A non-integer or out-of-range length is a RangeError in the specification; an
+            // empty array is closer to that than a silently truncated one.
+            return Value::Array(ArrayData::new(Vec::new()));
+        }
+        return Value::Array(ArrayData::new(vec![
+            Value::Native(Native::Hole);
+            length as usize
+        ]));
+    }
+    Value::Array(ArrayData::new(arguments.to_vec()))
 }
 
 /// The civil date a count of days since the epoch names.
