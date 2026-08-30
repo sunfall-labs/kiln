@@ -1808,6 +1808,13 @@ pub enum ExecutionError {
     /// thrown value. It exists because a rejection carries a value and an `ExecutionError`
     /// carries a message, and a promise needs the value.
     CaughtByHost,
+    /// A throw whose handler is below the current Rust re-entry.
+    ///
+    /// The value rides in [`Vm::caught`], like `CaughtByHost`, and for the same reason. It is
+    /// distinct because the two want opposite things: `CaughtByHost` means a built-in asked for
+    /// the value and will keep it, and this means nobody has taken it yet and the *same*
+    /// handler must still receive it once the Rust stack is flat.
+    ThrownAcrossNative,
     /// Any operation on a proxy whose `revoke` has been called.
     RevokedProxy,
     /// A proxy nested inside a value being serialised.
@@ -1919,6 +1926,9 @@ impl fmt::Display for ExecutionError {
                 Ok(())
             }
             Self::CaughtByHost => write!(formatter, "exception delivered to the host"),
+            Self::ThrownAcrossNative => {
+                write!(formatter, "exception travelling out of a built-in callback")
+            }
             Self::NotAnObject { instruction, value } => write!(
                 formatter,
                 "instruction {instruction} set a property on a {value}, which is not an object"
@@ -2379,6 +2389,15 @@ struct Handler {
     target: usize,
     frame_depth: usize,
     stack_height: usize,
+    /// How many Rust re-entries deep the machine was when this was installed.
+    ///
+    /// A built-in that takes a callback -- `map`, `sort`, a promise reaction -- drives the
+    /// interpreter from inside a Rust frame of its own. A throw from that callback cannot jump
+    /// straight to a handler installed *below* that frame: the Rust driver would still be
+    /// sitting there, and would carry on running whatever code the jump landed on. So the
+    /// depths are compared, and a throw that would cross one travels as an error instead until
+    /// the Rust stack is flat again.
+    native_depth: usize,
 }
 
 /// A suspended caller, restored when the callee returns.
@@ -2895,6 +2914,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         target: *target as usize,
                         frame_depth: self.frames.len(),
                         stack_height: self.stack.len(),
+                        native_depth: self.native_depth,
                     });
                 }
                 Instruction::PopHandler => {
@@ -3520,6 +3540,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// locals, `this` and arguments are put back exactly as `Return` would have -- an exception
     /// crossing a call must leave the machine in the same shape a normal return does.
     fn unwind(&mut self, thrown: Value, instruction: usize) -> Result<(), ExecutionError> {
+        // A handler installed below the current Rust re-entry cannot be jumped to from here:
+        // the built-in driving this callback is still on the Rust stack, and `run_frames` would
+        // carry on executing whatever the jump landed on -- which is the *caller's* code, at the
+        // caller's instruction pointer, inside a driver that thinks it is still running a
+        // callback. The value travels as an error instead, and the same handler takes it once
+        // every Rust frame between here and the instruction loop has returned.
+        //
+        // A *host* handler is the exception, and the reason the check is on the target rather
+        // than on the depth alone: it means the Rust frame immediately outside asked for the
+        // value, so returning to it is not crossing a boundary but arriving at one.
+        if self.handlers.last().is_some_and(|handler| {
+            handler.target != HOST_HANDLER && handler.native_depth < self.native_depth
+        }) {
+            self.caught = Some(thrown);
+            return Err(ExecutionError::ThrownAcrossNative);
+        }
         let Some(handler) = self.handlers.pop() else {
             // A `.return()` signal that reaches the top has run every `finally` between the
             // suspension point and here, which is the whole reason it was thrown.
@@ -3672,6 +3708,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 target,
                 frame_depth: depth + 1 + frame_offset,
                 stack_height: stack_base + stack_offset,
+                native_depth: self.native_depth,
             });
         }
         if started && !raising {
@@ -4891,6 +4928,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             target: HOST_HANDLER,
             frame_depth: self.frames.len(),
             stack_height: self.stack.len(),
+            native_depth: self.native_depth,
         });
         match self.call_value(callee, this_value, arguments, instruction) {
             Ok(value) => {
@@ -5275,6 +5313,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             target: HOST_HANDLER,
             frame_depth: self.frames.len(),
             stack_height: self.stack.len(),
+            native_depth: self.native_depth,
         });
         let outcome = self.resume_generator_with(generator, resume, instruction);
         self.handlers.truncate(installed);
@@ -5713,6 +5752,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Option<T>, ExecutionError> {
         match result {
             Ok(value) => Ok(Some(value)),
+            // The Rust stack is flat again here, so the handler that could not be reached
+            // from inside a callback can take the value now.
+            Err(ExecutionError::ThrownAcrossNative) => {
+                let thrown = self.caught.take().unwrap_or(Value::Undefined);
+                self.unwind(thrown, instruction)?;
+                Ok(None)
+            }
             Err(error) => match error.as_javascript_error() {
                 Some((kind, message)) => {
                     self.throw_error(kind, message, instruction)?;

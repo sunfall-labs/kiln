@@ -182,6 +182,10 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
 #define KILN_C99_OUT_OF_MEMORY (-4)
 #define KILN_C99_CALL_DEPTH_ERROR (-5)
 #define KILN_C99_UNINITIALIZED_ERROR (-6)
+/* A value the program threw, travelling outward until a handler takes it.  Distinct from every
+ * other status because those mean "this cannot be done" and this one means "the program said
+ * so": a `catch` takes this and must not take the others. */
+#define KILN_C99_THROWN (-7)
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
@@ -336,7 +340,8 @@ typedef struct kiln_host {
  * interpreter uses, so both engines print `[Function 3]` for the same function. */
 struct kiln_closure;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            kiln_value receiver, const kiln_value *args, size_t argc, int depth);
+                            kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                            kiln_value *thrown);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
@@ -767,14 +772,15 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
 static kiln_value kiln_c99_text(kiln_value value);
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
-                                  int depth);
+                                  int depth, kiln_value *thrown);
 
 /* Recursion runs on the C stack here, so depth is carried explicitly and checked before the
  * frame is entered rather than discovered by crashing. */
 /* The receiver is `this` inside the body.  A plain call passes undefined, which is what `this`
  * is in a module: modules are strict, and strict mode does not substitute the global object. */
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth) {
+                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                         kiln_value *thrown) {
     kiln_closure *closure;
     if (!kiln_c99_is_callable(callee)) {
         return KILN_C99_CONTROL_ERROR;
@@ -783,7 +789,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         return KILN_C99_CALL_DEPTH_ERROR;
     }
     if (callee.tag == KILN_VALUE_METHOD) {
-        return kiln_c99_invoke_method(host, result, callee.bits, receiver, args, argc, depth);
+        return kiln_c99_invoke_method(host, result, callee.bits, receiver, args, argc, depth,
+                                      thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN) {
         static const char empty[] = "";
@@ -798,7 +805,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
-    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1);
+    return closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
+                         thrown);
 }
 
 static kiln_value kiln_c99_number(double value) {
@@ -2049,7 +2057,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
 
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
-                                  int depth) {
+                                  int depth, kiln_value *thrown) {
     kiln_array *array;
     size_t index;
     int status;
@@ -2392,7 +2400,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 visit[0] = array->elements[index];
                 visit[1] = kiln_c99_number((double)index);
                 visit[2] = receiver;
-                status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth);
+                status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -2434,7 +2442,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             visit[2] = kiln_c99_number((double)index);
             visit[3] = receiver;
             status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,
-                                   depth);
+                                   depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -2739,6 +2747,7 @@ fn validate_code(
             | Instruction::JumpIfFalse(target)
             | Instruction::JumpIfTruthy(target)
             | Instruction::JumpIfNotNullish(target)
+            | Instruction::PushHandler(target)
                 if (*target as usize) >= code.len() =>
             {
                 return Err(invalid(
@@ -2800,6 +2809,16 @@ fn validate_code(
             continue;
         }
         match instruction {
+            // A handler is entered with the thrown value pushed onto the stack as the enclosing
+            // `try` left it, which is why the edge carries one more than the fall-through.
+            Instruction::PushHandler(target) => {
+                work.push((*target as usize, next_height + 1));
+                if index + 1 < code.len() {
+                    work.push((index + 1, next_height));
+                } else {
+                    return Err(invalid(index, "control falls off the end of the program"));
+                }
+            }
             Instruction::Jump(target) => work.push((*target as usize, next_height)),
             Instruction::JumpIfFalse(target)
             | Instruction::JumpIfTruthy(target)
@@ -2871,6 +2890,9 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetComputed
         | Instruction::CallMethod { .. }
         | Instruction::LoadThis
+        | Instruction::PushHandler(_)
+        | Instruction::PopHandler
+        | Instruction::Throw
         | Instruction::Pop
         | Instruction::Dup
         | Instruction::Unary(_)
@@ -2966,9 +2988,6 @@ fn stack_effect(
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
-        | Instruction::PushHandler(_)
-        | Instruction::PopHandler
-        | Instruction::Throw
         | Instruction::Yield
         | Instruction::Await
         | Instruction::SetPrototype
@@ -3053,6 +3072,17 @@ fn stack_effect(
         }
         // Both write a slot in place and touch no stack.
         Instruction::NewCell(_) | Instruction::MarkUninitialized(_) => Ok((height, false)),
+        // Registering and retiring a handler leave the stack alone; the *target* is reached with
+        // one more value on it, which the dataflow walk below accounts for.
+        Instruction::PushHandler(_) | Instruction::PopHandler => Ok((height, false)),
+        // A throw consumes the value and does not fall through: control leaves for a handler.
+        Instruction::Throw => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height - 1, true))
+            }
+        }
         Instruction::StoreLocal(_)
         | Instruction::StoreCell(_)
         | Instruction::StoreUpvalue(_)
@@ -3192,6 +3222,46 @@ fn slots_read_as_cells(code: &[Instruction], functions: &[FunctionProto]) -> Has
     needed
 }
 
+/// Whether anything in this program can throw, and so whether the entry point needs somewhere
+/// to put the value. A call counts: the callee's throw arrives here as a status and a value.
+fn can_throw(program: &Program) -> bool {
+    let throws = |code: &[Instruction]| {
+        code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::Throw | Instruction::Call { .. } | Instruction::CallMethod { .. }
+            )
+        })
+    };
+    throws(&program.code) || program.functions.iter().any(|proto| throws(&proto.code))
+}
+
+/// What a call site does when the callee threw: jump to this body's handler, or hand it on.
+fn unwind_or_return(handlers: &[u32]) -> &'static str {
+    if handlers.is_empty() {
+        "return status;"
+    } else {
+        "goto kiln_unwind;"
+    }
+}
+
+/// The instruction indices a body registers as exception handlers.
+///
+/// The set, not the count: an unwind has to jump to one of them, and C has no computed goto, so
+/// the emitted dispatch is a switch over exactly these labels.
+fn handler_targets(code: &[Instruction]) -> Vec<u32> {
+    let mut targets: Vec<u32> = code
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::PushHandler(target) => Some(*target),
+            _ => None,
+        })
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
 /// The local slots a body puts into the temporal dead zone.
 fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
     code.iter()
@@ -3206,7 +3276,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth);"
+            "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);"
         )
         .unwrap();
     }
@@ -3223,6 +3293,37 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     for (index, proto) in program.functions.iter().enumerate() {
         render_function(output, program, proto, plan.functions[index], index, symbol);
     }
+}
+
+/// Declare the handler stack a body needs, or nothing when it catches nothing.
+fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize) {
+    if handlers.is_empty() {
+        return;
+    }
+    writeln!(output, "    size_t kiln_handlers[{depth}];").unwrap();
+    writeln!(output, "    size_t kiln_handler_stack[{depth}];").unwrap();
+    output.push_str("    size_t kiln_handler_top = 0;\n");
+}
+
+/// The label a throw jumps to: take the innermost handler, restore the stack as the `try` left
+/// it, push what was thrown, and enter the catch.
+///
+/// A body whose handler stack is empty has nothing to catch with, so the throw keeps travelling
+/// -- which is the same path a body with no handlers at all takes.
+fn render_unwind(output: &mut String, handlers: &[u32]) {
+    if handlers.is_empty() {
+        return;
+    }
+    output.push_str("kiln_unwind:;\n");
+    output.push_str("    if (kiln_handler_top == 0) return KILN_C99_THROWN;\n");
+    output.push_str("    --kiln_handler_top;\n");
+    output.push_str("    sp = kiln_handler_stack[kiln_handler_top];\n");
+    output.push_str("    stack[sp++] = *thrown;\n");
+    output.push_str("    switch (kiln_handlers[kiln_handler_top]) {\n");
+    for target in handlers {
+        writeln!(output, "    case {target}: goto kiln_label_{target};").unwrap();
+    }
+    output.push_str("    default: return KILN_C99_CONTROL_ERROR;\n    }\n");
 }
 
 fn render_function(
@@ -3246,13 +3347,16 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth) {{"
+        "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(output, "    kiln_value locals[{locals}];").unwrap();
+    let handlers = handler_targets(&proto.code);
+    render_handler_prologue(output, &handlers, proto.code.len());
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str("    (void)thrown;\n");
     output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
     writeln!(
         output,
@@ -3276,6 +3380,7 @@ fn render_function(
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
+        handlers,
         site: ReturnSite::Body,
         guarded: dead_zone_slots(&proto.code),
     };
@@ -3283,6 +3388,7 @@ fn render_function(
         writeln!(output, "kiln_label_{position}:;").unwrap();
         emit_instruction(output, &proto.code[position], position, &emitter);
     }
+    render_unwind(output, &emitter.handlers);
     // A body whose control reaches the end without a `Return` is a compiler bug, not a program
     // error: the lowering always ends a body with one.
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
@@ -3321,6 +3427,13 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     if tracks_call_depth(program) {
         output.push_str("    int depth = 0;\n");
     }
+    // The entry point owns the thrown value every body writes into. It is a local rather than a
+    // parameter because the embedding signature is fixed and a reference must not cross it: an
+    // uncaught throw leaves as text in `*result` with a status that says what happened.
+    if can_throw(program) {
+        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
+        output.push_str("    kiln_value *thrown = &thrown_value;\n");
+    }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(
         output,
@@ -3328,6 +3441,11 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         usize::try_from(program.local_count).unwrap().max(1)
     )
     .unwrap();
+    render_handler_prologue(
+        &mut output,
+        &handler_targets(&program.code),
+        program.code.len(),
+    );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
@@ -3337,6 +3455,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
+        handlers: handler_targets(&program.code),
         site: ReturnSite::Entry { exports: None },
         guarded: dead_zone_slots(&program.code),
     };
@@ -3344,6 +3463,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
+    render_unwind(&mut output, &emitter.handlers);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -3384,6 +3504,13 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     if tracks_call_depth(program) {
         output.push_str("    int depth = 0;\n");
     }
+    // The entry point owns the thrown value every body writes into. It is a local rather than a
+    // parameter because the embedding signature is fixed and a reference must not cross it: an
+    // uncaught throw leaves as text in `*result` with a status that says what happened.
+    if can_throw(program) {
+        output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
+        output.push_str("    kiln_value *thrown = &thrown_value;\n");
+    }
     writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
     writeln!(
         output,
@@ -3391,6 +3518,11 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         usize::try_from(program.local_count).unwrap().max(1)
     )
     .unwrap();
+    render_handler_prologue(
+        &mut output,
+        &handler_targets(&program.code),
+        program.code.len(),
+    );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     writeln!(
         output,
@@ -3428,6 +3560,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         functions: &program.functions,
         symbol,
         callables: produces_callables(program),
+        handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
             exports: Some(&module.exports),
         },
@@ -3437,6 +3570,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
         writeln!(output, "kiln_label_{index}:;").unwrap();
         emit_instruction(&mut output, &program.code[index], index, &emitter);
     }
+    render_unwind(&mut output, &emitter.handlers);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
     output
 }
@@ -3448,6 +3582,9 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
 /// so the caller can call it.
 struct Emitter<'a> {
     constants: &'a [Constant],
+    /// The handler labels this body can unwind to, empty when it catches nothing. A body that
+    /// catches nothing propagates a throw by returning it, which needs no machinery at all.
+    handlers: Vec<u32>,
     functions: &'a [FunctionProto],
     symbol: &'a str,
     /// Whether a value reaching the embedding boundary could be a callable and so has to be
@@ -3478,6 +3615,7 @@ fn emit_instruction(
         functions,
         symbol,
         callables,
+        handlers,
         site,
         guarded,
     } = emitter;
@@ -3506,9 +3644,6 @@ fn emit_instruction(
         | Instruction::LoadNewTarget
         | Instruction::LoadArguments
         | Instruction::RestArguments(_)
-        | Instruction::PushHandler(_)
-        | Instruction::PopHandler
-        | Instruction::Throw
         | Instruction::Yield
         | Instruction::Await
         | Instruction::SetPrototype
@@ -3613,9 +3748,10 @@ fn emit_instruction(
         }
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
+            let unwind = unwind_or_return(handlers);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], kiln_c99_undefined(), call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -3702,6 +3838,25 @@ fn emit_instruction(
             );
         }
         Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
+        // The stack height is recorded with the handler, because a `catch` starts from the
+        // height the `try` began at however deep the expression that threw had got.
+        Instruction::PushHandler(target) => {
+            writeln!(
+                output,
+                "    kiln_handlers[kiln_handler_top] = {target}; kiln_handler_stack[kiln_handler_top] = sp; ++kiln_handler_top;"
+            )
+            .unwrap();
+        }
+        Instruction::PopHandler => output.push_str("    --kiln_handler_top;\n"),
+        Instruction::Throw => {
+            output.push_str("    *thrown = stack[--sp];\n");
+            if handlers.is_empty() {
+                // Nothing here can catch it, so it leaves immediately.
+                output.push_str("    return KILN_C99_THROWN;\n");
+            } else {
+                output.push_str("    goto kiln_unwind;\n");
+            }
+        }
         // Not a `GetProperty` followed by a `Call`: that would discard the receiver, and the
         // read has to yield the *unbound* function so `a.f === a.f` holds. The receiver stays on
         // the stack until the call, which is what lets both be true at once.
@@ -3710,9 +3865,10 @@ fn emit_instruction(
                 unreachable!("verification rejects a non-string method name before emission")
             };
             let argc = usize::from(*argc);
+            let unwind = unwind_or_return(handlers);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(self_value, {symbol}_constant_{name}, {}, &method); if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(self_value, {symbol}_constant_{name}, {}, &method); if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
