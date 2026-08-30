@@ -22,3 +22,15 @@ console.log(Object.hasOwn(source, first), Object.prototype.hasOwnProperty.call(s
 console.log(first in source, second in source, "plain" in source, "missing" in source);
 console.log(delete source[first], first in source, source[first]);
 console.log(delete source[second], second in source, source[second], reads);
+
+const array: any[] = [];
+const arraySymbol = Symbol("array");
+array[arraySymbol] = 4;
+array["@@iterator"] = 5;
+array.values = 6;
+array.constructor = 7;
+console.log(array[arraySymbol], Object.hasOwn(array, arraySymbol),
+  Object.prototype.hasOwnProperty.call(array, arraySymbol),
+  Object.prototype.propertyIsEnumerable.call(array, arraySymbol),
+  Object.getOwnPropertySymbols(array).length);
+console.log(array["@@iterator"], typeof array[Symbol.iterator], array.values, array.constructor);

@@ -577,6 +577,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_REGEXP_TEST 172
 #define KILN_C99_METHOD_REGEXP_EXEC 173
 #define KILN_C99_METHOD_REGEXP_TO_STRING 174
+#define KILN_C99_METHOD_STRING_ITERATOR 175
 
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
@@ -959,6 +960,7 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_same_symbol_key(const kiln_property *property, kiln_value symbol,
                                     const char *key, size_t key_len);
+static int kiln_c99_is_well_known_symbol(kiln_value symbol, const char *key, size_t key_len);
 static int kiln_c99_same_internal_key(const kiln_property *property, const char *key,
                                       size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -1051,6 +1053,7 @@ static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
+static int kiln_c99_new_string_iterator(kiln_value *out, kiln_value source);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
@@ -1061,6 +1064,8 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
 static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
 static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t key_len,
                                       kiln_value symbol, int kind, int *answer);
+static int kiln_c99_array_own_kind(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value symbol, int kind, int *found, int *enumerable);
 static int kiln_c99_delete_kind(kiln_value target, const char *key, size_t key_len,
                                 kiln_value symbol, int kind, int *answer);
 static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
@@ -1188,7 +1193,10 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static int kiln_c99_same_symbol_key(const kiln_property *property, kiln_value symbol,
                                     const char *key, size_t key_len) {
     return property->kind == KILN_PROPERTY_SYMBOL && property->symbol_value.tag == KILN_VALUE_SYMBOL &&
-           symbol.tag == KILN_VALUE_SYMBOL && property->symbol_value.bits == symbol.bits &&
+           symbol.tag == KILN_VALUE_SYMBOL &&
+           (property->symbol_value.bits == symbol.bits ||
+            (kiln_c99_is_well_known_symbol(property->symbol_value, key, key_len) &&
+             kiln_c99_is_well_known_symbol(symbol, key, key_len))) &&
            property->key_len == key_len && (key_len == 0 || memcmp(property->key, key, key_len) == 0);
 }
 
@@ -1211,7 +1219,7 @@ static int kiln_c99_put_kind(kiln_host *host, kiln_value target, const char *key
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
-        if (kiln_c99_same_name(key, key_len, "prototype")) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "prototype")) {
             closure->prototype = value;
             return KILN_C99_OK;
         }
@@ -1224,7 +1232,8 @@ static int kiln_c99_put_kind(kiln_host *host, kiln_value target, const char *key
         return kiln_c99_put_kind(host, closure->properties, key, key_len, symbol, value, depth,
                                  thrown, kind);
     }
-    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex")) {
+    if (target.tag == KILN_VALUE_REGEXP && kind == KILN_PROPERTY_STRING &&
+        kiln_c99_same_name(key, key_len, "lastIndex")) {
         /* The one property of a regexp a program may write, and the reason two evaluations of one
          * literal must not share a `kiln_regexp`. */
         kiln_c99_regexp_of(target)->last_index = kiln_c99_as_number(value);
@@ -1637,6 +1646,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REGEXP_TEST: return "test";
     case KILN_C99_METHOD_REGEXP_EXEC: return "exec";
     case KILN_C99_METHOD_REGEXP_TO_STRING: return "toString";
+    case KILN_C99_METHOD_STRING_ITERATOR: return "@@iterator";
     case KILN_C99_METHOD_MATH_RANDOM: return "random";
     case KILN_C99_METHOD_MATH_SINH: return "sinh";
     case KILN_C99_METHOD_MATH_COSH: return "cosh";
@@ -2257,6 +2267,22 @@ static kiln_value kiln_c99_well_known_value(const char *key, size_t key_len) {
         }
     }
     return kiln_c99_undefined();
+}
+
+/* Well-known symbols are realm values, not translation-unit values.  The generated units each
+ * carry a private static table, so pointer identity alone would make an imported Symbol.iterator
+ * differ from the importing unit's Symbol.iterator.  Their reserved spelling is private to this
+ * runtime (user Symbol() values use @@symbol:<serial>), making it a stable ABI identity for the
+ * specification-provided symbols. */
+static int kiln_c99_is_well_known_symbol(kiln_value symbol, const char *key, size_t key_len) {
+    kiln_symbol *value;
+    if (symbol.tag != KILN_VALUE_SYMBOL) {
+        return 0;
+    }
+    value = kiln_c99_symbol_of(symbol);
+    return value != NULL && value->key_len == key_len &&
+           (key_len == 0 || memcmp(value->key, key, key_len) == 0) &&
+           kiln_c99_well_known_value(key, key_len).tag == KILN_VALUE_SYMBOL;
 }
 
 /* The string a value names a property under.
@@ -3046,6 +3072,19 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
                (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
                                   memcmp(left.ptr, right.ptr, left.len) == 0));
     }
+    if (left.tag == KILN_VALUE_SYMBOL) {
+        return left.bits == right.bits ||
+               (kiln_c99_is_well_known_symbol(left, "@@iterator", 10) &&
+                kiln_c99_is_well_known_symbol(right, "@@iterator", 10)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@asyncIterator", 15) &&
+                kiln_c99_is_well_known_symbol(right, "@@asyncIterator", 15)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@hasInstance", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@hasInstance", 13)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@toStringTag", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@toStringTag", 13)) ||
+               (kiln_c99_is_well_known_symbol(left, "@@toPrimitive", 13) &&
+                kiln_c99_is_well_known_symbol(right, "@@toPrimitive", 13));
+    }
     return left.bits == right.bits;
 }
 
@@ -3316,7 +3355,7 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
         /* The chain ends at `Object.prototype`, whose members every object has -- unless the
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
          * that asks for. */
-        if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
             uint64_t inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
@@ -3394,6 +3433,10 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         size_t index;
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         /* The flag letters, in the order the specification lists their accessors. */
         static const char known[] = "dgimsuvy";
         static const char *const names[] = {"hasIndices", "global",  "ignoreCase", "multiline",
@@ -3440,21 +3483,40 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
-        if (kind != KILN_PROPERTY_STRING) {
-            kiln_array *self_array = kiln_c99_array_of(target);
-            if (self_array->properties.tag == KILN_VALUE_OBJECT) {
-                kiln_object *store = kiln_c99_object_of(self_array->properties);
-                for (index = 0; index < store->count; ++index) {
-                    int matches = kind == KILN_PROPERTY_SYMBOL
-                                      ? kiln_c99_same_symbol_key(&store->properties[index], symbol, key,
-                                                                 key_len)
-                                      : kiln_c99_same_internal_key(&store->properties[index], key, key_len);
-                    if (matches) {
-                        *out = store->properties[index].value;
-                        return KILN_C99_OK;
-                    }
+        kiln_array *self_array = kiln_c99_array_of(target);
+        if (self_array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_object *store = kiln_c99_object_of(self_array->properties);
+            for (index = 0; index < store->count; ++index) {
+                int matches = kind == KILN_PROPERTY_SYMBOL
+                                  ? kiln_c99_same_symbol_key(&store->properties[index], symbol, key,
+                                                             key_len)
+                              : kind == KILN_PROPERTY_INTERNAL
+                                  ? kiln_c99_same_internal_key(&store->properties[index], key, key_len)
+                                  : kiln_c99_same_key(&store->properties[index], key, key_len);
+                if (!matches) {
+                    continue;
                 }
+                if (!store->properties[index].accessor) {
+                    *out = store->properties[index].value;
+                    return KILN_C99_OK;
+                }
+                if (store->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    *out = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_call(host, out, store->properties[index].getter, target, NULL, 0,
+                                     depth, thrown);
             }
+        }
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
@@ -3507,6 +3569,18 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
     }
     case KILN_VALUE_STRING: {
         uint64_t code;
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_STRING_ITERATOR);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
             return KILN_C99_OK;
@@ -3520,9 +3594,17 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_PROMISE: {
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
                                                KILN_C99_METHOD_FINALLY);
         if (code == 0) {
@@ -3534,8 +3616,24 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
     case KILN_VALUE_COLLECTION: {
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_COLLECTION_SELF);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "size")) {
             *out = kiln_c99_number((double)collection->count);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
         code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
@@ -3552,6 +3650,10 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
         return KILN_C99_OK;
     }
     case KILN_VALUE_DATE: {
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         static const struct {
             const char *name;
             uint64_t code;
@@ -3588,6 +3690,22 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_GENERATOR: {
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_SELF);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
                                                KILN_C99_METHOD_GENERATOR_SELF);
         if (code != 0) {
@@ -3598,6 +3716,10 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
     }
     case KILN_VALUE_BOUND:
     case KILN_VALUE_METHOD: {
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         uint64_t callable = kiln_c99_callable_method(key, key_len);
         if (callable != 0) {
             *out = kiln_c99_method(callable);
@@ -3617,6 +3739,22 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_BUILTIN: {
+        if (kind == KILN_PROPERTY_SYMBOL) {
+            if (kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10) &&
+                (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+                 target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE)) {
+                *out = kiln_c99_method(target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE
+                                           ? KILN_C99_METHOD_ARRAY_VALUES
+                                           : KILN_C99_METHOD_STRING_ITERATOR);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         uint64_t code = kiln_c99_namespace_method(target.bits, key, key_len);
         if (code == 0 && !kiln_c99_is_namespace(target.bits)) {
             /* A constructor is a function, so it answers to these too. A namespace is not. */
@@ -3729,6 +3867,10 @@ static int kiln_c99_get_kind(kiln_host *host, kiln_value target, const char *key
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
     case KILN_VALUE_NUMBER:
+        if (kind != KILN_PROPERTY_STRING) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
             return KILN_C99_OK;
@@ -3853,6 +3995,15 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
             array->count = slot + 1;
         }
         return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_value text = kiln_c99_property_key(key);
+        if (text.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return key.tag == KILN_VALUE_SYMBOL
+                   ? kiln_c99_put_symbol(host, target, text.ptr, text.len, key, value, depth, thrown)
+                   : kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
@@ -3983,7 +4134,14 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         kiln_object *extra = array->properties.tag == KILN_VALUE_OBJECT
                                  ? kiln_c99_object_of(array->properties)
                                  : NULL;
-        if (array->count == 0 && (extra == NULL || extra->count == 0)) {
+        size_t visible_extra = 0;
+        if (extra != NULL) {
+            for (index = 0; index < extra->count; ++index) {
+                visible_extra += extra->properties[index].enumerable &&
+                                 extra->properties[index].kind != KILN_PROPERTY_SYMBOL;
+            }
+        }
+        if (array->count == 0 && visible_extra == 0) {
             return kiln_c99_text_append_c(text, "[]");
         }
         if (kiln_c99_text_append_c(text, "[ ") != KILN_C99_OK) {
@@ -4017,7 +4175,8 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         /* A property that is not an element is shown after the elements, which is where a console
          * puts the `index` and `input` a match result carries. */
         for (index = 0; extra != NULL && index < extra->count; ++index) {
-            if (!extra->properties[index].enumerable) {
+            if (!extra->properties[index].enumerable ||
+                extra->properties[index].kind == KILN_PROPERTY_SYMBOL) {
                 continue;
             }
             if ((array->count != 0 || index != 0) &&
@@ -6369,7 +6528,23 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value key = kiln_c99_property_key(raw_key);
             kiln_object *object;
             int found = 0;
-            if (receiver.tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+            if (key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    receiver, key.ptr, key.len, raw_key,
+                    raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                (void)enumerable;
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
+            if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(receiver);
@@ -6520,6 +6695,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_ITERATOR_SELF:
             *result = receiver;
             return KILN_C99_OK;
+        case KILN_C99_METHOD_STRING_ITERATOR:
+            return kiln_c99_new_string_iterator(result, receiver);
         case KILN_C99_METHOD_ARRAY_VALUES: {
             /* Over a snapshot, so a `for...of` that appends to the array it is walking
              * terminates -- which is what the length being read once means. */
@@ -6847,7 +7024,23 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_object *object;
             size_t slot;
             *result = kiln_c99_boolean(0);
-            if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
+            if (name.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OK;
+            }
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                int found;
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    receiver, name.ptr, name.len, raw_name,
+                    raw_name.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                *result = kiln_c99_boolean(found && enumerable);
+                return KILN_C99_OK;
+            }
+            if (receiver.tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_OK;
             }
             object = kiln_c99_object_of(receiver);
@@ -6925,7 +7118,23 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value key = kiln_c99_property_key(raw_key);
             kiln_object *object;
             int found = 0;
-            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT || key.tag != KILN_VALUE_STRING) {
+            if (argc == 0 || key.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (args[0].tag == KILN_VALUE_ARRAY) {
+                int enumerable;
+                status = kiln_c99_array_own_kind(
+                    args[0], key.ptr, key.len, raw_key,
+                    raw_key.tag == KILN_VALUE_SYMBOL ? KILN_PROPERTY_SYMBOL : KILN_PROPERTY_STRING,
+                    &found, &enumerable);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                (void)enumerable;
+                *result = kiln_c99_boolean(found);
+                return KILN_C99_OK;
+            }
+            if (args[0].tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(args[0]);
@@ -7715,10 +7924,21 @@ static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t
     kiln_value current = target;
     size_t steps;
     *answer = 0;
+    if (kind == KILN_PROPERTY_SYMBOL &&
+        kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+        if (target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_COLLECTION ||
+            target.tag == KILN_VALUE_GENERATOR ||
+            (target.tag == KILN_VALUE_BUILTIN &&
+             (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+              target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE))) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An index is present when it is in range, and `length` always is. */
-        double index = kiln_c99_key_index(key, key_len);
-        if (kiln_c99_same_name(key, key_len, "length")) {
+        double index = kind == KILN_PROPERTY_STRING ? kiln_c99_key_index(key, key_len) : -1.0;
+        if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "length")) {
             *answer = 1;
             return KILN_C99_OK;
         }
@@ -7748,9 +7968,14 @@ static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t
             }
         }
         if (kind != KILN_PROPERTY_STRING) {
+            if (kind == KILN_PROPERTY_SYMBOL &&
+                kiln_c99_is_well_known_symbol(symbol, "@@iterator", 10)) {
+                *answer = 1;
+            }
             return KILN_C99_OK;
         }
-        *answer = kiln_c99_array_method(key, key_len) != 0;
+        *answer = kiln_c99_same_name(key, key_len, "constructor") ||
+                  kiln_c99_array_method(key, key_len) != 0;
         return KILN_C99_OK;
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
@@ -7775,7 +8000,7 @@ static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t
         current = object->prototype;
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
-    if (target.tag == KILN_VALUE_OBJECT &&
+    if (kind == KILN_PROPERTY_STRING && target.tag == KILN_VALUE_OBJECT &&
         kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
         *answer = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                          KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
@@ -7787,6 +8012,46 @@ static int kiln_c99_has_property_kind(kiln_value target, const char *key, size_t
 static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer) {
     return kiln_c99_has_property_kind(target, key, key_len, kiln_c99_undefined(),
                                       KILN_PROPERTY_STRING, answer);
+}
+
+/* Array elements and the array's named-property side store are both own properties.  Keeping this
+ * walk in one place makes the reflective APIs agree with computed get/set/delete. */
+static int kiln_c99_array_own_kind(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value symbol, int kind, int *found, int *enumerable) {
+    kiln_array *array = kiln_c99_array_of(target);
+    double index = kind == KILN_PROPERTY_STRING ? kiln_c99_key_index(key, key_len) : -1.0;
+    size_t slot;
+    *found = 0;
+    *enumerable = 0;
+    if (kind == KILN_PROPERTY_STRING && kiln_c99_same_name(key, key_len, "length")) {
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    if (index >= 0.0) {
+        *found = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
+        *enumerable = *found;
+        return KILN_C99_OK;
+    }
+    if (array->properties.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_OK;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(array->properties);
+        for (slot = 0; slot < object->count; ++slot) {
+            int matches = kind == KILN_PROPERTY_SYMBOL
+                              ? kiln_c99_same_symbol_key(&object->properties[slot], symbol, key,
+                                                         key_len)
+                          : kind == KILN_PROPERTY_INTERNAL
+                              ? kiln_c99_same_internal_key(&object->properties[slot], key, key_len)
+                              : kiln_c99_same_key(&object->properties[slot], key, key_len);
+            if (matches) {
+                *found = 1;
+                *enumerable = object->properties[slot].enumerable;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return KILN_C99_OK;
 }
 
 /* `delete target[key]`: remove an own property, answering whether the name is gone afterwards.
@@ -7802,7 +8067,7 @@ static int kiln_c99_delete_kind(kiln_value target, const char *key, size_t key_l
         /* Deleting an element leaves undefined behind rather than shortening the array; a hole
          * and an undefined element are only distinguishable through `in`, and this backend
          * cannot represent the difference. */
-        double slot = kiln_c99_key_index(key, key_len);
+        double slot = kind == KILN_PROPERTY_STRING ? kiln_c99_key_index(key, key_len) : -1.0;
         kiln_array *array = kiln_c99_array_of(target);
         if (slot >= 0.0 && (size_t)slot < array->count) {
             array->elements[(size_t)slot] = kiln_c99_hole();
@@ -7971,6 +8236,17 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
             return status;
         }
         return kiln_c99_define_accessor(store, key, key_len, symbol, kind, getter, setter);
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        if (array->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&array->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return kiln_c99_define_accessor(array->properties, key, key_len, symbol, kind, getter,
+                                        setter);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
@@ -8844,6 +9120,32 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
     }
     *out = iterator;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_new_string_iterator(kiln_value *out, kiln_value source) {
+    kiln_value items;
+    uint16_t *units = NULL;
+    size_t count = 0;
+    size_t index;
+    int status;
+    if (source.tag != KILN_VALUE_STRING || kiln_c99_to_units(source, &units, &count) != KILN_C99_OK) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_array(&items);
+    for (index = 0; index < count && status == KILN_C99_OK; ++index) {
+        size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                        index + 1 < count && units[index + 1] >= 0xDC00 &&
+                        units[index + 1] <= 0xDFFF)
+                           ? 2
+                           : 1;
+        status = kiln_c99_array_push(items, kiln_c99_from_units(units + index, width));
+        index += width - 1;
+    }
+    free(units);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_new_iterator(out, items);
 }
 
 static const char *kiln_c99_error_name(uint64_t builtin) {
