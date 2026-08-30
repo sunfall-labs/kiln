@@ -2153,7 +2153,7 @@ alongside string bytes, closure records and cells. Five payload types, all `mall
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 7/7, differential 91/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 8/8, differential 92/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
@@ -2204,6 +2204,20 @@ and it is not reachable. Worth the ten minutes it took to find that out.
 So the order is: the builtin namespaces (`Object`, `Math`, `Number`, `NaN`/`Infinity`, `Array`),
 which are individually small and collectively unblock about sixteen probes; then `try`/`throw`;
 then `New` and accessors.
+
+**Those five landed, and the count went 21 to 25.** A namespace method reuses the method-value
+machinery the array and string tables already had, with the range searched telling `Math.min`
+from `Number.isNaN` -- one table, so a read and a call cannot disagree about which names exist.
+`NaN` and `Infinity` are values rather than callables but reach the program the same way, as a
+name the compiler resolves to something the runtime supplies, so they are simply pushed. The
+re-measured tally:
+
+```
+ 25  (ran, and matched the interpreter)
+  6  generator and async         5  `New`
+  6  `PushHandler` (try/catch)   5  `DefineAccessor`
+  5  the `Date` builtin          4  the `Json` builtin, 4 `NewRegExp`
+```
 
 **Two interpreter bugs fell out of looking at the builtins first**, which is why I looked:
 `typeof Math` answered `"function"`, and so did `JSON` and `Reflect`. They are namespace
