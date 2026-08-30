@@ -317,7 +317,8 @@ halves pull in opposite directions, which is why they are in one probe.\
 expected_stdout = """
 42
 threw TypeError
-inherited instance private: 1
+inherited instance private: 7
+private brand: true false
 """
 
 [[test]]

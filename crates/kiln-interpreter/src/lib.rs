@@ -14313,6 +14313,34 @@ mod tests {
     }
 
     #[test]
+    fn computed_symbol_reads_invoke_accessors() {
+        let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
+            serial: 100,
+            description: None,
+        }));
+        let array = ArrayData::new(vec![Value::Number(1.0)]);
+        array.properties.borrow_mut().define_accessor(
+            symbol.clone(),
+            Some(Value::Native(Native::ArrayValues)),
+            None,
+        );
+        let value = Value::Array(array);
+        let realm = Realm::new();
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::new(
+            no_program(),
+            Vec::new(),
+            &mut host,
+            ExecutionLimits::default(),
+            &realm,
+        );
+        let read = vm
+            .read_computed(&value, &Value::Symbol(symbol), 0)
+            .expect("symbol accessor read");
+        assert!(matches!(read, Value::Object(_)), "getter must be invoked");
+    }
+
+    #[test]
     fn spreading_something_without_own_properties_contributes_nothing() {
         // `{ ...null }` is `{}`, not a throw -- the one place object spread is more forgiving
         // than array spread.
