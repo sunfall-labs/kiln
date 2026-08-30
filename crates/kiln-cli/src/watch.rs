@@ -24,12 +24,13 @@ use std::collections::BTreeSet;
 use std::fmt::Arguments;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
 use crate::backend::Backend;
 use crate::backend::NativeBuildAtRevision;
@@ -406,11 +407,43 @@ enum NativeRefresh {
     },
 }
 
+enum NativeRunResult {
+    Completed(NativeExecution),
+    Cancelled,
+}
+
+struct NativeRun {
+    finish: Box<dyn FnOnce(Arc<AtomicBool>) -> Result<NativeRunResult> + Send + 'static>,
+}
+
+impl NativeRun {
+    fn new(
+        finish: impl FnOnce(Arc<AtomicBool>) -> Result<NativeRunResult> + Send + 'static,
+    ) -> Self {
+        Self {
+            finish: Box::new(finish),
+        }
+    }
+
+    fn finish(self, cancelled: Arc<AtomicBool>) -> Result<NativeRunResult> {
+        (self.finish)(cancelled)
+    }
+}
+
+type NativeLauncher = Box<dyn Fn(&Path) -> Result<NativeRun> + Send + 'static>;
+
+#[cfg(test)]
 type NativeExecutor = Box<dyn Fn(&Path) -> Result<NativeExecution> + Send + 'static>;
+
+struct RunningRefresh {
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+}
 
 #[derive(Default)]
 struct RefreshQueueState {
     latest: Option<RefreshJob>,
+    running: Option<RunningRefresh>,
     generation: u64,
     closed: bool,
 }
@@ -428,6 +461,7 @@ impl RefreshQueue {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if !state.closed {
+            Self::cancel_running_before(&state, job.generation);
             state.generation = job.generation;
             state.latest = Some(job);
             self.ready.notify_one();
@@ -440,6 +474,7 @@ impl RefreshQueue {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if !state.closed {
+            Self::cancel_running_before(&state, generation);
             state.generation = generation;
             state.latest = None;
         }
@@ -464,12 +499,51 @@ impl RefreshQueue {
         }
     }
 
-    fn superseded(&self, generation: u64) -> bool {
-        let state = self
+    /// Launch is the linearization point between a completed build and a newer edit. Holding the
+    /// queue lock only across `Command::spawn` means an edit that wins first prevents the stale
+    /// process entirely; an edit that follows records cancellation before `replace` returns.
+    fn launch_if_current(
+        &self,
+        generation: u64,
+        path: &Path,
+        launcher: &NativeLauncher,
+    ) -> Result<Option<(NativeRun, Arc<AtomicBool>)>> {
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        state.closed || state.generation > generation
+        if state.closed || state.generation != generation {
+            return Ok(None);
+        }
+        let run = launcher(path)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        state.running = Some(RunningRefresh {
+            generation,
+            cancelled: Arc::clone(&cancelled),
+        });
+        Ok(Some((run, cancelled)))
+    }
+
+    fn finish(&self, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state
+            .running
+            .as_ref()
+            .is_some_and(|running| running.generation == generation)
+        {
+            state.running = None;
+        }
+    }
+
+    fn cancel_running_before(state: &RefreshQueueState, generation: u64) {
+        if let Some(running) = &state.running
+            && running.generation < generation
+        {
+            running.cancelled.store(true, AtomicOrdering::SeqCst);
+        }
     }
 
     fn close(&self) {
@@ -479,6 +553,9 @@ impl RefreshQueue {
             .unwrap_or_else(|poison| poison.into_inner());
         state.closed = true;
         state.latest = None;
+        if let Some(running) = &state.running {
+            running.cancelled.store(true, AtomicOrdering::SeqCst);
+        }
         self.ready.notify_one();
     }
 }
@@ -494,10 +571,23 @@ struct Refresher {
 
 impl Refresher {
     fn new(peer: Option<Box<dyn Backend>>) -> Refresher {
-        Self::new_with_executor(peer, Box::new(execute_native))
+        Self::new_with_launcher(peer, Box::new(launch_native))
     }
 
+    #[cfg(test)]
     fn new_with_executor(peer: Option<Box<dyn Backend>>, executor: NativeExecutor) -> Refresher {
+        Self::new_with_launcher(
+            peer,
+            Box::new(move |path| {
+                let result = executor(path);
+                Ok(NativeRun::new(move |_| {
+                    result.map(NativeRunResult::Completed)
+                }))
+            }),
+        )
+    }
+
+    fn new_with_launcher(peer: Option<Box<dyn Backend>>, launcher: NativeLauncher) -> Refresher {
         let (result_tx, result_rx) = mpsc::channel::<RefreshResult>();
         if let Some(mut backend) = peer {
             let jobs = Arc::new(RefreshQueue::default());
@@ -514,23 +604,43 @@ impl Refresher {
                             job.revision,
                         )
                         .and_then(|build| match build {
-                            NativeBuildAtRevision::Built(summary)
-                                if worker_jobs.superseded(job.generation) =>
-                            {
-                                let _ = std::fs::remove_file(&summary.output_path);
-                                Ok(NativeRefresh::Stale {
-                                    current_revision: job.revision,
-                                })
-                            }
                             NativeBuildAtRevision::Built(summary) => {
-                                let execution = executor(Path::new(&summary.output_path));
-                                let _ = std::fs::remove_file(&summary.output_path);
-                                let execution = execution?;
-                                Ok(NativeRefresh::Executed {
-                                    output_path: job.path,
-                                    expected_stdout: job.expected_stdout,
-                                    execution,
-                                })
+                                let launched = worker_jobs.launch_if_current(
+                                    job.generation,
+                                    Path::new(&summary.output_path),
+                                    &launcher,
+                                );
+                                match launched {
+                                    Err(error) => {
+                                        let _ = std::fs::remove_file(&summary.output_path);
+                                        Err(error)
+                                    }
+                                    Ok(None) => {
+                                        let _ = std::fs::remove_file(&summary.output_path);
+                                        Ok(NativeRefresh::Stale {
+                                            current_revision: job.revision,
+                                        })
+                                    }
+                                    Ok(Some((run, cancelled))) => {
+                                        let execution = run.finish(cancelled);
+                                        worker_jobs.finish(job.generation);
+                                        let _ = std::fs::remove_file(&summary.output_path);
+                                        match execution? {
+                                            NativeRunResult::Completed(execution) => {
+                                                Ok(NativeRefresh::Executed {
+                                                    output_path: job.path,
+                                                    expected_stdout: job.expected_stdout,
+                                                    execution,
+                                                })
+                                            }
+                                            NativeRunResult::Cancelled => {
+                                                Ok(NativeRefresh::Stale {
+                                                    current_revision: job.revision,
+                                                })
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             NativeBuildAtRevision::Stale { current_revision } => {
                                 Ok(NativeRefresh::Stale { current_revision })
@@ -616,19 +726,24 @@ fn watch_native_output(project_root: &str, generation: u64) -> PathBuf {
     output
 }
 
-fn execute_native(path: &Path) -> Result<NativeExecution> {
+fn launch_native(path: &Path) -> Result<NativeRun> {
     const TIMEOUT: Duration = Duration::from_secs(5);
-    let mut child = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| {
-            Error::io(
-                format!("cannot execute native refresh {}", path.display()),
-                source,
-            )
-        })?;
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|source| {
+        Error::io(
+            format!("cannot execute native refresh {}", path.display()),
+            source,
+        )
+    })?;
     let stdout = child
         .stdout
         .take()
@@ -640,38 +755,95 @@ fn execute_native(path: &Path) -> Result<NativeExecution> {
     let stdout_reader = std::thread::spawn(move || read_native_pipe(stdout));
     let stderr_reader = std::thread::spawn(move || read_native_pipe(stderr));
     let deadline = Instant::now() + TIMEOUT;
-    let (status, timed_out) = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|source| Error::io("cannot wait for native refresh", source))?
-        {
-            break (status, false);
-        }
-        if Instant::now() >= deadline {
-            if let Err(source) = child.kill() {
-                if let Some(status) = child
-                    .try_wait()
-                    .map_err(|wait| Error::io("cannot wait for native refresh", wait))?
-                {
-                    break (status, false);
-                }
-                return Err(Error::io("cannot stop timed-out native refresh", source));
+    Ok(NativeRun::new(move |cancelled| {
+        let (status, timed_out, was_cancelled) = loop {
+            if cancelled.load(AtomicOrdering::SeqCst) {
+                break (stop_native(&mut child, "cancelled")?, false, true);
             }
-            let status = child
-                .wait()
-                .map_err(|source| Error::io("cannot reap timed-out native refresh", source))?;
-            break (status, true);
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|source| Error::io("cannot wait for native refresh", source))?
+            {
+                stop_native_descendants(&mut child)?;
+                break (status, false, false);
+            }
+            if Instant::now() >= deadline {
+                break (stop_native(&mut child, "timed-out")?, true, false);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = join_native_pipe(stdout_reader, "stdout")?;
+        let stderr = join_native_pipe(stderr_reader, "stderr")?;
+        if was_cancelled {
+            Ok(NativeRunResult::Cancelled)
+        } else {
+            Ok(NativeRunResult::Completed(NativeExecution {
+                exit_code: status.code(),
+                stdout,
+                stderr,
+                timed_out,
+            }))
         }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let stdout = join_native_pipe(stdout_reader, "stdout")?;
-    let stderr = join_native_pipe(stderr_reader, "stderr")?;
-    Ok(NativeExecution {
-        exit_code: status.code(),
-        stdout,
-        stderr,
-        timed_out,
-    })
+    }))
+}
+
+fn stop_native(child: &mut Child, reason: &str) -> Result<ExitStatus> {
+    let stopped = stop_native_process_tree(child);
+    let status = child
+        .wait()
+        .map_err(|source| Error::io(format!("cannot reap {reason} native refresh"), source))?;
+    stopped.map_err(|source| Error::io(format!("cannot stop {reason} native refresh"), source))?;
+    Ok(status)
+}
+
+#[cfg(unix)]
+fn stop_native_process_tree(child: &mut Child) -> std::io::Result<()> {
+    let process_group = i32::try_from(child.id())
+        .map_err(|_| std::io::Error::other("native refresh process id exceeds pid_t"))?;
+    // SAFETY: launch_native placed the child in a process group whose id is the child's pid.
+    // A negative pid asks POSIX kill(2) to signal every member of that group.
+    if unsafe { libc::kill(-process_group, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let group_error = std::io::Error::last_os_error();
+    if group_error.raw_os_error() == Some(libc::ESRCH) {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        return child.kill();
+    }
+    let _ = child.kill();
+    Err(group_error)
+}
+
+#[cfg(not(unix))]
+fn stop_native_process_tree(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        Ok(())
+    } else {
+        child.kill()
+    }
+}
+
+#[cfg(unix)]
+fn stop_native_descendants(child: &mut Child) -> Result<()> {
+    stop_native_process_tree(child)
+        .map_err(|source| Error::io("cannot stop native refresh descendants", source))
+}
+
+#[cfg(not(unix))]
+fn stop_native_descendants(_: &mut Child) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn execute_native(path: &Path) -> Result<NativeExecution> {
+    match launch_native(path)?.finish(Arc::new(AtomicBool::new(false)))? {
+        NativeRunResult::Completed(execution) => Ok(execution),
+        NativeRunResult::Cancelled => Err(Error::Protocol(
+            "native test execution was cancelled".into(),
+        )),
+    }
 }
 
 fn read_native_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
@@ -1175,10 +1347,12 @@ mod tests {
         std::fs::write(&path, "good one").expect("write");
 
         let (printed, notes) = watch_in_background(&path);
-        assert!(notes
-            .recv_timeout(Duration::from_secs(5))
-            .expect("watch should announce itself")
-            .contains("watching"));
+        assert!(
+            notes
+                .recv_timeout(Duration::from_secs(5))
+                .expect("watch should announce itself")
+                .contains("watching")
+        );
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(5))
@@ -1321,6 +1495,147 @@ mod tests {
     }
 
     #[test]
+    fn a_superseded_generation_cannot_cross_the_native_launch_boundary() {
+        let queue = RefreshQueue::default();
+        queue.replace(RefreshJob {
+            generation: 1,
+            revision: 1,
+            path: "/project/main.js".into(),
+            project_root: "/project".into(),
+            expected_stdout: "revision 1\n".into(),
+        });
+        assert_eq!(queue.next().expect("first job").generation, 1);
+        queue.replace(RefreshJob {
+            generation: 2,
+            revision: 2,
+            path: "/project/main.js".into(),
+            project_root: "/project".into(),
+            expected_stdout: "revision 2\n".into(),
+        });
+
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launch_count = Arc::clone(&launches);
+        let launcher: NativeLauncher = Box::new(move |_| {
+            launch_count.fetch_add(1, Ordering::SeqCst);
+            Ok(NativeRun::new(|_| {
+                Ok(NativeRunResult::Completed(NativeExecution {
+                    exit_code: Some(0),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    timed_out: false,
+                }))
+            }))
+        });
+
+        let launched = queue
+            .launch_if_current(1, Path::new("/project/.kiln/watch/native-1"), &launcher)
+            .expect("launch check");
+        assert!(launched.is_none());
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_new_revision_cancels_a_running_native_check_before_building_the_latest() {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        let backend = ScriptedNativeBackend {
+            requests: request_tx,
+            responses: response_rx,
+        };
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launch_count = Arc::clone(&launches);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let launcher: NativeLauncher = Box::new(move |_| {
+            let launch = launch_count.fetch_add(1, Ordering::SeqCst);
+            if launch == 0 {
+                let started = started_tx.clone();
+                return Ok(NativeRun::new(move |cancelled| {
+                    started.send(()).expect("announce running native check");
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while !cancelled.load(Ordering::SeqCst) {
+                        if Instant::now() >= deadline {
+                            return Err(Error::Protocol(
+                                "running native check was not cancelled".into(),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(NativeRunResult::Cancelled)
+                }));
+            }
+            Ok(NativeRun::new(|_| {
+                Ok(NativeRunResult::Completed(NativeExecution {
+                    exit_code: Some(0),
+                    stdout: b"revision 2\n".to_vec(),
+                    stderr: Vec::new(),
+                    timed_out: false,
+                }))
+            }))
+        });
+        let mut refresher = Refresher::new_with_launcher(Some(Box::new(backend)), launcher);
+
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 1,
+                stdout: "revision 1\n".into(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
+        let Request::NativeBuildAtRevision {
+            output: Some(first_output),
+            ..
+        } = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first native build starts")
+        else {
+            panic!("first request must target a private output");
+        };
+        response_tx
+            .send(Response::NativeBuilt(native_summary(&first_output)))
+            .expect("finish first native build");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first native check starts");
+
+        refresher.submit(
+            Some(RefreshExpectation {
+                revision: 2,
+                stdout: "revision 2\n".into(),
+            }),
+            "/project/main.js".into(),
+            "/project".into(),
+        );
+        let Request::NativeBuildAtRevision {
+            output: Some(latest_output),
+            expected_revision: 2,
+            ..
+        } = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancelled check lets the latest build start")
+        else {
+            panic!("latest request must target revision 2 and a private output");
+        };
+        response_tx
+            .send(Response::NativeBuilt(native_summary(&latest_output)))
+            .expect("finish latest native build");
+
+        let mut notes = Vec::new();
+        for _ in 0..100 {
+            refresher.drain(&mut notes).expect("drain native result");
+            if !notes.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            String::from_utf8(notes).expect("utf-8 notes"),
+            "native refresh stdout matched /project/main.js\n"
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn a_failed_foreground_run_invalidates_an_older_native_artifact() {
         let (request_tx, request_rx) = mpsc::channel();
         let (response_tx, response_rx) = mpsc::channel();
@@ -1433,9 +1748,11 @@ mod tests {
             },
         )
         .expect("stderr mismatch is reported");
-        assert!(String::from_utf8(notes)
-            .expect("notes are utf-8")
-            .contains("native refresh mismatch"));
+        assert!(
+            String::from_utf8(notes)
+                .expect("notes are utf-8")
+                .contains("native refresh mismatch")
+        );
     }
 
     #[cfg(unix)]
@@ -1461,6 +1778,67 @@ mod tests {
         assert_eq!(execution.stdout, b"native stdout\n");
         assert_eq!(execution.stderr, b"native stderr\n");
         assert!(!execution.timed_out);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_native_refresh_stops_descendants_that_hold_its_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("native-process-group");
+        let executable = dir.join("program");
+        let descendant_pid = dir.join("descendant.pid");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nsleep 10 &\nprintf '%s\\n' \"$!\" > \"{}\"\nwait\n",
+                descendant_pid.display()
+            ),
+        )
+        .expect("write executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make executable");
+
+        let run = launch_native(&executable).expect("launch fixture");
+        for _ in 0..100 {
+            if descendant_pid.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let descendant = std::fs::read_to_string(&descendant_pid)
+            .expect("descendant pid is published")
+            .trim()
+            .parse::<i32>()
+            .expect("descendant pid is numeric");
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        assert!(matches!(
+            run.finish(cancelled).expect("cancel process group"),
+            NativeRunResult::Cancelled
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a descendant retaining the pipes must not delay cancellation"
+        );
+
+        let mut descendant_is_gone = false;
+        for _ in 0..100 {
+            // SAFETY: signal zero performs existence/permission checking without sending a signal.
+            if unsafe { libc::kill(descendant, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                descendant_is_gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(descendant_is_gone, "the descendant survived cancellation");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
