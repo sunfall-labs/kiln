@@ -2144,16 +2144,36 @@ interpreter, and a dozen separate walks would be a dozen chances to disagree abo
 position is. `toUpperCase`/`toLowerCase` refuse outside ASCII, because case mapping needs Unicode
 tables the unit does not carry and guessing would disagree with the interpreter silently.
 
-**Still refused, and this is the queue in order:** `LoadGlobal`, prototypes and `New`, `sort` and
-the array methods with awkward callbacks (`find`, `some`, `every`), accessors, `delete`,
-`EnumerateKeys`, spread, `try`/`throw`, then generators and `async`.
+**Prototypes, `new`, `instanceof` and module scope landed after that**, taking the count 28 to
+31. An object and a closure each carry a prototype link; a property read walks the chain,
+iteratively and bounded, because the walk is on the C stack where running out aborts rather than
+reports; and `instanceof` reads the same chain from the other end, which is why they are written
+next to each other -- two walks that disagreed about the shape of the chain is how `x instanceof
+C` goes false for an `x` the program just built.
+
+**`LoadGlobal` turned out to be reachable after all** -- from a class body, which none of the four
+shapes I tried earlier used. Module bindings become a *file-scope* array when a function reads
+one, because an exported closure reads module scope after the entry point has returned, and a
+frame that has returned is not somewhere to read from. That is also what a per-module singleton
+is, so it is the honest shape rather than a workaround.
+
+**One structural change worth knowing about: the emitted runtime now opens with a
+forward-declaration block.** The header is one long sequence of static functions and the order
+they are written in is not the order they call each other in -- a property read reaches string
+conversion, conversion reaches the array join, the join reaches the read. I reshuffled the file
+three times for that before deciding the ordering constraint should simply not exist.
+
+**Still refused, and this is the queue in order:** accessors (`DefineAccessor`, 6), `JSON` (5),
+`Date` (5), `NewRegExp` (4), spread and `IterableToArray` (3 each), `Map`/`Set`, `delete`,
+`EnumerateKeys`, `SuperCall`/`SuperForward` (so `class D extends C` still refuses), then
+generators and `async` -- which need a suspended frame and so a different shape entirely.
 
 **ADR 0021, decision 4:** object property arrays and array backing stores join the migration list
 alongside string bytes, closure records and cells. Five payload types, all `malloc`-backed, none
 freed. I said in the note above that I would stop adding sites if you objected; you have not, so
 this is the fifth and I would rather it be the last before a collector.
 
-native 8/8, differential 92/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
+native 10/10, differential 93/0/0, thirdparty 13/13, conformance 39/39, Effect 12/12, workspace
 tests and clippy clean, five warm native cache hits.
 
 ### A string position was two different things, and no probe had asked
