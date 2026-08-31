@@ -47,6 +47,9 @@ pub const STYLES: &[&str] = &["long", "short", "narrow", "digital"];
 /// The accepted values of every `<unit>Display` option.
 pub const DISPLAYS: &[&str] = &["auto", "always"];
 
+/// A flattened duration formatting part: its kind, text, and optional unit.
+pub type DurationPart = (&'static str, String, Option<&'static str>);
+
 const TEXT_STYLES: &[&str] = &["long", "short", "narrow"];
 const NUMERIC_STYLES: &[&str] = &["long", "short", "narrow", "numeric", "2-digit"];
 const SUBSECOND_STYLES: &[&str] = &["long", "short", "narrow", "numeric"];
@@ -239,10 +242,7 @@ impl DurationFormat {
     ///   specification's `PartitionNumberPattern` reports a `style: "unit"` number. This is the
     ///   one boundary here that ICU4X does not annotate: the pattern is `{0}`-plus-literal-text
     ///   and the unit name is the non-space run of it.
-    pub fn format_to_parts(
-        &self,
-        value: &Value,
-    ) -> Result<Vec<(&'static str, String, Option<&'static str>)>, Error> {
+    pub fn format_to_parts(&self, value: &Value) -> Result<Vec<DurationPart>, Error> {
         use writeable::Writeable;
         let folded = fold(value, &self.units);
         let duration = icu_duration(value.negative, &folded)?;
@@ -496,7 +496,7 @@ fn icu_duration(negative: bool, amounts: &[u128; 10]) -> Result<IcuDuration, Err
 /// annotation) and what the run is (the inner one). A stack is the only way to have both.
 struct Collector {
     stack: Vec<writeable::Part>,
-    parts: Vec<(&'static str, String, Option<&'static str>)>,
+    parts: Vec<DurationPart>,
     /// The singular names of the units whose field is `numeric` or `2-digit`, and whose group
     /// separators therefore have to go.
     ungrouped: Vec<&'static str>,
@@ -511,7 +511,7 @@ impl Collector {
         }
     }
 
-    fn finish(self) -> Vec<(&'static str, String, Option<&'static str>)> {
+    fn finish(self) -> Vec<DurationPart> {
         self.parts
     }
 
