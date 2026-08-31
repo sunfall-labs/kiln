@@ -557,6 +557,20 @@ pub enum Native {
     /// `dispose()` and `[Symbol.dispose]`, which are one function: the specification says the
     /// two properties hold the same object, and a program compares them.
     DisposableStackDispose,
+    /// `AsyncDisposableStack`: the same object driven by promises.
+    ///
+    /// It carries the same pair of slots under names of its own, so the brand check tells the
+    /// two apart -- `DisposableStack.prototype.use.call(asyncStack)` has to be refused, and the
+    /// slot it looks for is the whole of that refusal. `use` prefers `[Symbol.asyncDispose]`
+    /// and falls back to `[Symbol.dispose]`, and every disposer's result is awaited, which is
+    /// what makes `disposeAsync` a state machine where `dispose` is a loop.
+    AsyncDisposableStackConstructor,
+    AsyncDisposableStackUse,
+    AsyncDisposableStackAdopt,
+    AsyncDisposableStackDefer,
+    AsyncDisposableStackMove,
+    /// `disposeAsync()` and `[Symbol.asyncDispose]`, one function for the reason above.
+    AsyncDisposableStackDisposeAsync,
     /// `FinalizationRegistry` and its two methods, for the same reason: nothing is ever
     /// collected, so no cleanup callback ever becomes due. What the registry still has to get
     /// right is everything a program can observe synchronously -- which targets it accepts, what
@@ -1406,6 +1420,9 @@ impl Native {
             (Self::DisposableStackConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::DisposableStack),
             )),
+            (Self::AsyncDisposableStackConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::AsyncDisposableStack),
+            )),
             (Self::FinalizationRegistryConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::FinalizationRegistry),
             )),
@@ -1460,6 +1477,7 @@ impl Native {
                 PrototypeTable::WeakSet => Self::WeakSetConstructor,
                 PrototypeTable::WeakRef => Self::WeakRefConstructor,
                 PrototypeTable::DisposableStack => Self::DisposableStackConstructor,
+                PrototypeTable::AsyncDisposableStack => Self::AsyncDisposableStackConstructor,
                 PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
                 PrototypeTable::EventEmitter => Self::NodeEventEmitter,
                 PrototypeTable::Readable => Self::NodeReadable,
@@ -1497,6 +1515,7 @@ impl Native {
                     PrototypeTable::WeakSet => collection_property(false, true, name),
                     PrototypeTable::WeakRef => weak_ref_method(name),
                     PrototypeTable::DisposableStack => disposable_stack_method(name),
+                    PrototypeTable::AsyncDisposableStack => async_disposable_stack_method(name),
                     PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
                     PrototypeTable::EventEmitter => Value::Undefined,
                     PrototypeTable::Readable => Self::PrototypeOf(PrototypeTable::EventEmitter)
@@ -2840,6 +2859,7 @@ pub enum PrototypeTable {
     WeakRef,
     FinalizationRegistry,
     DisposableStack,
+    AsyncDisposableStack,
     EventEmitter,
     /// `node:stream`'s readable method table. It inherits EventEmitter and owns no transport:
     /// HTTP, TCP and in-memory producers all feed the same state machine through `push`.
@@ -6265,6 +6285,9 @@ enum Sink {
     /// One `await` inside `Array.fromAsync`. Like `Combinator`, the bookkeeping *is* the
     /// reaction: there is no JavaScript handler, only a walk to resume.
     FromAsync(Rc<FromAsync>),
+    /// One awaited disposer inside `AsyncDisposableStack.prototype.disposeAsync`. Like the two
+    /// above, there is no JavaScript handler: what resumes is the walk down the stack.
+    AsyncDisposal(Rc<AsyncDisposal>),
     /// The value an async generator yielded, being awaited before it is handed to the consumer.
     ///
     /// `yield v` in an async generator is `Await(v)` and then the yield, which is why an async
@@ -6278,6 +6301,31 @@ enum Sink {
     /// The generator itself is not carried because there is nothing to resume -- it is already
     /// finished, and all that remains is to decide the step this `return()` promised.
     AsyncGeneratorReturn(Rc<RefCell<PromiseState>>),
+}
+
+/// One `AsyncDisposableStack.prototype.disposeAsync` in flight.
+///
+/// On the heap for the same reason [`FromAsync`] is: the walk is suspended at every disposer,
+/// so what a synchronous loop would keep on the Rust stack has to survive a return to the
+/// microtask queue.
+#[derive(Debug, PartialEq)]
+struct AsyncDisposal {
+    /// The promise the caller is holding.
+    result: Rc<RefCell<PromiseState>>,
+    /// The disposers still to run, in the order they were recorded: taken from the back, so
+    /// each resource is released before the ones it was built on top of.
+    pending: RefCell<Vec<Value>>,
+    /// What the throws so far add up to -- one of them travelling as itself, several folded
+    /// into a chain of `SuppressedError`s.
+    thrown: RefCell<Option<Value>>,
+    /// Whether a resource with *no* disposer was reached. `await using x = null` records one, so
+    /// that disposal still costs the tick the declaration would have cost had the value had a
+    /// disposer -- otherwise a program's job ordering would depend on whether a resource
+    /// happened to be null.
+    needs_await: std::cell::Cell<bool>,
+    /// Whether anything has actually been awaited, which is what makes that make-up tick
+    /// unnecessary.
+    has_awaited: std::cell::Cell<bool>,
 }
 
 /// One `Array.fromAsync` in flight.
@@ -10439,6 +10487,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Eval => Native::Eval,
                         kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
                         kiln_ir::Builtin::DisposableStack => Native::DisposableStackConstructor,
+                        kiln_ir::Builtin::AsyncDisposableStack => {
+                            Native::AsyncDisposableStackConstructor
+                        }
                         kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
@@ -11516,15 +11567,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | BuiltinAccessor::SharedGrowable => {
                 matches!(receiver, Value::ArrayBuffer(buffer) if buffer.shared)
             }
-            BuiltinAccessor::DisposableStackDisposed => {
+            BuiltinAccessor::DisposableStackDisposed
+            | BuiltinAccessor::AsyncDisposableStackDisposed => {
+                let flavour = if accessor == BuiltinAccessor::DisposableStackDisposed {
+                    Disposal::Sync
+                } else {
+                    Disposal::Async
+                };
                 return match receiver {
-                    Value::Object(object) if object.borrow().get_own(DISPOSE_ENTRIES).is_some() => {
-                        Ok(Value::Boolean(Self::disposable_is_disposed(receiver)))
+                    Value::Object(object)
+                        if object.borrow().get_own(flavour.entries_key()).is_some() =>
+                    {
+                        Ok(Value::Boolean(Self::disposable_is_disposed(
+                            receiver, flavour,
+                        )))
                     }
                     _ => Err(ExecutionError::TypeErrorMessage {
-                        message: "DisposableStack.prototype.disposed called on an incompatible \
-                                  receiver"
-                            .to_owned(),
+                        message: format!(
+                            "{}.prototype.disposed called on an incompatible receiver",
+                            flavour.type_name()
+                        ),
                     }),
                 };
             }
@@ -11927,13 +11989,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // symbol registry whether a symbol is one a program could look up again.
             Native::WeakRefDeref => return self.weak_ref_deref(receiver, instruction),
             Native::DisposableStackUse => {
-                return self.disposable_use(receiver, arguments, instruction);
+                return self.disposable_use(receiver, arguments, instruction, Disposal::Sync);
             }
-            Native::DisposableStackAdopt => return self.disposable_adopt(receiver, arguments),
-            Native::DisposableStackDefer => return self.disposable_defer(receiver, arguments),
-            Native::DisposableStackMove => return self.disposable_move(receiver),
+            Native::DisposableStackAdopt => {
+                return self.disposable_adopt(receiver, arguments, Disposal::Sync);
+            }
+            Native::DisposableStackDefer => {
+                return self.disposable_defer(receiver, arguments, Disposal::Sync);
+            }
+            Native::DisposableStackMove => return self.disposable_move(receiver, Disposal::Sync),
             Native::DisposableStackDispose => {
                 return self.disposable_dispose(receiver, instruction);
+            }
+            Native::AsyncDisposableStackUse => {
+                return self.disposable_use(receiver, arguments, instruction, Disposal::Async);
+            }
+            Native::AsyncDisposableStackAdopt => {
+                return self.disposable_adopt(receiver, arguments, Disposal::Async);
+            }
+            Native::AsyncDisposableStackDefer => {
+                return self.disposable_defer(receiver, arguments, Disposal::Async);
+            }
+            Native::AsyncDisposableStackMove => {
+                return self.disposable_move(receiver, Disposal::Async);
+            }
+            Native::AsyncDisposableStackDisposeAsync => {
+                return Ok(self.async_disposable_dispose(receiver, instruction));
             }
             Native::FinalizationRegistryRegister => {
                 return self.finalization_registry_register(receiver, arguments, instruction);
@@ -11959,6 +12040,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::WeakSetConstructor
             | Native::ProxyConstructor
             | Native::DisposableStackConstructor
+            | Native::AsyncDisposableStackConstructor
             | Native::ArrayBufferConstructor
             | Native::SharedArrayBufferConstructor
             | Native::DataViewConstructor
@@ -18457,6 +18539,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.async_resume(&state, outcome, self.instruction);
                 return Ok(());
             }
+            Sink::AsyncDisposal(state) => {
+                let state = Rc::clone(state);
+                self.async_disposal_resume(&state, outcome, self.instruction);
+                return Ok(());
+            }
             Sink::AsyncGeneratorYield(generator, step) => {
                 let (generator, step) = (Rc::clone(generator), Rc::clone(step));
                 return match outcome {
@@ -20563,6 +20650,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::DisposableStackConstructor),
         );
         globals.set_non_enumerable(
+            "AsyncDisposableStack",
+            Value::Native(Native::AsyncDisposableStackConstructor),
+        );
+        globals.set_non_enumerable(
             "FinalizationRegistry",
             Value::Native(Native::FinalizationRegistryConstructor),
         );
@@ -20868,7 +20959,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.construct_collection(parent, arguments, current)?
             }
             Native::WeakRefConstructor => self.construct_weak_ref(arguments, current)?,
-            Native::DisposableStackConstructor => new_disposable_stack(),
+            Native::DisposableStackConstructor => new_disposable_stack(Disposal::Sync),
+            Native::AsyncDisposableStackConstructor => new_disposable_stack(Disposal::Async),
             Native::FinalizationRegistryConstructor => {
                 self.construct_finalization_registry(arguments, current)?
             }
@@ -21190,8 +21282,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let collection = self.construct_collection(kind, &arguments, current)?;
                 self.stack.push(collection);
             }
-            Value::Native(Native::DisposableStackConstructor) => {
-                self.stack.push(new_disposable_stack());
+            Value::Native(
+                native @ (Native::DisposableStackConstructor
+                | Native::AsyncDisposableStackConstructor),
+            ) => {
+                let flavour = if native == Native::DisposableStackConstructor {
+                    Disposal::Sync
+                } else {
+                    Disposal::Async
+                };
+                let built = self.construct_disposable_stack(flavour, &new_target, current)?;
+                self.stack.push(built);
             }
             Value::Native(Native::WeakRefConstructor) => {
                 let built = self.construct_weak_ref(&arguments, current)?;
@@ -21252,9 +21353,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `use` records the value's own `[Symbol.dispose]` against the value; `adopt` and `defer`
     /// record the callback the program handed over. Keeping all three as the same shape means
     /// `dispose` has one thing to do with each and no idea which spelling produced it.
-    fn disposable_entries(&self, receiver: &Value, what: &str) -> Result<Value, ExecutionError> {
+    fn disposable_entries(
+        &self,
+        receiver: &Value,
+        what: &str,
+        flavour: Disposal,
+    ) -> Result<Value, ExecutionError> {
         if let Value::Object(object) = receiver
-            && let Some(found) = object.borrow().get_own(DISPOSE_ENTRIES)
+            && let Some(found) = object.borrow().get_own(flavour.entries_key())
         {
             return Ok(found.clone());
         }
@@ -21264,9 +21370,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// Whether this stack has already run its disposers.
-    fn disposable_is_disposed(receiver: &Value) -> bool {
+    fn disposable_is_disposed(receiver: &Value, flavour: Disposal) -> bool {
         matches!(receiver, Value::Object(object)
-            if object.borrow().get_own(DISPOSE_DONE).is_some_and(Value::is_truthy))
+            if object.borrow().get_own(flavour.done_key()).is_some_and(Value::is_truthy))
+    }
+
+    /// Record that this stack's disposers have been run, or handed away.
+    fn disposable_mark_disposed(receiver: &Value, flavour: Disposal) {
+        if let Value::Object(object) = receiver {
+            object
+                .borrow_mut()
+                .set_non_enumerable(flavour.done_key(), Value::Boolean(true));
+        }
     }
 
     /// The brand check plus the state check every method but `dispose` starts with: a stack that
@@ -21276,12 +21391,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &self,
         receiver: &Value,
         what: &str,
+        flavour: Disposal,
     ) -> Result<Rc<ArrayData>, ExecutionError> {
-        let entries = self.disposable_entries(receiver, what)?;
+        let entries = self.disposable_entries(receiver, what, flavour)?;
         // A `ReferenceError`, not a `TypeError`: the receiver is the right kind of thing and the
         // resources it named are simply no longer there to be reached, which is exactly what a
         // reference error reports.
-        if Self::disposable_is_disposed(receiver) {
+        if Self::disposable_is_disposed(receiver, flavour) {
             return Err(ExecutionError::ReferenceErrorMessage {
                 message: format!("{what} called on an already-disposed stack"),
             });
@@ -21294,50 +21410,99 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(entries)
     }
 
-    /// `DisposableStack.prototype.use(value)`.
+    /// `DisposableStack.prototype.use(value)`, and its asynchronous namesake.
     fn disposable_use(
         &mut self,
         receiver: &Value,
         arguments: &[Value],
         instruction: usize,
+        flavour: Disposal,
     ) -> Result<Value, ExecutionError> {
-        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.use")?;
+        let what = format!("{}.prototype.use", flavour.type_name());
+        let entries = self.live_disposable_entries(receiver, &what, flavour)?;
         let value = arguments.first().cloned().unwrap_or(Value::Undefined);
         // `null` and `undefined` are nothing to dispose rather than a broken resource, which is
-        // what lets `using x = maybe()` be written without a guard.
+        // what lets `using x = maybe()` be written without a guard. The asynchronous stack still
+        // *records* one, disposer and all absent: reaching it is what makes `disposeAsync` spend
+        // a tick it would otherwise have spent awaiting a real disposer.
         if value.is_nullish() {
+            if flavour == Disposal::Async {
+                entries
+                    .borrow_mut()
+                    .push(disposal(Value::Undefined, Value::Undefined, Vec::new()));
+            }
             return Ok(value);
         }
-        let method = self.read_computed(
-            &value,
-            &Value::Symbol(Symbol::WellKnown(WellKnown::Dispose)),
-            instruction,
-        )?;
-        if !is_callable(&method) {
+        let method = self.dispose_method(&value, instruction, flavour)?;
+        let Some(method) = method else {
             return Err(ExecutionError::TypeErrorMessage {
-                message: "DisposableStack.prototype.use: the value has no callable \
-                          [Symbol.dispose]"
-                    .to_owned(),
+                message: format!("{what}: the value has no callable {}", flavour.hint_name()),
             });
-        }
+        };
         entries
             .borrow_mut()
             .push(disposal(method, value.clone(), Vec::new()));
         Ok(value)
     }
 
-    /// `DisposableStack.prototype.adopt(value, onDispose)`.
+    /// `GetDisposeMethod(V, hint)`: the disposer a value carries, or nothing.
+    ///
+    /// An asynchronous stack asks for `[Symbol.asyncDispose]` first and settles for
+    /// `[Symbol.dispose]` -- and a synchronous disposer recorded here is still *awaited*, which
+    /// costs the tick the specification spends on it and is what a test counting turns sees.
+    /// Either name is `GetMethod`, so one that is present and not callable is a `TypeError`
+    /// rather than a reason to look at the other.
+    fn dispose_method(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+        flavour: Disposal,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if flavour == Disposal::Async {
+            let asynchronous =
+                self.dispose_method_named(value, WellKnown::AsyncDispose, instruction)?;
+            if asynchronous.is_some() {
+                return Ok(asynchronous);
+            }
+        }
+        self.dispose_method_named(value, WellKnown::Dispose, instruction)
+    }
+
+    /// `GetMethod(V, @@name)`: absent when the property is nullish, refused when it is present
+    /// and not callable.
+    fn dispose_method_named(
+        &mut self,
+        value: &Value,
+        name: WellKnown,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let found =
+            self.read_computed(value, &Value::Symbol(Symbol::WellKnown(name)), instruction)?;
+        if found.is_nullish() {
+            return Ok(None);
+        }
+        if !is_callable(&found) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a function", name.description()),
+            });
+        }
+        Ok(Some(found))
+    }
+
+    /// `DisposableStack.prototype.adopt(value, onDispose)`, and its asynchronous namesake.
     fn disposable_adopt(
         &mut self,
         receiver: &Value,
         arguments: &[Value],
+        flavour: Disposal,
     ) -> Result<Value, ExecutionError> {
-        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.adopt")?;
+        let what = format!("{}.prototype.adopt", flavour.type_name());
+        let entries = self.live_disposable_entries(receiver, &what, flavour)?;
         let value = arguments.first().cloned().unwrap_or(Value::Undefined);
         let on_dispose = arguments.get(1).cloned().unwrap_or(Value::Undefined);
         if !is_callable(&on_dispose) {
             return Err(ExecutionError::TypeErrorMessage {
-                message: "DisposableStack.prototype.adopt: onDispose must be a function".to_owned(),
+                message: format!("{what}: onDispose must be a function"),
             });
         }
         entries
@@ -21346,17 +21511,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(value)
     }
 
-    /// `DisposableStack.prototype.defer(onDispose)`.
+    /// `DisposableStack.prototype.defer(onDispose)`, and its asynchronous namesake.
     fn disposable_defer(
         &mut self,
         receiver: &Value,
         arguments: &[Value],
+        flavour: Disposal,
     ) -> Result<Value, ExecutionError> {
-        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.defer")?;
+        let what = format!("{}.prototype.defer", flavour.type_name());
+        let entries = self.live_disposable_entries(receiver, &what, flavour)?;
         let on_dispose = arguments.first().cloned().unwrap_or(Value::Undefined);
         if !is_callable(&on_dispose) {
             return Err(ExecutionError::TypeErrorMessage {
-                message: "DisposableStack.prototype.defer: onDispose must be a function".to_owned(),
+                message: format!("{what}: onDispose must be a function"),
             });
         }
         entries
@@ -21370,20 +21537,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The original is left *disposed* rather than empty, which is the point: moving is how a
     /// function that built resources transfers responsibility for them to its caller, and the
     /// stack it built must not run them on the way out.
-    fn disposable_move(&mut self, receiver: &Value) -> Result<Value, ExecutionError> {
-        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.move")?;
-        let moved = new_disposable_stack();
+    fn disposable_move(
+        &mut self,
+        receiver: &Value,
+        flavour: Disposal,
+    ) -> Result<Value, ExecutionError> {
+        let what = format!("{}.prototype.move", flavour.type_name());
+        let entries = self.live_disposable_entries(receiver, &what, flavour)?;
+        let moved = new_disposable_stack(flavour);
         let taken = std::mem::take(&mut *entries.borrow_mut());
         if let Value::Object(object) = &moved {
             object
                 .borrow_mut()
-                .set_non_enumerable(DISPOSE_ENTRIES, Value::Array(ArrayData::new(taken)));
+                .set_non_enumerable(flavour.entries_key(), Value::Array(ArrayData::new(taken)));
         }
-        if let Value::Object(object) = receiver {
-            object
-                .borrow_mut()
-                .set_non_enumerable(DISPOSE_DONE, Value::Boolean(true));
-        }
+        Self::disposable_mark_disposed(receiver, flavour);
         Ok(moved)
     }
 
@@ -21398,43 +21566,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let entries = self.disposable_entries(receiver, "DisposableStack.prototype.dispose")?;
-        if Self::disposable_is_disposed(receiver) {
-            return Ok(Value::Undefined);
-        }
-        if let Value::Object(object) = receiver {
-            object
-                .borrow_mut()
-                .set_non_enumerable(DISPOSE_DONE, Value::Boolean(true));
-        }
-        let Value::Array(entries) = entries else {
+        let Some(pending) = self.disposable_take(receiver, Disposal::Sync)? else {
             return Ok(Value::Undefined);
         };
-        let pending: Vec<Value> = std::mem::take(&mut *entries.borrow_mut());
         let mut thrown: Option<Value> = None;
         for entry in pending.into_iter().rev() {
-            let Value::Array(entry) = entry else { continue };
-            let (method, this_value, list) = {
-                let entry = entry.borrow();
-                let list = match entry.get(2) {
-                    Some(Value::Array(list)) => list.borrow().clone(),
-                    _ => Vec::new(),
-                };
-                (
-                    entry.first().cloned().unwrap_or(Value::Undefined),
-                    entry.get(1).cloned().unwrap_or(Value::Undefined),
-                    list,
-                )
-            };
+            let (method, this_value, list) = Self::disposal_parts(&entry);
             let outcome = self.call_value(&method, this_value, list, instruction);
             if let Err(error) = outcome {
                 let raised = self.thrown_value(error)?;
-                thrown = Some(match thrown {
-                    None => raised,
-                    Some(earlier) => {
-                        self.construct_error(ErrorKind::Suppressed, &[raised, earlier])
-                    }
-                });
+                thrown = Some(self.suppressing(raised, thrown));
             }
         }
         match thrown {
@@ -21444,6 +21585,177 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Err(ExecutionError::ThrownAcrossNative)
             }
         }
+    }
+
+    /// Mark this stack disposed and hand back the disposers to run, innermost first.
+    ///
+    /// `None` when there is nothing to do because the stack is already spent -- which is not an
+    /// error: disposal is idempotent, and both spellings answer a second call with nothing.
+    fn disposable_take(
+        &mut self,
+        receiver: &Value,
+        flavour: Disposal,
+    ) -> Result<Option<Vec<Value>>, ExecutionError> {
+        let what = match flavour {
+            Disposal::Sync => "DisposableStack.prototype.dispose",
+            Disposal::Async => "AsyncDisposableStack.prototype.disposeAsync",
+        };
+        let entries = self.disposable_entries(receiver, what, flavour)?;
+        if Self::disposable_is_disposed(receiver, flavour) {
+            return Ok(None);
+        }
+        Self::disposable_mark_disposed(receiver, flavour);
+        let Value::Array(entries) = entries else {
+            return Ok(None);
+        };
+        // In the order they were recorded. Both callers walk them from the *back*, because a
+        // resource is released before the ones it was built on top of -- which is the whole of
+        // the ordering guarantee the stack makes.
+        Ok(Some(std::mem::take(&mut *entries.borrow_mut())))
+    }
+
+    /// The `[method, receiver, arguments]` triple a recorded disposal holds, taken apart.
+    fn disposal_parts(entry: &Value) -> (Value, Value, Vec<Value>) {
+        let Value::Array(entry) = entry else {
+            return (Value::Undefined, Value::Undefined, Vec::new());
+        };
+        let entry = entry.borrow();
+        let list = match entry.get(2) {
+            Some(Value::Array(list)) => list.borrow().clone(),
+            _ => Vec::new(),
+        };
+        (
+            entry.first().cloned().unwrap_or(Value::Undefined),
+            entry.get(1).cloned().unwrap_or(Value::Undefined),
+            list,
+        )
+    }
+
+    /// Fold a new throw into whatever disposal has already collected.
+    ///
+    /// The first one travels as itself; every one after it displaces the one before, and the
+    /// `SuppressedError` that results names both -- so nothing a disposer raised is lost, and
+    /// the outermost failure is the one a caller's `catch` sees first.
+    fn suppressing(&mut self, raised: Value, earlier: Option<Value>) -> Value {
+        match earlier {
+            None => raised,
+            Some(earlier) => self.construct_error(ErrorKind::Suppressed, &[raised, earlier]),
+        }
+    }
+
+    /// `AsyncDisposableStack.prototype.disposeAsync()`, which is `[Symbol.asyncDispose]` too.
+    ///
+    /// Every disposer's result is awaited before the next one runs, so what `dispose` does in a
+    /// loop this does as a state machine: each await hands control back to the microtask queue
+    /// and the walk resumes from [`Vm::async_disposal_resume`], which is why what it needs
+    /// between steps lives in [`AsyncDisposal`] rather than on the Rust stack.
+    ///
+    /// Nothing here throws to the caller. It is holding a promise and nothing else -- a receiver
+    /// that is not a stack at all rejects that promise rather than raising, which is what
+    /// `RequireInternalSlot` inside a promise-returning method comes to.
+    fn async_disposable_dispose(&mut self, receiver: &Value, instruction: usize) -> Value {
+        let result = PromiseState::pending();
+        let handle = Value::Promise(Rc::clone(&result));
+        let receiver = receiver.clone();
+        let taken = self.catching(|vm| vm.disposable_take(&receiver, Disposal::Async));
+        match taken {
+            Ok(None) => self.settle(&result, &Settled::Fulfilled(Value::Undefined)),
+            Ok(Some(pending)) => {
+                let state = Rc::new(AsyncDisposal {
+                    result,
+                    pending: RefCell::new(pending),
+                    thrown: RefCell::new(None),
+                    needs_await: std::cell::Cell::new(false),
+                    has_awaited: std::cell::Cell::new(false),
+                });
+                self.async_disposal_advance(&state, instruction);
+            }
+            Err(reason) => self.settle(&result, &Settled::Rejected(reason)),
+        }
+        handle
+    }
+
+    /// Run disposers until one of them hands back something to await, or until there are none.
+    fn async_disposal_advance(&mut self, state: &Rc<AsyncDisposal>, instruction: usize) {
+        loop {
+            let next = state.pending.borrow_mut().pop();
+            let Some(entry) = next else {
+                // The make-up tick: a stack that held only disposer-less resources has awaited
+                // nothing, and the specification spends exactly one `Await(undefined)` so that
+                // it settles a turn later all the same.
+                if state.needs_await.get() && !state.has_awaited.get() {
+                    state.has_awaited.set(true);
+                    self.async_disposal_await(state, Value::Undefined);
+                    return;
+                }
+                let thrown = state.thrown.borrow_mut().take();
+                let outcome = match thrown {
+                    None => Settled::Fulfilled(Value::Undefined),
+                    Some(reason) => Settled::Rejected(reason),
+                };
+                self.settle(&state.result, &outcome);
+                return;
+            };
+            let (method, this_value, list) = Self::disposal_parts(&entry);
+            // A resource recorded without a disposer -- `stack.use(null)` -- is nothing to call.
+            // It still counts, because reaching one is what makes the tick above due.
+            if !is_callable(&method) {
+                state.needs_await.set(true);
+                continue;
+            }
+            match self.catching(|vm| vm.call_value(&method, this_value, list, instruction)) {
+                // Awaited even when it is plainly `undefined`: the specification spends a tick
+                // here whatever the disposer returned, and a test counting turns can see it.
+                Ok(value) => {
+                    self.async_disposal_await(state, value);
+                    return;
+                }
+                // A disposer that throws does not strand the ones underneath it. The throw is
+                // kept and the walk continues; there is nothing to await, because the call never
+                // produced a value.
+                Err(reason) => self.async_disposal_record(state, reason),
+            }
+        }
+    }
+
+    /// `Await(value)`: hand control back to the queue and resume when it settles.
+    fn async_disposal_await(&mut self, state: &Rc<AsyncDisposal>, value: Value) {
+        state.has_awaited.set(true);
+        let promise = match &value {
+            Value::Promise(existing) => Rc::clone(existing),
+            other => {
+                let promise = PromiseState::pending();
+                self.resolve_promise(&promise, other.clone());
+                promise
+            }
+        };
+        self.react(
+            &promise,
+            Value::Undefined,
+            Value::Undefined,
+            Sink::AsyncDisposal(Rc::clone(state)),
+            false,
+        );
+    }
+
+    /// One awaited disposal settling.
+    fn async_disposal_resume(
+        &mut self,
+        state: &Rc<AsyncDisposal>,
+        outcome: Settled,
+        instruction: usize,
+    ) {
+        if let Settled::Rejected(reason) = outcome {
+            self.async_disposal_record(state, reason);
+        }
+        self.async_disposal_advance(state, instruction);
+    }
+
+    /// Keep what a disposer raised, folded into what the ones before it raised.
+    fn async_disposal_record(&mut self, state: &Rc<AsyncDisposal>, reason: Value) {
+        let earlier = state.thrown.borrow_mut().take();
+        let folded = self.suppressing(reason, earlier);
+        *state.thrown.borrow_mut() = Some(folded);
     }
 
     /// The value a failed call threw, for a built-in that has to keep going and report later.
@@ -21460,6 +21772,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => Err(other),
             },
         }
+    }
+
+    /// `OrdinaryCreateFromConstructor` for the two stacks.
+    ///
+    /// A stack reached through `Reflect.construct` inherits from *`newTarget`'s* `prototype`
+    /// rather than from the constructor's own, and reading that can run a program's getter --
+    /// so it is read only when the two differ, which is every `new DisposableStack()` skipped.
+    /// A `prototype` that is not an object leaves the intrinsic one in place, which is what the
+    /// specification substitutes rather than failing.
+    fn construct_disposable_stack(
+        &mut self,
+        flavour: Disposal,
+        new_target: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let stack = new_disposable_stack(flavour);
+        let default = match flavour {
+            Disposal::Sync => Native::DisposableStackConstructor,
+            Disposal::Async => Native::AsyncDisposableStackConstructor,
+        };
+        if matches!(new_target, Value::Native(native) if *native == default) {
+            return Ok(stack);
+        }
+        let named = self.read_property(new_target, "prototype", instruction)?;
+        if is_reflect_target(&named)
+            && let Value::Object(object) = &stack
+        {
+            object.borrow_mut().set_prototype(named);
+        }
+        Ok(stack)
     }
 
     /// `new WeakRef(target)`.
@@ -23505,6 +23847,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `getOwnPropertyDescriptor` reports; this is what the read answers, for the same
             // reason a collection's `size` is answered here -- an instance is an ordinary object
             // and the chain walk below would find the getter rather than run it.
+            Value::Object(object)
+                if name == "disposed"
+                    && object.borrow().get_own(ASYNC_DISPOSE_ENTRIES).is_some() =>
+            {
+                Value::Boolean(
+                    object
+                        .borrow()
+                        .get_own(ASYNC_DISPOSE_DONE)
+                        .is_some_and(Value::is_truthy),
+                )
+            }
             Value::Object(object)
                 if name == "disposed" && object.borrow().get_own(DISPOSE_ENTRIES).is_some() =>
             {
@@ -27724,6 +28077,12 @@ fn call_native(
         | Native::DisposableStackDefer
         | Native::DisposableStackMove
         | Native::DisposableStackDispose
+        | Native::AsyncDisposableStackConstructor
+        | Native::AsyncDisposableStackUse
+        | Native::AsyncDisposableStackAdopt
+        | Native::AsyncDisposableStackDefer
+        | Native::AsyncDisposableStackMove
+        | Native::AsyncDisposableStackDisposeAsync
         | Native::FinalizationRegistryConstructor
         | Native::FinalizationRegistryRegister
         | Native::FinalizationRegistryUnregister
@@ -29824,6 +30183,57 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
 const DISPOSE_ENTRIES: &str = "@@disposeEntries";
 const DISPOSE_DONE: &str = "@@disposeDone";
 
+/// The same pair for an `AsyncDisposableStack`, under names of its own.
+///
+/// Separate names rather than a shared pair with a flag, because the brand check *is* the
+/// distinction: `DisposableStack.prototype.use.call(asyncStack)` is a `TypeError`, and looking
+/// for a slot the other kind does not have is the whole of how that is decided.
+const ASYNC_DISPOSE_ENTRIES: &str = "@@asyncDisposeEntries";
+const ASYNC_DISPOSE_DONE: &str = "@@asyncDisposeDone";
+
+/// Which of the two stacks an operation belongs to.
+///
+/// The pair is one object driven two ways. The slots, the brand check and the recorded
+/// `[method, receiver, arguments]` triple are the same shape for both; what differs is the name
+/// the disposer is looked up under, and whether what it returns is awaited before the next one
+/// runs. Everything the two share is written once and told which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Disposal {
+    Sync,
+    Async,
+}
+
+impl Disposal {
+    const fn entries_key(self) -> &'static str {
+        match self {
+            Self::Sync => DISPOSE_ENTRIES,
+            Self::Async => ASYNC_DISPOSE_ENTRIES,
+        }
+    }
+
+    const fn done_key(self) -> &'static str {
+        match self {
+            Self::Sync => DISPOSE_DONE,
+            Self::Async => ASYNC_DISPOSE_DONE,
+        }
+    }
+
+    const fn type_name(self) -> &'static str {
+        match self {
+            Self::Sync => "DisposableStack",
+            Self::Async => "AsyncDisposableStack",
+        }
+    }
+
+    /// The name a value has to carry a disposer under, as a diagnostic spells it.
+    const fn hint_name(self) -> &'static str {
+        match self {
+            Self::Sync => "[Symbol.dispose]",
+            Self::Async => "[Symbol.asyncDispose] or [Symbol.dispose]",
+        }
+    }
+}
+
 /// One recorded call: what to invoke, against what, with what.
 fn disposal(method: Value, this_value: Value, arguments: Vec<Value>) -> Value {
     Value::Array(ArrayData::new(vec![
@@ -29833,14 +30243,18 @@ fn disposal(method: Value, this_value: Value, arguments: Vec<Value>) -> Value {
     ]))
 }
 
-/// `new DisposableStack()`: empty, and not yet disposed.
-fn new_disposable_stack() -> Value {
+/// `new DisposableStack()` or `new AsyncDisposableStack()`: empty, and not yet disposed.
+fn new_disposable_stack(flavour: Disposal) -> Value {
     let mut data = ObjectData::default();
-    data.set_non_enumerable(DISPOSE_ENTRIES, Value::Array(ArrayData::new(Vec::new())));
-    data.set_non_enumerable(DISPOSE_DONE, Value::Boolean(false));
-    data.set_prototype(Value::Native(Native::PrototypeOf(
-        PrototypeTable::DisposableStack,
-    )));
+    data.set_non_enumerable(
+        flavour.entries_key(),
+        Value::Array(ArrayData::new(Vec::new())),
+    );
+    data.set_non_enumerable(flavour.done_key(), Value::Boolean(false));
+    data.set_prototype(Value::Native(Native::PrototypeOf(match flavour {
+        Disposal::Sync => PrototypeTable::DisposableStack,
+        Disposal::Async => PrototypeTable::AsyncDisposableStack,
+    })));
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -29856,6 +30270,28 @@ fn disposable_stack_method(name: &str) -> Value {
         }
         key if key == WellKnown::ToStringTag.property_key() => {
             Value::String("DisposableStack".to_owned())
+        }
+        _ => Value::Undefined,
+    }
+}
+
+/// What an `AsyncDisposableStack` inherits from `AsyncDisposableStack.prototype`.
+///
+/// `disposeAsync` and `[Symbol.asyncDispose]` answer with the same value, for the same reason
+/// the synchronous pair do: the specification says the two properties hold one function, and
+/// `await using` reaches a stack through the symbol.
+fn async_disposable_stack_method(name: &str) -> Value {
+    match name {
+        "use" => Value::Native(Native::AsyncDisposableStackUse),
+        "adopt" => Value::Native(Native::AsyncDisposableStackAdopt),
+        "defer" => Value::Native(Native::AsyncDisposableStackDefer),
+        "move" => Value::Native(Native::AsyncDisposableStackMove),
+        "disposeAsync" => Value::Native(Native::AsyncDisposableStackDisposeAsync),
+        key if key == WellKnown::AsyncDispose.property_key() => {
+            Value::Native(Native::AsyncDisposableStackDisposeAsync)
+        }
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("AsyncDisposableStack".to_owned())
         }
         _ => Value::Undefined,
     }
@@ -33191,6 +33627,8 @@ pub enum BuiltinAccessor {
     Species,
     /// `DisposableStack.prototype.disposed`.
     DisposableStackDisposed,
+    /// `AsyncDisposableStack.prototype.disposed`.
+    AsyncDisposableStackDisposed,
 }
 
 impl BuiltinAccessor {
@@ -33209,7 +33647,7 @@ impl BuiltinAccessor {
             Self::DataViewByteOffset | Self::TypedArrayByteOffset => "byteOffset",
             Self::TypedArrayLength => "length",
             Self::CollectionSize(_) => "size",
-            Self::DisposableStackDisposed => "disposed",
+            Self::DisposableStackDisposed | Self::AsyncDisposableStackDisposed => "disposed",
             Self::Species => WellKnown::Species.property_key(),
         }
     }
@@ -33223,7 +33661,7 @@ fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
         PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
         PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
         PrototypeTable::Map | PrototypeTable::Set => &["size"],
-        PrototypeTable::DisposableStack => &["disposed"],
+        PrototypeTable::DisposableStack | PrototypeTable::AsyncDisposableStack => &["disposed"],
         _ => &[],
     }
 }
@@ -33251,6 +33689,9 @@ fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccesso
         (PrototypeTable::Map, "size") => BuiltinAccessor::CollectionSize(true),
         (PrototypeTable::Set, "size") => BuiltinAccessor::CollectionSize(false),
         (PrototypeTable::DisposableStack, "disposed") => BuiltinAccessor::DisposableStackDisposed,
+        (PrototypeTable::AsyncDisposableStack, "disposed") => {
+            BuiltinAccessor::AsyncDisposableStackDisposed
+        }
         _ => return None,
     })
 }
@@ -33977,6 +34418,9 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::DisposableStackConstructor
         | N::DisposableStackMove
         | N::DisposableStackDispose
+        | N::AsyncDisposableStackConstructor
+        | N::AsyncDisposableStackMove
+        | N::AsyncDisposableStackDisposeAsync
         | N::ProxyRevoke => 0.0,
 
         // The two-argument ones. `Object.assign` is 2 because the specification counts the
@@ -34006,6 +34450,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayCopy(ArrayCopy::With)
         | N::ArrayCopy(ArrayCopy::ToSpliced)
         | N::DisposableStackAdopt
+        | N::AsyncDisposableStackAdopt
         | N::ArraySlice
         | N::ArraySplice
         | N::ArrayCopyWithin
@@ -34565,6 +35010,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::WeakSet => &["add", "has", "delete"],
         PrototypeTable::WeakRef => &["deref"],
         PrototypeTable::DisposableStack => &["use", "adopt", "defer", "move", "dispose"],
+        PrototypeTable::AsyncDisposableStack => &["use", "adopt", "defer", "move", "disposeAsync"],
         PrototypeTable::FinalizationRegistry => &["register", "unregister"],
         PrototypeTable::EventEmitter => &[
             "on",
@@ -35325,6 +35771,11 @@ fn native_js_name(native: &Native) -> String {
         Native::DisposableStackDefer => "defer".to_owned(),
         Native::DisposableStackMove => "move".to_owned(),
         Native::DisposableStackDispose => "dispose".to_owned(),
+        Native::AsyncDisposableStackUse => "use".to_owned(),
+        Native::AsyncDisposableStackAdopt => "adopt".to_owned(),
+        Native::AsyncDisposableStackDefer => "defer".to_owned(),
+        Native::AsyncDisposableStackMove => "move".to_owned(),
+        Native::AsyncDisposableStackDisposeAsync => "disposeAsync".to_owned(),
         // The derivation lowers a trailing acronym as an ordinary word: `JsonRawJson` becomes
         // `rawJson`, and the language spells the second half in capitals.
         Native::JsonRawJson => "rawJSON".to_owned(),
