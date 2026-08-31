@@ -32,7 +32,7 @@ fi
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
-	cargo build --locked -p kiln-cli >&2
+	kiln_cargo build --locked -p kiln-cli >&2
 	KILN="$(kiln_repo_root)/target/debug/kiln"
 fi
 
