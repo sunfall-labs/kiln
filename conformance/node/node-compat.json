@@ -68,12 +68,11 @@
       "features": ["node:events", "event-emitter"]
     },
     "parallel/test-net-listen-close-server.js": {
-      "expectation": "expected-failure",
+      "expectation": "pass",
       "sha256": "e7c0bf96be8619c6357aca1a11d0898fd9ed5ccc03778093d5d059d4185342a7",
-      "reason": "partial: listen/address/close lifecycle passes through Tokio; the upstream case closes before listen completion and still needs that exact cancellation timing",
+      "adapted_complete": true,
       "adapted": [
-        "upstream-adapted/net-listen-close-server.mjs",
-        "upstream-adapted/net-socket-set-encoding.mjs"
+        "upstream-adapted/net-listen-close-server.mjs"
       ],
       "features": ["node:net", "tokio-net", "resource-lifecycle"]
     },
