@@ -3862,14 +3862,14 @@ mod tests {
                     Backend::C,
                     &module_abi_identity(),
                     &target,
-                    profile,
+                    profile.clone(),
                 ),
                 cache_identity(
                     compiler.clone(),
                     Backend::Custom("native-runtime".to_owned()),
                     &runtime_abi_identity(),
                     &target,
-                    profile,
+                    profile.clone(),
                 ),
                 cache_identity(
                     compiler.clone(),
