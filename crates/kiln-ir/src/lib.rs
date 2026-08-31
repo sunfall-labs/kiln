@@ -4402,8 +4402,16 @@ impl Compiler {
                 let flags = self.constant_index(Constant::String(flags.clone()));
                 self.code.push(Instruction::NewRegExp { pattern, flags });
             }
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 self.expression(object);
+                // `o?.#x` on a nullish `o` leaves the chain with `undefined`, exactly as an
+                // ordinary optional member read does. Without this the brand check ran on
+                // `null` and raised the TypeError the `?.` was written to avoid.
+                self.short_circuit_if_nullish(*optional, expression.span);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
@@ -4878,8 +4886,12 @@ impl Compiler {
         // `class_expression` invents one carrying a `%` that no identifier can contain. That
         // binding is scaffolding: `(class {}).name` is the empty string, and reporting the
         // scaffolding instead put `"%class0"` where the program could read it.
+        // A `%` carries the scaffolding binding an anonymous class expression is held in, which
+        // the program cannot spell and must never read back. What it *does* read back is the name
+        // a named evaluation supplied -- `var C = class {}` is `"C"` -- and the empty string only
+        // when nothing named it.
         let written_name = if name.starts_with('%') {
-            String::new()
+            class.inferred_name.clone().unwrap_or_default()
         } else {
             name.clone()
         };
@@ -6093,9 +6105,14 @@ impl Compiler {
             // receiver becomes `this`. Reached through `Apply` rather than a `CallPrivate`
             // instruction, because the shape `Apply` already takes -- receiver, callee,
             // arguments -- is exactly this one.
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
                 self.code.push(Instruction::Dup);
                 self.code.push(Instruction::GetPrivate(name));
                 self.array_literal(arguments, span);
@@ -7640,6 +7657,7 @@ mod tests {
 
         inner.name = Some("m".to_owned());
         let class = kiln_hir::Class {
+            inferred_name: None,
             name: Some("C".to_owned()),
             superclass: None,
             constructor: None,
@@ -8352,6 +8370,7 @@ mod tests {
                 }],
             }),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Reader".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8397,12 +8416,14 @@ mod tests {
                 kind: ExpressionKind::PrivateMember {
                     object: Box::new(identifier("Outer")),
                     name: "x".to_owned(),
+                    optional: false,
                 },
                 span: Span::default(),
             })))],
             span: Span::default(),
         };
         let inner = kiln_hir::Class {
+            inferred_name: None,
             name: Some("Inner".to_owned()),
             superclass: None,
             constructor: None,
@@ -8429,6 +8450,7 @@ mod tests {
         };
         let program = compile(&module(vec![statement(StatementKind::Class(Box::new(
             kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Outer".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8504,6 +8526,7 @@ mod tests {
             }],
             rest: None,
             body: vec![statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Name".to_owned()),
                 superclass: None,
                 constructor: Some(constructor),
@@ -8545,6 +8568,7 @@ mod tests {
     fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
         let program = compile(&module(vec![
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Base".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8553,6 +8577,7 @@ mod tests {
                 span: Span::default(),
             }))),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Derived".to_owned()),
                 superclass: Some(identifier("Base")),
                 constructor: Some(kiln_hir::Function {
@@ -8689,6 +8714,7 @@ mod tests {
         let program = compile(&module(vec![statement(StatementKind::Expression(
             Expression {
                 kind: ExpressionKind::Class(Box::new(kiln_hir::Class {
+                    inferred_name: None,
                     name: None,
                     superclass: None,
                     constructor: None,
