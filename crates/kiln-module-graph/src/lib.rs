@@ -16,7 +16,7 @@ use kiln_interpreter::{
     Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession,
     Value,
     execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
-    node_builtin_exports, ordinary_object, own_data_property,
+    node_builtin_exports, ordinary_object, own_data_property, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -744,7 +744,7 @@ impl ModuleGraph {
                     } else if let Some(provider) = values.get(&dependency.target) {
                         let mut entries: Vec<_> = provider
                             .iter()
-                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
                             .collect();
                         entries.sort_by(|left, right| left.0.cmp(&right.0));
                         std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
@@ -1488,6 +1488,73 @@ mod tests {
             .expect("execute mixed graph");
         assert_eq!(host.into_stdout(), "42\n");
         assert_eq!(execution.value, Value::Undefined);
+    }
+
+    #[test]
+    fn node_executes_relative_cjs_default_import_and_publishes_output() {
+        let project = TempProject::new();
+        let dependency = project.write("dep.cjs", "module.exports = 42;");
+        let entry = project.write(
+            "main.mjs",
+            "import value from './dep.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build relative CommonJS graph");
+
+        let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+        assert_eq!(
+            graph.module(&dependency).expect("dependency node").source,
+            ModuleSource::CommonJs
+        );
+        assert_eq!(
+            graph.resolved_export(&dependency, "default"),
+            Some(&ResolvedExport::Local {
+                module: dependency.clone(),
+                local_slot: 0,
+            })
+        );
+
+        let mut host = TestHost::default();
+        let execution = graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute relative CommonJS graph");
+        assert_eq!(host.output, ["42"]);
+        assert_eq!(execution.value, Value::Undefined);
+        assert!(execution.steps > 0);
+    }
+
+    #[test]
+    fn node_commonjs_require_reads_esm_export_values() {
+        let project = TempProject::new();
+        project.write("dep.mjs", "export let answer = 41;");
+        project.write(
+            "bridge.cjs",
+            "const dep = require('./dep.mjs'); module.exports = dep.answer + 1;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import value from './bridge.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build mixed ESM/CommonJS graph");
+
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute mixed ESM/CommonJS graph");
+        assert_eq!(host.output, ["42"]);
     }
 
     impl Drop for TempProject {
