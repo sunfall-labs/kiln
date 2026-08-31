@@ -15,10 +15,11 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult,
-    ModuleBinding, ModulePlan, ModuleRealmSession, ModuleValueRef, PlannedModule, Value,
-    execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
-    node_builtin_commonjs_value, node_builtin_export_names, node_builtin_exports, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell,
+    ModuleBinding, ModulePlan, ModuleRealmSession, ModuleSelfExport, ModuleSelfImport,
+    ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
+    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
+    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
+    parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -733,6 +734,87 @@ impl ModuleGraph {
             .get(name)
     }
 
+    /// Bind one import a module makes from its own specifier, or `None` if it cannot be bound.
+    ///
+    /// `None` is not a failure of this function; it is the honest answer for a name whose origin
+    /// is a module that has not run. That happens only inside an import cycle, where the value
+    /// genuinely does not exist yet, and answering `undefined` there would be a wrong answer
+    /// where a refusal is a true one.
+    fn self_import(
+        &self,
+        path: &Path,
+        import: &kiln_ir::ImportBinding,
+        values: &HashMap<PathBuf, HashMap<String, Value>>,
+    ) -> Option<ModuleSelfImport> {
+        if import.imported == kiln_ir::NAMESPACE_IMPORT {
+            // Sorted, because that is the order a namespace holds its names in and the object is
+            // built once and only ever refreshed in place afterwards.
+            let mut names = self.resolved_export_names(path)?;
+            names.sort();
+            let mut exports = Vec::with_capacity(names.len());
+            for name in names {
+                let source = self.self_export(path, &name, values)?;
+                exports.push((name, source));
+            }
+            return Some(ModuleSelfImport::Namespace {
+                import_slot: import.local_slot,
+                exports,
+            });
+        }
+        match self.self_export(path, &import.imported, values)? {
+            ModuleSelfExport::Slot(export_slot) => Some(ModuleSelfImport::Binding {
+                import_slot: import.local_slot,
+                export_slot,
+            }),
+            // The name is this module's to export but another module's to hold, which is what
+            // `export { x } from './other.js'` makes it. That module has finished, so the value
+            // is a value like any other and there is nothing to keep live.
+            ModuleSelfExport::Settled(_) => None,
+        }
+    }
+
+    /// Where one name exported by `module` gets its value, from `module`'s own point of view.
+    fn self_export(
+        &self,
+        path: &Path,
+        name: &str,
+        values: &HashMap<PathBuf, HashMap<String, Value>>,
+    ) -> Option<ModuleSelfExport> {
+        match self.resolved_export(path, name)? {
+            // The one case that has to stay live: this module's own binding, which the body it
+            // is about to run creates.
+            ResolvedExport::Local { module, local_slot } if module == path => {
+                Some(ModuleSelfExport::Slot(*local_slot))
+            }
+            ResolvedExport::Local { module, local_slot } => {
+                // Another module's binding, reached through a re-export. It has already run, so
+                // the value is settled -- but the resolution names a *slot* and the finished
+                // module publishes *names*, so the name that slot was exported under is what
+                // bridges the two.
+                let exported = self
+                    .module_node(module)?
+                    .program
+                    .exports
+                    .iter()
+                    .find(|export| export.local_slot == *local_slot)?;
+                let value = values.get(module)?.get(&exported.exported)?;
+                Some(ModuleSelfExport::Settled(value.clone()))
+            }
+            ResolvedExport::Namespace { module } => {
+                let mut entries: Vec<(String, Value)> = values
+                    .get(module)?
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                Some(ModuleSelfExport::Settled(
+                    kiln_interpreter::namespace_object(entries),
+                ))
+            }
+            ResolvedExport::Ambiguous => None,
+        }
+    }
+
     /// Return the sorted names that are visibly exported by `module`.
     ///
     /// Ambiguous star exports are intentionally omitted: they remain available through
@@ -1041,6 +1123,7 @@ impl ModuleGraph {
                 continue;
             }
             let mut imports = Vec::with_capacity(module_node.program.imports.len());
+            let mut self_imports = Vec::new();
             for import in &module_node.program.imports {
                 let dependency = module_node
                     .dependencies
@@ -1051,19 +1134,25 @@ impl ModuleGraph {
                         source: import.source.clone(),
                     })?;
                 // A module importing from itself has no finished exports to take a value from,
-                // and needs none: the only such import is the placeholder a re-export desugars
-                // to, whose slot no source can name and whose export the linker resolves
-                // straight through to its origin. Any other one would be read, so it is refused.
+                // and it never will: the binding it names is created by the body that is about
+                // to run. So the linker hands over the *place* rather than the value, and the
+                // machine ties the two together as the body creates them. A re-export
+                // placeholder is the one self-import that is never read -- its slot no source
+                // can name, and its export the linker resolves straight through to its origin.
                 if dependency.target == *path {
-                    if !import.local.starts_with(kiln_ir::REEXPORT_LOCAL_PREFIX) {
-                        return Err(ModuleGraphError::Source {
-                            path: path.clone(),
-                            message: format!(
-                                "module imports `{}` from itself, which this linker cannot bind",
-                                import.imported
-                            ),
-                        });
+                    if import.local.starts_with(kiln_ir::REEXPORT_LOCAL_PREFIX) {
+                        imports.push(Value::Undefined);
+                        continue;
                     }
+                    let bound = self.self_import(path, import, &values);
+                    let bound = bound.ok_or_else(|| ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: format!(
+                            "module imports `{}` from itself, which this linker cannot bind",
+                            import.imported
+                        ),
+                    })?;
+                    self_imports.push(bound);
                     imports.push(Value::Undefined);
                     continue;
                 }
@@ -1123,6 +1212,7 @@ impl ModuleGraph {
                 execute_node_module_in_session_with_loader(
                     &module_node.program,
                     &imports,
+                    &self_imports,
                     host,
                     remaining_limits,
                     &mut runtime,
@@ -1135,6 +1225,7 @@ impl ModuleGraph {
                 execute_module_in_runtime_with_loader(
                     &module_node.program,
                     &imports,
+                    &self_imports,
                     host,
                     remaining_limits,
                     &mut runtime,
@@ -1335,6 +1426,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 execute_node_module_in_session_with_loader(
                     &module_node.program,
                     &imports,
+                    &[],
                     &mut *self.host,
                     remaining_limits,
                     &mut *self.runtime,
@@ -1349,6 +1441,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 execute_module_in_runtime_with_loader(
                     &module_node.program,
                     &imports,
+                    &[],
                     &mut *self.host,
                     remaining_limits,
                     &mut *self.runtime,
@@ -4065,6 +4158,69 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["0"]);
+    }
+
+    #[test]
+    fn a_module_sees_its_own_exports_through_a_namespace_it_imported_from_itself() {
+        let project = TempProject::new();
+        // Every read is written *after* the binding it names, which is the whole point: a
+        // namespace built when the linker ran would answer `undefined` to all four.
+        let entry = project.write(
+            "self.js",
+            "import * as ns from './self.js';\n\
+             export var mutable = 23;\n\
+             var renamed = 45;\n\
+             export { renamed as other };\n\
+             export default 444;\n\
+             console.log(ns.mutable, ns.other, ns.default);\n\
+             mutable = 24;\n\
+             console.log(ns.mutable);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        assert_eq!(host.output, ["23 45 444", "24"]);
+    }
+
+    #[test]
+    fn a_self_imported_namespace_refuses_a_binding_that_has_not_run() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "self.js",
+            "import * as ns from './self.js';\n\
+             try { ns.later } catch (error) { console.log(error.constructor.name); }\n\
+             export const later = 1;\n\
+             console.log(ns.later);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        // `undefined` here would be the one answer worse than the refusal this replaced.
+        assert_eq!(host.output, ["ReferenceError", "1"]);
+    }
+
+    #[test]
+    fn a_named_import_from_the_same_module_is_a_live_view_of_the_export() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "self.js",
+            "import { counter as seen } from './self.js';\n\
+             export let counter = 1;\n\
+             console.log(seen);\n\
+             counter = 2;\n\
+             console.log(seen);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute graph");
+        // A snapshot would print `1` twice. node prints this.
+        assert_eq!(host.output, ["1", "2"]);
     }
 
     #[test]

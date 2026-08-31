@@ -2486,6 +2486,19 @@ impl ObjectData {
         self.properties.insert(position, slot);
     }
 
+    /// Overwrite what one export of a module namespace holds, leaving its flags alone.
+    ///
+    /// Every ordinary write to a namespace is refused, which is what the object is for -- so the
+    /// one write that is not the program's has to come in by its own door. The linker uses it to
+    /// keep a namespace a module imported *from itself* in step with the bindings it shows: the
+    /// object has to exist before the body that fills those bindings runs, so it is built over
+    /// the slots and caught up from them rather than snapshotted after the fact.
+    pub fn refresh_module_namespace_export(&mut self, key: &str, value: Value) {
+        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+            slot.property = Property::Value(value);
+        }
+    }
+
     /// Refuse every further change to this object.
     pub fn freeze(&mut self) {
         self.frozen = true;
@@ -6058,6 +6071,40 @@ pub struct ModuleExportValue {
     pub value: Value,
 }
 
+/// An import a module makes from its own specifier.
+///
+/// Every other import is a value the linker already has, because the module it came from ran
+/// first. A self-import has no such value and never will: the binding it names is created by the
+/// very body that is about to run. So the linker hands over the *place* instead of the value,
+/// and the machine ties the two together as the body creates them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModuleSelfImport {
+    /// `import { x } from` this module's own specifier. The import slot is made an alias of the
+    /// export slot: from the moment the body creates the cell, both slots hold that one cell,
+    /// which is exactly what a live binding is.
+    Binding { import_slot: u32, export_slot: u32 },
+    /// `import * as ns from` this module's own specifier. The object exists before anything has
+    /// been assigned, so it is built over the slots and caught up from them rather than
+    /// snapshotted -- a snapshot taken here would be a namespace of undefineds.
+    Namespace {
+        import_slot: u32,
+        /// Every visible export, in the order a namespace holds them.
+        exports: Vec<(String, ModuleSelfExport)>,
+    },
+}
+
+/// Where one name of a self-imported namespace gets its value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModuleSelfExport {
+    /// A binding of this module, by the local slot that will hold its cell.
+    Slot(u32),
+    /// A name re-exported from a module that has already finished, so its value is known.
+    Settled(Value),
+}
+
+/// A namespace a module imported from itself, beside where each of its names comes from.
+type SelfNamespace = (Rc<RefCell<ObjectData>>, Vec<(String, ModuleSelfExport)>);
+
 /// A completed module invocation, including the values its local export slots hold.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModuleExecutionResult {
@@ -7152,6 +7199,16 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
+/// Reading an export whose declaration has not run yet.
+///
+/// Worded as the language words it for a dead-zone read of the binding itself, because that is
+/// what it is: the namespace is a second name for the same binding, not a copy of it.
+fn uninitialized_export_error(name: &str) -> ExecutionError {
+    ExecutionError::ReferenceErrorMessage {
+        message: format!("Cannot access '{name}' before initialization"),
+    }
+}
+
 /// Whether this generator object came from an `async function*`.
 fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
     let state = state.borrow();
@@ -7377,9 +7434,11 @@ pub fn execute_module_in_runtime<H: HostOps + ?Sized>(
 }
 
 /// Execute one module while allowing graph-owned CommonJS targets to load on demand.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
     module: &ModuleProgram,
     import_values: &[Value],
+    self_imports: &[ModuleSelfImport],
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
@@ -7389,6 +7448,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
     execute_module_in_runtime_mode_with_session(
         module,
         import_values,
+        self_imports,
         host,
         limits,
         runtime,
@@ -7435,6 +7495,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
     execute_module_in_runtime_mode_with_session(
         module,
         import_values,
+        &[],
         host,
         limits,
         runtime,
@@ -7449,6 +7510,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
 pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
     module: &ModuleProgram,
     import_values: &[Value],
+    self_imports: &[ModuleSelfImport],
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
@@ -7460,6 +7522,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
     execute_module_in_runtime_mode_with_session(
         module,
         import_values,
+        self_imports,
         host,
         limits,
         runtime,
@@ -7482,6 +7545,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
         execute_module_in_runtime_mode_with_session(
             module,
             import_values,
+            &[],
             host,
             limits,
             runtime,
@@ -7493,6 +7557,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
         execute_module_in_runtime_mode_with_session(
             module,
             import_values,
+            &[],
             host,
             limits,
             runtime,
@@ -7507,6 +7572,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
 fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     module: &ModuleProgram,
     import_values: &[Value],
+    self_imports: &[ModuleSelfImport],
     host: &'host mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
@@ -7540,6 +7606,84 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         };
     }
 
+    // An import this module makes from itself names a binding that does not exist yet, so
+    // there was no value for the loop above to place. Both kinds are set up here instead: a
+    // named one gets a cell the body's own `NewCell` will replace with the export's, and a
+    // namespace gets its object now -- with every name already in it, in the order a namespace
+    // holds them -- because the body may read it before it has finished filling it in.
+    let mut self_bindings = Vec::new();
+    let mut self_namespaces = Vec::new();
+    // Every slot a self-import shows starts out holding the dead-zone marker. An exported
+    // binding is boxed only when it can change, so a `const`, a class or an `export default`
+    // expression is a plain slot that would otherwise read as `undefined` for as long as its
+    // declaration had not run -- and `undefined` is the wrong answer to a dead-zone read. The
+    // marker is invisible by any other route: an unboxed binding cannot be captured, and a
+    // direct read of one in its dead zone is a compile error before it ever runs.
+    for self_import in self_imports {
+        let slots: &[u32] = match self_import {
+            ModuleSelfImport::Binding { export_slot, .. } => std::slice::from_ref(export_slot),
+            ModuleSelfImport::Namespace { .. } => &[],
+        };
+        let namespace_slots: Vec<u32> = match self_import {
+            ModuleSelfImport::Namespace { exports, .. } => exports
+                .iter()
+                .filter_map(|(_, source)| match source {
+                    ModuleSelfExport::Slot(slot) => Some(*slot),
+                    ModuleSelfExport::Settled(_) => None,
+                })
+                .collect(),
+            ModuleSelfImport::Binding { .. } => Vec::new(),
+        };
+        for slot in slots.iter().chain(namespace_slots.iter()) {
+            let Some(local) = locals.get_mut(*slot as usize) else {
+                return Err(ExecutionError::LocalOutOfBounds {
+                    index: *slot as usize,
+                });
+            };
+            *local = Value::Native(Native::Uninitialized);
+        }
+    }
+    for self_import in self_imports {
+        let (import_slot, seed) = match self_import {
+            ModuleSelfImport::Binding {
+                import_slot,
+                export_slot,
+            } => {
+                let cell = Rc::new(RefCell::new(Value::Native(Native::Uninitialized)));
+                self_bindings.push((Rc::clone(&cell), *export_slot));
+                let Some(local) = locals.get_mut(*import_slot as usize) else {
+                    return Err(ExecutionError::LocalOutOfBounds {
+                        index: *import_slot as usize,
+                    });
+                };
+                *local = Value::Cell(cell);
+                continue;
+            }
+            ModuleSelfImport::Namespace {
+                import_slot,
+                exports,
+            } => {
+                let object = namespace_object(exports.iter().map(|(name, source)| {
+                    let value = match source {
+                        ModuleSelfExport::Slot(_) => Value::Native(Native::Uninitialized),
+                        ModuleSelfExport::Settled(value) => value.clone(),
+                    };
+                    (name.clone(), value)
+                }));
+                if let Value::Object(data) = &object {
+                    self_namespaces.push((Rc::clone(data), exports.clone()));
+                }
+                (*import_slot, object)
+            }
+        };
+        let Some(local) = locals.get_mut(import_slot as usize) else {
+            return Err(ExecutionError::LocalOutOfBounds {
+                index: import_slot as usize,
+            });
+        };
+        *local = Value::Cell(Rc::new(RefCell::new(seed)));
+    }
+
     // Cloned into an `Rc` because a function value this module exports outlives the run that
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
@@ -7555,6 +7699,8 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         limits,
         runtime.capabilities(),
     )?;
+    vm.self_bindings = self_bindings;
+    vm.self_namespaces = self_namespaces;
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
         vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
@@ -7602,6 +7748,12 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
             error_constructor: vm.error_constructor(&reason),
             trace,
         });
+    }
+    // The loop refreshes before each instruction, so the body's *last* store is not in the
+    // namespace yet. Nothing in this module can see the difference -- it has stopped running --
+    // but whoever holds the object afterwards can.
+    if !vm.self_bindings.is_empty() || !vm.self_namespaces.is_empty() {
+        vm.refresh_self_imports();
     }
     let execution = ExecutionResult {
         steps: vm.steps,
@@ -8060,6 +8212,16 @@ struct Vm<'host, H: HostOps + ?Sized> {
     unhandled: Option<Value>,
     module_suspension: Option<Rc<RefCell<ModuleSuspension>>>,
     module_completion: Option<Rc<PromiseData>>,
+    /// The cell a module's import of one of its own exports reads, beside the slot it shows.
+    ///
+    /// Not the export's own cell: an exported binding is boxed only when it can change, so half
+    /// of them are plain slots with no cell to share. Caught up from the slot instead, which is
+    /// one mechanism for both rather than a fast path and a fallback.
+    /// Empty for every module that does not import from itself, which is nearly all of them.
+    self_bindings: Vec<(Rc<RefCell<Value>>, u32)>,
+    /// Namespace objects a module imported from itself, and the slots each name shows. Caught up
+    /// from those slots before every instruction, so no read can see one stale.
+    self_namespaces: Vec<SelfNamespace>,
     /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
@@ -8198,6 +8360,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             unhandled: None,
             module_suspension: None,
             module_completion: None,
+            self_bindings: Vec::new(),
+            self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
             random_state: match entropy {
                 EntropyCapability::Deterministic | EntropyCapability::Host => DEFAULT_ENTROPY_SEED,
@@ -11540,6 +11704,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // arrange that is a real cost, and a pointer comparison is not.
         let mut program = Rc::clone(&self.program);
         loop {
+            // A namespace a module imported from itself shows bindings this very frame owns, so
+            // it can go stale between any two instructions. Catching it up here rather than at
+            // each of the dozens of places a namespace can be observed is what makes "no read
+            // sees it stale" a property of the loop instead of a claim about a list of sites.
+            // Empty for every module that does not import itself, so the ordinary run pays one
+            // comparison against a length -- next to the step-limit check below, nothing.
+            if !self.self_bindings.is_empty() || !self.self_namespaces.is_empty() {
+                self.refresh_self_imports();
+            }
             if self.steps >= self.limits.max_steps {
                 return Err(ExecutionError::StepLimitExceeded {
                     steps: self.steps,
@@ -12865,8 +13038,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let read =
-                        self.read_computed_with_receiver(&target, &key, &receiver, current);
+                    let read = self.read_computed_with_receiver(&target, &key, &receiver, current);
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
@@ -20462,6 +20634,41 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A module that never awaits runs exactly as it did before: one `run`, one completion. One
     /// that does becomes an async evaluation, and the value this returns is no longer what the
     /// body produced -- the body has not produced anything yet.
+    /// What one module-scope slot holds, whether or not the binding it names is boxed.
+    ///
+    /// A missing slot reads as the dead-zone marker rather than as `undefined`, which is the
+    /// truthful answer: the binding is not there.
+    fn module_slot_value(&self, slot: u32) -> Value {
+        match self.locals.get(slot as usize) {
+            Some(Value::Cell(cell)) => cell.borrow().clone(),
+            Some(other) => other.clone(),
+            None => Value::Native(Native::Uninitialized),
+        }
+    }
+
+    /// Bring every import a module made from itself back in step with the slot behind it.
+    ///
+    /// A binding still in its dead zone carries the dead-zone marker across rather than
+    /// `undefined`: `ns.x` before `let x` runs is a ReferenceError, and answering `undefined`
+    /// would be the one outcome worse than refusing to bind the namespace at all.
+    fn refresh_self_imports(&mut self) {
+        for (cell, slot) in self.self_bindings.clone() {
+            let value = self.module_slot_value(slot);
+            *cell.borrow_mut() = value;
+        }
+        for (object, exports) in self.self_namespaces.clone() {
+            for (name, source) in &exports {
+                let ModuleSelfExport::Slot(slot) = source else {
+                    continue;
+                };
+                let value = self.module_slot_value(*slot);
+                object
+                    .borrow_mut()
+                    .refresh_module_namespace_export(name, value);
+            }
+        }
+    }
+
     fn run_module_body(&mut self) -> Result<ExecutionResult, ExecutionError> {
         let outcome = self.run()?;
         if self.suspended {
@@ -26258,7 +26465,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `target.name`, refusing a binding that is not there yet.
+    ///
+    /// The dead-zone marker reaches a *property* by exactly one route: a module namespace shows
+    /// a binding whose declaration has not run, and the specification makes reading it a
+    /// ReferenceError rather than an `undefined`. No other property can hold the marker, so the
+    /// check costs one discriminant comparison and is asked once instead of at each of the
+    /// reads below.
     fn read_property(
+        &mut self,
+        target: &Value,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let value = self.read_property_inner(target, name, instruction)?;
+        if matches!(value, Value::Native(Native::Uninitialized)) {
+            return Err(uninitialized_export_error(name));
+        }
+        Ok(value)
+    }
+
+    fn read_property_inner(
         &mut self,
         target: &Value,
         name: &str,
@@ -27436,7 +27663,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The `[[Get]]` operation with an explicit receiver. Ordinary bracket access uses the target
     /// itself; `Reflect.get` can provide a different value for accessors and proxy traps.
+    /// The computed spelling of [`Vm::read_property`], with the same dead-zone refusal.
     fn read_computed_with_receiver(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let value = self.read_computed_with_receiver_inner(target, key, receiver, instruction)?;
+        if matches!(value, Value::Native(Native::Uninitialized)) {
+            return Err(uninitialized_export_error(&key.to_display_string()));
+        }
+        Ok(value)
+    }
+
+    fn read_computed_with_receiver_inner(
         &mut self,
         target: &Value,
         key: &Value,
