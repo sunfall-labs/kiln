@@ -24,7 +24,7 @@ use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
-use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolvedExport};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result,
@@ -253,6 +253,9 @@ pub enum NativeError {
         path: PathBuf,
         message: String,
     },
+    UnsupportedNodeBuiltin {
+        specifier: &'static str,
+    },
 }
 
 impl fmt::Display for NativeError {
@@ -302,6 +305,10 @@ impl fmt::Display for NativeError {
                 "native result from {} was invalid: {message}",
                 path.display()
             ),
+            Self::UnsupportedNodeBuiltin { specifier } => write!(
+                formatter,
+                "native Node execution does not yet materialize the `{specifier}` builtin"
+            ),
         }
     }
 }
@@ -320,7 +327,8 @@ impl std::error::Error for NativeError {
             | Self::ArtifactPathCollision { .. }
             | Self::ImmutableArtifactCollision { .. }
             | Self::NumberProvider { .. }
-            | Self::RunResult { .. } => None,
+            | Self::RunResult { .. }
+            | Self::UnsupportedNodeBuiltin { .. } => None,
         }
     }
 }
@@ -1184,6 +1192,7 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeBuildReport, NativeError> {
+        validate_native_node_builtins(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut modules = Vec::with_capacity(graph.module_count());
@@ -1574,6 +1583,24 @@ impl NativeBuilder {
             }
         }
     }
+}
+
+/// Fail before emission if a typed builtin has no native materializer.
+///
+/// A builtin node's bytecode is intentionally empty: its exports are supplied by the execution
+/// adapter. Treating it as an ordinary generated module therefore succeeds while leaving every
+/// export `undefined`, which is worse than refusing the surface. Keep this gate beside native
+/// graph construction until each accepted builtin has an explicit native materializer.
+fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError> {
+    if let Some(builtin) = graph.modules().find_map(|node| match node.source {
+        ModuleSource::NodeBuiltin(builtin) => Some(builtin),
+        _ => None,
+    }) {
+        return Err(NativeError::UnsupportedNodeBuiltin {
+            specifier: builtin.specifier(),
+        });
+    }
+    Ok(())
 }
 
 fn cached_payload(
@@ -3402,6 +3429,66 @@ mod tests {
         assert_eq!(
             native_number_abi_identity(),
             "kiln-native-number-provider-5"
+        );
+    }
+
+    #[test]
+    fn typed_node_builtins_fail_before_native_emission_without_a_materializer() {
+        use kiln_module_resolver::{NodeBuiltin, NodeRequestKind, PinnedPackageResolver};
+
+        let project = TestDirectory::new("native-node-builtin-gate");
+        let entry = project.path.join("main.mjs");
+        fs::write(&entry, "export const marker = 1;\n").expect("write entry");
+        let builtin_path = NodeBuiltin::Http.virtual_path(&project.path);
+        let entry_program = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: vec![Constant::Number(1_f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreLocal(0),
+                    Instruction::Const(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: vec!["node:http".to_owned()],
+            imports: Vec::new(),
+            exports: vec![ExportBinding {
+                exported: "marker".to_owned(),
+                local_slot: 0,
+            }],
+        };
+        let provider_entry = fs::canonicalize(&entry).expect("canonical entry");
+        let graph = ModuleGraph::build_with_typed_policy(
+            &entry,
+            PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
+                &project.path,
+                [(
+                    entry.clone(),
+                    "node:http".to_owned(),
+                    NodeRequestKind::Import,
+                    builtin_path,
+                )],
+                [],
+            )
+            .expect("node resolver"),
+            move |path, source| {
+                assert_eq!(path, provider_entry);
+                assert_eq!(source, ModuleSource::Source);
+                Ok(kiln_module_graph::ModulePayload::Program(
+                    entry_program.clone(),
+                ))
+            },
+        )
+        .expect("typed node graph");
+
+        assert_eq!(
+            validate_native_node_builtins(&graph)
+                .expect_err("unmaterialized builtin must fail")
+                .to_string(),
+            "native Node execution does not yet materialize the `node:http` builtin"
         );
     }
 
