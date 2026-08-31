@@ -4816,9 +4816,9 @@ mod tests {
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         // Same tripwire as the provider pin below, for the module ABI: it moved
-        // generator-3 -> generator-12 as generator semantics advanced. Update it
+        // generator-3 -> generator-13 as generator semantics advanced. Update it
         // with the change that moves it, so an *unintended* bump still fails here.
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-12");
+        assert_eq!(module_abi_identity(), "host-2;c-1;generator-13");
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
