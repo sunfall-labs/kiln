@@ -705,12 +705,15 @@ name = "kiln-conformance"
 version = "0.0.0"
 dependencies = [
  "frontend-oxc",
+ "kiln-digest",
  "kiln-hir",
  "kiln-interpreter",
  "kiln-ir",
  "kiln-module-graph",
  "kiln-runtime",
  "kiln-test262",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
