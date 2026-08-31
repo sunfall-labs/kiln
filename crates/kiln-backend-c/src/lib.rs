@@ -24654,7 +24654,7 @@ fn emit_instruction(
             "return KILN_C99_CONTROL_ERROR;"
         };
         let refusal = format!(
-            "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
+            "{control_refusal} kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; {refusal_target} }} if (status != KILN_C99_OK) return status;"
         );
         let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
         output.truncate(before);
