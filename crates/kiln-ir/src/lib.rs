@@ -8815,6 +8815,19 @@ mod tests {
     }
 
     #[test]
+    fn a_script_rejects_top_level_await_with_a_module_only_diagnostic() {
+        let source = statement(StatementKind::Expression(Expression {
+            kind: ExpressionKind::Await(Box::new(number(1.0))),
+            span: Span::new(4, 9),
+        }));
+        let diagnostics = compile(&module(vec![source])).expect_err("script await is rejected");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "top-level `await` is only available in a module"
+                && diagnostic.span == Some(Span::new(4, 9))
+        }));
+    }
+
+    #[test]
     fn a_var_read_before_its_declaration_is_undefined_rather_than_refused() {
         // The one kind that is initialised on entry, which is the whole difference.
         let program = compile(&module(vec![
