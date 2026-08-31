@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 2;
+pub const C_GENERATOR_VERSION: u32 = 3;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -24126,6 +24126,14 @@ fn emit_instruction(
         site,
         guarded,
     } = emitter;
+    // A public/module entry instruction starts a fresh diagnostic attempt. Function bodies do
+    // not clear this state: when one calls another, the deepest failing body owns the refusal
+    // provenance and every caller preserves it while unwinding.
+    if matches!(site, ReturnSite::Entry { .. }) {
+        output.push_str(
+            "    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL;\n",
+        );
+    }
     let before = output.len();
     let instruction_site = c_string(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
@@ -25033,15 +25041,6 @@ fn emit_instruction(
             "{control_refusal} kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; {refusal_target} }} if (status != KILN_C99_OK) return status;"
         );
         let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
-        output.truncate(before);
-        output.push_str(&replaced);
-    }
-    if matches!(site, ReturnSite::Entry { .. }) {
-        let emitted = &mut output[before..];
-        let reset = format!(
-            "kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; {instruction_site}"
-        );
-        let replaced = emitted.replace(&instruction_site, &reset);
         output.truncate(before);
         output.push_str(&replaced);
     }
@@ -26116,7 +26115,15 @@ int main(void) {
         assert!(
             generated
                 .source
-                .contains("\"node_modules/@fastify/error/index.js\"")
+                .contains(
+                    "kiln_c99_diagnostic_site = \"node_modules/@fastify/error/index.js\"; kiln_c99_diagnostic_instruction = (size_t)1; kiln_c99_diagnostic_operation = \"CallMethod(defineProperty)\";"
+                )
+        );
+        assert!(
+            !generated
+                .source
+                .contains("kiln_c99_diagnostic_site = kiln_c99_diagnostic_site"),
+            "diagnostic reset must not be substituted into the site expression"
         );
         assert!(
             generated
