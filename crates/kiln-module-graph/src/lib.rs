@@ -2563,6 +2563,84 @@ mod tests {
         output: Vec<String>,
     }
 
+    fn http_header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+        response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response has a header terminator")
+            .0
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (header_name, value) = line.split_once(':')?;
+                header_name
+                    .eq_ignore_ascii_case(name)
+                    .then_some(value.trim())
+            })
+    }
+
+    fn http_status(response: &str) -> &str {
+        response
+            .split_once("\r\n")
+            .expect("HTTP response has a status line")
+            .0
+    }
+
+    fn http_body(response: &str) -> Vec<u8> {
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response has a header terminator");
+        let body = body.as_bytes();
+        if http_header(response, "transfer-encoding").is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
+        }) {
+            let mut decoded = Vec::new();
+            let mut cursor = 0;
+            loop {
+                let line_end = body[cursor..]
+                    .windows(2)
+                    .position(|window| window == b"\r\n")
+                    .map(|offset| cursor + offset)
+                    .expect("chunk has a size line");
+                let size_text = std::str::from_utf8(&body[cursor..line_end])
+                    .expect("chunk size is UTF-8")
+                    .split(';')
+                    .next()
+                    .expect("chunk size is present");
+                let size =
+                    usize::from_str_radix(size_text.trim(), 16).expect("chunk size is hexadecimal");
+                cursor = line_end + 2;
+                if size == 0 {
+                    assert!(
+                        body[cursor..].starts_with(b"\r\n"),
+                        "chunked body is terminated"
+                    );
+                    break;
+                }
+                assert!(
+                    body.len() >= cursor + size + 2,
+                    "chunk has its full payload"
+                );
+                decoded.extend_from_slice(&body[cursor..cursor + size]);
+                assert_eq!(&body[cursor + size..cursor + size + 2], b"\r\n");
+                cursor += size + 2;
+            }
+            return decoded;
+        }
+
+        let length = http_header(response, "content-length")
+            .expect("non-chunked response has Content-Length")
+            .parse::<usize>()
+            .expect("Content-Length is numeric");
+        assert_eq!(
+            head.len() + 4 + length,
+            response.len(),
+            "response body has its declared length"
+        );
+        body[..length].to_vec()
+    }
+
     impl HostOps for ServerHostForPort {
         fn call(
             &mut self,
@@ -2832,29 +2910,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("read timeout");
             let mut response = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                let length = stream.read(&mut chunk).expect("read response");
-                if length == 0 {
-                    break;
-                }
-                response.extend_from_slice(&chunk[..length]);
-                let Some(head_end) = response.windows(4).position(|window| window == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let head = String::from_utf8_lossy(&response[..head_end]);
-                let content_length = head
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("Content-Length: ")
-                            .and_then(|value| value.parse::<usize>().ok())
-                    })
-                    .expect("response has Content-Length");
-                if response.len() >= head_end + 4 + content_length {
-                    break;
-                }
-            }
+            stream.read_to_end(&mut response).expect("read response");
             String::from_utf8(response).expect("UTF-8 response")
         });
 
@@ -2865,12 +2921,9 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("serve live request");
         let response = client.join().expect("client thread");
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-        assert!(
-            response.contains("Content-Type: text/plain\r\n"),
-            "{response:?}"
-        );
-        assert!(response.ends_with("GET /health"), "{response:?}");
+        assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(http_header(&response, "content-type"), Some("text/plain"));
+        assert_eq!(http_body(&response), b"GET /health");
     }
 
     #[test]
@@ -2954,7 +3007,8 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("serve options-form request");
         let response = client.join().expect("client thread");
-        assert!(response.ends_with("options /configured"), "{response:?}");
+        assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(http_body(&response), b"options /configured");
     }
 
     #[test]
@@ -3043,9 +3097,9 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("serve request body");
         let response = client.join().expect("client completes");
-        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
-        assert!(response.contains("Content-Type: text/plain\r\n"));
-        assert!(response.ends_with("POST 12"));
+        assert_eq!(http_status(&response), "HTTP/1.1 201 Created");
+        assert_eq!(http_header(&response, "content-type"), Some("text/plain"));
+        assert_eq!(http_body(&response), b"POST 12");
     }
 
     #[test]
@@ -3109,7 +3163,8 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("serve paused request");
         let response = client.join().expect("client completes");
-        assert!(response.ends_with('1'), "{response:?}");
+        assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(http_body(&response), b"1");
     }
 
     #[test]
@@ -3170,14 +3225,9 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("serve streaming response");
         let response = client.join().expect("client completes");
-        assert!(
-            response.contains("Transfer-Encoding: chunked\r\n"),
-            "{response:?}"
-        );
-        assert!(
-            response.ends_with("6\r\nhello \r\n5\r\ntokio\r\n0\r\n\r\n"),
-            "{response:?}"
-        );
+        assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(http_header(&response, "transfer-encoding"), Some("chunked"));
+        assert_eq!(http_body(&response), b"hello tokio");
         assert_eq!(host.output.last().map(String::as_str), Some("true"));
     }
 
