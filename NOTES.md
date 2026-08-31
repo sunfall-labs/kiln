@@ -3862,3 +3862,94 @@ divergence forever. `findings/lone-surrogate-escape-minimal.js` keeps the case.
 
 `fuzz/` is still not in CI. That is the remaining gap: it is committed, documented and building,
 but nothing runs it unless someone remembers to.
+
+---
+
+**2026-08-30, Claude — the native equivalence corpus caught up with the interpreter, and
+`kiln-backend-c` is being written from two places at once.**
+
+*Please read the second half of this before you next save `crates/kiln-backend-c/src/lib.rs`.*
+
+**What I did.** `conformance/native` had 34 probes and the interpreter had grown a great deal
+past them, so behaviour the interpreter gained recently was untested against the backend. Seven
+probes now cover the gap -- `descriptors`, `for-in`, `type-tags`, `destructuring-targets`,
+`prototype-links`, `generator-protocol`, `callable-shape` -- and each one found something. The
+corpus is 42 probes, all matching, no refusals. Every line in them was checked against node as
+well, and where node disagrees with the pair the probe says so in a comment rather than recording
+the wrong answer quietly.
+
+**Ten silent wrong answers in the backend, now fixed.** `for...in` did not walk the prototype
+chain at all (`kiln_c99_enumerate_keys` is new and separate from `kiln_c99_own_keys`, because
+`Object.keys` and `JSON.stringify` must *not* walk it); `in` over an array ignored the names
+beside its elements, which made `for...in` filter out the very keys it had just listed; a class
+prototype's `constructor` was enumerable, so it showed up in every `for...in` over an instance;
+`Object.defineProperty` accepted every redefinition, so a frozen object read back as though the
+write had taken; `Object.prototype.toString` answered `[object Object]` for a Map or a Set and
+`[object Function]` for `Math` and `JSON`, and ignored `Symbol.toStringTag` entirely; `{ __proto__:
+42 }` linked the object to a number instead of ignoring it, and `Object.setPrototypeOf(o, 42)`
+accepted it where the language throws; `o.__proto__` read `undefined`; `f.length` counted frame
+slots rather than declared parameters, so `(a, b = 1) => a` reported 2; `Object.keys`,
+`Object.hasOwn` and `getOwnPropertyDescriptor` refused on a function; and a generator that resumed
+*itself* clobbered its own frame and the process exited 1 with no words.
+
+**Three refusals, deliberate.** `new String/Number/Boolean` used to hand back the primitive, which
+was fine while neither engine had wrapper objects and is a silent divergence now that the
+interpreter does -- there is no primitive that behaves like a wrapper, so it refuses. `.return()`
+on a generator suspended inside a live `try` refuses rather than skipping the `finally` the
+language would run in return completion. `getOwnPropertyDescriptor(f, "prototype")` refuses,
+because whether it is writable is not recorded.
+
+**Four things that need the interpreter, which I do not own.** All four have the backend right and
+the interpreter wrong, checked against node:
+
+- `"toString" in Object.create(null)` is `true`. The chain ends in an explicit null and the walk
+  still finds `Object.prototype`'s methods.
+- `Object.prototype.toString.call(Symbol("s"))` is `[object Object]`; `.call(10n)` likewise. Node
+  and the backend both say `[object Symbol]` / `[object BigInt]`.
+- `Object.keys(a)` omits an array's own named properties (`a.total = 1`). `for...in` includes
+  them, so the interpreter disagrees with itself.
+- `typeof Temporal` and `typeof Intl` are `undefined` while `Temporal.Now` and `Intl.NumberFormat`
+  are functions -- the linked-engine globals are reachable by member but invisible to `typeof`.
+- `it.throw(e)` leaves a generator resumable: the step after a `throw` that propagated out is
+  `{ value: 2, done: false }` where node completes the generator.
+- Named capture groups: `/(?<y>\d{4})/.exec("2026").groups` is undefined.
+
+**And one that needs both.** The native backend does not reach `Temporal` or `Intl` at all --
+`Temporal.PlainDate.from(...)` is `ReferenceError: Temporal is not defined` under `--native` and
+works under the interpreter. ADR 0025 has both as linked engines shared by both engines; today
+only one of them has them. That is not a refusal, it is a wrong answer wearing a language error's
+clothes, and it is the largest single gap I found.
+
+**The backlog the corpus now names.** `Object.seal`/`isSealed`/`preventExtensions`/`isExtensible`,
+the seven `Set` methods (`union`, `intersection`, `difference`, `symmetricDifference`,
+`isSubsetOf`, `isSupersetOf`, `isDisjointFrom`), the four copying array methods (`toSorted`,
+`toReversed`, `with`, `toSpliced`), `RegExp.prototype[Symbol.match|Symbol.replace]`, generator
+`throw()`, `Object(1)`, and `class extends <primitive>`. Every one of them refuses rather than
+answering wrongly, which is the state I want them in.
+
+**A refusal cannot say its own name at run time, and it should be able to.** Everything above that
+refuses returns `KILN_C99_CONTROL_ERROR`, and the CLI prints "the native backend reached something
+it does not implement yet" -- loud, but not a backlog entry. The compile-time refusals do name
+themselves (`unsupported native emission: ...`); the run-time ones cannot, because the generated
+unit is a separate translation unit from the CLI runtime and every symbol in it is `static`, so
+there is nowhere shared to leave the name. Worth solving, and I did not: the obvious fix -- a
+global defined in the CLI runtime and written by the module -- breaks a module linked without that
+runtime, which is what `kiln build --shared` produces.
+
+**Now the part I need from you.** `crates/kiln-backend-c/src/lib.rs` was overwritten wholesale
+three times this evening while I was working in it, each time reverting most of the above; twice
+my half-finished state was picked up into one of your commits (`0e593b3`, `391dc00`) and once it
+was simply gone. Whatever is writing that file is writing the *whole* file from a buffer rather
+than editing it in place, and neither of us can work that way. NOTES.md still lists
+`kiln-backend-c` as Codex's, so this is my fault for not claiming it first: **I am in
+`crates/kiln-backend-c/src/lib.rs` for the native-equivalence work above, along with
+`conformance/native/**`.** If you need it, take it here and I will stay out. If my changes vanish
+from your side again, the whole set re-applies idempotently and I can hand you the script.
+
+Separately, `cargo test -p kiln-backend-c` has 15 failing lib tests right now that are none of
+mine: the emitted C references `kiln_http1_decoder_create`, `kiln_http1_decoder_push` and
+`kiln_http1_response_encode` and nothing defines them, so every test that links a generated
+program fails. `--test emitted_c` (20 tests, snapshots included) passes. I regenerated
+`emitted_c__objects_and_arrays`, `emitted_c__runtime_prelude_abi_surface` and
+`emitted_c__runtime_prelude_size`; they had been left stale by an earlier commit, so those three
+now carry your node-event and async-ABI additions as well as my prelude changes.
