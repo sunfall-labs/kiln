@@ -4428,8 +4428,16 @@ impl Compiler {
                 let flags = self.constant_index(Constant::String(flags.clone()));
                 self.code.push(Instruction::NewRegExp { pattern, flags });
             }
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 self.expression(object);
+                // `o?.#x` on a nullish `o` leaves the chain with `undefined`, exactly as an
+                // ordinary optional member read does. Without this the brand check ran on
+                // `null` and raised the TypeError the `?.` was written to avoid.
+                self.short_circuit_if_nullish(*optional, expression.span);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
@@ -6178,9 +6186,14 @@ impl Compiler {
             // receiver becomes `this`. Reached through `Apply` rather than a `CallPrivate`
             // instruction, because the shape `Apply` already takes -- receiver, callee,
             // arguments -- is exactly this one.
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
                 self.code.push(Instruction::Dup);
                 self.code.push(Instruction::GetPrivate(name));
                 self.array_literal(arguments, span);

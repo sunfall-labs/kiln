@@ -744,6 +744,9 @@ pub enum ExpressionKind {
     PrivateMember {
         object: Box<Expression>,
         name: String,
+        /// Whether the access was written `?.#name`, which short-circuits the whole chain to
+        /// `undefined` on a nullish object rather than asking it for the name.
+        optional: bool,
     },
     /// `object.#name = value`, including the compound forms.
     ///
