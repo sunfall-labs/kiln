@@ -2130,17 +2130,12 @@ impl Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
-        // Boxed only when a nested function refers to this name and the name is not a module
-        // *scope* binding. Module scope is already shared -- `LoadGlobal`/`StoreGlobal` reach the
-        // one slot from every frame -- so boxing it would leave the cell itself in the slot and a
-        // global read would hand back the cell rather than its contents. A block inside the
-        // module body is not module scope, and a closure over it does need a cell.
-        let in_module_scope = !self.compiling_function() && scope_index == 0;
-        // A direct `eval` overrides the module-scope exemption. The exemption holds only while
-        // module bindings are read through `LoadGlobal`, and a boxed one never is: it resolves
-        // as a cell from the body and as an upvalue from every nested function, exactly as
-        // `predeclare` has already been boxing captured module bindings since ADR 0019.
-        let celled = self.cell_everything || (self.captured.contains(name) && !in_module_scope);
+        // A captured binding is a cell at every scope, including module scope. `LoadGlobal`
+        // reaches the currently executing module frame, which is correct only while a callable
+        // stays in its declaring module. Exported functions and classes travel; their cells travel
+        // with them. `predeclare` applies the same rule to hoisted bindings, and keeping this
+        // non-hoisted path weaker let hidden superclass bindings index the importer by slot.
+        let celled = self.cell_everything || self.captured.contains(name);
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
@@ -4238,7 +4233,15 @@ impl Compiler {
         // Which of this function's own bindings its nested functions refer to. Computed before
         // the body is compiled because a declaration has to know, at the point it allocates its
         // slot, whether that slot holds a value or a cell.
-        let captured = names_captured_by_this_function(function);
+        let mut captured = names_captured_by_this_function(function);
+        // `super` is syntax, not an identifier, so the ordinary name walk cannot discover the
+        // hidden binding that represents it. Every callable compiled while a derived class is
+        // active may emit `load_super` (an explicit call/member access, or a synthesized
+        // forwarding constructor) and must carry that binding with the closure. Otherwise an
+        // exported derived class reads the caller module's slot by number when constructed.
+        if let Some(super_binding) = self.super_bindings.last() {
+            captured.insert(super_binding.clone());
+        }
         // A direct `eval` anywhere in this function -- including inside one nested in it -- means
         // the eval'd source may name any binding here, so every one of them has to be a cell.
         let cell_everything = function_contains_direct_eval(function);
