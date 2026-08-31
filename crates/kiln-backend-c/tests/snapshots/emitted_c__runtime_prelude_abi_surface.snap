@@ -457,6 +457,8 @@ int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
+static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
+static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
@@ -748,8 +750,15 @@ static int kiln_c99_reads_only(uint64_t code) {
 static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len) {
 static kiln_value kiln_c99_method(uint64_t code) {
 static const char *kiln_c99_method_name(uint64_t code) {
-static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);
-static double kiln_c99_random(void) {
+#ifndef KILN_REALM_ENTROPY_SEED
+#define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
+#endif
+static uint64_t kiln_c99_random_state = KILN_REALM_ENTROPY_SEED;
+static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
+#if KILN_REALM_HOST_ENTROPY
+#else
+#endif
+static int kiln_c99_random(kiln_host *host, double *out) {
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
@@ -817,6 +826,14 @@ static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
 static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static kiln_value kiln_c99_number(double value) {
+static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds) {
+#if KILN_REALM_HOST_CLOCK
+#else
+#endif
+static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high,
+#if KILN_REALM_HOST_CLOCK
+#else
+#endif
 static kiln_value kiln_c99_number_bits(uint64_t bits) {
 static double kiln_c99_as_number(kiln_value value) {
 static int kiln_c99_truthy(kiln_value value) {

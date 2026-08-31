@@ -10086,7 +10086,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             index: *index as usize,
                         });
                     };
-                    self.stack.push(value.clone());
+                    let value = value.clone();
+                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            "cannot access a binding before its declaration".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.stack.push(value);
                 }
                 Instruction::StoreLocal(index) => {
                     let value = self.pop(current)?;
@@ -38635,6 +38644,29 @@ mod tests {
         .unwrap();
         assert_eq!(result.value, Value::Number(5.0));
         assert_eq!(result.steps, 4);
+    }
+
+    #[test]
+    fn a_marked_local_read_throws_a_reference_error() {
+        // Lexical slots are marked on scope entry, so a direct read must inspect the marker just
+        // like a captured cell does. This is deliberately hand-written bytecode: it catches a
+        // regression where `LoadLocal` silently returned the marker as `undefined`.
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![
+                Instruction::MarkUninitialized(0),
+                Instruction::LoadLocal(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: Vec::new(),
+        };
+        assert!(matches!(
+            run(&program),
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "ReferenceError: cannot access a binding before its declaration"
+        ));
     }
 
     #[test]
