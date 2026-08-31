@@ -24774,7 +24774,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -26521,6 +26521,61 @@ int main(void) {
             generated
                 .source
                 .contains("Object.defineProperty invalid key or arity")
+        );
+    }
+
+    #[test]
+    fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_callee() {
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("missing".into())],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![FunctionProto {
+                prologue_end: 0,
+                asynchronous: false,
+                name: Some("read_missing_math_property".into()),
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                parameter_count: 0,
+                declared_length: 0,
+                local_count: 0,
+                code: vec![
+                    Instruction::LoadBuiltin(Builtin::Math),
+                    Instruction::GetProperty(0),
+                    Instruction::Return,
+                ],
+                upvalues: Vec::new(),
+            }],
+        })
+        .expect("nested refusal probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result = kiln_c99_undefined();
+    int status = {symbol}(NULL, &result);
+    if (status != KILN_C99_CONTROL_ERROR) return 1;
+    if (kiln_c99_diagnostic_site == NULL || kiln_c99_diagnostic_operation == NULL) return 2;
+    if (kiln_c99_diagnostic_instruction != (size_t)1) return 3;
+    if (strcmp(kiln_c99_diagnostic_operation, "GetProperty(missing)") != 0) return 4;
+    if (kiln_c99_diagnostic_detail != NULL) return 5;
+    if (kiln_c99_diagnostic_receiver_tag != 0) return 6;
+    return 0;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "nested-call-refusal-provenance");
+        assert!(
+            run.status.success(),
+            "nested refusal provenance failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
         );
     }
 
