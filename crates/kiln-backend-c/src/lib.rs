@@ -4563,13 +4563,6 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_define_method(kiln_c99_process, "hrtime", 6,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
-    if (status == KILN_C99_OK) {
-        kiln_value hrtime;
-        status = kiln_c99_get(NULL, kiln_c99_process, "hrtime", 6, &hrtime, 0, NULL);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, hrtime, "bigint", 6,
-                                  kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT), 0, NULL);
-    }
     if (status == KILN_C99_OK)
         status = kiln_c99_define_method(kiln_c99_process, "cwd", 3,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
@@ -7669,6 +7662,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
             return KILN_C99_CONTROL_ERROR;
+        }
+        if (target.tag == KILN_VALUE_METHOD &&
+            target.bits == KILN_C99_METHOD_PROCESS_HRTIME &&
+            kiln_c99_same_name(key, key_len, "bigint")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT);
+            return KILN_C99_OK;
         }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
