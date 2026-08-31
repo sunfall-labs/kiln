@@ -855,6 +855,7 @@ impl Lowerer {
             Expression::PrivateFieldExpression(member) => HirExpressionKind::PrivateMember {
                 object: Box::new(self.expression(&member.object)),
                 name: member.field.name.to_string(),
+                optional: member.optional,
             },
             Expression::CallExpression(_) => {
                 return self.unsupported_expression("optional call", expression_span);
@@ -1794,6 +1795,7 @@ impl Lowerer {
                 HirExpressionKind::PrivateMember {
                     object: Box::new(self.expression(&member.object)),
                     name: member.field.name.to_string(),
+                    optional: member.optional,
                 }
             }
         };
