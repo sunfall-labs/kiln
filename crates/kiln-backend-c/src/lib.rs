@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 4;
+pub const C_GENERATOR_VERSION: u32 = 5;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -25077,7 +25077,7 @@ fn emit_instruction(
             "return KILN_C99_CONTROL_ERROR;"
         };
         let refusal = format!(
-            "{control_refusal} kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; {refusal_target} }} if (status != KILN_C99_OK) return status;"
+            "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
         );
         let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
         output.truncate(before);
