@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -45,7 +44,8 @@ KILN_VALUE_REGEXP = 20,
 KILN_VALUE_BIGINT = 21,
 KILN_VALUE_ARRAY_BUFFER = 22,
 KILN_VALUE_TYPED_ARRAY = 23,
-KILN_VALUE_PROXY = 24
+KILN_VALUE_PROXY = 24,
+KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_BUILTIN_PROMISE 15
 #define KILN_C99_BUILTIN_BOOLEAN 16
 #define KILN_C99_BUILTIN_REFLECT 17
@@ -84,6 +84,16 @@ KILN_VALUE_PROXY = 24
 #define KILN_C99_BUILTIN_SET_PROTOTYPE 50
 #define KILN_C99_BUILTIN_ERROR_PROTOTYPE 51
 #define KILN_C99_BUILTIN_PROXY 52
+#define KILN_C99_BUILTIN_TEMPORAL 53
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE 54
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME 55
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME 56
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH 57
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY 58
+#define KILN_C99_BUILTIN_TEMPORAL_DURATION 59
+#define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
+#define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
+#define KILN_C99_BUILTIN_TEMPORAL_NOW 62
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -349,6 +359,15 @@ KILN_VALUE_PROXY = 24
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
+#define KILN_C99_METHOD_TEMPORAL_FROM 285
+#define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
+#define KILN_C99_METHOD_TEMPORAL_COMPARE 293
+#define KILN_C99_METHOD_TEMPORAL_COMPARE_LAST 300
+#define KILN_C99_METHOD_TEMPORAL_TO_STRING 301
+#define KILN_C99_METHOD_TEMPORAL_TO_JSON 302
+#define KILN_C99_METHOD_TEMPORAL_VALUE_OF 303
+#define KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID 304
+#define KILN_C99_METHOD_TEMPORAL_LAST 304
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -462,6 +481,16 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
+int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
+int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle);
+void kiln_temporal_free(void *handle);
+int32_t kiln_temporal_kind(const void *handle);
+int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
+int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity);
+int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order);
+int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity);
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len);
 static kiln_value kiln_c99_undefined(void);
 static kiln_value kiln_c99_null(void);
@@ -469,6 +498,17 @@ static kiln_value kiln_c99_boolean(int value);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
+static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
+static kiln_value kiln_c99_temporal_value(void *handle);
+static void *kiln_c99_temporal_of(kiln_value value);
+static int kiln_c99_temporal_raise(kiln_value *thrown, int32_t code);
+static int kiln_c99_temporal_string(kiln_value *out, kiln_value value, kiln_value *thrown);
+static const char *kiln_c99_temporal_tag(kiln_value value);
+static const char *kiln_c99_temporal_builtin_name(uint64_t builtin);
+static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
+static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
+static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
+static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_method(uint64_t code);
 static kiln_value kiln_c99_function(kiln_closure *closure);
 static kiln_closure *kiln_c99_closure_of(kiln_value value);
@@ -686,10 +726,20 @@ static int kiln_c99_frame_is_arrow;
 static int kiln_c99_visible_arguments(kiln_value *out) {
 static kiln_value kiln_c99_globals;
 static int kiln_c99_global_object(kiln_value *out) {
+static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
 static kiln_value kiln_c99_bigint_text(kiln_value value, uint32_t radix) {
 static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len,
 static const void *kiln_c99_bigint_one(void) {
 static kiln_value kiln_c99_bigint_value(void *handle) {
+static kiln_value kiln_c99_temporal_value(void *handle) {
+static void *kiln_c99_temporal_of(kiln_value value) {
+static int kiln_c99_temporal_raise(kiln_value *thrown, int32_t code) {
+static int kiln_c99_temporal_string(kiln_value *out, kiln_value value, kiln_value *thrown) {
+static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin) {
+static uint64_t kiln_c99_temporal_builtin_of(kiln_value value) {
+static const char *kiln_c99_temporal_tag(kiln_value value) {
+static const char *kiln_c99_temporal_builtin_name(uint64_t builtin) {
+static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
 static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
 static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size_t count,
@@ -800,6 +850,14 @@ static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
+typedef struct kiln_temporal_key {
+static const kiln_temporal_key KILN_C99_TEMPORAL_FIELD_KEYS[15] = {
+static const kiln_temporal_key KILN_C99_TEMPORAL_DURATION_KEYS[10] = {
+typedef struct kiln_temporal_text {
+static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int duration,
+static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
+static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
+static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,

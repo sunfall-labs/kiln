@@ -19,11 +19,17 @@ default = ["realm"]
 realm = ["dep:kiln-runtime"]
 regexp = ["dep:regress"]
 bigint = ["dep:num-bigint", "dep:num-traits"]
+# `Temporal` over the same adapter the interpreter links, so the two engines cannot disagree about
+# a calendar (ADR 0025, ADR 0029 §4).
+temporal = ["dep:kiln-temporal"]
 
 [dependencies]
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-runtime = { workspace = true, optional = true }
+# The calendar engine, wrapped by the adapter that already keeps `temporal_rs` out of every public
+# signature -- which is what lets it cross a C ABI as scalars and an opaque handle.
+kiln-temporal = { workspace = true, optional = true }
 # The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.
 regress = { version = "0.12", default-features = false, features = [

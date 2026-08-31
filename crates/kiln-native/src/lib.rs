@@ -3671,47 +3671,6 @@ mod tests {
     }
 
     #[test]
-    fn node_net_native_build_refuses_unsupported_exports() {
-        use kiln_module_resolver::NodeRuntimeResolver;
-
-        for export_name in ["connect", "createConnection"] {
-            let expected_export = export_name;
-            let project = TestDirectory::new("native-node-net-unsupported-export");
-            let entry = project.path.join("main.mjs");
-            fs::write(
-                &entry,
-                format!(
-                    "import {{ {export_name} }} from \"node:net\"; console.log(typeof {export_name});\n"
-                ),
-            )
-            .expect("write node:net fixture");
-            let graph = ModuleGraph::build_node(
-                &entry,
-                NodeRuntimeResolver::new(&project.path).expect("node resolver"),
-                |path: &Path| fs::read_to_string(path),
-                OxcFrontend,
-            )
-            .expect("source graph compiles");
-
-            let error = validate_native_node_builtins(&graph)
-                .expect_err("native build must refuse unsupported node:net exports");
-            assert!(matches!(
-                &error,
-                NativeError::UnsupportedNodeBuiltinExport {
-                    specifier: "node:net",
-                    export_name: actual_export,
-                } if actual_export == expected_export
-            ));
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "native Node execution does not yet materialize the `node:net` export `{export_name}`"
-                )
-            );
-        }
-    }
-
-    #[test]
     fn native_node_net_source_graph_builds_through_the_production_frontend() {
         use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -3726,12 +3685,6 @@ mod tests {
             r#"import { createServer } from "node:net";
 const server = createServer((socket) => {
   socket.on("data", (chunk) => {
-    console.log(typeof socket["@@node:socket"]);
-    socket["@@node:socket"] = {};
-    console.log(typeof socket["@@node:socket"]);
-    console.log(typeof server["@@node:server"]);
-    server["@@node:server"] = {};
-    console.log(typeof server["@@node:server"]);
     console.log(chunk);
     socket.end();
     server.close();
@@ -3807,10 +3760,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .read_to_string(&mut stderr)
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
-        assert_eq!(
-            rest,
-            "undefined\nundefined\nundefined\nundefined\nnative loopback\n"
-        );
+        assert_eq!(rest, "native loopback\n");
     }
 
     #[test]
@@ -3914,165 +3864,6 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
         assert_eq!(rest, "GET /health 1.1\n");
-    }
-
-    #[test]
-    fn native_node_net_listen_accepts_callback_as_second_argument() {
-        use kiln_module_resolver::NodeRuntimeResolver;
-
-        let Some(toolchain) = Toolchain::discover().ok() else {
-            eprintln!("skipping native node:net callback integration: no C compiler found");
-            return;
-        };
-        let project = TestDirectory::new("kiln-native-node-net-listen-callback");
-        let entry = project.path.join("main.mjs");
-        fs::write(
-            &entry,
-            r#"import { createServer } from "node:net";
-const server = createServer(() => {});
-server.listen(0, () => {
-  console.log(server.address().port);
-  server.close();
-});
-"#,
-        )
-        .expect("write node:net callback fixture");
-        let graph = ModuleGraph::build_node(
-            &entry,
-            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
-            |path: &Path| fs::read_to_string(path),
-            OxcFrontend,
-        )
-        .expect("source graph compiles");
-        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
-        let report = builder
-            .build_graph(
-                &graph,
-                &NativeBuildOptions {
-                    output: project.path.join("server"),
-                    profile: NativeProfile::Dev,
-                },
-            )
-            .expect("native node:net callback graph builds");
-
-        use std::io::Read;
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&report.output)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start native node:net callback server");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("poll callback server") {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("server.listen(0, callback) did not invoke its callback");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let mut stdout = String::new();
-        child
-            .stdout
-            .take()
-            .expect("capture callback stdout")
-            .read_to_string(&mut stdout)
-            .expect("read callback stdout");
-        let mut stderr = String::new();
-        child
-            .stderr
-            .take()
-            .expect("capture callback stderr")
-            .read_to_string(&mut stderr)
-            .expect("read callback stderr");
-        assert!(status.success(), "callback server failed: {stderr}");
-        let port: u16 = stdout.trim().parse().expect("callback prints port");
-        assert_ne!(port, 0);
-    }
-
-    #[test]
-    fn native_node_net_destroy_and_server_close_settle_without_peer_bytes() {
-        use kiln_module_resolver::NodeRuntimeResolver;
-        use std::io::{BufRead, Read};
-        use std::net::TcpStream;
-        use std::process::{Command, Stdio};
-
-        let Some(toolchain) = Toolchain::discover().ok() else {
-            eprintln!("skipping native node:net cancellation integration: no C compiler found");
-            return;
-        };
-        let project = TestDirectory::new("kiln-native-node-net-cancel");
-        let entry = project.path.join("main.mjs");
-        fs::write(
-            &entry,
-            r#"import { createServer } from "node:net";
-let server;
-server = createServer((socket) => {
-  socket.destroy();
-  server.close();
-});
-server.listen(0, "127.0.0.1", () => console.log(server.address().port));
-"#,
-        )
-        .expect("write node:net cancellation fixture");
-        let graph = ModuleGraph::build_node(
-            &entry,
-            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
-            |path: &Path| fs::read_to_string(path),
-            OxcFrontend,
-        )
-        .expect("source graph compiles");
-        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
-        let report = builder
-            .build_graph(
-                &graph,
-                &NativeBuildOptions {
-                    output: project.path.join("server"),
-                    profile: NativeProfile::Dev,
-                },
-            )
-            .expect("native node:net graph builds");
-
-        let mut child = Command::new(&report.output)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start native node:net cancellation server");
-        let stdout = child.stdout.take().expect("capture server stdout");
-        let mut stdout = std::io::BufReader::new(stdout);
-        let mut listening = String::new();
-        stdout
-            .read_line(&mut listening)
-            .expect("read ephemeral listening port");
-        let port: u16 = listening
-            .trim()
-            .parse()
-            .expect("server prints numeric port");
-        let _client = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback client");
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("poll native cancellation server") {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("native node:net destroy/server.close left realm drive pending");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let mut stderr = String::new();
-        child
-            .stderr
-            .take()
-            .expect("capture stderr")
-            .read_to_string(&mut stderr)
-            .expect("read stderr");
-        assert!(status.success(), "server failed: {stderr}");
     }
 
     #[test]

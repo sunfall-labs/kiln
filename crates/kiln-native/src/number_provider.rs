@@ -24,9 +24,10 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// What a packaged archive has to define.
 ///
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
-/// 0025). The list is part of the identity below, so an archive built before them is rejected
-/// rather than linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 41] = [
+/// 0025), and the temporal nine joined them when the calendar engine did (ADR 0029 §4). The list
+/// is part of the identity below, so an archive built before them is rejected rather than linked
+/// and found wanting.
+const REQUIRED_EXPORTS: [&str; 50] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
@@ -68,6 +69,15 @@ const REQUIRED_EXPORTS: [&str; 41] = [
     "kiln_bigint_negate",
     "kiln_bigint_compare",
     "kiln_bigint_is_zero",
+    "kiln_temporal_from_fields",
+    "kiln_temporal_parse",
+    "kiln_temporal_now",
+    "kiln_temporal_free",
+    "kiln_temporal_kind",
+    "kiln_temporal_get",
+    "kiln_temporal_to_string",
+    "kiln_temporal_compare",
+    "kiln_temporal_last_error",
 ];
 
 #[derive(Debug, Clone)]
@@ -404,7 +414,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
         // runtime that now owns native entry as well as interpreted entry.
         OsString::from("--features"),
-        OsString::from("regexp,bigint"),
+        OsString::from("regexp,bigint,temporal"),
         OsString::from("--release"),
         OsString::from("--target"),
         OsString::from(&rust_target),
