@@ -370,6 +370,38 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 343
 #define KILN_C99_METHOD_BUFFER_CONCAT 344
 #define KILN_C99_METHOD_BUFFER_TO_STRING 345
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 346
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 347
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 348
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 349
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 350
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 353
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 354
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 355
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 356
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 357
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 358
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 359
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 360
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 361
+#define KILN_C99_METHOD_NODE_STREAM 362
+#define KILN_C99_METHOD_NODE_READABLE 363
+#define KILN_C99_METHOD_NODE_WRITABLE 364
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 365
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 366
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 367
+#define KILN_C99_METHOD_NODE_READABLE_READ 368
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 369
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 370
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 371
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 372
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 373
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 374
+#define KILN_C99_METHOD_NODE_WRITABLE_END 375
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 376
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 377
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -655,6 +687,10 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -739,6 +775,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
@@ -747,6 +784,11 @@ static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_channel(kiln_value *out) {
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
