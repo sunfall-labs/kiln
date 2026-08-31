@@ -106,6 +106,17 @@ kiln_provider_cleanup() {
 }
 trap kiln_provider_cleanup EXIT
 
+# Keep the shipped manifest tied to the ABI the resolver validates. This is intentionally read from
+# the Rust source rather than duplicated as a second version constant in the shell packager.
+KILN_PROVIDER_ABI_VERSION=$(
+	sed -n 's/^pub(crate) const PROVIDER_ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
+		crates/kiln-native/src/number_provider.rs
+)
+if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
+	printf 'could not determine number-provider ABI version\n' >&2
+	exit 1
+fi
+
 cp "$KILN_PROVIDER_BUILT_ARCHIVE" "$KILN_PROVIDER_ARCHIVE_TEMP"
 KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE_TEMP")
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
@@ -142,7 +153,7 @@ printf '%s\n' \
 	'{' \
 	'  "schema": 1,' \
 	'  "provider": "kiln-native-number-ffi",' \
-	'  "provider_abi": 1,' \
+	"  \"provider_abi\": $KILN_PROVIDER_ABI_VERSION," \
 	'  "format_version": 1,' \
 	'  "parse_version": 1,' \
 	"  \"rust_target\": \"$KILN_PROVIDER_TARGET\"," \
