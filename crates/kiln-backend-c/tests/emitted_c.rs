@@ -60,6 +60,7 @@ fn function(
     upvalues: Vec<Upvalue>,
 ) -> FunctionProto {
     FunctionProto {
+        prologue_end: 0,
         asynchronous: false,
         name: Some(name.to_owned()),
         arrow: false,
