@@ -9044,6 +9044,10 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             status = kiln_c99_put(NULL, request, "httpVersion", 11,
                                   event->version_minor ? kiln_c99_copy_text("1.1", 3)
                                                        : kiln_c99_copy_text("1.0", 3), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "socket", 6, socket->object, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "connection", 10, socket->object, 0, NULL);
         if (status == KILN_C99_OK) {
             kiln_value request_headers;
             size_t at = 0;
@@ -9094,6 +9098,13 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
                                                       response);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, response->object, "req", 3, request, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, response->object, "socket", 6, socket->object, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, response->object, "connection", 10,
+                                  socket->object, 0, NULL);
         if (status != KILN_C99_OK) return status;
         response->request = request;
         response->next = socket->responses;

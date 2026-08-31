@@ -3051,6 +3051,69 @@ mod tests {
     }
 
     #[test]
+    fn node_http_request_and_response_share_the_accepted_socket_identity() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer((request, response) => {",
+                "  if (!request.socket || request.connection !== request.socket) throw new Error('request socket');",
+                "  if (response.req !== request) throw new Error('response request');",
+                "  if (response.socket !== request.socket || response.connection !== request.socket) throw new Error('response socket');",
+                "  response.end('identity');",
+                "  server.close();",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build HTTP identity graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server publishes its port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write request");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("read response");
+            response
+        });
+        let mut host = ServerHostForPort {
+            sender: Some(port_sender),
+            output: Vec::new(),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve identity request");
+        let response = client.join().expect("client completes");
+        assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(http_body(&response), b"identity");
+    }
+
+    #[test]
     fn node_http_request_body_is_a_readable_event_stream() {
         use std::io::{Read, Write};
         use std::net::{Shutdown, TcpStream};

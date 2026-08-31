@@ -7,6 +7,12 @@ const server = createServer((request, response) => {
   if (request.method !== 'POST' || request.url !== '/kiln') {
     throw new Error('request line was not preserved');
   }
+  if (!request.socket || request.connection !== request.socket) {
+    throw new Error('IncomingMessage did not expose its accepted socket identity');
+  }
+  if (response.req !== request || response.socket !== request.socket || response.connection !== request.socket) {
+    throw new Error('ServerResponse did not preserve its request and socket identities');
+  }
   let bodyBytes = 0;
   request.pause();
   request.on('data', chunk => { bodyBytes += chunk.length; });
