@@ -1154,6 +1154,11 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_WEAK_SET 67
 #define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
 #define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
+/* The error kind that reports several failures as one. Reachable only through `Promise.any` for
+ * now -- the emitter still refuses the `AggregateError` global, because constructing one iterates
+ * its first argument and this runtime has no `IterableToList` to do it with. A refusal is the
+ * honest state; naming the global without the iteration would make the two engines disagree. */
+#define KILN_C99_BUILTIN_AGGREGATE_ERROR 70
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -19377,6 +19382,7 @@ static const char *kiln_c99_error_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_SYNTAX_ERROR: return "SyntaxError";
     case KILN_C99_BUILTIN_URI_ERROR: return "URIError";
     case KILN_C99_BUILTIN_ERROR: return "Error";
+    case KILN_C99_BUILTIN_AGGREGATE_ERROR: return "AggregateError";
     default: return NULL;
     }
 }
@@ -19506,13 +19512,14 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
 
 /* What `Promise.any` rejects with when nothing succeeded: the reasons, and a sentence saying so.
  *
- * A plain `Error` rather than an `AggregateError`, which is the kind the interpreter builds and
- * therefore the kind this has to build -- node names it `AggregateError` and both engines are
- * behind on that together. `errors` is not enumerated, for the same reason an error's `message`
- * is not: it is the error saying what happened, not a property of an object. */
+ * An `AggregateError`, which is what node names it and what the interpreter builds. It used to be
+ * a plain `Error` carrying an `errors` array -- a *plausible* wrong answer, in that everything a
+ * handler reads off it was right except what it is, and `e.constructor.name` answered "Error".
+ * `errors` is not enumerated, for the same reason an error's `message` is not: it is the error
+ * saying what happened, not a property of an object. */
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
     kiln_value aggregate;
-    int status = kiln_c99_new_error(&aggregate, KILN_C99_BUILTIN_ERROR,
+    int status = kiln_c99_new_error(&aggregate, KILN_C99_BUILTIN_AGGREGATE_ERROR,
                                     kiln_c99_copy_text("All promises were rejected", 26));
     if (status != KILN_C99_OK) {
         return status;
