@@ -71,6 +71,7 @@ pub enum NodeBuiltin {
     Https,
     PerfHooks,
     Os,
+    Tty,
     Stream,
     QueryString,
     Url,
@@ -98,6 +99,7 @@ impl NodeBuiltin {
             "https" => Self::Https,
             "perf_hooks" => Self::PerfHooks,
             "os" => Self::Os,
+            "tty" => Self::Tty,
             "stream" => Self::Stream,
             "querystring" => Self::QueryString,
             "url" => Self::Url,
@@ -126,6 +128,7 @@ impl NodeBuiltin {
             Self::Https => "node:https",
             Self::PerfHooks => "node:perf_hooks",
             Self::Os => "node:os",
+            Self::Tty => "node:tty",
             Self::Stream => "node:stream",
             Self::QueryString => "node:querystring",
             Self::Url => "node:url",
@@ -1914,6 +1917,7 @@ mod tests {
             ("node:http", NodeBuiltin::Http),
             ("node:module", NodeBuiltin::Module),
             ("node:path", NodeBuiltin::Path),
+            ("node:tty", NodeBuiltin::Tty),
             ("node:worker_threads", NodeBuiltin::WorkerThreads),
         ] {
             let resolved = resolver
@@ -1950,6 +1954,7 @@ mod tests {
             "http",
             "module",
             "path",
+            "tty",
             "worker_threads",
         ] {
             assert_eq!(
@@ -1968,6 +1973,7 @@ mod tests {
             NodeBuiltin::Fs,
             NodeBuiltin::Module,
             NodeBuiltin::Path,
+            NodeBuiltin::Tty,
             NodeBuiltin::WorkerThreads,
         ] {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));

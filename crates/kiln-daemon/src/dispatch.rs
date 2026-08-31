@@ -938,19 +938,29 @@ fn scalar_value_summary(value: &kiln_interpreter::Value) -> Option<ScalarValueSu
 /// by everything the daemon publishes rather than by whichever entry point a client happened to
 /// use. The accounting runs after the build is complete and only ever spawns a sweep on another
 /// thread, so it adds nothing to the latency of the response it precedes.
-fn native_built(project_root: &Path, report: kiln_native::NativeBuildReport) -> Response {
-    crate::cache_gc::record_publication(project_root, crate::cache_gc::published_bytes(&report));
+fn native_built(
+    project_root: &Path,
+    builder: &kiln_native::NativeBuilder,
+    report: kiln_native::NativeBuildReport,
+) -> Response {
+    crate::cache_gc::record_publication(
+        project_root,
+        crate::cache_gc::published_bytes(&report),
+        native_cache_identities(builder),
+    );
     Response::NativeBuilt(native_summary(report))
 }
 
 /// Answer a finished shared-library build, accounting for what it published into the cache.
 fn native_shared_built(
     project_root: &Path,
+    builder: &kiln_native::NativeBuilder,
     report: kiln_native::NativeSharedLibraryReport,
 ) -> Response {
     crate::cache_gc::record_publication(
         project_root,
         crate::cache_gc::published_shared_bytes(&report),
+        native_cache_identities(builder),
     );
     Response::NativeSharedBuilt(native_shared_summary(report))
 }
@@ -989,10 +999,15 @@ fn default_native_output_for_builder(
 }
 
 /// Answer a finished native run, accounting for what its build published into the cache.
-fn native_ran(project_root: &Path, report: kiln_native::NativeRunReport) -> Response {
+fn native_ran(
+    project_root: &Path,
+    builder: &kiln_native::NativeBuilder,
+    report: kiln_native::NativeRunReport,
+) -> Response {
     crate::cache_gc::record_publication(
         project_root,
         crate::cache_gc::published_bytes(&report.build),
+        native_cache_identities(builder),
     );
     Response::NativeRan(NativeRunSummary {
         exit_code: report.exit_code,
@@ -1000,6 +1015,18 @@ fn native_ran(project_root: &Path, report: kiln_native::NativeRunReport) -> Resp
         stderr: String::from_utf8_lossy(&report.stderr).into_owned(),
         scalar_value: report.result.map(native_scalar_value_summary),
         build: native_summary(report.build),
+    })
+}
+
+fn native_cache_identities(
+    builder: &kiln_native::NativeBuilder,
+) -> std::collections::BTreeSet<kiln_artifact_cache::Digest> {
+    builder.live_cache_identities().unwrap_or_else(|error| {
+        // A successful build has already loaded the same provider inputs, so this is defensive.
+        // Cache maintenance is never allowed to turn a successful native build into a failure;
+        // an empty set merely disables identity-stale eviction for this process.
+        eprintln!("kiln-daemon: cannot enumerate live native cache identities: {error}");
+        std::collections::BTreeSet::new()
     })
 }
 
@@ -1050,7 +1077,7 @@ pub(crate) fn native_build_program(
             realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
-        Ok(report) => native_built(&project_root, report),
+        Ok(report) => native_built(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1086,7 +1113,7 @@ pub(crate) fn native_build_shared_program(
             Err(message) => return Response::Error { message },
         };
     match builder.build_shared_library(&program, &options) {
-        Ok(report) => native_shared_built(Path::new(&project_root), report),
+        Ok(report) => native_shared_built(Path::new(&project_root), &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1106,7 +1133,7 @@ pub(crate) fn native_build_shared_graph(
             Err(message) => return Response::Error { message },
         };
     match builder.build_shared_graph(graph, &options) {
-        Ok(report) => native_shared_built(Path::new(&project_root), report),
+        Ok(report) => native_shared_built(Path::new(&project_root), &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1210,7 +1237,7 @@ pub(crate) fn native_build_graph(
             realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
-        Ok(report) => native_built(&project_root, report),
+        Ok(report) => native_built(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1241,7 +1268,7 @@ pub(crate) fn native_run_program(
             realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
-        Ok(report) => native_ran(&project_root, report),
+        Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
@@ -1272,7 +1299,7 @@ pub(crate) fn native_run_graph(
             realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
-        Ok(report) => native_ran(&project_root, report),
+        Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
         },
