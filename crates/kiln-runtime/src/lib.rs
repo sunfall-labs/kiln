@@ -257,8 +257,21 @@ impl RealmRuntime {
 
     /// Starts one asynchronous host operation on this realm's Tokio runtime.
     pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
-        self.local
-            .block_on(&self.runtime, self.host.start_on(operation, referenced))
+        self.local.block_on(&self.runtime, async {
+            self.host.start_on(operation, referenced)
+        })
+    }
+
+    /// Starts a host operation while the caller is already executing inside this realm runtime.
+    ///
+    /// Language adapters use this path from native calls. It must not re-enter `block_on`; Tokio
+    /// forbids nesting a runtime, and `spawn_local` already sees the active `LocalSet` here.
+    pub fn start_host_op_in_context(
+        &mut self,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> RequestId {
+        self.host.start_on(operation, referenced)
     }
 
     /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
@@ -344,6 +357,21 @@ impl RealmRuntime {
     }
 }
 
+/// The resource-aware asynchronous host boundary exposed to a Node language adapter.
+///
+/// Unlike [`AsyncHostOps`], this starter also admits persistent resources whose tables must be
+/// mutated on the owning runtime thread. The interpreter receives this trait object rather than
+/// a Tokio handle or `RealmRuntime`, keeping executor ownership out of language objects.
+pub trait NodeHostOps {
+    fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
+}
+
+impl NodeHostOps for RealmRuntime {
+    fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        self.start_host_op_in_context(operation, referenced)
+    }
+}
+
 /// Tokio-owned asynchronous host operations for one realm.
 ///
 /// Requests are assigned a monotonic sequence at submission. Tokio may finish them in any order,
@@ -376,6 +404,10 @@ enum ResourceLifecycleUpdate {
 
 enum HostCompletionValue {
     Public(AsyncHostValue),
+    TcpListener {
+        listener: TcpListener,
+        referenced: bool,
+    },
     TcpStream {
         stream: TcpStream,
         peer: std::net::SocketAddr,
@@ -432,7 +464,7 @@ impl TokioHost {
         }
     }
 
-    async fn start_on(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+    fn start_on(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         let request = RequestId::new(self.next_request);
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sequence = self.next_sequence;
@@ -489,8 +521,30 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpListen { host, port } => {
-                let result = self.tcp_listen(host, port, referenced).await;
-                self.insert_immediate(request, sequence, referenced, result);
+                let sender = self.sender.clone();
+                let task = tokio::task::spawn_local(async move {
+                    let result = TcpListener::bind((host.as_str(), port))
+                        .await
+                        .map(|listener| HostCompletionValue::TcpListener {
+                            listener,
+                            referenced,
+                        })
+                        .map_err(|error| socket_error("listen", error));
+                    let _ = sender.send(HostCompletion {
+                        request,
+                        sequence,
+                        lifecycle: None,
+                        result,
+                    });
+                });
+                self.pending.insert(
+                    request,
+                    PendingRequest {
+                        sequence,
+                        referenced,
+                        task,
+                    },
+                );
                 return request;
             }
             AsyncHostOp::TcpAccept { listener } => {
@@ -786,37 +840,6 @@ impl TokioHost {
         );
     }
 
-    async fn tcp_listen(
-        &mut self,
-        host: String,
-        port: u16,
-        referenced: bool,
-    ) -> Result<AsyncHostValue, AsyncHostError> {
-        let listener = TcpListener::bind((host.as_str(), port))
-            .await
-            .map_err(|error| socket_error("listen", error))?;
-        let local = listener
-            .local_addr()
-            .map_err(|error| socket_error("getsockname", error))?;
-        let id = ResourceId::new(self.next_resource);
-        self.next_resource = self.next_resource.wrapping_add(1).max(1);
-        let info = ResourceInfo {
-            id,
-            kind: ResourceKind::TcpListener,
-            address: Some(local.ip().to_string()),
-            port: Some(local.port()),
-        };
-        self.resources.insert(
-            id,
-            HostResource::TcpListener {
-                listener: Rc::new(listener),
-                info: info.clone(),
-                referenced,
-            },
-        );
-        Ok(AsyncHostValue::Resource(info))
-    }
-
     fn close_resource(&mut self, resource: ResourceId) -> Result<AsyncHostValue, AsyncHostError> {
         self.resources
             .remove(&resource)
@@ -909,6 +932,29 @@ impl TokioHost {
         }
         let result = completion.result.map(|value| match value {
             HostCompletionValue::Public(value) => value,
+            HostCompletionValue::TcpListener {
+                listener,
+                referenced,
+            } => {
+                let local = listener.local_addr().ok();
+                let id = ResourceId::new(self.next_resource);
+                self.next_resource = self.next_resource.wrapping_add(1).max(1);
+                let info = ResourceInfo {
+                    id,
+                    kind: ResourceKind::TcpListener,
+                    address: local.map(|address| address.ip().to_string()),
+                    port: local.map(|address| address.port()),
+                };
+                self.resources.insert(
+                    id,
+                    HostResource::TcpListener {
+                        listener: Rc::new(listener),
+                        info: info.clone(),
+                        referenced,
+                    },
+                );
+                AsyncHostValue::Resource(info)
+            }
             HostCompletionValue::TcpStream {
                 stream,
                 peer,
