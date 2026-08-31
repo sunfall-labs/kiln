@@ -2606,12 +2606,6 @@ fn cache_gc_sweeps_over_the_socket_without_disturbing_the_source_set() {
                 fixture.dir.join(".kiln/cache").to_string_lossy()
             );
         }
-        // The sweep reaches the cache through the native builder, so a machine with no C
-        // compiler cannot answer this request at all. That is worth reporting, not asserting.
-        Response::Error { message } if message.contains("no supported C compiler") => {
-            eprintln!("skipping cache gc integration: {message}");
-            return;
-        }
         other => panic!("unexpected cache gc response: {other:?}"),
     }
 

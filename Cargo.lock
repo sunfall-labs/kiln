@@ -854,6 +854,7 @@ name = "kiln-daemon"
 version = "0.0.0"
 dependencies = [
  "frontend-oxc",
+ "kiln-artifact-cache",
  "kiln-conformance",
  "kiln-db",
  "kiln-digest",
