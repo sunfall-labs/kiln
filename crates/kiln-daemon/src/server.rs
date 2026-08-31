@@ -7,7 +7,9 @@
 
 use kiln_db::{MemoEngine, QueryEngine};
 use kiln_module_graph::ModuleGraph;
-use kiln_proto::{Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, SyncId};
+use kiln_proto::{
+    Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, StepBudget, SyncId,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{self, BufReader, ErrorKind};
@@ -727,8 +729,9 @@ fn handle<E: QueryEngine>(
             path,
             project_root,
             node,
+            steps,
             source_view,
-        } => handle_run(state, path, project_root, node, source_view),
+        } => handle_run(state, path, project_root, node, steps, source_view),
         Request::Test {
             root,
             mode,
@@ -853,6 +856,7 @@ fn handle_run<E: QueryEngine>(
     path: String,
     project_root: String,
     node: bool,
+    steps: StepBudget,
     source_view: SourceView,
 ) -> (Response, Next) {
     let prepared = {
@@ -905,7 +909,7 @@ fn handle_run<E: QueryEngine>(
             }
         }
     };
-    run_without_engine_lock(|| execute_prepared_run(prepared, node))
+    run_without_engine_lock(|| execute_prepared_run(prepared, node, steps))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and
