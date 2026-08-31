@@ -1,4 +1,4 @@
-# ADR 0030: Owned native results use an opaque versioned handle
+# ADR 0034: Owned native results use an opaque versioned handle
 
 ## Status
 

@@ -181,7 +181,7 @@ the generated module. A callback-local stack buffer is not a valid result: its l
 before the proxy can inspect it. The copies live through the whole graph invocation and are then
 released with the wrapper's per-call storage. This solves provider-to-consumer lifetime and keeps
 concurrent invocations isolated. It does not broaden ABI v1: callers still cannot assume an
-arbitrary string in the public result remains valid after the wrapper returns. ADR 0030 adds an
+arbitrary string in the public result remains valid after the wrapper returns. ADR 0034 adds an
 optional ABI-v2 descriptor whose opaque result handle owns a normalized scalar snapshot and
 exposes library-owned disposal; the legacy entry and its borrowed-result contract remain
 unchanged.
@@ -207,7 +207,7 @@ unchanged.
 - The platform compiler is a process boundary with captured diagnostics, while all source and
   artifact identity stays shell-independent and deterministic.
 - Number formatting and string parsing are ECMAScript-spelled through the versioned native number
-  runtime. ADR 0030 makes the public scalar result lifetime explicit, but temporary concatenation
+  runtime. ADR 0034 makes the public scalar result lifetime explicit, but temporary concatenation
   allocations are still retained for a process lifetime; that internal ownership gap remains
   before claiming a leak-free realm heap.
 - A 128-bit deterministic module symbol is not the artifact integrity boundary. SHA-256 cache keys
