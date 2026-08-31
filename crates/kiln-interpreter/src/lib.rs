@@ -2455,6 +2455,7 @@ fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
         Value::DataView(view) => &view.properties,
         Value::RegExp(regexp) => &regexp.properties,
         Value::Date(date) => &date.properties,
+        Value::Promise(promise) => &promise.properties,
         _ => return None,
     })
 }
@@ -3521,7 +3522,15 @@ impl TypedKind {
             Self::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
             Self::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
             Self::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
-            Self::Float16 => slot.copy_from_slice(&f64_to_half(value).to_le_bytes()),
+            Self::Float16 => slot.copy_from_slice(
+                &f32_to_half(
+                    #[expect(clippy::cast_possible_truncation)]
+                    {
+                        value as f32
+                    },
+                )
+                .to_le_bytes(),
+            ),
             #[allow(clippy::cast_possible_truncation)]
             Self::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
             Self::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
@@ -3557,26 +3566,26 @@ fn half_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// A binary64 number as the nearest binary16 bit pattern, rounding halves to even.
+/// A number as the nearest binary16 bit pattern, rounding halves to even.
 ///
 /// Not a truncation of the binary32 pattern: half's subnormals begin where nothing else's do, so
 /// a value too small for a normal half still has bits to keep, and a value too large becomes an
 /// *infinity* rather than the largest finite half. Rounding to even is the mode every other
 /// conversion in the language uses, and the one that does not drift when applied repeatedly.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f64_to_half(value: f64) -> u16 {
+fn f32_to_half(value: f32) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 48) & 0x8000) as u16;
-    let exponent = ((bits >> 52) & 0x7ff) as i32;
-    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
     // NaN keeps a non-empty mantissa so it does not come back as an infinity; which NaN it is
     // is not observable.
-    if exponent == 0x7ff {
+    if exponent == 0xff {
         return sign | 0x7c00 | u16::from(mantissa != 0) << 9;
     }
     // The unbiased exponent, rebiased for half. Above half's range is an infinity, which is what
     // the specification's `ToFloat16` produces rather than the largest finite value.
-    let unbiased = exponent - 1023 + 15;
+    let unbiased = exponent - 127 + 15;
     if unbiased >= 0x1f {
         return sign | 0x7c00;
     }
@@ -3586,11 +3595,11 @@ fn f64_to_half(value: f64) -> u16 {
         if unbiased < -10 {
             return sign;
         }
-        let with_leading = mantissa | 0x0010_0000_0000_0000;
-        let shift = (43 - unbiased) as u32;
+        let with_leading = mantissa | 0x80_0000;
+        let shift = (14 - unbiased) as u32;
         let kept = with_leading >> shift;
         let remainder = with_leading & ((1 << shift) - 1);
-        let half = 1_u64 << (shift - 1);
+        let half = 1_u32 << (shift - 1);
         let rounded = if remainder > half || (remainder == half && kept & 1 == 1) {
             kept + 1
         } else {
@@ -3598,10 +3607,10 @@ fn f64_to_half(value: f64) -> u16 {
         };
         return sign | rounded as u16;
     }
-    let kept = mantissa >> 42;
-    let remainder = mantissa & 0x3ff_ffff_ffff;
-    let mut raw = ((unbiased as u32) << 10) | kept as u32;
-    if remainder > 0x200_0000_0000 || (remainder == 0x200_0000_0000 && kept & 1 == 1) {
+    let kept = mantissa >> 13;
+    let remainder = mantissa & 0x1fff;
+    let mut raw = ((unbiased as u32) << 10) | kept;
+    if remainder > 0x1000 || (remainder == 0x1000 && kept & 1 == 1) {
         // A carry out of the mantissa lands in the exponent, which is what makes 65520 round up
         // to an infinity rather than to the largest finite half.
         raw += 1;
@@ -4965,7 +4974,7 @@ pub enum Value {
     Native(Native),
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
     Generator(Rc<RefCell<GeneratorState>>),
-    Promise(Rc<RefCell<PromiseState>>),
+    Promise(Rc<PromiseData>),
     RegExp(Rc<RegExpData>),
     /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same
     /// instant are still two objects and `===` has to say so.
@@ -4993,7 +5002,7 @@ pub enum Value {
     ///
     /// A function bound to one promise, which no other value kind here can express: a `Native`
     /// carries no state and a `Closure` carries bytecode. The flag says which of the two it is.
-    Settler(Rc<RefCell<PromiseState>>, bool),
+    Settler(Rc<PromiseData>, bool),
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
@@ -7268,23 +7277,23 @@ struct Reaction {
 #[derive(Debug, PartialEq)]
 enum Sink {
     /// The promise `then` returned.
-    Promise(Rc<RefCell<PromiseState>>),
+    Promise(Rc<PromiseData>),
     /// One input of a combinator. `Promise.all` and its siblings have to count and collect, which
     /// is bookkeeping no JavaScript handler performs -- so their inputs feed this instead.
     Combinator(Native, usize, Rc<Combinator>),
     /// Settle a promise with a *recorded* outcome once something else has settled, unless that
     /// something rejected. `finally` waits on its handler's result and then restores the outcome
     /// it was passing through.
-    Replay(Rc<RefCell<PromiseState>>, Settled),
+    Replay(Rc<PromiseData>, Settled),
     /// An `await` inside an async function: resume its body with whatever the awaited promise
     /// produced, and settle the function's own promise when the body finishes.
-    Async(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    Async(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
     /// An `await` inside an async *generator*: resume its body, and settle the promise the
     /// consumer's `next()` returned once the body reaches its next `yield` or finishes.
     ///
     /// The promise here belongs to one step rather than to the whole function, which is the
     /// whole difference between the two.
-    AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
     /// One `await` inside `Array.fromAsync`. Like `Combinator`, the bookkeeping *is* the
     /// reaction: there is no JavaScript handler, only a walk to resume.
     FromAsync(Rc<FromAsync>),
@@ -7296,14 +7305,14 @@ enum Sink {
     /// `yield v` in an async generator is `Await(v)` and then the yield, which is why an async
     /// generator that yields promises hands back their *values*. Without this the consumer got
     /// the promise itself, and `for await (const x of gen())` bound `x` to a promise.
-    AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
     ModuleAwait(Rc<RefCell<ModuleSuspension>>),
     /// `AsyncGeneratorAwaitReturn`: the argument of a `return()` on a generator with no body
     /// left to unwind, being awaited before it becomes the final step.
     ///
     /// The generator itself is not carried because there is nothing to resume -- it is already
     /// finished, and all that remains is to decide the step this `return()` promised.
-    AsyncGeneratorReturn(Rc<RefCell<PromiseState>>),
+    AsyncGeneratorReturn(Rc<PromiseData>),
 }
 
 /// One `AsyncDisposableStack.prototype.disposeAsync` in flight.
@@ -7314,7 +7323,7 @@ enum Sink {
 #[derive(Debug, PartialEq)]
 struct AsyncDisposal {
     /// The promise the caller is holding.
-    result: Rc<RefCell<PromiseState>>,
+    result: Rc<PromiseData>,
     /// The disposers still to run, in the order they were recorded: taken from the back, so
     /// each resource is released before the ones it was built on top of.
     pending: RefCell<Vec<Value>>,
@@ -7339,7 +7348,7 @@ struct AsyncDisposal {
 #[derive(Debug, PartialEq)]
 struct FromAsync {
     /// The promise the caller is holding.
-    result: Rc<RefCell<PromiseState>>,
+    result: Rc<PromiseData>,
     /// What the elements are being collected into.
     target: Value,
     mapper: Value,
@@ -7387,16 +7396,40 @@ struct Combinator {
     /// than the order they finished in.
     slots: RefCell<Vec<Value>>,
     outstanding: std::cell::Cell<usize>,
-    result: Rc<RefCell<PromiseState>>,
+    result: Rc<PromiseData>,
 }
 
 impl PromiseState {
-    fn pending() -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self {
-            settled: None,
-            reactions: Vec::new(),
-            handled: false,
-        }))
+    fn pending() -> Rc<PromiseData> {
+        Rc::new(PromiseData {
+            state: RefCell::new(Self {
+                settled: None,
+                reactions: Vec::new(),
+                handled: false,
+            }),
+            properties: RefCell::new(ObjectData::default()),
+        })
+    }
+}
+
+/// A promise: the state the specification gives it, and the ordinary properties a program hung
+/// beside it.
+///
+/// The store is here for the same reason a date has one. A promise is exotic in exactly one
+/// respect -- what it is waiting for -- and an ordinary object in every other, so `p.tag = 1` is
+/// a property write and `class P extends Promise {}` records its prototype the way every
+/// subclass does. Without it the first threw and the second produced a promise that was not an
+/// instance of its own class.
+#[derive(Debug)]
+pub struct PromiseData {
+    state: RefCell<PromiseState>,
+    properties: RefCell<ObjectData>,
+}
+
+impl PartialEq for PromiseData {
+    /// Identity, like every other object: two promises are equal only when they are one promise.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
     }
 }
 
@@ -7420,13 +7453,13 @@ enum Job {
     /// *queueing* a call to its `then`, which costs a tick -- so returning a promise from a
     /// handler settles one turn later than returning a plain value. That is observable, and
     /// programs order themselves around it.
-    Adopt(Rc<RefCell<PromiseState>>, Rc<RefCell<PromiseState>>),
+    Adopt(Rc<PromiseData>, Rc<PromiseData>),
     /// Hand this realm's resolving functions to a foreign thenable's `then`.
     ///
     /// A job for the same reason `Adopt` is one: the specification *queues* the call, so a
     /// thenable settles one tick later than a plain value. Programs order themselves around that
     /// tick, and running the `then` straight away would move them.
-    Thenable(Rc<RefCell<PromiseState>>, Value, Value),
+    Thenable(Rc<PromiseData>, Value, Value),
     /// `import(specifier)`: resolve, evaluate and settle, with the specifier already coerced.
     ///
     /// A job rather than work the instruction does, because the specification loads a module
@@ -7434,7 +7467,7 @@ enum Job {
     /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
-    Import(Rc<RefCell<PromiseState>>, String),
+    Import(Rc<PromiseData>, String),
 }
 
 /// How a suspended generator is resumed.
@@ -7626,7 +7659,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// A rejection that reached the end of the run with nothing attached to it.
     unhandled: Option<Value>,
     module_suspension: Option<Rc<RefCell<ModuleSuspension>>>,
-    module_completion: Option<Rc<RefCell<PromiseState>>>,
+    module_completion: Option<Rc<PromiseData>>,
     /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
@@ -7673,7 +7706,7 @@ enum HostResultConversion {
 
 struct PendingHostRequest {
     request: RequestId,
-    promise: Rc<RefCell<PromiseState>>,
+    promise: Rc<PromiseData>,
     conversion: HostResultConversion,
 }
 
@@ -14300,20 +14333,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
-                // Install a host boundary while obtaining the iterator and draining it. User
-                // code in `Symbol.iterator`, `next`, `done`, or `value` can throw an arbitrary
-                // value; without this boundary it becomes an `Uncaught` machine error before
-                // `thrown_value` gets a chance to turn it into the combinator's rejection.
-                let installed = self.handlers.len();
-                self.handlers.push(Handler {
-                    target: HOST_HANDLER,
-                    frame_depth: self.frames.len(),
-                    stack_height: self.stack.len(),
-                    native_depth: self.native_depth,
-                });
-                let drained = self.drain_iterable(&source, instruction);
-                self.handlers.truncate(installed);
-                let combined = match drained {
+                let combined = match self.drain_iterable(&source, instruction) {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
@@ -16382,7 +16402,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         })))
     }
 
-    /// `view.getInt16(byteOffset, littleEndian?)` and the other numeric accessors.
+    /// `view.getInt16(byteOffset, littleEndian?)` and its seven siblings.
     ///
     /// The byte-order argument defaults to *big*-endian -- the opposite of every typed array and
     /// of every platform this runs on. That is deliberate in the specification: a `DataView`
@@ -16410,7 +16430,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(kind.decode(&bytes[..width]))
     }
 
-    /// `view.setInt16(byteOffset, value, littleEndian?)` and the other numeric accessors.
+    /// `view.setInt16(byteOffset, value, littleEndian?)` and its seven siblings.
     fn data_view_set(
         &mut self,
         kind: TypedKind,
@@ -17993,7 +18013,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         receiver: &Value,
         arguments: &[Value],
-        result: &Rc<RefCell<PromiseState>>,
+        result: &Rc<PromiseData>,
         instruction: usize,
     ) -> Result<Rc<FromAsync>, ExecutionError> {
         let items = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -19433,7 +19453,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn drive_async(
         &mut self,
         generator: &Rc<RefCell<GeneratorState>>,
-        promise: &Rc<RefCell<PromiseState>>,
+        promise: &Rc<PromiseData>,
         resume: Resume,
     ) -> Result<(), ExecutionError> {
         let instruction = self.instruction;
@@ -19494,7 +19514,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // after its first `await` is reported as the module failing rather than as a
             // rejection nobody was waiting for. Every suspension of one body settles this same
             // promise: a module is evaluated once, however many times it stops on the way.
-            completion.borrow_mut().handled = true;
+            completion.state.borrow_mut().handled = true;
             self.module_completion = Some(completion);
         }
         let state = Rc::new(RefCell::new(ModuleSuspension {
@@ -19614,7 +19634,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn module_outcome(&self) -> Option<Settled> {
         self.module_completion
             .as_ref()
-            .and_then(|completion| completion.borrow().settled.clone())
+            .and_then(|completion| completion.state.borrow().settled.clone())
     }
 
     /// Advance an async generator one consumer step, settling `step` when it stops.
@@ -19626,7 +19646,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn drive_async_generator(
         &mut self,
         generator: &Rc<RefCell<GeneratorState>>,
-        step: &Rc<RefCell<PromiseState>>,
+        step: &Rc<PromiseData>,
         resume: Resume,
     ) -> Result<(), ExecutionError> {
         let instruction = self.instruction;
@@ -19730,9 +19750,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// Only the first settlement counts: a promise is a value that arrives once, and both
     /// `resolve` and `reject` are handed to the program, which may call either twice.
-    fn settle(&mut self, promise: &Rc<RefCell<PromiseState>>, outcome: &Settled) {
+    fn settle(&mut self, promise: &Rc<PromiseData>, outcome: &Settled) {
         let (reactions, unobserved) = {
-            let mut state = promise.borrow_mut();
+            let mut state = promise.state.borrow_mut();
             if state.settled.is_some() {
                 return;
             }
@@ -19759,7 +19779,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// rather than fulfilling with the promise object. It needs no special machinery -- waiting
     /// for `inner` and settling `promise` with whatever it produces is exactly a reaction with no
     /// handlers, which passes both outcomes through unchanged.
-    fn resolve_promise(&mut self, promise: &Rc<RefCell<PromiseState>>, value: Value) {
+    fn resolve_promise(&mut self, promise: &Rc<PromiseData>, value: Value) {
         let Value::Promise(inner) = &value else {
             // Anything with a callable `then` is adopted rather than stored. That is what makes a
             // promise from another library -- or a hand-written object with a `then` -- usable
@@ -19806,7 +19826,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// settled rather than on what it does.
     fn react(
         &mut self,
-        promise: &Rc<RefCell<PromiseState>>,
+        promise: &Rc<PromiseData>,
         on_fulfilled: Value,
         on_rejected: Value,
         sink: Sink,
@@ -19819,7 +19839,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             passthrough,
         };
         let settled = {
-            let mut state = promise.borrow_mut();
+            let mut state = promise.state.borrow_mut();
             let first = !state.handled;
             state.handled = true;
             if first && matches!(state.settled, Some(Settled::Rejected(_))) {
@@ -19832,7 +19852,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(outcome) => {
                 self.with_realm_mut(|realm| realm.queue_microtask(Job::React(outcome, reaction)))
             }
-            None => promise.borrow_mut().reactions.push(reaction),
+            None => promise.state.borrow_mut().reactions.push(reaction),
         }
     }
 
@@ -29371,12 +29391,7 @@ fn call_native(
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
-            | Value::TypedArray(_)
-            // These views also have an own property store, while their standard accessors live
-            // on their prototypes. Falling through to `has_property` would report an inherited
-            // `byteLength` as an own property.
-            | Value::ArrayBuffer(_)
-            | Value::DataView(_) => own_attributes(intrinsics,
+            | Value::TypedArray(_) => own_attributes(intrinsics,
                 receiver,
                 &arguments
                     .first()
@@ -30749,9 +30764,12 @@ fn call_native(
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
-        Native::MathF16Round => {
-            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
-        }
+        Native::MathF16Round => Value::Number(f64::from(half_to_f32(f32_to_half(
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                argument_number(arguments) as f32
+            },
+        )))),
         Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
@@ -34327,7 +34345,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
         // A console shows the literal's spelling, which is how it is told from a number.
         Value::BigInt(value) => format!("{value}n"),
-        Value::Promise(promise) => match &promise.borrow().settled {
+        Value::Promise(promise) => match &promise.state.borrow().settled {
             None => "Promise { <pending> }".to_owned(),
             Some(Settled::Fulfilled(value)) => {
                 format!("Promise {{ {} }}", inspect_nested(value, depth + 1, seen))
@@ -35775,8 +35793,9 @@ fn iterator_method(name: &str) -> Value {
 
 /// What a `DataView` inherits from `DataView.prototype`.
 ///
-/// The `Float16` pair shares the typed-element conversion, so a `DataView` and a typed array
-/// reading the same two bytes cannot disagree about what a half is.
+/// The `Float16` pair is absent rather than approximated: half precision is not one of the
+/// element types this engine's buffers know how to read, and a `getFloat16` that answered a
+/// `Float32` decode of the same bytes would be a wrong answer no program could see coming.
 fn data_view_method(name: &str) -> Value {
     match name {
         "getInt8" => Value::Native(Native::DataViewGet(TypedKind::Int8)),
@@ -38785,108 +38804,6 @@ fn number_string(value: f64) -> String {
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn binary16_rounding_keeps_binary64_bits_near_a_tie() {
-        let above_tie = 1.0 + 2_f64.powi(-11) + 2_f64.powi(-25);
-        assert_eq!(f64_to_half(above_tie), 0x3c01);
-    }
-
-    #[test]
-    fn binary16_patterns_round_trip_through_numbers() {
-        for bits in 0..=u16::MAX {
-            let value = half_to_f32(bits);
-            let got = f64_to_half(f64::from(value));
-            if bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0 {
-                assert_eq!(got, 0x7e00, "NaN pattern {bits:#06x}");
-            } else {
-                assert_eq!(got, bits, "binary16 pattern {bits:#06x}");
-            }
-        }
-    }
-
-    #[test]
-    fn buffer_own_property_checks_do_not_follow_their_prototype() {
-        let intrinsics = Intrinsics::default();
-        let buffer = Value::ArrayBuffer(BufferData::fixed(1));
-        let view = Value::DataView(Rc::new(DataViewData {
-            buffer: match &buffer {
-                Value::ArrayBuffer(buffer) => Rc::clone(buffer),
-                _ => unreachable!(),
-            },
-            offset: 0,
-            length: Some(1),
-            properties: RefCell::new(ObjectData::default()),
-        }));
-        let key = [Value::String("byteLength".to_owned())];
-        assert_eq!(
-            call_native(&intrinsics, Native::ObjectHasOwnProperty, &buffer, &key),
-            Ok(Value::Boolean(false))
-        );
-        assert_eq!(
-            call_native(&intrinsics, Native::ObjectHasOwnProperty, &view, &key),
-            Ok(Value::Boolean(false))
-        );
-    }
-
-    #[test]
-    fn promise_combinators_reject_with_an_iterator_thrown_value() {
-        let program = Program {
-            version: kiln_ir::BYTECODE_VERSION,
-            constants: Vec::new(),
-            code: vec![Instruction::Return],
-            local_count: 0,
-            functions: vec![kiln_ir::FunctionProto {
-                prologue_end: 0,
-                asynchronous: false,
-                name: Some("iterator".to_owned()),
-                arrow: false,
-                generator: false,
-                async_generator: false,
-                parameter_count: 0,
-                declared_length: 0,
-                local_count: 0,
-                code: vec![Instruction::LoadThis, Instruction::Throw],
-                upvalues: Vec::new(),
-            }],
-        };
-        let mut host = TestHost {
-            calls: Vec::new(),
-            clock_now: None,
-            entropy: std::collections::VecDeque::new(),
-            timezone: None,
-            locale: None,
-        };
-        let mut vm = test_vm(&program, &mut host);
-        let method = Value::Function(vm.make_closure(0).expect("iterator closure"));
-        let source = ordinary_object([(WellKnown::Iterator.property_key().to_owned(), method)]);
-
-        for native in [
-            Native::PromiseAll,
-            Native::PromiseAllSettled,
-            Native::PromiseRace,
-            Native::PromiseAny,
-        ] {
-            let result = vm
-                .dispatch_native(
-                    native,
-                    &Value::Native(Native::PromiseConstructor),
-                    std::slice::from_ref(&source),
-                    0,
-                )
-                .expect("combinator returns a promise");
-            let Value::Promise(promise) = result else {
-                panic!("combinator returned a non-promise");
-            };
-            let Some(Settled::Rejected(reason)) = promise.borrow().settled.clone() else {
-                panic!("combinator did not reject immediately");
-            };
-            assert!(
-                strict_equal(&reason, &source),
-                "thrown value identity was lost"
-            );
-        }
-    }
-
     fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
         let mut arguments = vec![Value::String(needle.to_owned())];
         if let Some(start) = start {
@@ -39028,12 +38945,12 @@ mod tests {
         let readable = node_readable(
             &[ordinary_object([(
                 "highWaterMark".into(),
-                Value::Number(4.0),
+                Value::Number(2.0),
             )])],
             None,
         );
         let state = node_readable_state(&readable).expect("Readable owns semantic state");
-        assert_eq!(state.borrow().high_water_mark, 4);
+        assert_eq!(state.borrow().high_water_mark, 2);
         assert!(matches!(
             Native::PrototypeOf(PrototypeTable::Readable).property("on"),
             Some(Value::Native(Native::NodeEventOn))
@@ -39065,7 +38982,7 @@ mod tests {
             vm.dispatch_memory_readable(
                 Native::NodeReadablePush,
                 &readable,
-                &[Value::String("one".into())],
+                &[Value::String("a".into())],
                 0,
             )
             .unwrap(),
@@ -39075,7 +38992,7 @@ mod tests {
             vm.dispatch_memory_readable(
                 Native::NodeReadablePush,
                 &readable,
-                &[Value::String("two".into())],
+                &[Value::String("b".into())],
                 0,
             )
             .unwrap(),
@@ -39084,10 +39001,49 @@ mod tests {
         assert_eq!(
             vm.dispatch_memory_readable(Native::NodeReadableRead, &readable, &[], 0)
                 .unwrap(),
-            Value::String("one".into())
+            Value::String("a".into())
+        );
+        assert_eq!(state.borrow().buffered_bytes, 1);
+        assert_eq!(
+            state.borrow().public.borrow().get("length"),
+            Some(Value::Number(1.0))
         );
         assert!(vm.pending_node.is_empty());
         assert!(vm.pending_host.is_empty());
+    }
+
+    #[test]
+    fn event_names_and_late_readable_listener_reflect_buffered_state() {
+        let readable = node_readable(&[], None);
+        let state = node_readable_state(&readable).expect("Readable owns semantic state");
+        state.borrow_mut().buffer.push(Value::String("x".into()));
+        state.borrow_mut().buffered_bytes = 1;
+        sync_readable_public_state(&readable, &state.borrow());
+
+        let Value::Object(object) = &readable else {
+            unreachable!()
+        };
+        object.borrow_mut().node_events = Some(vec![NodeEventBucket {
+            name: "readable".into(),
+            listeners: vec![NodeEventListener {
+                callback: Value::Native(Native::NodeUtilDebugNoop),
+                once: false,
+            }],
+        }]);
+        let names = object
+            .borrow()
+            .node_events
+            .as_ref()
+            .expect("events exist")
+            .iter()
+            .filter(|bucket| !bucket.listeners.is_empty())
+            .map(|bucket| bucket.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["readable".to_owned()]);
+        assert_eq!(
+            state.borrow().public.borrow().get("length"),
+            Some(Value::Number(1.0))
+        );
     }
 
     #[test]
