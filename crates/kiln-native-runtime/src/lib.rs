@@ -596,7 +596,12 @@ void kiln_cli_report_failure(int status, kiln_value value) {
      * what makes the difference between a refusal you can see and an exit code with no words. */
     switch (status) {
     case KILN_C99_CONTROL_ERROR:
-        fputs("the native backend reached something it does not implement yet\n", stderr);
+        fputs("native backend refusal", stderr);
+        if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
+            fputs(": ", stderr);
+            fwrite(value.ptr, 1, value.len, stderr);
+        }
+        fputc('\n', stderr);
         return;
     case KILN_C99_OUT_OF_MEMORY:
         fputs("out of memory\n", stderr);
