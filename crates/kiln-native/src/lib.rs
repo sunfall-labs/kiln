@@ -4635,9 +4635,13 @@ mod tests {
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         assert_eq!(module_abi_identity(), "host-2;c-1");
         assert!(runtime_abi_identity().contains("async-4"));
+        // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
+        // would silently invalidate every cached native artifact. When the bump is intended,
+        // update this with the change that makes it -- it went 14 -> 15 when the Temporal
+        // surface grew and nothing moved the expectation, leaving main red.
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-14"
+            "kiln-native-number-provider-15"
         );
     }
 
