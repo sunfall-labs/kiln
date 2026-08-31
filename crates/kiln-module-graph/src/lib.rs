@@ -1236,14 +1236,14 @@ mod tests {
     }
 
     #[test]
-    fn recognized_but_unimplemented_node_builtin_fails_at_link_time() {
+    fn node_net_connect_is_a_typed_virtual_module_export() {
         let project = TempProject::new();
         let entry = project.write(
             "main.js",
             "import { connect } from 'node:net'; console.log(connect);",
         );
         let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
-        let error = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
             let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
                 path: path.to_path_buf(),
                 message: error.to_string(),
@@ -1254,11 +1254,12 @@ mod tests {
                 diagnostics,
             })
         })
-        .expect_err("unimplemented builtin export must not become a placeholder");
-        assert!(matches!(
-            error,
-            ModuleGraphError::MissingExport { name, .. } if name == "connect"
-        ));
+        .expect("implemented builtin export links");
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute typed node:net module");
+        assert_eq!(host.output, ["[Function: nodeNetConnect]"]);
     }
 
     #[test]
@@ -1572,7 +1573,9 @@ mod tests {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
             stream.write_all(b"tokio net").expect("write payload");
             stream.shutdown(Shutdown::Write).expect("finish request");
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut echoed = Vec::new();
             stream.read_to_end(&mut echoed).expect("read echo");
             echoed
@@ -1582,6 +1585,63 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("run net server");
         assert_eq!(client.join().expect("client completes"), b"tokio net");
+    }
+
+    #[test]
+    fn node_net_client_connects_over_the_shared_tokio_stream_driver() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener};
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind peer");
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept kiln client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4];
+            stream
+                .read_exact(&mut request)
+                .expect("read client payload");
+            stream.write_all(b"pong!").expect("write reply");
+            stream.shutdown(Shutdown::Write).expect("finish reply");
+            request
+        });
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            &format!(
+                concat!(
+                    "import {{ connect }} from 'node:net';",
+                    "const socket = connect({}, '127.0.0.1', () => socket.write('ping'));",
+                    "let bytes = 0;",
+                    "socket.on('data', chunk => bytes += chunk.length);",
+                    "socket.on('end', () => {{ console.log(bytes); socket.end(); }});",
+                ),
+                port
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build net client graph");
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("run net client");
+        assert_eq!(peer.join().expect("peer completes"), *b"ping");
+        assert_eq!(host.output, ["5"]);
     }
 
     /// A function value survives the module boundary it was exported across.

@@ -254,6 +254,7 @@ pub enum Native {
     NodeEventSetMaxListeners,
     NodeNet,
     NodeNetCreateServer,
+    NodeNetConnect,
     NodeSocketWrite,
     NodeSocketEnd,
     NodeSocketDestroy,
@@ -906,6 +907,9 @@ impl Native {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
             (Self::NodeNet, "createServer") => Some(Value::Native(Self::NodeNetCreateServer)),
+            (Self::NodeNet, "connect" | "createConnection") => {
+                Some(Value::Native(Self::NodeNetConnect))
+            }
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
@@ -1378,23 +1382,24 @@ pub struct ObjectData {
 
 #[derive(Clone, Debug)]
 enum NodeObject {
-    HttpServer(Rc<RefCell<HttpServerState>>),
+    NodeServer(Rc<RefCell<NodeServerState>>),
     NetSocket(Rc<RefCell<NetSocketState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
 }
 
 #[derive(Debug)]
 struct NetSocketState {
-    server: Weak<RefCell<HttpServerState>>,
-    resource: kiln_host_abi::ResourceId,
+    owner: Option<Weak<RefCell<NodeServerState>>>,
+    resource: Option<kiln_host_abi::ResourceId>,
+    object: Option<Weak<RefCell<ObjectData>>>,
 }
 
 #[derive(Debug)]
-struct HttpServerState {
+struct NodeServerState {
     driver: TcpServerDriver,
     handler: Value,
     protocol: ServerProtocol,
-    streams: Vec<HttpConnection>,
+    streams: Vec<NodeConnection>,
     object: Option<Weak<RefCell<ObjectData>>>,
 }
 
@@ -1405,7 +1410,7 @@ enum ServerProtocol {
 }
 
 #[derive(Debug)]
-struct HttpConnection {
+struct NodeConnection {
     driver: StreamDriver,
     decoder: Http1Decoder,
     request: Option<Value>,
@@ -3218,7 +3223,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
-        "net" => &["createServer"],
+        "net" => &["connect", "createConnection", "createServer"],
         "http" => &["createServer"],
         _ => return None,
     })
@@ -4925,7 +4930,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     pending_node: Vec<PendingNodeRequest>,
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
-    http_servers: Vec<Rc<RefCell<HttpServerState>>>,
+    node_servers: Vec<Rc<RefCell<NodeServerState>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
     node_host: Option<*mut dyn NodeHostOps>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
@@ -4971,19 +4976,25 @@ struct PendingHostRequest {
 enum PendingNodeRequest {
     Server {
         request: RequestId,
-        state: Rc<RefCell<HttpServerState>>,
+        state: Rc<RefCell<NodeServerState>>,
     },
     Stream {
         request: RequestId,
-        server: Rc<RefCell<HttpServerState>>,
+        server: Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
+    },
+    Connect {
+        request: RequestId,
+        state: Rc<RefCell<NetSocketState>>,
     },
 }
 
 impl PendingNodeRequest {
     fn request(&self) -> RequestId {
         match self {
-            Self::Server { request, .. } | Self::Stream { request, .. } => *request,
+            Self::Server { request, .. }
+            | Self::Stream { request, .. }
+            | Self::Connect { request, .. } => *request,
         }
     }
 }
@@ -5024,7 +5035,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             realm: Realm::new(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
-            http_servers: Vec::new(),
+            node_servers: Vec::new(),
             node_host: None,
             caught: None,
             unhandled: None,
@@ -5093,7 +5104,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "The connection listener must be a function".into(),
                     });
                 }
-                let state = Rc::new(RefCell::new(HttpServerState {
+                let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
                     handler,
                     protocol: ServerProtocol::Net,
@@ -5101,8 +5112,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                 }));
                 let object = node_server_object(&state);
-                self.http_servers.push(Rc::clone(&state));
+                self.node_servers.push(Rc::clone(&state));
                 Ok(object)
+            }
+            Native::NodeNetConnect => {
+                let (port, host, callback) = node_connect_arguments(arguments)?;
+                let state = Rc::new(RefCell::new(NetSocketState {
+                    owner: None,
+                    resource: None,
+                    object: None,
+                }));
+                let socket = node_socket_object(&state);
+                if let Some(callback) = callback {
+                    self.dispatch_node_event(
+                        Native::NodeEventOnce,
+                        &socket,
+                        &[Value::String("connect".into()), callback],
+                        instruction,
+                    )?;
+                }
+                let host_ops = self.node_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:net requires the Node execution Adapter".into(),
+                })?;
+                let request = unsafe {
+                    (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
+                };
+                self.pending_node
+                    .push(PendingNodeRequest::Connect { request, state });
+                Ok(socket)
             }
             Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
                 self.dispatch_node_socket(native, receiver, arguments, instruction)
@@ -5121,11 +5159,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let state = node_net_socket_state(receiver)?;
         let (server, resource) = {
             let state = state.borrow();
-            let server = state.server.upgrade().ok_or_else(|| ExecutionError::Host {
+            let server = state
+                .owner
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:net socket lost its server".into(),
+                })?;
+            let resource = state.resource.ok_or_else(|| ExecutionError::Host {
                 instruction,
-                message: "node:net socket lost its server".into(),
+                message: "node:net socket is not connected".into(),
             })?;
-            (server, state.resource)
+            (server, resource)
         };
         let (result, actions) = {
             let mut server_state = server.borrow_mut();
@@ -5179,7 +5225,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "The request listener must be a function".into(),
                     });
                 }
-                let state = Rc::new(RefCell::new(HttpServerState {
+                let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
                     handler,
                     protocol: ServerProtocol::Http,
@@ -5187,7 +5233,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                 }));
                 let object = node_server_object(&state);
-                self.http_servers.push(Rc::clone(&state));
+                self.node_servers.push(Rc::clone(&state));
                 Ok(object)
             }
             Native::NodeServerListen => {
@@ -5261,7 +5307,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn start_http_server_action(
         &mut self,
-        state: &Rc<RefCell<HttpServerState>>,
+        state: &Rc<RefCell<NodeServerState>>,
         action: ServerAction,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
@@ -5288,7 +5334,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn apply_http_server_action(
         &mut self,
-        state: &Rc<RefCell<HttpServerState>>,
+        state: &Rc<RefCell<NodeServerState>>,
         action: ServerAction,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
@@ -5312,7 +5358,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
             ServerAction::Connection(accepted) => {
                 let protocol = state.borrow().protocol;
-                let mut stream = HttpConnection {
+                let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     decoder: Http1Decoder::default(),
                     request: None,
@@ -5350,7 +5396,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn emit_http_server(
         &mut self,
-        state: &Rc<RefCell<HttpServerState>>,
+        state: &Rc<RefCell<NodeServerState>>,
         event: &str,
         arguments: Vec<Value>,
         instruction: usize,
@@ -5384,8 +5430,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn http_server_for_stream(
         &self,
         resource: kiln_host_abi::ResourceId,
-    ) -> Option<Rc<RefCell<HttpServerState>>> {
-        self.http_servers
+    ) -> Option<Rc<RefCell<NodeServerState>>> {
+        self.node_servers
             .iter()
             .find(|server| {
                 server
@@ -5399,7 +5445,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn start_http_stream_action(
         &mut self,
-        server: &Rc<RefCell<HttpServerState>>,
+        server: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
         action: StreamAction,
         instruction: usize,
@@ -5550,7 +5596,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn dispatch_http_request_event(
         &mut self,
-        server: &Rc<RefCell<HttpServerState>>,
+        server: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
         event: HttpRequestEvent,
         instruction: usize,
@@ -5616,7 +5662,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn http_incoming_for_stream(
         &self,
-        server: &Rc<RefCell<HttpServerState>>,
+        server: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
@@ -5634,7 +5680,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn dispatch_http_request_head(
         &mut self,
-        server: &Rc<RefCell<HttpServerState>>,
+        server: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
         request: kiln_runtime::node_http::HttpRequest,
         instruction: usize,
@@ -6021,6 +6067,76 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                     Ok(())
+                }
+                PendingNodeRequest::Connect { state, .. } => {
+                    let socket = state
+                        .borrow()
+                        .object
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .map(Value::Object)
+                        .unwrap_or(Value::Undefined);
+                    match completion.result {
+                        Ok(AsyncHostValue::Resource(resource)) => {
+                            let resource = resource.id;
+                            let mut connection = NodeConnection {
+                                driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
+                                decoder: Http1Decoder::default(),
+                                request: Some(socket.clone()),
+                                close_after_finish: false,
+                                closed: false,
+                            };
+                            let actions = connection.driver.start_reading();
+                            let owner = Rc::new(RefCell::new(NodeServerState {
+                                driver: TcpServerDriver::default(),
+                                handler: Value::Undefined,
+                                protocol: ServerProtocol::Net,
+                                streams: vec![connection],
+                                object: None,
+                            }));
+                            {
+                                let mut state = state.borrow_mut();
+                                state.owner = Some(Rc::downgrade(&owner));
+                                state.resource = Some(resource);
+                            }
+                            self.node_servers.push(Rc::clone(&owner));
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &socket,
+                                &[Value::String("connect".into())],
+                                self.instruction,
+                            )?;
+                            for action in actions {
+                                self.start_http_stream_action(
+                                    &owner,
+                                    resource,
+                                    action,
+                                    self.instruction,
+                                )?;
+                            }
+                            Ok(())
+                        }
+                        Ok(_) => Err(ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "node:net connect returned a non-stream resource".into(),
+                        }),
+                        Err(error) => {
+                            let error = self.node_error_value(error);
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &socket,
+                                &[Value::String("error".into()), error],
+                                self.instruction,
+                            )?;
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &socket,
+                                &[Value::String("close".into())],
+                                self.instruction,
+                            )?;
+                            Ok(())
+                        }
+                    }
                 }
             };
         }
@@ -7868,6 +7984,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(
             native,
             Native::NodeNetCreateServer
+                | Native::NodeNetConnect
                 | Native::NodeSocketWrite
                 | Native::NodeSocketEnd
                 | Native::NodeSocketDestroy
@@ -14586,10 +14703,10 @@ fn node_event_emitter() -> Value {
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
-fn node_server_object(state: &Rc<RefCell<HttpServerState>>) -> Value {
+fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     let mut data = ObjectData::default();
     data.node_events = Some(Vec::new());
-    data.node_object = Some(NodeObject::HttpServer(Rc::clone(state)));
+    data.node_object = Some(NodeObject::NodeServer(Rc::clone(state)));
     data.set("listen", Value::Native(Native::NodeServerListen));
     data.set("close", Value::Native(Native::NodeServerClose));
     data.set("address", Value::Native(Native::NodeServerAddress));
@@ -14602,24 +14719,15 @@ fn node_server_object(state: &Rc<RefCell<HttpServerState>>) -> Value {
 }
 
 fn node_net_socket(
-    server: &Rc<RefCell<HttpServerState>>,
+    server: &Rc<RefCell<NodeServerState>>,
     resource: kiln_host_abi::ResourceId,
 ) -> Value {
-    let mut data = ObjectData::default();
-    data.node_events = Some(Vec::new());
-    data.node_object = Some(NodeObject::NetSocket(Rc::new(RefCell::new(
-        NetSocketState {
-            server: Rc::downgrade(server),
-            resource,
-        },
-    ))));
-    data.set("on", Value::Native(Native::NodeEventOn));
-    data.set("once", Value::Native(Native::NodeEventOnce));
-    data.set("emit", Value::Native(Native::NodeEventEmit));
-    data.set("write", Value::Native(Native::NodeSocketWrite));
-    data.set("end", Value::Native(Native::NodeSocketEnd));
-    data.set("destroy", Value::Native(Native::NodeSocketDestroy));
-    let socket = Value::Object(Rc::new(RefCell::new(data)));
+    let state = Rc::new(RefCell::new(NetSocketState {
+        owner: Some(Rc::downgrade(server)),
+        resource: Some(resource),
+        object: None,
+    }));
+    let socket = node_socket_object(&state);
     if let Some(connection) = server
         .borrow_mut()
         .streams
@@ -14631,8 +14739,23 @@ fn node_net_socket(
     socket
 }
 
+fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
+    let mut data = ObjectData::default();
+    data.node_events = Some(Vec::new());
+    data.node_object = Some(NodeObject::NetSocket(Rc::clone(state)));
+    data.set("on", Value::Native(Native::NodeEventOn));
+    data.set("once", Value::Native(Native::NodeEventOnce));
+    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set("write", Value::Native(Native::NodeSocketWrite));
+    data.set("end", Value::Native(Native::NodeSocketEnd));
+    data.set("destroy", Value::Native(Native::NodeSocketDestroy));
+    let object = Rc::new(RefCell::new(data));
+    state.borrow_mut().object = Some(Rc::downgrade(&object));
+    Value::Object(object)
+}
+
 fn node_net_socket_value(
-    server: &Rc<RefCell<HttpServerState>>,
+    server: &Rc<RefCell<NodeServerState>>,
     resource: kiln_host_abi::ResourceId,
 ) -> Option<Value> {
     server
@@ -14659,14 +14782,14 @@ fn node_net_socket_state(
     }
 }
 
-fn node_http_server(receiver: &Value) -> Result<Rc<RefCell<HttpServerState>>, ExecutionError> {
+fn node_http_server(receiver: &Value) -> Result<Rc<RefCell<NodeServerState>>, ExecutionError> {
     let Value::Object(object) = receiver else {
         return Err(ExecutionError::TypeErrorMessage {
             message: "Server method called on an incompatible receiver".into(),
         });
     };
     match &object.borrow().node_object {
-        Some(NodeObject::HttpServer(state)) => Ok(Rc::clone(state)),
+        Some(NodeObject::NodeServer(state)) => Ok(Rc::clone(state)),
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "Server method called on an incompatible receiver".into(),
         }),
@@ -14695,6 +14818,25 @@ fn node_listen_arguments(
         return Err(ExecutionError::InvalidPort);
     }
     let mut host = "0.0.0.0".to_owned();
+    let mut callback = None;
+    for argument in arguments.iter().skip(1) {
+        if is_callable(argument) {
+            callback = Some(argument.clone());
+        } else if let Value::String(value) = argument {
+            host = value.clone();
+        }
+    }
+    Ok((port as u16, host, callback))
+}
+
+fn node_connect_arguments(
+    arguments: &[Value],
+) -> Result<(u16, String, Option<Value>), ExecutionError> {
+    let port = arguments.first().map(Value::as_number).unwrap_or(f64::NAN);
+    if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
+        return Err(ExecutionError::InvalidPort);
+    }
+    let mut host = "localhost".to_owned();
     let mut callback = None;
     for argument in arguments.iter().skip(1) {
         if is_callable(argument) {
@@ -17307,6 +17449,7 @@ fn call_native(
         Native::NodeEventEmitter => node_event_emitter(),
         Native::NodeNet
         | Native::NodeNetCreateServer
+        | Native::NodeNetConnect
         | Native::NodeSocketWrite
         | Native::NodeSocketEnd
         | Native::NodeSocketDestroy
