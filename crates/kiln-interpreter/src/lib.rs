@@ -17683,6 +17683,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         error_prototype: Option<&Value>,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        // `Iterator` is the one built-in whose instances are told apart by a marker rather than
+        // by a prototype the realm has as an object: a generator, an array iterator and a helper
+        // all answer to it, and none of their chains reaches an object this walk could compare.
+        // A value carrying no marker still falls through to the ordinary walk below, which is
+        // what answers for an iterator a program wrote by extending `Iterator` itself.
+        // `Iterator` is the one built-in whose instances are told apart by a marker rather than
+        // by a prototype the realm has as an object: a generator, an array iterator and a helper
+        // all answer to it, and none of their chains reaches an object this walk could compare.
+        // A value carrying no marker still falls through to the ordinary walk below, which is
+        // what answers for an iterator a program wrote by extending `Iterator` itself.
+        if matches!(constructor, Value::Native(Native::IteratorConstructor))
+            && match value {
+                Value::Generator(_) => true,
+                Value::Object(object) => {
+                    let object = object.borrow();
+                    object.get_own("@@iterated").is_some()
+                        || object.get_own(HELPER_SOURCE).is_some()
+                }
+                _ => false,
+            }
+        {
+            return Ok(true);
+        }
         let prototype = match constructor {
             Value::Proxy(_) => self.read_computed(
                 constructor,
@@ -29338,6 +29361,10 @@ fn prototype_of(value: &Value) -> Value {
         // missing, and the one every `instanceof Date` walks.
         Value::Date(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Date)),
         Value::Promise(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Promise)),
+        // A regexp is a value kind here rather than an object, and without this link
+        // `/x/ instanceof RegExp` is false and `RegExp.prototype.isPrototypeOf(/x/)` denies it --
+        // a chain a program can see is missing, and the one every brand check walks.
+        Value::RegExp(_) => Value::Native(Native::PrototypeOf(PrototypeTable::RegExp)),
         Value::Object(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
         Value::ArrayBuffer(buffer) => Value::Native(Native::PrototypeOf(if buffer.shared {
             PrototypeTable::SharedArrayBuffer
