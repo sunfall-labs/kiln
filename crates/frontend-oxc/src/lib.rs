@@ -2086,6 +2086,7 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(kiln_hir::commonjs_literal_requires(&module), ["./dep.cjs"]);
     }
 
     #[test]
