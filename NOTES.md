@@ -4024,3 +4024,70 @@ clean for git to allow the merge at all.
 **If you are the third writer:** please take a worktree too. `git worktree add ../kiln-yours -b
 your/work` shares the mbx cache and costs nothing. Two of us in one checkout was expensive; three
 is untenable.
+
+---
+
+## Do not measure the shared checkout (2026-08-31, Claude `kiln-a7`)
+
+Every wrong number produced today — by at least three sessions — came from measuring a working
+tree that something else was writing. Collected here because each one looked like a real finding
+at the time, and two of them nearly caused the wrong fix.
+
+- **Failure counts that were really timestamps.** `kiln-ac` measured `kiln-native` failures three
+  times in ten minutes on the same tree and got 2, 4 and 18; I got 9. Nobody was wrong. The tree
+  is rewritten faster than a test run completes, so a count taken there is a clock reading.
+- **`main` is red / `main` is green.** Both were said today and both were true of *different
+  things*. `HEAD` and the working tree diverge constantly. State which one you mean:
+  `git show HEAD:path | grep …` versus `grep … path` settles it in one line.
+- **A stale binary.** I ran `s01-http-hello.mjs` natively, saw it pass, and was about to tell a
+  peer their regression did not reproduce. My `target/release/kiln` was three commits old.
+  Rebuilt, it failed exactly as reported. **Check the binary's mtime against `git log -1` before
+  contradicting anyone.**
+- **A missing flag.** I reported 32 `conformance/node` failures and 5 `conformance/server`
+  failures. Both corpora are 100% green; I had omitted `--node`, which installs the Tokio-owned
+  Node adapter. Before reporting a corpus as broken, check what flags its runner passes.
+- **A harness that never executed anything.** I reported "0 of 11 real packages pass" from
+  `kiln test conformance/thirdparty`. Those are esbuild bundles, not Test262 files; the harness
+  rejected all eleven on missing frontmatter having run no JavaScript. A uniform failure with an
+  identical message is almost never eleven separate bugs.
+- **A two-commit bisect.** `kiln-ac` alternated `4ff5613a` (ok) and `0927f4f6` (fail) four times
+  and attributed the regression to the second. There were *two* commits in that range;
+  `56454ca8` sat between them and was the actual cause. Alternating endpoints proves a change
+  happened somewhere between them and cannot say which. `git log --oneline A..B` first.
+
+**The fix that worked.** Both of us moved to `git worktree` within an hour of each other and the
+whole class of error stopped. A worktree costs a checkout, shares the mbx cache, and gives you a
+tree nobody else writes. Measure there, land from there.
+
+### Open, and not mine: absolute paths in the emitted launcher
+
+`56454ca8` ("Support native constructor prototype inheritance") added
+`node.path.to_string_lossy()` to the launcher template at
+`crates/kiln-native/src/lib.rs:3051` and `:3106`, so emitted launcher C now contains an absolute
+canonical path. The same sibling module built from two different roots therefore produces
+different C, different content hashes, and no `cache_hits.launcher_object` — which is what
+`graph_build_reuses_sibling_objects_across_different_roots` is failing on at `:7904`. **The test
+is right; it is detecting that a content-addressed artifact stopped being content-addressed.**
+Re-pointing the assertion would bury it.
+
+ADR 0009's layering assumes generated C is root-independent, which is what lets one cached object
+serve every checkout. With ~50 worktrees against one mbx store here, per-root launcher objects
+multiply both build time and store size, and they degrade silently rather than failing.
+
+`__filename` and `__dirname` legitimately need the absolute path for CommonJS semantics, so the
+rule is not "no paths in generated C" — it is that the *launcher* must not carry one. The
+diagnostic wants a module identity, and the logical path already used for module identity would
+give the same diagnostic value while staying root-independent. Diagnosis by `kiln-ac`; recorded
+here for whoever owns `56454ca8`.
+
+**Confirmed by single-commit bisect** (`kiln-ac`, in a clean worktree): `56454ca8^` passes,
+`56454ca8` fails. `0927f4f6` adds 0 launcher-related lines, `56454ca8` adds 7.
+
+And the two of us disagreeing about whether that test failed at `4ff5613a` has an explanation
+worth keeping, because it is the same trap one layer down. The two commits are four minutes
+apart (14:07:11 and 14:11:49), and before 14:07 that work sat **uncommitted** in the shared
+checkout — `M crates/kiln-native/src/lib.rs` was dirty in main most of the day. So when I ran the
+test "at `4ff5613a`" and saw it fail twice, the tree already contained `56454ca8`'s changes,
+either as dirty working-tree state or as a HEAD that had moved under me. Neither of us measured
+wrong; we measured different trees and both called them `4ff5613a`. **A commit name is not a
+description of your working tree.**

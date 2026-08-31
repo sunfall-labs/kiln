@@ -81,6 +81,34 @@ pub enum NodeBuiltin {
 }
 
 impl NodeBuiltin {
+    pub const ALL: &[Self] = &[
+        Self::Assert,
+        Self::Buffer,
+        Self::AsyncHooks,
+        Self::DiagnosticsChannel,
+        Self::Crypto,
+        Self::Dns,
+        Self::Events,
+        Self::FsPromises,
+        Self::Fs,
+        Self::Net,
+        Self::Http,
+        Self::Module,
+        Self::Path,
+        Self::WorkerThreads,
+        Self::Http2,
+        Self::Https,
+        Self::PerfHooks,
+        Self::Os,
+        Self::Tty,
+        Self::Zlib,
+        Self::Stream,
+        Self::StringDecoder,
+        Self::QueryString,
+        Self::Url,
+        Self::Util,
+    ];
+
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Self::Assert,

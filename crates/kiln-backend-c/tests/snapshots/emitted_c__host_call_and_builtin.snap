@@ -15,36 +15,43 @@ static int kiln_module_ec2a308e4946bce380bccb1e9b79b3b0_body(kiln_host *host, ki
 kiln_label_0:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)0; kiln_c99_diagnostic_operation = "LoadBuiltin";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     stack[sp++] = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
 kiln_label_1:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)1; kiln_c99_diagnostic_operation = "Const";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4631107791820423168));
 kiln_label_2:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)2; kiln_c99_diagnostic_operation = "Call";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     { kiln_value call_result; int status; const kiln_value *call_args = 1 == 0 ? NULL : &stack[sp - 1]; status = kiln_c99_call(host, &call_result, stack[sp - 1 - 1], kiln_c99_undefined(), call_args, (size_t)1, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; goto kiln_refusal; } if (status != KILN_C99_OK) return status; sp -= (size_t)2; stack[sp++] = call_result; }
 kiln_label_3:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)3; kiln_c99_diagnostic_operation = "Const";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_ec2a308e4946bce380bccb1e9b79b3b0_constant_0, 5);
 kiln_label_4:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)4; kiln_c99_diagnostic_operation = "Binary";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked(1, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp++] = answer; }
 kiln_label_5:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)5; kiln_c99_diagnostic_operation = "HostCall";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     { size_t arg; for (arg = sp - 1; arg < sp; ++arg) if (kiln_c99_crosses_boundary(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }
     { kiln_value host_result; const kiln_value *args = 1 == 0 ? NULL : &stack[sp - 1]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C(1), UINT16_C(1), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= 1; stack[sp++] = host_result; }
 kiln_label_6:;
     kiln_c99_diagnostic_site = "kiln_module_ec2a308e4946bce380bccb1e9b79b3b0"; kiln_c99_diagnostic_instruction = (size_t)6; kiln_c99_diagnostic_operation = "Return";
     kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
 kiln_uncaught:;
-    *result = kiln_c99_text(*thrown);
+    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(" at " , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }
     return KILN_C99_THROWN;
     goto kiln_refusal;
 kiln_refusal:;
