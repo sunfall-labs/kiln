@@ -9,6 +9,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
@@ -142,12 +143,14 @@ pub enum ModulePayload {
 pub struct ModuleGraph {
     entry: PathBuf,
     project_root: PathBuf,
-    modules: BTreeMap<PathBuf, ModuleNode>,
+    modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
     /// Dependencies-first, deterministic (source-occurrence ordered) module order. CommonJS
     /// cycles appear once in the order, with the back-edge omitted from traversal.
-    order: Vec<PathBuf>,
+    order: Arc<Vec<PathBuf>>,
     /// Link-time export identity for every visible, non-missing name.
-    export_resolutions: HashMap<PathBuf, BTreeMap<String, ResolvedExport>>,
+    export_resolutions: Arc<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>>,
+    /// Body replacements layered over the shared immutable graph storage.
+    patched_modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
 }
 
 /// Link-time identity of one visible export.
@@ -627,9 +630,10 @@ impl ModuleGraph {
         Ok(Self {
             entry: entry_path,
             project_root: builder.resolver.project_root().to_path_buf(),
-            modules: builder.modules,
-            order: builder.order,
-            export_resolutions,
+            modules: Arc::new(builder.modules),
+            order: Arc::new(builder.order),
+            export_resolutions: Arc::new(export_resolutions),
+            patched_modules: Arc::new(BTreeMap::new()),
         })
     }
 
@@ -645,20 +649,59 @@ impl ModuleGraph {
         self.modules.len()
     }
 
+    fn module_node(&self, path: &Path) -> Option<&ModuleNode> {
+        self.patched_modules
+            .get(path)
+            .or_else(|| self.modules.get(path))
+    }
+
     pub fn module(&self, path: impl AsRef<Path>) -> Option<&ModuleNode> {
-        self.modules.get(path.as_ref()).or_else(|| {
+        self.module_node(path.as_ref()).or_else(|| {
             fs::canonicalize(path.as_ref())
                 .ok()
-                .and_then(|canonical| self.modules.get(&canonical))
+                .and_then(|canonical| self.module_node(&canonical))
         })
     }
 
     pub fn modules(&self) -> impl Iterator<Item = &ModuleNode> {
-        self.order.iter().filter_map(|path| self.modules.get(path))
+        self.order.iter().filter_map(|path| self.module_node(path))
     }
 
     pub fn module_order(&self) -> &[PathBuf] {
         &self.order
+    }
+
+    /// Return a new graph with one source module's body replaced when its link shape is unchanged.
+    ///
+    /// This is intentionally copy-on-write at the graph boundary: the original graph is never
+    /// mutated, so an interpreter or native build holding an older [`Arc<ModuleGraph>`] can keep
+    /// using its immutable snapshot while the daemon prepares the replacement. The graph's order,
+    /// resolved export table, and dependency targets are retained verbatim. `None` means the
+    /// caller must perform a complete traversal and link; this is the safe fallback for an import,
+    /// export, or dependency-shape edit.
+    pub fn patch_module(&self, path: impl AsRef<Path>, program: ModuleProgram) -> Option<Self> {
+        let path = path.as_ref();
+        let canonical = if self.modules.contains_key(path) {
+            path.to_path_buf()
+        } else {
+            fs::canonicalize(path).ok()?
+        };
+        let node = self.module_node(&canonical)?;
+        if node.source != ModuleSource::Source
+            || node.program.dependencies != program.dependencies
+            || node.program.imports != program.imports
+            || node.program.exports != program.exports
+        {
+            return None;
+        }
+
+        let mut patched_node = node.clone();
+        patched_node.program = program;
+        let mut patched = self.clone();
+        let mut patched_modules = (*self.patched_modules).clone();
+        patched_modules.insert(canonical, patched_node);
+        patched.patched_modules = Arc::new(patched_modules);
+        Some(patched)
     }
 
     /// Return the canonical link-time origin of `name` as exported by `module`.
@@ -758,10 +801,9 @@ impl ModuleGraph {
         };
 
         let mut modules = Vec::with_capacity(self.order.len());
-        for path in &self.order {
+        for path in self.order.iter() {
             let node = self
-                .modules
-                .get(path)
+                .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
             // Only a source module has a body to run. A JSON module, a CommonJS wrapper and a
             // Node builtin each need their own materialisation, and answering with an empty
@@ -948,10 +990,9 @@ impl ModuleGraph {
             node,
         };
 
-        for path in &self.order {
+        for path in self.order.iter() {
             let module_node = self
-                .modules
-                .get(path)
+                .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
             if let ModuleSource::NodeBuiltin(builtin) = module_node.source {
                 let exports = node_builtin_exports(builtin.specifier())
@@ -1016,8 +1057,7 @@ impl ModuleGraph {
                 }
                 if !values.contains_key(&dependency.target)
                     && self
-                        .modules
-                        .get(&dependency.target)
+                        .module_node(&dependency.target)
                         .is_some_and(|node| node.source == ModuleSource::CommonJs)
                 {
                     commonjs_loader
@@ -1186,7 +1226,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             Some(CommonJsExecutionState::Executing | CommonJsExecutionState::Done) => return Ok(()),
             None => {}
         }
-        let Some(module_node) = self.graph.modules.get(path) else {
+        let Some(module_node) = self.graph.module_node(path) else {
             return Err(ExecutionError::Host {
                 instruction: 0,
                 message: format!("CommonJS target `{}` is not in the graph", path.display()),
@@ -1217,8 +1257,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                         std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
                     } else if self
                         .graph
-                        .modules
-                        .get(&dependency.target)
+                        .module_node(&dependency.target)
                         .is_some_and(|node| node.source == ModuleSource::Json)
                     {
                         let value = provider.get("default").cloned().ok_or_else(|| {
@@ -3723,6 +3762,124 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute graph");
         assert_eq!(host.output, ["dependency", "entry"]);
+    }
+
+    #[test]
+    fn body_patch_preserves_linkage_and_rejects_interface_changes() {
+        let project = TempProject::new();
+        let dependency = project.write(
+            "dependency.js",
+            "console.log('old'); export const answer = 42;",
+        );
+        let entry = project.write(
+            "entry.js",
+            "import { answer } from './dependency.js'; console.log(answer);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+        let order = graph.module_order().to_vec();
+        let resolved = graph
+            .resolved_export(&dependency, "answer")
+            .cloned()
+            .expect("answer is linked");
+        let program = compile_module(&frontend_oxc::parse(
+            dependency.to_str().expect("utf8 dependency"),
+            "console.log('new'); export const answer = 7;",
+        ))
+        .expect("compile body edit");
+
+        let patched = graph
+            .patch_module(&dependency, program)
+            .expect("body-only edit can reuse graph topology");
+        assert!(Arc::ptr_eq(&graph.modules, &patched.modules));
+        assert!(Arc::ptr_eq(
+            &graph.export_resolutions,
+            &patched.export_resolutions
+        ));
+        assert_eq!(
+            graph.module(&entry).unwrap() as *const ModuleNode,
+            patched.module(&entry).unwrap() as *const ModuleNode
+        );
+        assert_ne!(
+            graph.module(&dependency).unwrap() as *const ModuleNode,
+            patched.module(&dependency).unwrap() as *const ModuleNode
+        );
+        assert_eq!(patched.module_order(), order);
+        assert_eq!(
+            patched.resolved_export(&dependency, "answer"),
+            Some(&resolved)
+        );
+        assert_eq!(
+            patched.module(&dependency).unwrap().dependencies,
+            graph.module(&dependency).unwrap().dependencies
+        );
+        let mut host = TestHost::default();
+        patched
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute patched graph");
+        assert_eq!(host.output, ["new", "7"]);
+
+        let changed_export = compile_module(&frontend_oxc::parse(
+            dependency.to_str().expect("utf8 dependency"),
+            "console.log('new'); export const other = 7;",
+        ))
+        .expect("compile interface edit");
+        assert!(graph.patch_module(&dependency, changed_export).is_none());
+
+        let changed_import = compile_module(&frontend_oxc::parse(
+            dependency.to_str().expect("utf8 dependency"),
+            "import './other.js'; export const answer = 7;",
+        ))
+        .expect("compile import edit");
+        assert!(graph.patch_module(&dependency, changed_import).is_none());
+    }
+
+    #[test]
+    fn sequential_body_patches_retain_each_previous_overlay() {
+        let project = TempProject::new();
+        let first = project.write(
+            "first.js",
+            "console.log('first old'); export const first = 1;",
+        );
+        let second = project.write(
+            "second.js",
+            "console.log('second old'); export const second = 2;",
+        );
+        let entry = project.write(
+            "entry.js",
+            "import { first } from './first.js'; import { second } from './second.js'; console.log(first + second);",
+        );
+        let graph = project.graph(&entry).expect("build graph");
+        let first = fs::canonicalize(first).expect("canonical first");
+        let second = fs::canonicalize(second).expect("canonical second");
+        let first_program = compile_module(&frontend_oxc::parse(
+            first.to_str().expect("utf8 first"),
+            "console.log('first new'); export const first = 10;",
+        ))
+        .expect("compile first body edit");
+        let second_program = compile_module(&frontend_oxc::parse(
+            second.to_str().expect("utf8 second"),
+            "console.log('second new'); export const second = 20;",
+        ))
+        .expect("compile second body edit");
+
+        let patched_first = graph
+            .patch_module(&first, first_program)
+            .expect("first body edit can be patched");
+        let patched_both = patched_first
+            .patch_module(&second, second_program)
+            .expect("second body edit can be patched");
+        let mut host = TestHost::default();
+        patched_both
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute both patched modules");
+        assert_eq!(host.output, ["first new", "second new", "30"]);
+
+        let mut original_host = TestHost::default();
+        graph
+            .execute(&mut original_host, ExecutionLimits::default())
+            .expect("execute original graph");
+        assert_eq!(original_host.output, ["first old", "second old", "3"]);
     }
 
     #[test]

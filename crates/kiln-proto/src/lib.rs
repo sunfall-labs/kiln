@@ -826,6 +826,9 @@ pub struct Stats {
     /// graph cache report zero for these additive fields.
     #[serde(default)]
     pub graph_cache_hits: u64,
+    /// Subset of graph-cache hits produced by patching one body-only module over shared topology.
+    #[serde(default)]
+    pub graph_cache_partial_hits: u64,
     #[serde(default)]
     pub graph_cache_misses: u64,
     #[serde(default)]
@@ -1261,7 +1264,21 @@ mod tests {
         .expect("older stats remain decodable");
         assert_eq!(stats.revision, 7);
         assert_eq!(stats.graph_cache_hits, 0);
+        assert_eq!(stats.graph_cache_partial_hits, 0);
         assert_eq!(stats.graph_cache_modules, 0);
+    }
+
+    #[test]
+    fn graph_cache_partial_hits_round_trip_as_an_additive_stats_field() {
+        let stats = Stats {
+            graph_cache_hits: 4,
+            graph_cache_partial_hits: 3,
+            graph_cache_misses: 1,
+            ..Stats::default()
+        };
+        let encoded = serde_json::to_vec(&stats).expect("serialize stats");
+        let decoded: Stats = serde_json::from_slice(&encoded).expect("deserialize stats");
+        assert_eq!(decoded, stats);
     }
 
     #[test]

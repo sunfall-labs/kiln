@@ -61,6 +61,7 @@ impl GraphCacheKey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct GraphCacheStats {
     pub(crate) hits: u64,
+    pub(crate) partial_hits: u64,
     pub(crate) misses: u64,
     pub(crate) evictions: u64,
     pub(crate) invalidations: u64,
@@ -71,6 +72,16 @@ struct Entry {
     key: GraphCacheKey,
     sources: Vec<GraphSourceRevision>,
     graph: Arc<ModuleGraph>,
+}
+
+#[derive(Debug)]
+pub(crate) enum GraphCacheLookup {
+    Hit(Arc<ModuleGraph>),
+    Stale {
+        graph: Arc<ModuleGraph>,
+        changed: Vec<GraphSourceRevision>,
+    },
+    Miss,
 }
 
 /// One reachable source version captured by a graph snapshot.
@@ -106,21 +117,41 @@ impl GraphCache {
     }
 
     /// Return and promote a graph only when every reachable source still has the captured
-    /// revision. A key match with a changed reachable source is a miss, but the old entry remains
-    /// transactional until a replacement graph has built successfully.
+    /// revision. A changed reachable source returns the old entry as a patch candidate; the old
+    /// entry remains transactional until either a patched or complete replacement builds.
+    #[cfg(test)]
     pub(crate) fn get(
         &mut self,
         key: &GraphCacheKey,
         mut current_revision: impl FnMut(FileId) -> Option<Revision>,
     ) -> Option<Arc<ModuleGraph>> {
-        let hit = self.entries.iter().position(|entry| {
-            entry.key == *key
-                && entry
-                    .sources
-                    .iter()
-                    .all(|source| current_revision(source.file) == Some(source.revision))
-        });
-        if let Some(index) = hit {
+        match self.lookup(key, &mut current_revision) {
+            GraphCacheLookup::Hit(graph) => Some(graph),
+            GraphCacheLookup::Stale { .. } => {
+                self.stats.misses += 1;
+                None
+            }
+            GraphCacheLookup::Miss => None,
+        }
+    }
+
+    pub(crate) fn lookup(
+        &mut self,
+        key: &GraphCacheKey,
+        mut current_revision: impl FnMut(FileId) -> Option<Revision>,
+    ) -> GraphCacheLookup {
+        let Some(index) = self.entries.iter().position(|entry| entry.key == *key) else {
+            self.stats.misses += 1;
+            return GraphCacheLookup::Miss;
+        };
+        let entry = &self.entries[index];
+        let changed = entry
+            .sources
+            .iter()
+            .filter(|source| current_revision(source.file) != Some(source.revision))
+            .copied()
+            .collect::<Vec<_>>();
+        if changed.is_empty() {
             let entry = self
                 .entries
                 .remove(index)
@@ -128,11 +159,22 @@ impl GraphCache {
             let graph = Arc::clone(&entry.graph);
             self.entries.push_back(entry);
             self.stats.hits += 1;
-            return Some(graph);
+            return GraphCacheLookup::Hit(graph);
         }
 
+        GraphCacheLookup::Stale {
+            graph: Arc::clone(&entry.graph),
+            changed,
+        }
+    }
+
+    pub(crate) fn record_partial_hit(&mut self) {
+        self.stats.hits += 1;
+        self.stats.partial_hits += 1;
+    }
+
+    pub(crate) fn record_miss(&mut self) {
         self.stats.misses += 1;
-        None
     }
 
     /// Publish a completely built immutable snapshot and return its shared handle.
@@ -359,6 +401,31 @@ mod tests {
         assert_eq!(cache.stats().hits, 2);
         assert_eq!(cache.stats().misses, 2);
         assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
+    fn stale_lookup_returns_old_snapshot_for_transactional_patch() {
+        let (root, first, _second, graph) = graph_fixture();
+        let cache_key = key(&root, &first, None);
+        let mut cache = GraphCache::default();
+        cache.insert(cache_key.clone(), sources(), graph.clone());
+
+        let GraphCacheLookup::Stale {
+            graph: old,
+            changed,
+        } = cache.lookup(&cache_key, |_| Some(Revision(2)))
+        else {
+            panic!("changed source should retain the old snapshot for patching");
+        };
+        assert_eq!(old.entry(), graph.entry());
+        assert_eq!(changed, sources());
+        cache.record_partial_hit();
+        assert_eq!(cache.stats().partial_hits, 1);
+        assert_eq!(
+            cache.entries(),
+            1,
+            "a stale lookup must not evict the old snapshot"
+        );
     }
 
     #[test]

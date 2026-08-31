@@ -2262,6 +2262,106 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     assert_eq!(after_run.graph_cache_hits, 1);
     assert_eq!(after_run.graph_cache_misses, 1);
 
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: "console.log('updated dependency'); export const answer = 7;\n".into(),
+        })
+        .expect("set body-only edit");
+    let Response::Ran(updated) = client
+        .request(&Request::Run {
+            node: false,
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("run body-only edit")
+    else {
+        panic!("expected run response");
+    };
+    assert!(updated.succeeded, "{:?}", updated.diagnostics);
+    assert_eq!(updated.stdout, "updated dependency\n7\n");
+    let Response::Stats(after_update) = client.request(&Request::Stats).expect("update stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_update.graph_cache_hits, 2);
+    assert_eq!(after_update.graph_cache_partial_hits, 1);
+    assert_eq!(after_update.graph_cache_misses, 1);
+    assert_eq!(after_update.graph_cache_evictions, 1);
+
+    let failed_edit = "export const =;\n";
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: failed_edit.into(),
+        })
+        .expect("set invalid body edit");
+    let Response::Ran(failed) = client
+        .request(&Request::Run {
+            node: false,
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("invalid body edit is structured")
+    else {
+        panic!("expected run response");
+    };
+    assert!(!failed.succeeded);
+    let Response::Stats(after_failed_edit) =
+        client.request(&Request::Stats).expect("failed edit stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_failed_edit.graph_cache_entries, 1);
+    assert_eq!(
+        after_failed_edit.graph_cache_misses, 2,
+        "a failed one-module patch compile is observable as a miss"
+    );
+    assert_eq!(after_failed_edit.graph_cache_partial_hits, 1);
+
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: "console.log('updated dependency'); export const answer = 7;\n".into(),
+        })
+        .expect("restore valid body edit");
+    let Response::Ran(restored) = client
+        .request(&Request::Run {
+            node: false,
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("restored body edit")
+    else {
+        panic!("expected run response");
+    };
+    assert!(restored.succeeded, "{:?}", restored.diagnostics);
+    assert_eq!(restored.stdout, "updated dependency\n7\n");
+
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
         .request(&Request::Run {
@@ -2277,13 +2377,14 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     else {
         panic!("expected run response");
     };
-    assert_eq!(second.stdout, first.stdout);
+    assert_eq!(second.stdout, updated.stdout);
     let Response::Stats(stats) = client.request(&Request::Stats).expect("stats") else {
         panic!("expected stats response");
     };
     assert_eq!(stats.parse_computed, 0);
     assert_eq!(stats.ir_computed, 0);
     assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_partial_hits, 0);
     assert_eq!(stats.graph_cache_misses, 0);
     assert_eq!(stats.graph_cache_entries, 1);
     assert_eq!(stats.graph_cache_modules, 2);
@@ -2323,6 +2424,14 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("cycle"))
+    );
+    let Response::Stats(after_cycle) = client.request(&Request::Stats).expect("cycle stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_cycle.graph_cache_misses, 1);
+    assert_eq!(
+        after_cycle.graph_cache_entries, 1,
+        "failed rebuild retains old snapshot"
     );
 
     stop.shutdown();
@@ -2751,6 +2860,15 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         first.scalar_value,
         Some(kiln_proto::ScalarValueSummary::Undefined)
     );
+    let Response::Stats(after_first) = client.request(&Request::Stats).expect("first native stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_first.graph_cache_hits, 0);
+    assert_eq!(after_first.graph_cache_partial_hits, 0);
+    assert_eq!(after_first.graph_cache_misses, 1);
+    assert_eq!(after_first.graph_cache_entries, 1);
+    assert_eq!(after_first.graph_cache_modules, 2);
 
     let Response::NativeRan(second) = client.request(&request).expect("cached native graph run")
     else {
@@ -2759,6 +2877,15 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
     assert_eq!(second.stdout, first.stdout);
     assert!(second.build.generated_c_cache_hit);
     assert!(second.build.app_object_cache_hit);
+    let Response::Stats(after_second) = client
+        .request(&Request::Stats)
+        .expect("second native stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_second.graph_cache_hits, 1);
+    assert_eq!(after_second.graph_cache_partial_hits, 0);
+    assert_eq!(after_second.graph_cache_misses, 1);
 
     client
         .request(&Request::SetSource {
