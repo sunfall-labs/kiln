@@ -1841,13 +1841,12 @@ mod realm {
                             };
                             // SAFETY: each operation is copied and each callback target remains
                             // live through the following drive.
+                            let handle = exchange.handle;
+                            let Some(request) = exchange.requests.get_mut(7 + offset) else {
+                                return INVALID_ARGUMENT;
+                            };
                             let status = unsafe {
-                                start_test_host_op(
-                                    exchange.handle,
-                                    &close,
-                                    observation,
-                                    &raw mut exchange.requests[7 + offset],
-                                )
+                                start_test_host_op(handle, &close, observation, &raw mut *request)
                             };
                             if status != 0 {
                                 return status;
