@@ -520,6 +520,11 @@ pub enum Native {
     SharedArrayBufferConstructor,
     ArrayBufferGrow,
     ArrayBufferSlice,
+    /// `transfer` and `transferToFixedLength`: move the bytes into a new buffer and detach this
+    /// one. The flag controls whether a resizable ceiling is preserved.
+    ArrayBufferTransfer {
+        preserve_resizability: bool,
+    },
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
     ///
@@ -2479,6 +2484,8 @@ pub struct BufferData {
     /// last part is the whole reason the language has a second buffer type, and it is exactly
     /// what a single type with a `grow` alias would lose.
     shared: bool,
+    /// Whether the bytes have been handed to another buffer by `transfer`.
+    detached: std::cell::Cell<bool>,
 }
 
 /// Identity, not contents: two buffers holding the same bytes are still two buffers, and a
@@ -2496,11 +2503,24 @@ impl BufferData {
             bytes: RefCell::new(vec![0; length]),
             max_byte_length: None,
             shared: false,
+            detached: std::cell::Cell::new(false),
         })
     }
 
     fn byte_length(&self) -> usize {
+        if self.detached.get() {
+            return 0;
+        }
         self.bytes.borrow().len()
+    }
+
+    fn detached(&self) -> bool {
+        self.detached.get()
+    }
+
+    fn detach(&self) -> Vec<u8> {
+        self.detached.set(true);
+        std::mem::take(&mut *self.bytes.borrow_mut())
     }
 
     /// Move a resizable buffer's length within its ceiling.
@@ -2512,6 +2532,9 @@ impl BufferData {
     fn resize(&self, length: usize) -> Result<(), ExecutionError> {
         if self.shared {
             return Err(ExecutionError::NotABuffer);
+        }
+        if self.detached.get() {
+            return Err(ExecutionError::BufferDetached);
         }
         let Some(max) = self.max_byte_length else {
             return Err(ExecutionError::BufferNotResizable);
@@ -2589,6 +2612,9 @@ impl TypedArrayData {
     /// -- it treats it as empty -- because the surviving prefix is not what the program asked
     /// for, and handing it back would be a stale read dressed up as a short one.
     fn out_of_bounds(&self) -> bool {
+        if self.buffer.detached() {
+            return true;
+        }
         let total = self.buffer.byte_length();
         match self.length {
             None => self.offset > total,
@@ -2677,6 +2703,9 @@ impl PartialEq for DataViewData {
 impl DataViewData {
     /// Whether a shrink has left the window outside its buffer.
     fn out_of_bounds(&self) -> bool {
+        if self.buffer.detached() {
+            return true;
+        }
         let total = self.buffer.byte_length();
         match self.length {
             None => self.offset > total,
@@ -3908,6 +3937,8 @@ pub enum ExecutionError {
     /// [`Self::BufferNotResizable`] exists: a fixed-length buffer is not a growable one that
     /// happens to refuse.
     BufferNotGrowable,
+    /// An operation on an ArrayBuffer whose bytes have been transferred away.
+    BufferDetached,
     /// A buffer length outside what the specification accepts -- negative, unrepresentable, or
     /// above the ceiling the buffer was created with.
     BufferLengthOutOfRange {
@@ -4109,6 +4140,9 @@ impl fmt::Display for ExecutionError {
             Self::BufferNotGrowable => {
                 write!(formatter, "cannot grow a non-growable SharedArrayBuffer")
             }
+            Self::BufferDetached => {
+                write!(formatter, "the ArrayBuffer is detached")
+            }
             Self::BufferLengthOutOfRange { length } => {
                 write!(formatter, "invalid ArrayBuffer length {length}")
             }
@@ -4267,6 +4301,10 @@ impl ExecutionError {
             Self::BufferNotGrowable => (
                 ErrorKind::Type,
                 "Cannot grow a non-growable SharedArrayBuffer".to_owned(),
+            ),
+            Self::BufferDetached => (
+                ErrorKind::Type,
+                "Cannot perform this operation on a detached ArrayBuffer".to_owned(),
             ),
             Self::BufferLengthOutOfRange { .. } => {
                 (ErrorKind::Range, "Invalid ArrayBuffer length".to_owned())
@@ -8981,6 +9019,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 bytes: RefCell::new(vec![0; length]),
                 max_byte_length: None,
                 shared,
+                detached: std::cell::Cell::new(false),
             })));
         };
         // The ceiling is what a later `resize` may reach, so it is the figure the allocation
@@ -9004,6 +9043,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             bytes: RefCell::new(vec![0; length]),
             max_byte_length: Some(max),
             shared,
+            detached: std::cell::Cell::new(false),
         })))
     }
 
@@ -9907,6 +9947,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let buffer = Rc::clone(buffer);
         let offset = self.as_index_argument(arguments.get(1), instruction)?;
+        if buffer.detached() {
+            return Err(ExecutionError::BufferDetached);
+        }
         if offset > buffer.byte_length() {
             return Err(ExecutionError::DataViewOutOfRange);
         }
@@ -12074,6 +12117,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             callee,
             Value::Native(native) if native.creates_array_iterator()
         ) && matches!(receiver, Value::TypedArray(_));
+        if walks_an_array
+            && let Value::TypedArray(view) = &receiver
+            && view.buffer.detached()
+        {
+            return Err(ExecutionError::BufferDetached);
+        }
         if !walks_an_array || matches!(receiver, Value::Array(_)) || preserves_live_typed_array {
             return Ok(receiver);
         }
@@ -13522,20 +13571,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // specification makes each accessor a `TypeError` on the other type, and
                 // answering `false` instead would tell a program that a growable buffer cannot
                 // grow.
-                "resizable" if !buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
+                "resizable" if !buffer.shared => {
+                    Value::Boolean(!buffer.detached() && buffer.max_byte_length.is_some())
+                }
                 "growable" if buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
                 // A fixed-length buffer answers its own length rather than zero or `undefined`:
                 // the accessor is defined for every buffer, and "the most this can ever hold"
                 // is a question a fixed buffer has an answer to.
+                "maxByteLength" if buffer.detached() => Value::Number(0.0),
                 "maxByteLength" => Value::Number(
                     buffer
                         .max_byte_length
                         .unwrap_or_else(|| buffer.byte_length()) as f64,
                 ),
-                // Always false, and honestly so: this realm has no way to detach a buffer, so
-                // there is no state here that a `true` could ever describe. A shared buffer has
-                // no `detached` at all -- there is nothing that could detach it.
-                "detached" if !buffer.shared => Value::Boolean(false),
+                "detached" if !buffer.shared => Value::Boolean(buffer.detached()),
                 "constructor" if buffer.shared => {
                     Value::Native(Native::SharedArrayBufferConstructor)
                 }
@@ -15687,6 +15736,36 @@ fn call_native(
             buffer.grow(bounded_buffer(length, 1)?)?;
             Value::Undefined
         }
+        Native::ArrayBufferTransfer {
+            preserve_resizability,
+        } => {
+            let Value::ArrayBuffer(buffer) = receiver else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            if buffer.shared || buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
+            let length = match arguments.first() {
+                None | Some(Value::Undefined) => buffer.byte_length(),
+                requested => bounded_buffer(to_index(requested)?, 1)?,
+            };
+            let max_byte_length = preserve_resizability.then_some(buffer.max_byte_length).flatten();
+            if let Some(max) = max_byte_length
+                && length > max
+            {
+                return Err(ExecutionError::BufferLengthOutOfRange {
+                    length: length as f64,
+                });
+            }
+            let mut bytes = buffer.detach();
+            bytes.resize(length, 0);
+            Value::ArrayBuffer(Rc::new(BufferData {
+                bytes: RefCell::new(bytes),
+                max_byte_length,
+                shared: false,
+                detached: std::cell::Cell::new(false),
+            }))
+        }
         // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
         // the original -- or a write through a view onto it -- is not visible through the copy.
         // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
@@ -15699,6 +15778,9 @@ fn call_native(
             let Value::ArrayBuffer(buffer) = receiver else {
                 return Err(ExecutionError::NotABuffer);
             };
+            if buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
             let bytes = buffer.bytes.borrow();
             let (start, end) = slice_bounds(arguments, bytes.len());
             Value::ArrayBuffer(Rc::new(BufferData {
@@ -15709,6 +15791,7 @@ fn call_native(
                 // and a program that sliced a `SharedArrayBuffer` and got back something it
                 // could not hand to another holder would have lost the only property it wanted.
                 shared: buffer.shared,
+                detached: std::cell::Cell::new(false),
             }))
         }
         Native::TypedArrayConstructor(kind) => construct_typed_array(kind, arguments)?,
@@ -15730,6 +15813,9 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
+            if view.buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
             let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
             let items = typed_source(arguments.first());
             if offset > view.len() || items.len() > view.len() - offset {
@@ -15747,6 +15833,9 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
+            if view.buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
             let (start, end) = slice_bounds(arguments, view.len());
             // A slice of a length-tracking view is itself length-tracking when no end was
             // named: "from here to wherever the buffer ends" survives a resize, where the
@@ -15764,6 +15853,9 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
+            if view.buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
             // Converted once, and before the range is worked out, so `fill` refuses a Number
             // on a BigInt array whether or not there is a slot for it to land in.
             let filler = coerce_element(view.kind, arguments.first().unwrap_or(&Value::Undefined))?;
@@ -17262,6 +17354,7 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                     bytes: RefCell::new(bytes),
                     max_byte_length: None,
                     shared: false,
+                    detached: std::cell::Cell::new(false),
                 }),
                 offset: 0,
                 length: Some(length),
@@ -20509,6 +20602,12 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
         "resize" if !shared => Value::Native(Native::ArrayBufferResize),
         "grow" if shared => Value::Native(Native::ArrayBufferGrow),
         "slice" => Value::Native(Native::ArrayBufferSlice),
+        "transfer" if !shared => Value::Native(Native::ArrayBufferTransfer {
+            preserve_resizability: true,
+        }),
+        "transferToFixedLength" if !shared => Value::Native(Native::ArrayBufferTransfer {
+            preserve_resizability: false,
+        }),
         _ => Value::Undefined,
     }
 }
@@ -20779,6 +20878,9 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
     let width = kind.width();
     Ok(match arguments.first() {
         Some(Value::ArrayBuffer(buffer)) => {
+            if buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
             let total = buffer.byte_length();
             let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
             if offset > total || offset % width != 0 {
@@ -21253,6 +21355,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayValues
         | N::ArrayFlat
         | N::ArrayOf
+        | N::ArrayBufferTransfer { .. }
         // The nine wrappers that take no attribute; the four that do fall to the default of 1.
         | N::StringHtml(
             HtmlWrapper::Big
@@ -22274,6 +22377,12 @@ fn native_js_name(native: &Native) -> String {
         // and the derivation cannot reach it: the payload it discards as "not part of the name"
         // is the only place the type is written, so what is left spells the family instead.
         Native::TypedArrayConstructor(kind) => kind.name().to_owned(),
+        Native::ArrayBufferTransfer {
+            preserve_resizability: true,
+        } => "transfer".to_owned(),
+        Native::ArrayBufferTransfer {
+            preserve_resizability: false,
+        } => "transferToFixedLength".to_owned(),
         // The URI four are an acronym the variant spelling flattens: `DecodeUri` lowers to
         // `decodeUri`, and the language spells it `decodeURI`. A derivation cannot recover a case
         // distinction that the input does not carry, so these are named outright.
@@ -24866,5 +24975,137 @@ mod tests {
             ignored,
             Value::TypedArray(view) if view.len() == 1 && view.get(0) == Some(Value::Number(7.0))
         ));
+    }
+
+    fn test_buffer(bytes: &[u8], max_byte_length: Option<usize>, shared: bool) -> Value {
+        Value::ArrayBuffer(Rc::new(BufferData {
+            bytes: RefCell::new(bytes.to_vec()),
+            max_byte_length,
+            shared,
+            detached: std::cell::Cell::new(false),
+        }))
+    }
+
+    #[test]
+    fn array_buffer_transfer_moves_bytes_and_detaches_the_source() {
+        let source = test_buffer(&[1, 2, 3], None, false);
+        let moved = call_native(
+            &Intrinsics::default(),
+            Native::ArrayBufferTransfer {
+                preserve_resizability: true,
+            },
+            &source,
+            &[],
+        )
+        .expect("transfer succeeds");
+        let Value::ArrayBuffer(source) = &source else {
+            unreachable!()
+        };
+        let Value::ArrayBuffer(moved) = moved else {
+            unreachable!()
+        };
+        assert!(source.detached());
+        assert_eq!(source.byte_length(), 0);
+        assert_eq!(&*moved.bytes.borrow(), &[1, 2, 3]);
+        assert!(!moved.detached());
+    }
+
+    #[test]
+    fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints() {
+        let resizable = test_buffer(&[4, 5], Some(8), false);
+        let moved = call_native(
+            &Intrinsics::default(),
+            Native::ArrayBufferTransfer {
+                preserve_resizability: true,
+            },
+            &resizable,
+            &[Value::Number(4.0)],
+        )
+        .expect("resizable transfer succeeds");
+        let Value::ArrayBuffer(moved) = moved else {
+            unreachable!()
+        };
+        assert_eq!(moved.max_byte_length, Some(8));
+        assert_eq!(&*moved.bytes.borrow(), &[4, 5, 0, 0]);
+
+        let fixed = test_buffer(&[6, 7], None, false);
+        let moved = call_native(
+            &Intrinsics::default(),
+            Native::ArrayBufferTransfer {
+                preserve_resizability: false,
+            },
+            &fixed,
+            &[Value::Number(4.0)],
+        )
+        .expect("fixed-length transfer succeeds");
+        let Value::ArrayBuffer(moved) = moved else {
+            unreachable!()
+        };
+        assert_eq!(moved.max_byte_length, None);
+        assert_eq!(&*moved.bytes.borrow(), &[6, 7, 0, 0]);
+        assert!(matches!(
+            moved.resize(3),
+            Err(ExecutionError::BufferNotResizable)
+        ));
+
+        let too_large = test_buffer(&[0, 0], Some(2), false);
+        assert!(matches!(
+            call_native(
+                &Intrinsics::default(),
+                Native::ArrayBufferTransfer {
+                    preserve_resizability: true,
+                },
+                &too_large,
+                &[Value::Number(3.0)],
+            ),
+            Err(ExecutionError::BufferLengthOutOfRange { .. })
+        ));
+        let shared = test_buffer(&[1], Some(2), true);
+        assert!(matches!(
+            call_native(
+                &Intrinsics::default(),
+                Native::ArrayBufferTransfer {
+                    preserve_resizability: true,
+                },
+                &shared,
+                &[],
+            ),
+            Err(ExecutionError::BufferDetached)
+        ));
+    }
+
+    #[test]
+    fn views_observe_array_buffer_detachment() {
+        let source = test_buffer(&[9, 10, 11, 12], None, false);
+        let typed = construct_typed_array(TypedKind::Uint8, &[source.clone()]).expect("view");
+        let Value::ArrayBuffer(source_data) = &source else {
+            unreachable!()
+        };
+        let data_view = Value::DataView(Rc::new(DataViewData {
+            buffer: Rc::clone(source_data),
+            offset: 0,
+            length: Some(4),
+        }));
+
+        call_native(
+            &Intrinsics::default(),
+            Native::ArrayBufferTransfer {
+                preserve_resizability: true,
+            },
+            &source,
+            &[],
+        )
+        .expect("detach");
+
+        let Value::TypedArray(typed) = typed else {
+            unreachable!()
+        };
+        let Value::DataView(data_view) = data_view else {
+            unreachable!()
+        };
+        assert_eq!(typed.len(), 0);
+        assert_eq!(typed.get(0), None);
+        assert!(data_view.out_of_bounds());
+        assert_eq!(data_view.byte_length(), None);
     }
 }
