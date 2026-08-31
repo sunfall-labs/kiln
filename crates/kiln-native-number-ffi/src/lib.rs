@@ -41,8 +41,10 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent,
-        RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds, node_stream::StreamAction,
+        ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
+        RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+        node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
+        node_stream::StreamAction,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
@@ -68,6 +70,12 @@ mod realm {
     const HTTP_EVENT_RESPONSE_END: u32 = 8;
     const HTTP_EVENT_ERROR: u32 = 9;
     const HTTP_EVENT_CLOSED: u32 = 10;
+    const HTTP_AGENT_CONNECT: i32 = 1;
+    const HTTP_AGENT_REUSE: i32 = 2;
+    const HTTP_AGENT_QUEUED: i32 = 3;
+    const HTTP_AGENT_IDLE: i32 = 4;
+    const HTTP_AGENT_DISPATCH: i32 = 5;
+    const HTTP_AGENT_RETIRE: i32 = 6;
 
     #[repr(C)]
     pub struct HttpEventView {
@@ -1591,6 +1599,96 @@ mod realm {
     }
 
     #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_agent_acquire_active(
+        host: *const u8,
+        host_len: u64,
+        port: u16,
+        request: u64,
+        out_resource: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(_realm), Some(runtime), Some(out_resource)) =
+                (active_realm(), active_runtime(), unsafe {
+                    out_resource.as_mut()
+                })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(host) = std::str::from_utf8(host) else {
+                return INVALID_ARGUMENT;
+            };
+            *out_resource = 0;
+            match unsafe { &mut *runtime }
+                .acquire_client_connection(HttpOrigin::http(host, port), request)
+            {
+                AgentDecision::Connect => HTTP_AGENT_CONNECT,
+                AgentDecision::Reuse(resource) => {
+                    *out_resource = resource.get();
+                    HTTP_AGENT_REUSE
+                }
+                AgentDecision::Queued => HTTP_AGENT_QUEUED,
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_agent_connected_active(
+        host: *const u8,
+        host_len: u64,
+        port: u16,
+        resource: u64,
+        request: u64,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(host) = std::str::from_utf8(host) else {
+                return INVALID_ARGUMENT;
+            };
+            i32::from(unsafe { &mut *runtime }.client_connection_connected(
+                HttpOrigin::http(host, port),
+                ResourceId::new(resource),
+                request,
+            ))
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_agent_release_active(
+        resource: u64,
+        reusable: i32,
+        out_request: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(_realm), Some(runtime), Some(out_request)) =
+                (active_realm(), active_runtime(), unsafe {
+                    out_request.as_mut()
+                })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            *out_request = 0;
+            match unsafe { &mut *runtime }
+                .release_client_connection(ResourceId::new(resource), reusable != 0)
+            {
+                AgentRelease::Idle => HTTP_AGENT_IDLE,
+                AgentRelease::Dispatch { request } => {
+                    *out_request = request;
+                    HTTP_AGENT_DISPATCH
+                }
+                AgentRelease::Retire => HTTP_AGENT_RETIRE,
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_start_active(
         resource: u64,
         id: u64,
@@ -2355,6 +2453,52 @@ mod realm {
             unsafe { kiln_realm_http_client_request_id_active(context.cast::<u64>()) }
         }
 
+        unsafe extern "C" fn exercises_http_agent(context: *mut c_void) -> i32 {
+            if context.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let host = b"Example.COM";
+            let mut resource = 0;
+            let acquired = unsafe {
+                kiln_realm_http_agent_acquire_active(
+                    host.as_ptr(),
+                    host.len() as u64,
+                    80,
+                    1,
+                    &raw mut resource,
+                )
+            };
+            if acquired != HTTP_AGENT_CONNECT || resource != 0 {
+                return RUNTIME_ERROR;
+            }
+            if unsafe {
+                kiln_realm_http_agent_connected_active(host.as_ptr(), host.len() as u64, 80, 91, 1)
+            } != 1
+            {
+                return RUNTIME_ERROR;
+            }
+            let mut request = 0;
+            if unsafe { kiln_realm_http_agent_release_active(91, 1, &raw mut request) }
+                != HTTP_AGENT_IDLE
+            {
+                return RUNTIME_ERROR;
+            }
+            let reused = unsafe {
+                kiln_realm_http_agent_acquire_active(
+                    host.as_ptr(),
+                    host.len() as u64,
+                    80,
+                    2,
+                    &raw mut resource,
+                )
+            };
+            if reused != HTTP_AGENT_REUSE || resource != 91 {
+                return RUNTIME_ERROR;
+            }
+            unsafe { context.cast::<u64>().write(resource) };
+            0
+        }
+
         #[test]
         fn opaque_handle_enters_tokio_and_rejects_stale_or_cross_thread_use() {
             let mut handle = 0;
@@ -2430,6 +2574,21 @@ mod realm {
             assert_eq!((first, second, other_realm), (1, 2, 1));
             assert_eq!(kiln_realm_destroy(first_realm), 0);
             assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
+        #[test]
+        fn native_http_agent_abi_maps_runtime_decisions_without_rust_layout() {
+            let mut handle = 0;
+            let mut reused = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(exercises_http_agent), (&raw mut reused).cast())
+                },
+                0
+            );
+            assert_eq!(reused, 91);
+            assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
         #[test]
