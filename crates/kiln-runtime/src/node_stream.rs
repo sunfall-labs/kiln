@@ -70,6 +70,10 @@ impl StreamDriver {
         &self.state
     }
 
+    pub const fn resource(&self) -> ResourceId {
+        self.resource
+    }
+
     pub fn start_reading(&mut self) -> Vec<StreamAction> {
         self.reading = true;
         self.next_read_action().into_iter().collect()

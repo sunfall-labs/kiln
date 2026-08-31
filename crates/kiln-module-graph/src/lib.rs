@@ -1240,7 +1240,7 @@ mod tests {
         let project = TempProject::new();
         let entry = project.write(
             "main.js",
-            "import { createServer } from 'node:http'; console.log(createServer);",
+            "import { connect } from 'node:net'; console.log(connect);",
         );
         let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
         let error = ModuleGraph::build_with_policy(&entry, resolver, |path| {
@@ -1257,7 +1257,7 @@ mod tests {
         .expect_err("unimplemented builtin export must not become a placeholder");
         assert!(matches!(
             error,
-            ModuleGraphError::MissingExport { name, .. } if name == "createServer"
+            ModuleGraphError::MissingExport { name, .. } if name == "connect"
         ));
     }
 
@@ -1307,6 +1307,118 @@ mod tests {
             .execute_node(&mut node_host, ExecutionLimits::default())
             .expect("explicit Node graph execution");
         assert_eq!(node_host.output, ["from tokio"]);
+    }
+
+    #[test]
+    fn node_http_static_module_serves_one_live_request_on_tokio() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer((request, response) => {",
+                "  response.setHeader('Content-Type', 'text/plain');",
+                "  response.end(request.method + ' ' + request.url);",
+                "  server.close();",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build HTTP graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        struct ServerHost {
+            port_sender: Option<mpsc::Sender<u16>>,
+        }
+        impl HostOps for ServerHost {
+            fn call(
+                &mut self,
+                operation: HostOp,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostError> {
+                assert_eq!(operation, HostOp::WriteStdout);
+                let port = arguments
+                    .first()
+                    .and_then(|value| value.to_js_string().parse::<u16>().ok())
+                    .expect("listening callback prints port");
+                if let Some(sender) = self.port_sender.take() {
+                    sender.send(port).expect("send server port");
+                }
+                Ok(HostValue::Undefined)
+            }
+        }
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server announces port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
+            stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write request");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("finish request bytes");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut response = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let length = stream.read(&mut chunk).expect("read response");
+                if length == 0 {
+                    break;
+                }
+                response.extend_from_slice(&chunk[..length]);
+                let Some(head_end) = response.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&response[..head_end]);
+                let content_length = head
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .expect("response has Content-Length");
+                if response.len() >= head_end + 4 + content_length {
+                    break;
+                }
+            }
+            String::from_utf8(response).expect("UTF-8 response")
+        });
+
+        let mut host = ServerHost {
+            port_sender: Some(port_sender),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve live request");
+        let response = client.join().expect("client thread");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+        assert!(
+            response.contains("Content-Type: text/plain\r\n"),
+            "{response:?}"
+        );
+        assert!(response.ends_with("GET /health"), "{response:?}");
     }
 
     /// A function value survives the module boundary it was exported across.
