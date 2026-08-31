@@ -58,7 +58,13 @@ letting an absent test look like compatibility.
 
 Sequential client requests are also an executable adaptation of the pinned HTTP server slice.
 They prove that response, body, finish, and error events route by a realm-scoped request identity
-instead of a connection-local constant. The inventory deliberately continues to name Agent
-connection reuse as missing until the interpreter and generated-native bindings both acquire an
-idle same-origin connection from the realm-owned Agent rather than opening one TCP resource per
-request.
+instead of a connection-local constant. The interpreter and generated-native bindings both acquire
+idle same-origin connections from the realm-owned Agent, and dispatch queued requests only after
+Hyper reports protocol readiness. The same adapted case therefore also guards sequential reuse on
+both execution paths rather than merely proving identity across two fresh TCP resources.
+
+The raw-socket pipelining adaptation is committed as an expected failure. It sends two complete
+HTTP/1 requests in one write and requires both response bodies in request order. This distinguishes
+true protocol pipelining from sequential Agent reuse and keeps the remaining server gap executable:
+the current adapter completes only one request on that connection. The probe also uses
+`net.Socket.setEncoding('utf8')`, whose shared readable-state implementation is independently live.

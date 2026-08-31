@@ -146,6 +146,13 @@ features = ["node:net", "tokio-net", "resource-lifecycle", "module-graph"]
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/net/socket-set-encoding"
+source = "upstream-adapted/net-socket-set-encoding.mjs"
+status = "runnable"
+features = ["node:net", "tokio-net", "readable", "utf8", "resource-lifecycle", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/http/tokio-owned-server-client"
 source = "upstream-adapted/http-server-tokio-owned.mjs"
 status = "runnable"
