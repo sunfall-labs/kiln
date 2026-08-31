@@ -96,6 +96,13 @@ flow and encoding semantics; module facades expose the JavaScript objects. HTTP 
 therefore share transport, resource lifetime, event dispatch, and backpressure instead of growing
 two loops. Future TLS wraps the transport seam; it does not fork the scheduler.
 
+HTTP client connection reuse belongs to a realm-owned Agent above the protocol engine. The Agent
+keys pools by origin and transport policy, assigns realm-scoped request identities, queues requests
+while a connection is busy, and retires idle or failed resources. Hyper owns each connection's
+HTTP state but does not choose which origin may reuse it; Tokio owns polling but does not choose
+JavaScript-visible Agent lifetime. Interpreter and generated-native bindings consume the same
+acquire/release decisions rather than maintaining representation-specific socket caches.
+
 ### One completion ingress
 
 Every asynchronous service follows one lifecycle:

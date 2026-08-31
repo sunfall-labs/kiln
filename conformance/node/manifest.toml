@@ -167,6 +167,13 @@ features = ["node:http", "tokio-net", "http-client", "request-stream", "set-enco
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/http/sequential-request-identity"
+source = "upstream-adapted/http-sequential-request-identity.mjs"
+status = "runnable"
+features = ["node:http", "tokio-net", "http-client", "request-identity", "resource-lifecycle", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/buffer/concat-core"
 source = "upstream-adapted/buffer-concat-core.mjs"
 status = "runnable"

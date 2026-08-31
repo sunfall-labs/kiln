@@ -121,6 +121,7 @@ pub trait ActiveHttpRuntime {
         &mut self,
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>>;
+    fn close_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>>;
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -839,10 +840,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 }
                 hyper_http::EngineEvent::RequestEnd { id } => RuntimeHttpEvent::RequestEnd { id },
                 hyper_http::EngineEvent::Error { id, message } => {
-                    if id != 0 {
-                        connection.response_bodies.remove(&id);
-                        connection.body_events.remove(&id);
-                    }
                     RuntimeHttpEvent::Error { id, message }
                 }
                 hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
@@ -1051,7 +1048,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             connection.client_bodies.remove(&id);
             connection.client_body_events.remove(&id);
         }
-        let Some(receiver) = connection.client_events.as_mut() else {
+        let Some(receiver) = self
+            .http_connections
+            .get_mut(&resource)
+            .and_then(|connection| connection.client_events.as_mut())
+        else {
             return events;
         };
         while let Ok(event) = receiver.try_recv() {
@@ -1074,10 +1075,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                     RuntimeHttpClientEvent::ResponseEnd { id }
                 }
                 hyper_http::ClientEvent::Error { id, message } => {
-                    if id != 0 {
-                        connection.client_bodies.remove(&id);
-                        connection.client_body_events.remove(&id);
-                    }
                     RuntimeHttpClientEvent::Error { id, message }
                 }
                 hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
@@ -1179,6 +1176,10 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>> {
         self.poll_http_connection_in_context(resource)
+    }
+
+    fn close_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>> {
+        self.close_http_connection(resource)
     }
 
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {

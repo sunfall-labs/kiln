@@ -32,8 +32,11 @@
     "parallel/test-http-server.js": {
       "expectation": "expected-failure",
       "sha256": "e62450f338b93c15eab588fc70c91db638d35f30cb35c4da283f838f054cfb05",
-      "reason": "partial: the Tokio-owned server/client, request stream, response stream, pause/resume timer, and full-duplex socket path pass; the upstream test still needs CommonJS harness support, url/querystring, pipelined requests, readyState, and allowHalfOpen",
-      "adapted": ["upstream-adapted/http-server-tokio-owned.mjs"],
+      "reason": "partial: the Tokio-owned server/client, request stream, response stream, pause/resume timer, full-duplex socket path, and sequential request identity pass; the upstream test still needs Agent connection reuse, CommonJS harness support, url/querystring, pipelined requests, readyState, and allowHalfOpen",
+      "adapted": [
+        "upstream-adapted/http-server-tokio-owned.mjs",
+        "upstream-adapted/http-sequential-request-identity.mjs"
+      ],
       "features": ["node:http", "events", "streams", "tokio-net"]
     },
     "parallel/test-http-request-end.js": {
