@@ -190,6 +190,13 @@ impl PartialEq for Symbol {
 /// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 const RESERVED_KEY_PREFIX: &str = "@@";
 
+/// The reservation a private name is stored under, ahead of its scope number and its spelling.
+///
+/// A private element is not a property a program can name, so it is kept under a key no source
+/// text can spell -- which means every message and every `name` that has to *show* one has to
+/// undo the reservation rather than print it.
+const PRIVATE_KEY_PREFIX: &str = "@@private:";
+
 /// The error constructors a realm provides.
 ///
 /// One enum rather than one `Native` each, because everything about them is the same shape: a
@@ -298,6 +305,7 @@ pub enum Native {
     NodeUtilInherits,
     NodeUtilDebuglog,
     NodeUtilDebugNoop,
+    NodeUtilDeprecate,
     NodeUtilFormat,
     NodeAssert,
     NodeAssertOk,
@@ -323,6 +331,8 @@ pub enum Native {
     NodeOs,
     NodeOsNetworkInterfaces,
     NodeOsHostname,
+    NodeTty,
+    NodeTtyIsatty,
     NodePerfHooks,
     NodeHttps,
     NodeHttpsCreateServer,
@@ -376,6 +386,7 @@ pub enum Native {
     /// `process.hrtime`, whose callable and `.bigint()` forms both read the realm clock.
     ProcessHrtime,
     ProcessHrtimeBigInt,
+    ProcessCwd,
     UrlConstructor,
     UrlSearchParamsGet,
     NodeServerListen,
@@ -1185,6 +1196,7 @@ impl Native {
             (Self::NodeDiagnosticsChannel, "hasSubscribers") => Some(Value::Boolean(false)),
             (Self::NodeUtil, "inherits") => Some(Value::Native(Self::NodeUtilInherits)),
             (Self::NodeUtil, "debuglog") => Some(Value::Native(Self::NodeUtilDebuglog)),
+            (Self::NodeUtil, "deprecate") => Some(Value::Native(Self::NodeUtilDeprecate)),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
             (Self::NodeAssert, "default" | "ok" | "strict") => {
                 Some(Value::Native(Self::NodeAssertOk))
@@ -1213,6 +1225,7 @@ impl Native {
                 Some(Value::Native(Self::NodeOsNetworkInterfaces))
             }
             (Self::NodeOs, "hostname") => Some(Value::Native(Self::NodeOsHostname)),
+            (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty)),
             (Self::NodePerfHooks, "performance" | "default") => {
                 Some(Value::Native(Self::Performance))
             }
@@ -5086,6 +5099,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "worker_threads" => &["Worker", "default"],
         "perf_hooks" => &["default", "performance"],
         "os" => &["default", "hostname", "networkInterfaces"],
+        "tty" => &["default", "isatty"],
         "stream" => &[
             "Readable",
             "Writable",
@@ -5093,7 +5107,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
             "default",
             "finished",
         ],
-        "util" => &["debuglog", "default", "format", "inherits"],
+        "util" => &["debuglog", "default", "deprecate", "format", "inherits"],
         "querystring" => &["decode", "default", "parse"],
         "url" => &["URL", "default", "parse"],
         _ => return None,
@@ -5121,6 +5135,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "worker_threads" => Native::NodeWorkerThreads,
             "perf_hooks" => Native::NodePerfHooks,
             "os" => Native::NodeOs,
+            "tty" => Native::NodeTty,
             "stream" => Native::NodeStream,
             "querystring" => Native::NodeQueryString,
             "util" => Native::NodeUtil,
@@ -12035,7 +12050,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             ErrorKind::Type,
                             format!(
                                 "Cannot read private member #{} from an object whose class did not declare it",
-                                name.trim_start_matches("@@private:")
+                                name.trim_start_matches(PRIVATE_KEY_PREFIX)
                             ),
                             current,
                         )?;
@@ -12059,7 +12074,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             ErrorKind::Type,
                             format!(
                                 "Cannot write private member #{} to an object whose class did not declare it",
-                                name.trim_start_matches("@@private:")
+                                name.trim_start_matches(PRIVATE_KEY_PREFIX)
                             ),
                             current,
                         )?;
@@ -12079,6 +12094,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     };
                     let name = key.property_key();
+                    define_function_name(
+                        &function,
+                        &key,
+                        Some(if *setter { "set" } else { "get" }),
+                    );
                     let (getter, setter) = if *setter {
                         (None, Some(function))
                     } else {
@@ -12122,6 +12142,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     };
                     let name = key.property_key();
+                    define_function_name(&function, &key, None);
                     match &target {
                         Value::Object(object) => {
                             object
@@ -13489,6 +13510,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(Value::Native(Native::NodeUtilDebugNoop));
             }
             Native::NodeUtilDebugNoop => return Ok(Value::Undefined),
+            // Warning delivery is an embedding policy. A deterministic realm preserves the
+            // wrapped callable and performs no ambient stderr write.
+            Native::NodeUtilDeprecate => {
+                return Ok(arguments.first().cloned().unwrap_or(Value::Undefined));
+            }
             Native::NodeUtilInherits => {
                 let constructor = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let super_constructor = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -13694,6 +13720,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(ordinary_object([("loopback".to_owned(), loopback)]));
             }
             Native::NodeOsHostname => return Ok(Value::String("kiln".to_owned())),
+            // Kiln captures the realm's standard streams. They are therefore not terminals,
+            // regardless of whether the embedding process happens to have an ambient TTY.
+            Native::NodeTtyIsatty => return Ok(Value::Boolean(false)),
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -14473,6 +14502,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Number((nanoseconds % 1_000_000_000) as f64),
                 ])))
             }
+            // The deterministic realm has no ambient working directory. Graph execution may
+            // later supply its captured project root as a realm capability; until then `/` is
+            // the stable virtual root and never consults the embedding process.
+            Native::ProcessCwd => return Ok(Value::String("/".to_owned())),
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
@@ -19111,6 +19144,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if require.target_cell(&specifier).is_none() {
+                    self.throw_error(
+                        ErrorKind::Error,
+                        format!("Cannot find module '{specifier}'"),
+                        instruction,
+                    )?;
+                    return Ok(Value::Undefined);
+                }
                 if let Some(loader) = self.commonjs_loader {
                     return unsafe { (&mut *loader).load(require, &specifier, instruction) };
                 }
@@ -19221,6 +19262,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         error_prototype: Option<&Value>,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        // `InstanceofOperator` begins by asking the right-hand side how it wants the question
+        // answered. `Symbol.hasInstance` replaces the prototype walk outright -- it is how a
+        // program writes a brand check of its own, and how `Array[Symbol.hasInstance]` would be
+        // spelled if it were written in JavaScript. It was never consulted, so a class that
+        // defined one was answered by the very walk it had replaced.
+        //
+        // The two refusals around it are the other half of the same operation, and both were
+        // answered `false` instead: a right-hand side that is not an object has no `[[Prototype]]`
+        // to compare against, and one that is not callable has no `prototype` to compare *to*.
+        // `x instanceof 3` is a program that means something impossible, and saying "no" to it is
+        // a plausible answer to a question that was never asked.
+        if !is_reflect_target(constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Right-hand side of 'instanceof' is not an object".to_owned(),
+            });
+        }
+        let handler = self.read_property(
+            constructor,
+            WellKnown::HasInstance.property_key(),
+            instruction,
+        )?;
+        if !handler.is_nullish() {
+            if !is_callable(&handler) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Symbol.hasInstance is not a function".to_owned(),
+                });
+            }
+            let answered = self.call_value(
+                &handler,
+                constructor.clone(),
+                vec![value.clone()],
+                instruction,
+            )?;
+            return Ok(answered.is_truthy());
+        }
+        if !is_callable(constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Right-hand side of 'instanceof' is not callable".to_owned(),
+            });
+        }
         // `Iterator` is the one built-in whose instances are told apart by a marker rather than
         // by a prototype the realm has as an object: a generator, an array iterator and a helper
         // all answer to it, and none of their chains reaches an object this walk could compare.
@@ -22163,7 +22244,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "versions",
             ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned()))]),
         );
+        // These identify the realm's captured standard streams; they do not expose ambient file
+        // descriptors or make them terminals. `node:tty.isatty` consequently remains false.
+        process.set(
+            "stdin",
+            ordinary_object([("fd".to_owned(), Value::Number(0.0))]),
+        );
+        process.set(
+            "stdout",
+            ordinary_object([("fd".to_owned(), Value::Number(1.0))]),
+        );
+        process.set(
+            "stderr",
+            ordinary_object([("fd".to_owned(), Value::Number(2.0))]),
+        );
         process.set_non_enumerable("hrtime", Value::Native(Native::ProcessHrtime));
+        process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd));
         process.set_non_enumerable("nextTick", Value::Native(Native::ProcessNextTick));
         process.set_non_enumerable(
             "getBuiltinModule",
@@ -31761,6 +31857,7 @@ fn call_native(
         | Native::NodeUtilInherits
         | Native::NodeUtilDebuglog
         | Native::NodeUtilDebugNoop
+        | Native::NodeUtilDeprecate
         | Native::NodeUtilFormat
         | Native::NodeAssert
         | Native::NodeAssertOk
@@ -31777,6 +31874,8 @@ fn call_native(
         | Native::NodeOs
         | Native::NodeOsNetworkInterfaces
         | Native::NodeOsHostname
+        | Native::NodeTty
+        | Native::NodeTtyIsatty
         | Native::NodePerfHooks
         | Native::NodeHttps
         | Native::NodeHttpsCreateServer
@@ -31826,6 +31925,7 @@ fn call_native(
         | Native::NodeBufferToString
         | Native::ProcessHrtime
         | Native::ProcessHrtimeBigInt
+        | Native::ProcessCwd
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
         | Native::NodeServerListen
@@ -36849,6 +36949,48 @@ fn has_prototype_property(closure: &Closure) -> bool {
 /// Locked against assignment and hidden from enumeration, but *configurable*: the specification
 /// makes these the one pair a program is expected to redefine -- which is how a decorator
 /// renames a function without replacing it.
+/// `SetFunctionName(function, key, prefix)`.
+///
+/// A method, a getter and a setter are each created anonymous and named by the definition that
+/// installs them, which is also the only place a computed key is known. Nothing did it, so
+/// `class C { m() {} }` left `C.prototype.m.name` empty, `{ get x() {} }` reported `""` where the
+/// language says `"get x"`, and a symbol-keyed method reported nothing at all. That name is not
+/// decoration: a decorator reads it, a stack trace prints it, and Test262 asserts it on almost
+/// every method it defines.
+fn define_function_name(function: &Value, key: &Value, prefix: Option<&str>) {
+    let Value::Function(closure) = function else {
+        return;
+    };
+    let name = match key {
+        // A symbol names the property after its description, in brackets; one with no description
+        // names it nothing, and a prefix is still applied to that nothing.
+        Value::Symbol(symbol) => match symbol.description() {
+            "" => String::new(),
+            description => format!("[{description}]"),
+        },
+        other => {
+            let key = other.property_key();
+            // A private name is spelled the way the program wrote it rather than the way the
+            // store keys it: `#m`, not the scope-numbered reservation standing in for it.
+            match key.strip_prefix(PRIVATE_KEY_PREFIX) {
+                Some(reserved) => format!(
+                    "#{}",
+                    reserved.split_once(':').map_or(reserved, |(_, name)| name)
+                ),
+                None => key,
+            }
+        }
+    };
+    let name = match prefix {
+        Some(prefix) => format!("{prefix} {name}"),
+        None => name,
+    };
+    closure
+        .properties
+        .borrow_mut()
+        .define_value("name", Value::String(name), FUNCTION_IDENTITY);
+}
+
 const FUNCTION_IDENTITY: Attributes = Attributes {
     writable: false,
     enumerable: false,

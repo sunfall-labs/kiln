@@ -1196,7 +1196,10 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
             name.to_owned(),
             Local {
                 slot,
-                kind: VariableKind::Let,
+                // Node supplies these as function parameters. A `var` declaration of a
+                // parameter is legal and reuses that binding (`var module = ...` appears in
+                // real packages); modelling them as lexical `let`s rejects valid CommonJS.
+                kind: VariableKind::Var,
                 imported: false,
                 initialized: true,
                 celled: true,
@@ -5188,7 +5191,10 @@ impl Compiler {
                 name.clone(),
                 Local {
                     slot,
-                    kind: VariableKind::Let,
+                    // Parameters share a function's variable environment with `var`.
+                    // Their initialization rules are still handled below, but `var x` in a
+                    // body whose parameter is `x` must reuse this slot.
+                    kind: VariableKind::Var,
                     imported: false,
                     // Uninitialised until the binding list reaches it, which is what puts the
                     // parameters to a default's right in a dead zone.
@@ -7606,6 +7612,18 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn commonjs_var_may_redeclare_a_wrapper_parameter() {
+        let program = compile_commonjs(&module(vec![declaration(
+            VariableKind::Var,
+            "module",
+            Some(number(42.0)),
+        )]))
+        .expect("CommonJS wrapper parameters have function-parameter var semantics");
+
+        assert!(program.program.code.contains(&Instruction::StoreCell(2)));
+    }
+
     /// Strictness decides whose binding a `var` in eval code is.
     ///
     /// A sloppy direct eval declares into the caller's variable environment, so `var x` over a
@@ -8352,6 +8370,25 @@ mod tests {
         assert!(
             messages.iter().any(|m| m.contains("duplicate parameter")),
             "got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn var_may_redeclare_a_function_parameter() {
+        let program = compile(&module(vec![function(
+            "f",
+            &["codepoint"],
+            vec![declaration(
+                VariableKind::Var,
+                "codepoint",
+                Some(number(1.0)),
+            )],
+        )]))
+        .expect("a var declaration reuses its parameter binding");
+        assert!(
+            program.functions[0]
+                .code
+                .contains(&Instruction::StoreLocal(0))
         );
     }
 
@@ -9221,16 +9258,20 @@ mod tests {
         };
         let receiver = at(&Instruction::LoadLocal(0));
         // The value an element receives is whatever stepping the iterator produced, so the step
-        // is what has to come after the receiver and before the store.
+        // is what has to come after the receiver and before the store. The step is an `Apply` of
+        // the `next` the record captured, not a fresh read of it: the read happens once, when the
+        // iterator is opened, which is before the first element's receiver is even evaluated.
         let next = program
             .constants
             .iter()
             .position(|constant| matches!(constant, Constant::String(name) if name == "next"))
-            .expect("the walk steps the iterator by name") as u32;
-        let read = at(&Instruction::CallMethod {
-            name: next,
-            argc: 0,
-        });
+            .expect("the walk names the method it captures") as u32;
+        let captured = at(&Instruction::GetProperty(next));
+        assert!(
+            captured < receiver,
+            "the iterator record is complete before any element is taken"
+        );
+        let read = at(&Instruction::Apply);
         let store = program
             .code
             .iter()
