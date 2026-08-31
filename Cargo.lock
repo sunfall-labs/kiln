@@ -963,8 +963,10 @@ dependencies = [
 name = "kiln-native"
 version = "0.0.0"
 dependencies = [
+ "frontend-oxc",
  "kiln-artifact-cache",
  "kiln-backend-c",
+ "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",

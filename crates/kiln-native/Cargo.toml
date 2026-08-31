@@ -20,5 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+frontend-oxc = { workspace = true }
+kiln-hir = { workspace = true }
 kiln-interpreter = { workspace = true }
 kiln-runtime = { workspace = true }
