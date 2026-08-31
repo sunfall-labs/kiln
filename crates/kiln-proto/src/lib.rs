@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -87,18 +87,18 @@ pub struct SourceHash {
     pub hash: SourceDigest,
 }
 
-/// One package import resolved against a pinned package manifest.
+/// One module request resolved to a pinned target.
 ///
-/// All paths are canonical spellings supplied by the package resolver. The manifest digest is
-/// included so a daemon can distinguish two resolutions that happen to have the same paths but
-/// came from different package metadata.
+/// All paths are canonical spellings supplied by the client-side Node resolver. Manifest
+/// provenance is present when package metadata influenced the decision and absent for decisions
+/// such as extension fallback that require pinning but did not consult a manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageResolution {
     pub importer: String,
     pub specifier: String,
     pub target: String,
-    pub package_json: String,
-    pub package_json_hash: SourceDigest,
+    pub package_json: Option<String>,
+    pub package_json_hash: Option<SourceDigest>,
 }
 
 /// The package-resolution snapshot belonging to one [`Request::Sync`].
@@ -117,6 +117,7 @@ pub struct ResolutionMap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolutionMapError {
     EmptyField { field: &'static str, index: usize },
+    IncompleteManifest { index: usize },
     EntriesNotSorted { previous: String, current: String },
     DuplicateEntry { importer: String, specifier: String },
 }
@@ -127,6 +128,10 @@ impl fmt::Display for ResolutionMapError {
             Self::EmptyField { field, index } => {
                 write!(formatter, "resolution entry {index} has an empty {field}")
             }
+            Self::IncompleteManifest { index } => write!(
+                formatter,
+                "resolution entry {index} must provide both package_json and package_json_hash"
+            ),
             Self::EntriesNotSorted { previous, current } => write!(
                 formatter,
                 "resolution entries are not sorted: {previous:?} appears before {current:?}"
@@ -188,11 +193,20 @@ impl ResolutionMap {
                 ("importer", &entry.importer),
                 ("specifier", &entry.specifier),
                 ("target", &entry.target),
-                ("package_json", &entry.package_json),
             ] {
                 if value.is_empty() {
                     return Err(ResolutionMapError::EmptyField { field, index });
                 }
+            }
+            match (&entry.package_json, &entry.package_json_hash) {
+                (Some(path), Some(_)) if path.is_empty() => {
+                    return Err(ResolutionMapError::EmptyField {
+                        field: "package_json",
+                        index,
+                    });
+                }
+                (Some(_), Some(_)) | (None, None) => {}
+                _ => return Err(ResolutionMapError::IncompleteManifest { index }),
             }
         }
         for pair in self.entries.windows(2) {
@@ -223,15 +237,22 @@ impl ResolutionMap {
     pub fn identity(&self) -> Digest {
         debug_assert!(self.validate().is_ok());
         let mut bytes = Vec::new();
-        frame(&mut bytes, b"kiln-resolution-map\0v1");
+        frame(&mut bytes, b"kiln-resolution-map\0v2");
         frame(&mut bytes, self.project_root.as_bytes());
         frame_u64(&mut bytes, self.entries.len() as u64);
         for entry in &self.entries {
             frame(&mut bytes, entry.importer.as_bytes());
             frame(&mut bytes, entry.specifier.as_bytes());
             frame(&mut bytes, entry.target.as_bytes());
-            frame(&mut bytes, entry.package_json.as_bytes());
-            frame(&mut bytes, entry.package_json_hash.0.as_bytes());
+            match (&entry.package_json, &entry.package_json_hash) {
+                (Some(path), Some(hash)) => {
+                    frame(&mut bytes, b"manifest");
+                    frame(&mut bytes, path.as_bytes());
+                    frame(&mut bytes, hash.0.as_bytes());
+                }
+                (None, None) => frame(&mut bytes, b"no-manifest"),
+                _ => unreachable!("validated resolution manifest provenance"),
+            }
         }
         Digest::hash(&bytes)
     }
@@ -714,8 +735,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v19_sync_source_view_and_cache_gc_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 19);
+    fn protocol_v20_sync_source_view_and_cache_gc_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 20);
 
         let requests = [
             (
@@ -929,8 +950,8 @@ mod tests {
             importer: importer.to_owned(),
             specifier: specifier.to_owned(),
             target: target.to_owned(),
-            package_json: "/project/node_modules/pkg/package.json".to_owned(),
-            package_json_hash: source_digest("package metadata"),
+            package_json: Some("/project/node_modules/pkg/package.json".to_owned()),
+            package_json_hash: Some(source_digest("package metadata")),
         }
     }
 
@@ -1011,9 +1032,31 @@ mod tests {
             "ab",
             "/project/node_modules/pkg/index.js",
         );
-        changed_hash.package_json_hash = source_digest("different package metadata");
+        changed_hash.package_json_hash = Some(source_digest("different package metadata"));
         let changed_map = ResolutionMap::new("/project", vec![changed_hash]).expect("valid map");
         assert_ne!(left_map.identity(), changed_map.identity());
+    }
+
+    #[test]
+    fn manifest_free_resolution_is_canonical_and_has_a_distinct_identity() {
+        let mut without_manifest = package_resolution("a", "./lib", "/project/lib.js");
+        without_manifest.package_json = None;
+        without_manifest.package_json_hash = None;
+        let without = ResolutionMap::new("/project", vec![without_manifest.clone()])
+            .expect("extension fallback is a valid pinned decision");
+
+        let with = ResolutionMap::new(
+            "/project",
+            vec![package_resolution("a", "./lib", "/project/lib.js")],
+        )
+        .expect("manifest-backed decision is valid");
+        assert_ne!(without.identity(), with.identity());
+
+        without_manifest.package_json = Some("/project/package.json".to_owned());
+        assert!(matches!(
+            ResolutionMap::new("/project", vec![without_manifest]),
+            Err(ResolutionMapError::IncompleteManifest { .. })
+        ));
     }
 
     #[test]

@@ -251,8 +251,8 @@ mod tests {
                 importer: first.to_string_lossy().into_owned(),
                 specifier: "pkg".into(),
                 target: second.to_string_lossy().into_owned(),
-                package_json: root.join("package.json").to_string_lossy().into_owned(),
-                package_json_hash: source_digest("manifest"),
+                package_json: Some(root.join("package.json").to_string_lossy().into_owned()),
+                package_json_hash: Some(source_digest("manifest")),
             }],
         )
         .expect("valid resolution map");

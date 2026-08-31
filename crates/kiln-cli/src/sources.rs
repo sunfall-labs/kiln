@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
-use kiln_module_resolver::{NodeModuleFormat, NodePackageResolver, ResolutionKind, ResolutionPolicy};
+use kiln_module_resolver::{
+    NodeModuleFormat, NodePackageResolver, ResolutionKind, ResolutionPolicy,
+};
 use kiln_proto::{PackageResolution, source_digest};
 use rayon::prelude::*;
 
@@ -164,10 +166,8 @@ pub(crate) fn include_reachable_dependencies(
         let importer_path = importer.to_str().ok_or_else(|| {
             Error::BadInput(format!("path is not valid UTF-8: {}", importer.display()))
         })?;
-        let resolved_importer = kiln_module_resolver::ResolvedModule::new(
-            importer.clone(),
-            ResolutionKind::Relative,
-        );
+        let resolved_importer =
+            kiln_module_resolver::ResolvedModule::new(importer.clone(), ResolutionKind::Relative);
         let commonjs = node
             && resolver
                 .node_format(&resolved_importer)
@@ -198,31 +198,41 @@ pub(crate) fn include_reachable_dependencies(
                 .resolve_with_metadata(&specifier, &importer)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
             let target = resolved.module.path;
-            if resolved.module.kind == ResolutionKind::Package {
-                let package_json = resolved.package_json.ok_or_else(|| {
-                    Error::BadInput(format!(
-                        "package request `{}` resolved without a package manifest",
-                        specifier
-                    ))
-                })?;
-                let package_json_text =
-                    std::fs::read_to_string(&package_json).map_err(|source| {
-                        Error::io(format!("cannot read {}", package_json.display()), source)
+            let exact_explicit = match resolved.module.kind {
+                ResolutionKind::Relative => importer
+                    .parent()
+                    .is_some_and(|directory| directory.join(&specifier).is_file()),
+                ResolutionKind::Absolute => Path::new(&specifier).is_file(),
+                _ => false,
+            };
+            if !exact_explicit {
+                let package_json = resolved.package_json.as_deref();
+                let (package_json, package_json_hash) = if let Some(package_json) = package_json {
+                    let package_json_text =
+                        std::fs::read_to_string(package_json).map_err(|source| {
+                            Error::io(format!("cannot read {}", package_json.display()), source)
+                        })?;
+                    let package_json = package_json.to_str().ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "path is not valid UTF-8: {}",
+                            package_json.display()
+                        ))
                     })?;
-                let package_json = package_json.to_str().ok_or_else(|| {
-                    Error::BadInput(format!(
-                        "path is not valid UTF-8: {}",
-                        package_json.display()
-                    ))
-                })?;
+                    (
+                        Some(package_json.to_owned()),
+                        Some(source_digest(&package_json_text)),
+                    )
+                } else {
+                    (None, None)
+                };
                 resolutions.insert(
                     (importer_path.to_owned(), specifier.clone()),
                     PackageResolution {
                         importer: importer_path.to_owned(),
                         specifier: specifier.clone(),
                         target: target.to_string_lossy().into_owned(),
-                        package_json: package_json.to_owned(),
-                        package_json_hash: source_digest(&package_json_text),
+                        package_json,
+                        package_json_hash,
                     },
                 );
             }
@@ -501,9 +511,12 @@ mod tests {
         assert_eq!(resolutions[0].specifier, "pkg");
         assert_eq!(
             resolutions[0].package_json,
-            canonical_root
-                .join("node_modules/pkg/package.json")
-                .to_string_lossy()
+            Some(
+                canonical_root
+                    .join("node_modules/pkg/package.json")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
     }
 

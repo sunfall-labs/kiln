@@ -55,10 +55,16 @@ pub enum NodeBuiltin {
     Assert,
     AsyncHooks,
     DiagnosticsChannel,
+    Dns,
     Events,
     FsPromises,
     Net,
     Http,
+    Http2,
+    Https,
+    PerfHooks,
+    Os,
+    Stream,
     Util,
 }
 
@@ -68,10 +74,16 @@ impl NodeBuiltin {
             "assert" | "assert/strict" => Self::Assert,
             "async_hooks" => Self::AsyncHooks,
             "diagnostics_channel" => Self::DiagnosticsChannel,
+            "dns" => Self::Dns,
             "events" => Self::Events,
             "fs/promises" => Self::FsPromises,
             "net" => Self::Net,
             "http" => Self::Http,
+            "http2" => Self::Http2,
+            "https" => Self::Https,
+            "perf_hooks" => Self::PerfHooks,
+            "os" => Self::Os,
+            "stream" => Self::Stream,
             "util" => Self::Util,
             _ => return None,
         })
@@ -82,10 +94,16 @@ impl NodeBuiltin {
             Self::Assert => "node:assert",
             Self::AsyncHooks => "node:async_hooks",
             Self::DiagnosticsChannel => "node:diagnostics_channel",
+            Self::Dns => "node:dns",
             Self::Events => "node:events",
             Self::FsPromises => "node:fs/promises",
             Self::Net => "node:net",
             Self::Http => "node:http",
+            Self::Http2 => "node:http2",
+            Self::Https => "node:https",
+            Self::PerfHooks => "node:perf_hooks",
+            Self::Os => "node:os",
+            Self::Stream => "node:stream",
             Self::Util => "node:util",
         }
     }
@@ -545,28 +563,28 @@ fn validate_node_target(
     package_json: Option<PathBuf>,
     project_root: &Path,
 ) -> Result<ResolvedRequest, ResolveError> {
-        ensure_utf8(&canonical_target, PathRole::Target)?;
-        if !canonical_target.starts_with(project_root) {
-            return Err(ResolveError::OutsideProject {
-                path: canonical_target,
-                project_root: project_root.to_path_buf(),
-            });
-        }
-        if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
-            return Err(ResolveError::NotRegularFile {
-                role: PathRole::Target,
-                path: canonical_target,
-            });
-        }
-        if !has_supported_extension(&canonical_target) {
-            return Err(ResolveError::UnsupportedExtension {
-                path: canonical_target,
-            });
-        }
-        Ok(ResolvedRequest {
-            module: ResolvedModule::new(canonical_target, kind),
-            package_json,
-        })
+    ensure_utf8(&canonical_target, PathRole::Target)?;
+    if !canonical_target.starts_with(project_root) {
+        return Err(ResolveError::OutsideProject {
+            path: canonical_target,
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
+        return Err(ResolveError::NotRegularFile {
+            role: PathRole::Target,
+            path: canonical_target,
+        });
+    }
+    if !has_supported_extension(&canonical_target) {
+        return Err(ResolveError::UnsupportedExtension {
+            path: canonical_target,
+        });
+    }
+    Ok(ResolvedRequest {
+        module: ResolvedModule::new(canonical_target, kind),
+        package_json,
+    })
 }
 
 impl ResolutionPolicy for NodePackageResolver {
@@ -668,9 +686,9 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
 
 /// Replays package decisions captured by a client-side [`NodePackageResolver`].
 ///
-/// Explicit paths retain [`ModuleResolver`]'s exact filesystem policy. Bare package requests are
-/// keyed lookups: graph construction never rereads `package.json` or reruns Node resolution, but
-/// it still canonicalizes and validates the pinned target before admitting it to the graph.
+/// Every captured request is a keyed lookup. This includes Node's extension/directory-resolved
+/// relative requests: graph construction never reruns those filesystem heuristics after sync.
+/// Requests absent from the map retain [`ModuleResolver`]'s exact explicit-filesystem policy.
 #[derive(Debug, Clone)]
 pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
@@ -725,26 +743,27 @@ impl PinnedPackageResolver {
                 ResolutionKind::Builtin,
             ));
         }
-        if !matches!(
-            classify_specifier(specifier),
-            Err(ResolveError::InvalidSpecifier {
-                reason: InvalidSpecifierReason::BarePackage,
-                ..
-            })
-        ) {
-            return self.explicit.resolve(specifier, importer);
-        }
-
         let canonical_importer = canonical_importer(importer, self.project_root())?;
-        let target = self
+        let Some(target) = self
             .packages
             .get(&(canonical_importer.clone(), specifier.to_owned()))
             .cloned()
-            .ok_or_else(|| ResolveError::PackageResolution {
+        else {
+            if !matches!(
+                classify_specifier(specifier),
+                Err(ResolveError::InvalidSpecifier {
+                    reason: InvalidSpecifierReason::BarePackage,
+                    ..
+                })
+            ) {
+                return self.explicit.resolve(specifier, importer);
+            }
+            return Err(ResolveError::PackageResolution {
                 specifier: specifier.to_owned(),
                 importer: canonical_importer,
                 message: "request is absent from the synchronized resolution map".to_owned(),
-            })?;
+            });
+        };
         let canonical_target = canonical_path(&target, PathRole::Target)?;
         ensure_utf8(&canonical_target, PathRole::Target)?;
         if !canonical_target.starts_with(self.project_root()) {
@@ -764,10 +783,8 @@ impl PinnedPackageResolver {
                 path: canonical_target,
             });
         }
-        Ok(ResolvedModule::new(
-            canonical_target,
-            ResolutionKind::Package,
-        ))
+        let kind = classify_specifier(specifier).unwrap_or(ResolutionKind::Package);
+        Ok(ResolvedModule::new(canonical_target, kind))
     }
 }
 

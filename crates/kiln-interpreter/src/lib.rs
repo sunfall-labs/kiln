@@ -263,6 +263,18 @@ pub enum Native {
     NodeAsyncResource,
     NodeAsyncResourceBind,
     NodeAsyncResourceEmitDestroy,
+    NodeStream,
+    NodeStreamFinished,
+    NodeDns,
+    NodeDnsLookup,
+    NodeOs,
+    NodeOsNetworkInterfaces,
+    NodePerfHooks,
+    NodeHttps,
+    NodeHttpsCreateServer,
+    NodeHttp2,
+    NodeHttp2CreateServer,
+    NodeHttp2CreateSecureServer,
     NodeEventEmitter,
     NodeEventOn,
     NodeEventOnce,
@@ -996,9 +1008,7 @@ impl Native {
             (Self::NodeDiagnosticsChannel, "tracingChannel") => {
                 Some(Value::Native(Self::NodeDiagnosticsTracingChannel))
             }
-            (Self::NodeDiagnosticsChannel, "hasSubscribers") => {
-                Some(Value::Boolean(false))
-            }
+            (Self::NodeDiagnosticsChannel, "hasSubscribers") => Some(Value::Boolean(false)),
             (Self::NodeUtil, "inherits") => Some(Value::Native(Self::NodeUtilInherits)),
             (Self::NodeUtil, "debuglog") => Some(Value::Native(Self::NodeUtilDebuglog)),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
@@ -1007,6 +1017,19 @@ impl Native {
             }
             (Self::NodeAsyncHooks, "AsyncResource" | "default") => {
                 Some(Value::Native(Self::NodeAsyncResource))
+            }
+            (Self::NodeStream, "finished") => Some(Value::Native(Self::NodeStreamFinished)),
+            (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup)),
+            (Self::NodeOs, "networkInterfaces") => {
+                Some(Value::Native(Self::NodeOsNetworkInterfaces))
+            }
+            (Self::NodePerfHooks, "performance" | "default") => {
+                Some(Value::Native(Self::Performance))
+            }
+            (Self::NodeHttps, "createServer") => Some(Value::Native(Self::NodeHttpsCreateServer)),
+            (Self::NodeHttp2, "createServer") => Some(Value::Native(Self::NodeHttp2CreateServer)),
+            (Self::NodeHttp2, "createSecureServer") => {
+                Some(Value::Native(Self::NodeHttp2CreateSecureServer))
             }
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
@@ -3579,16 +3602,17 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "assert" | "assert/strict" => &["default", "ok", "strict"],
         "async_hooks" => &["AsyncResource", "default"],
-        "diagnostics_channel" => &[
-            "channel",
-            "default",
-            "hasSubscribers",
-            "tracingChannel",
-        ],
+        "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
+        "dns" => &["default", "lookup"],
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
         "net" => &["connect", "createConnection", "createServer"],
         "http" => &["createServer", "default", "get", "request"],
+        "https" => &["createServer", "default"],
+        "http2" => &["createSecureServer", "createServer", "default"],
+        "perf_hooks" => &["default", "performance"],
+        "os" => &["default", "networkInterfaces"],
+        "stream" => &["default", "finished"],
         "util" => &["debuglog", "default", "format", "inherits"],
         _ => return None,
     })
@@ -3600,10 +3624,16 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "assert" | "assert/strict" => Native::NodeAssert,
             "async_hooks" => Native::NodeAsyncHooks,
             "diagnostics_channel" => Native::NodeDiagnosticsChannel,
+            "dns" => Native::NodeDns,
             "events" => Native::NodeEvents,
             "fs/promises" => Native::NodeFsPromises,
             "net" => Native::NodeNet,
             "http" => Native::NodeHttp,
+            "https" => Native::NodeHttps,
+            "http2" => Native::NodeHttp2,
+            "perf_hooks" => Native::NodePerfHooks,
+            "os" => Native::NodeOs,
+            "stream" => Native::NodeStream,
             "util" => Native::NodeUtil,
             _ => return None,
         },
@@ -4850,6 +4880,16 @@ fn realm_runtime() -> Result<RealmRuntime, ExecutionError> {
     })
 }
 
+fn runtime_entropy_seed(runtime: &RealmRuntime) -> Result<u64, ExecutionError> {
+    runtime
+        .capabilities()
+        .entropy_seed()
+        .ok_or_else(|| ExecutionError::Host {
+            instruction: 0,
+            message: "host entropy must be requested through HostOp::EntropyU64".to_owned(),
+        })
+}
+
 /// Execute one IR program against a host implementation.
 pub fn execute<H: HostOps + ?Sized>(
     program: Rc<Program>,
@@ -4857,8 +4897,14 @@ pub fn execute<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
-    let mut vm = Vm::new(program, host, locals, limits);
     let mut runtime = realm_runtime()?;
+    let mut vm = Vm::with_entropy_seed(
+        program,
+        host,
+        locals,
+        limits,
+        runtime_entropy_seed(&runtime)?,
+    );
     // The program is not finished when its last statement is: anything it scheduled still has
     // to run, which is what makes a `setTimeout` observable at all.
     let execution = runtime.enter(|| vm.run())?;
@@ -4881,7 +4927,13 @@ pub fn execute_node<H: HostOps + ?Sized>(
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
     let locals = vec![Value::Undefined; program.local_count as usize];
-    let mut vm = Vm::new(program, host, locals, limits);
+    let mut vm = Vm::with_entropy_seed(
+        program,
+        host,
+        locals,
+        limits,
+        runtime_entropy_seed(&runtime)?,
+    );
     vm.node_host = Some(&mut runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
     let execution = runtime.enter(|| vm.run())?;
     vm.run_node_event_loop(&mut runtime)?;
@@ -4906,8 +4958,14 @@ pub fn execute_reclaiming<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
 ) -> Result<u64, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
-    let mut vm = Vm::new(program, host, locals, limits);
     let mut runtime = realm_runtime()?;
+    let mut vm = Vm::with_entropy_seed(
+        program,
+        host,
+        locals,
+        limits,
+        runtime_entropy_seed(&runtime)?,
+    );
     let outcome = runtime
         .enter(|| vm.run())
         .and_then(|_| vm.run_event_loop(&mut runtime));
@@ -5208,7 +5266,13 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
     // Cloned into an `Rc` because a function value this module exports outlives the run that
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
-    let mut vm = Vm::new(Rc::new(module.program.clone()), host, locals, limits);
+    let mut vm = Vm::with_entropy_seed(
+        Rc::new(module.program.clone()),
+        host,
+        locals,
+        limits,
+        runtime_entropy_seed(runtime)?,
+    );
     if session.is_some() {
         vm.node_host = Some(runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
     }
@@ -5636,15 +5700,16 @@ impl PendingNodeRequest {
 }
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
-    /// A machine with nothing run yet.
+    /// Constructs a VM whose deterministic entropy is owned by its realm runtime policy.
     ///
-    /// `locals` arrives from the caller rather than being sized here because a module body starts
-    /// with its import slots already filled, where a script starts empty.
-    fn new(
+    /// Keeping the seed as a plain value here avoids leaking Tokio or runtime ownership into the
+    /// language machine while making ADR 0031 authoritative for every entropy consumer.
+    fn with_entropy_seed(
         program: Rc<Program>,
         host: &'host mut H,
         locals: Vec<Value>,
         limits: ExecutionLimits,
+        entropy_seed: u64,
     ) -> Self {
         Self {
             program,
@@ -5677,7 +5742,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             caught: None,
             unhandled: None,
             symbol_registry: Vec::new(),
-            random_state: RANDOM_SEED,
+            random_state: entropy_seed,
             closures: Vec::new(),
             limits,
         }
@@ -9332,22 +9397,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .to_owned(),
                     });
                 }
-                let super_prototype = self.read_property(
-                    &super_constructor,
-                    "prototype",
-                    instruction,
-                )?;
-                let constructor_prototype = self.read_property(
-                    &constructor,
-                    "prototype",
-                    instruction,
-                )?;
+                let super_prototype =
+                    self.read_property(&super_constructor, "prototype", instruction)?;
+                let constructor_prototype =
+                    self.read_property(&constructor, "prototype", instruction)?;
                 match &constructor_prototype {
                     Value::Object(object) => {
                         object.borrow_mut().set_prototype(super_prototype);
                     }
                     Value::Function(function) => {
-                        function.properties.borrow_mut().set_prototype(super_prototype);
+                        function
+                            .properties
+                            .borrow_mut()
+                            .set_prototype(super_prototype);
                     }
                     _ => {}
                 }
@@ -9363,7 +9425,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: arguments
                             .get(1)
                             .map(Value::to_display_string)
-                            .unwrap_or_else(|| "The expression evaluated to a falsy value".to_owned()),
+                            .unwrap_or_else(|| {
+                                "The expression evaluated to a falsy value".to_owned()
+                            }),
                     });
                 }
                 return Ok(Value::Undefined);
@@ -9383,6 +9447,126 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 })));
             }
             Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
+            Native::NodeStreamFinished => {
+                let stream = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let callback = arguments
+                    .iter()
+                    .rev()
+                    .find(|value| is_callable(value))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
+                let event = if self.property(&stream, "writableEnded").is_truthy() {
+                    None
+                } else {
+                    Some(if self.property(&stream, "readableEnded").is_truthy() {
+                        "end"
+                    } else {
+                        "finish"
+                    })
+                };
+                if let Some(event) = event {
+                    self.dispatch_node_event(
+                        Native::NodeEventOnce,
+                        &stream,
+                        &[Value::String(event.to_owned()), callback],
+                        instruction,
+                    )?;
+                } else {
+                    self.call_value(&callback, Value::Undefined, Vec::new(), instruction)?;
+                }
+                return Ok(Value::Native(Native::NodeUtilDebugNoop));
+            }
+            Native::NodeDnsLookup => {
+                let host = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_else(|| "localhost".to_owned());
+                let callback = arguments
+                    .iter()
+                    .rev()
+                    .find(|value| is_callable(value))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
+                // Deterministic loopback-only resolution. Non-loopback DNS must become an
+                // explicit async HostOp before it is advertised; it must never read ambient
+                // resolver state from inside the interpreter.
+                let addresses = match host.as_str() {
+                    "localhost" => vec![
+                        ordinary_object([
+                            ("address".to_owned(), Value::String("127.0.0.1".to_owned())),
+                            ("family".to_owned(), Value::Number(4.0)),
+                        ]),
+                        ordinary_object([
+                            ("address".to_owned(), Value::String("::1".to_owned())),
+                            ("family".to_owned(), Value::Number(6.0)),
+                        ]),
+                    ],
+                    "127.0.0.1" => vec![ordinary_object([
+                        ("address".to_owned(), Value::String(host)),
+                        ("family".to_owned(), Value::Number(4.0)),
+                    ])],
+                    "::1" => vec![ordinary_object([
+                        ("address".to_owned(), Value::String(host)),
+                        ("family".to_owned(), Value::Number(6.0)),
+                    ])],
+                    _ => Vec::new(),
+                };
+                let options_all = arguments.get(1).is_some_and(|options| {
+                    own_data_property(options, "all").is_some_and(|value| value.is_truthy())
+                });
+                let callback_arguments = if addresses.is_empty() {
+                    vec![
+                        Value::String("ENOTFOUND".to_owned()),
+                        Value::Array(ArrayData::new(Vec::new())),
+                    ]
+                } else if options_all {
+                    vec![Value::Null, Value::Array(ArrayData::new(addresses))]
+                } else {
+                    let first = addresses.into_iter().next().unwrap();
+                    vec![
+                        Value::Null,
+                        own_data_property(&first, "address").unwrap_or(Value::Undefined),
+                        own_data_property(&first, "family").unwrap_or(Value::Undefined),
+                    ]
+                };
+                self.call_value(&callback, Value::Undefined, callback_arguments, instruction)?;
+                return Ok(Value::Undefined);
+            }
+            Native::NodeOsNetworkInterfaces => {
+                let loopback = Value::Array(ArrayData::new(vec![ordinary_object([
+                    ("address".to_owned(), Value::String("127.0.0.1".to_owned())),
+                    ("family".to_owned(), Value::String("IPv4".to_owned())),
+                    ("internal".to_owned(), Value::Boolean(true)),
+                ])]));
+                return Ok(ordinary_object([("loopback".to_owned(), loopback)]));
+            }
+            Native::NodeHttpsCreateServer => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message:
+                        "node:https requires a TLS host capability that this realm does not provide"
+                            .to_owned(),
+                });
+            }
+            Native::NodeHttp2CreateServer | Native::NodeHttp2CreateSecureServer => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: "node:http2 requires an HTTP/2 host capability that this realm does not provide"
+                        .to_owned(),
+                });
+            }
             _ => {}
         }
         if matches!(
@@ -19110,12 +19294,8 @@ fn unary(operator: UnaryOp, value: Value) -> Value {
 ///
 /// This is why `1 << 31` is negative and why `2 ** 32 | 0` is zero. Not a cast: the value wraps
 /// modulo 2^32 rather than saturating, and anything not finite becomes zero.
-/// The seed `Math.random` starts from, and the constants that advance it.
-///
 /// SplitMix64: a full-period generator with good statistical properties in five lines, which is
-/// what a language builtin needs. The seed is a constant so a run is reproducible; see ADR 0026
-/// for why that is a decision rather than a shortcut.
-const RANDOM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+/// what a language builtin needs. Its seed comes from the realm's ADR 0031 entropy capability.
 
 fn split_mix_64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -21709,6 +21889,18 @@ fn call_native(
         | Native::NodeAsyncResource
         | Native::NodeAsyncResourceBind
         | Native::NodeAsyncResourceEmitDestroy
+        | Native::NodeStream
+        | Native::NodeStreamFinished
+        | Native::NodeDns
+        | Native::NodeDnsLookup
+        | Native::NodeOs
+        | Native::NodeOsNetworkInterfaces
+        | Native::NodePerfHooks
+        | Native::NodeHttps
+        | Native::NodeHttpsCreateServer
+        | Native::NodeHttp2
+        | Native::NodeHttp2CreateServer
+        | Native::NodeHttp2CreateSecureServer
         | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect
@@ -27370,6 +27562,7 @@ mod tests {
     }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
+    use kiln_runtime::DEFAULT_ENTROPY_SEED;
 
     struct TestHost {
         calls: Vec<(HostOp, Vec<HostValue>)>,
@@ -27438,11 +27631,12 @@ mod tests {
     }
 
     fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost> {
-        Vm::new(
+        Vm::with_entropy_seed(
             Rc::new(program.clone()),
             host,
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
+            DEFAULT_ENTROPY_SEED,
         )
     }
 
