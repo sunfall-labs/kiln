@@ -38,7 +38,7 @@ What exists today:
 | `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
 | `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
 | `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 19, including collision-resistant source synchronization and structured interpreter, native-build, native-run, shared-library, and test results. |
+| `crates/kiln-proto` | CLI-to-daemon wire contract, at `PROTOCOL_VERSION` 20, including collision-resistant source synchronization and structured interpreter, native-build, native-run, shared-library, and test results. |
 | `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
 | `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
 | `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
