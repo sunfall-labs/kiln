@@ -34,6 +34,14 @@ scripts/check-native-number-ffi.sh
 # intentionally tiny; the full upstream suite remains an external, separately pinned input.
 kiln_cargo run -p kiln-cli --locked -- --one-shot test tests/conformance/smoke
 
+# The Deno-style Node inventory is more than a hash allowlist: every adaptation behind a `pass`
+# claim is also present in conformance/node/manifest.toml, and this public run executes that oracle
+# through the production Node resolver, graph linker, interpreter binding, and Tokio provider.
+# Running the complete adapted corpus is intentional: partial/expected-failure upstream entries
+# still have promoted sub-cases here, and those executable gains must not regress while the full
+# upstream file remains honestly red in node-compat.json.
+kiln_cargo run -p kiln-cli --locked -- --one-shot test conformance/node --node
+
 # Exercise the public native path against the same bytecode as the interpreter. The second build
 # must be a fully warm artifact-cache hit, and both execution engines must expose identical stdout
 # for the supported scalar slice.
