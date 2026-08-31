@@ -929,6 +929,11 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
 static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size_t count,
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
 static const kiln_symbol kiln_c99_well_known[] = {
+static kiln_value *kiln_c99_symbols;
+static size_t kiln_c99_symbol_count;
+static size_t kiln_c99_symbol_capacity;
+static int kiln_c99_remember_symbol(kiln_value symbol) {
+static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
 static kiln_value kiln_c99_property_key(kiln_value key) {
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
