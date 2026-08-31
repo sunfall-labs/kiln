@@ -2453,6 +2453,38 @@ fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
     })
 }
 
+/// The store a value records a `[[Prototype]]` in, or `None` when its chain is fixed by its kind.
+///
+/// Every value with somewhere to put ordinary named properties also has somewhere to put a
+/// prototype, and the two are the same store. Naming it once is what keeps the six places that
+/// *write* a chain -- `Object.setPrototypeOf`, `Reflect.setPrototypeOf`, `__proto__` either way
+/// round, `class D extends B`, and `super()` handing back the parent's object -- agreeing with
+/// the one place that reads it. They did not: a write reached an object, a function and an
+/// array, and the read looked only there, so `class V extends Uint8Array {}` produced a view
+/// whose prototype was the intrinsic one and `new V() instanceof V` was false.
+fn prototype_slot(target: &Value) -> Option<&RefCell<ObjectData>> {
+    match target {
+        Value::Object(object) => Some(object.as_ref()),
+        Value::Array(items) => Some(&items.properties),
+        Value::Function(closure) => Some(&closure.properties),
+        Value::Bound(bound) => Some(&bound.properties),
+        other => exotic_properties(other),
+    }
+}
+
+/// Record `prototype` as the value's own chain, reporting whether it had anywhere to keep one.
+///
+/// The refusal is the answer `Reflect.setPrototypeOf` gives, and the reason `super()` leaves an
+/// exotic parent's object alone when it has no slot: a link that cannot be stored must not be
+/// reported as stored.
+fn record_prototype(target: &Value, prototype: Value) -> bool {
+    let Some(slot) = prototype_slot(target) else {
+        return false;
+    };
+    slot.borrow_mut().set_prototype(prototype);
+    true
+}
+
 /// Whether the value answers this name from its own exotic behaviour rather than from the store
 /// beside it.
 ///
@@ -14863,25 +14895,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !prototype_may_change(&self.intrinsics, &target, &prototype) {
                     return Ok(Value::Boolean(false));
                 }
-                let stored = match &target {
-                    Value::Object(object) => {
-                        object.borrow_mut().set_prototype(prototype);
-                        true
-                    }
-                    Value::Function(closure) => {
-                        closure.properties.borrow_mut().set_prototype(prototype);
-                        true
-                    }
-                    Value::Array(items) => {
-                        items.properties.borrow_mut().set_prototype(prototype);
-                        true
-                    }
-                    // An exotic value keeps its chain in its kind rather than in a slot, so
-                    // there is nowhere to put a new one. Reported as a refusal, which is what
-                    // this operation exists to be able to say.
-                    _ => false,
-                };
-                Ok(Value::Boolean(stored))
+                // A value with no store keeps its chain in its kind, so there is nowhere to put
+                // a new one. Reported as a refusal, which is what this operation exists to say.
+                Ok(Value::Boolean(record_prototype(&target, prototype)))
             }
             Native::ReflectGetOwnPropertyDescriptor => {
                 let target = self.reflect_target(arguments.first(), "getOwnPropertyDescriptor")?;
@@ -19258,13 +19274,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     _ => None,
                 };
                 if let Some(prototype) = prototype {
-                    match &built {
-                        Value::Object(object) => object.borrow_mut().set_prototype(prototype),
-                        Value::Array(array) => {
-                            array.properties.borrow_mut().set_prototype(prototype);
-                        }
-                        _ => {}
-                    }
+                    record_prototype(&built, prototype);
                 }
 
                 // `this` is the parent's object from here on, and the frame's record of what is
@@ -22259,6 +22269,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         new_target: Value,
         current: usize,
     ) -> Result<(), ExecutionError> {
+        // `OrdinaryCreateFromConstructor` for the built-ins: every one of them takes its
+        // instance's prototype from `NewTarget` rather than from itself, which is only visible
+        // when the two differ -- `Reflect.construct(Date, [0], D)` and the `super()` of a
+        // subclass. Each branch below builds the value its own way and none of them was asking,
+        // so `class D extends Date {}` produced a date whose prototype was `Date.prototype` and
+        // `new D(0) instanceof D` was false. Decided here once rather than in eight
+        // constructors, and only when the two differ: reading `prototype` off the target runs a
+        // program's getter, and doing it on every `new Date()` would be a call nothing asked for.
+        let subclassed = match (&callee, &new_target) {
+            // `new Proxy` is the one built-in whose `[[Construct]]` ignores `NewTarget`: a proxy
+            // has no prototype of its own, it forwards the question to its target.
+            (Value::Native(Native::ProxyConstructor), _) => false,
+            (Value::Native(built_in), Value::Native(target)) => built_in != target,
+            (Value::Native(_), _) => true,
+            _ => false,
+        };
+        let depth = self.stack.len();
         match callee {
             // `new Temporal.PlainDate(...)`. The engine builds the value; what is decided here is
             // only what the arguments meant, which is the half the language owns.
@@ -22501,8 +22528,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 } else {
                     Disposal::Async
                 };
-                let built = self.construct_disposable_stack(flavour, &new_target, current)?;
-                self.stack.push(built);
+                self.stack.push(new_disposable_stack(flavour));
             }
             Value::Native(Native::WeakRefConstructor) => {
                 let built = self.construct_weak_ref(&arguments, current)?;
@@ -22528,7 +22554,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     current,
                     instance.clone(),
                     Some(instance),
-                    Some(new_target),
+                    Some(new_target.clone()),
                 )?;
             }
             other => {
@@ -22536,6 +22562,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction: current,
                     value: other.type_name(),
                 });
+            }
+        }
+        // A native branch leaves exactly the instance it built. A `prototype` that is not an
+        // object leaves the intrinsic chain in place, which is what the specification
+        // substitutes rather than failing, and a value with no store to keep a link in keeps the
+        // one its kind gives it.
+        if subclassed && self.stack.len() == depth + 1 {
+            let built = self.stack[depth].clone();
+            let named = self.read_property(&new_target, "prototype", current)?;
+            if is_reflect_target(&named) {
+                record_prototype(&built, named);
             }
         }
         Ok(())
@@ -22982,36 +23019,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => Err(other),
             },
         }
-    }
-
-    /// `OrdinaryCreateFromConstructor` for the two stacks.
-    ///
-    /// A stack reached through `Reflect.construct` inherits from *`newTarget`'s* `prototype`
-    /// rather than from the constructor's own, and reading that can run a program's getter --
-    /// so it is read only when the two differ, which is every `new DisposableStack()` skipped.
-    /// A `prototype` that is not an object leaves the intrinsic one in place, which is what the
-    /// specification substitutes rather than failing.
-    fn construct_disposable_stack(
-        &mut self,
-        flavour: Disposal,
-        new_target: &Value,
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        let stack = new_disposable_stack(flavour);
-        let default = match flavour {
-            Disposal::Sync => Native::DisposableStackConstructor,
-            Disposal::Async => Native::AsyncDisposableStackConstructor,
-        };
-        if matches!(new_target, Value::Native(native) if *native == default) {
-            return Ok(stack);
-        }
-        let named = self.read_property(new_target, "prototype", instruction)?;
-        if is_reflect_target(&named)
-            && let Value::Object(object) = &stack
-        {
-            object.borrow_mut().set_prototype(named);
-        }
-        Ok(stack)
     }
 
     /// `new WeakRef(target)`.
@@ -26392,13 +26399,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !prototype_may_change(&self.intrinsics, target, &value) {
                 return Err(prototype_change_refused());
             }
-            match target {
-                Value::Object(object) => object.borrow_mut().set_prototype(value),
-                Value::Function(closure) => closure.properties.borrow_mut().set_prototype(value),
-                Value::Array(items) => items.properties.borrow_mut().set_prototype(value),
-                // An exotic value keeps its chain in its kind and has nowhere to put another.
-                _ => {}
-            }
+            // A value with no store keeps its chain in its kind and has nowhere to put another.
+            record_prototype(target, value);
             return Ok(());
         }
         // The other half of the restricted pair. Its setter is `%ThrowTypeError%` too, so a
@@ -30161,25 +30163,10 @@ fn call_native(
                 if !prototype_may_change(intrinsics, &target, prototype) {
                     return Err(prototype_change_refused());
                 }
-                match &target {
-                    Value::Object(object) => object.borrow_mut().set_prototype(prototype.clone()),
-                    // A function is an object, and setting its prototype is how a program gives
-                    // a constructor inherited statics without `extends`.
-                    Value::Function(closure) => closure
-                        .properties
-                        .borrow_mut()
-                        .set_prototype(prototype.clone()),
-                    Value::Bound(bound) => bound
-                        .properties
-                        .borrow_mut()
-                        .set_prototype(prototype.clone()),
-                    // Where `prototype_of` already looks for it, so the two agree.
-                    Value::Array(items) => items
-                        .properties
-                        .borrow_mut()
-                        .set_prototype(prototype.clone()),
-                    _ => {}
-                }
+                // Into the store `prototype_of` already looks in, so the two agree. A function
+                // is an object here too: setting its prototype is how a program gives a
+                // constructor inherited statics without `extends`.
+                record_prototype(&target, prototype.clone());
             }
             target
         }
@@ -30318,14 +30305,7 @@ fn call_native(
                 if !prototype_may_change(intrinsics, receiver, &prototype) {
                     return Err(prototype_change_refused());
                 }
-                match receiver {
-                    Value::Object(object) => object.borrow_mut().set_prototype(prototype),
-                    Value::Function(closure) => {
-                        closure.properties.borrow_mut().set_prototype(prototype);
-                    }
-                    Value::Array(items) => items.properties.borrow_mut().set_prototype(prototype),
-                    _ => {}
-                }
+                record_prototype(receiver, prototype);
             }
             Value::Undefined
         }
@@ -31992,14 +31972,10 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
 /// the chain -- which is the sort of disagreement that makes `x instanceof C` false for an `x`
 /// the program just built.
 fn prototype_of(value: &Value) -> Value {
-    let recorded = match value {
-        Value::Object(object) => object.borrow().prototype().cloned(),
-        // A subclassed array keeps its prototype with its other non-element properties, which is
-        // what makes `new (class extends Array {})() instanceof that class` true.
-        Value::Array(array) => array.properties.borrow().prototype().cloned(),
-        Value::Function(closure) => closure.properties.borrow().prototype().cloned(),
-        _ => None,
-    };
+    // A subclassed value keeps its prototype with its other non-element properties, which is what
+    // makes `new (class extends Array {})() instanceof that class` true -- and, through the same
+    // store, what makes it true of a view, a buffer, a regexp and a bound function as well.
+    let recorded = prototype_slot(value).and_then(|slot| slot.borrow().prototype().cloned());
     if let Some(link) = recorded {
         return link;
     }
@@ -41877,6 +41853,7 @@ mod tests {
             max_byte_length,
             shared,
             detached: std::cell::Cell::new(false),
+            immutable: false,
             properties: RefCell::new(ObjectData::default()),
         }))
     }
