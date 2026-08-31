@@ -3521,15 +3521,7 @@ impl TypedKind {
             Self::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
             Self::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
             Self::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
-            Self::Float16 => slot.copy_from_slice(
-                &f32_to_half(
-                    #[expect(clippy::cast_possible_truncation)]
-                    {
-                        value as f32
-                    },
-                )
-                .to_le_bytes(),
-            ),
+            Self::Float16 => slot.copy_from_slice(&f64_to_half(value).to_le_bytes()),
             #[allow(clippy::cast_possible_truncation)]
             Self::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
             Self::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
@@ -3565,26 +3557,26 @@ fn half_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// A number as the nearest binary16 bit pattern, rounding halves to even.
+/// A binary64 number as the nearest binary16 bit pattern, rounding halves to even.
 ///
 /// Not a truncation of the binary32 pattern: half's subnormals begin where nothing else's do, so
 /// a value too small for a normal half still has bits to keep, and a value too large becomes an
 /// *infinity* rather than the largest finite half. Rounding to even is the mode every other
 /// conversion in the language uses, and the one that does not drift when applied repeatedly.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f32_to_half(value: f32) -> u16 {
+fn f64_to_half(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
     // NaN keeps a non-empty mantissa so it does not come back as an infinity; which NaN it is
     // is not observable.
-    if exponent == 0xff {
+    if exponent == 0x7ff {
         return sign | 0x7c00 | u16::from(mantissa != 0) << 9;
     }
     // The unbiased exponent, rebiased for half. Above half's range is an infinity, which is what
     // the specification's `ToFloat16` produces rather than the largest finite value.
-    let unbiased = exponent - 127 + 15;
+    let unbiased = exponent - 1023 + 15;
     if unbiased >= 0x1f {
         return sign | 0x7c00;
     }
@@ -3594,11 +3586,11 @@ fn f32_to_half(value: f32) -> u16 {
         if unbiased < -10 {
             return sign;
         }
-        let with_leading = mantissa | 0x80_0000;
-        let shift = (14 - unbiased) as u32;
+        let with_leading = mantissa | 0x0010_0000_0000_0000;
+        let shift = (43 - unbiased) as u32;
         let kept = with_leading >> shift;
         let remainder = with_leading & ((1 << shift) - 1);
-        let half = 1_u32 << (shift - 1);
+        let half = 1_u64 << (shift - 1);
         let rounded = if remainder > half || (remainder == half && kept & 1 == 1) {
             kept + 1
         } else {
@@ -3606,10 +3598,10 @@ fn f32_to_half(value: f32) -> u16 {
         };
         return sign | rounded as u16;
     }
-    let kept = mantissa >> 13;
-    let remainder = mantissa & 0x1fff;
-    let mut raw = ((unbiased as u32) << 10) | kept;
-    if remainder > 0x1000 || (remainder == 0x1000 && kept & 1 == 1) {
+    let kept = mantissa >> 42;
+    let remainder = mantissa & 0x3ff_ffff_ffff;
+    let mut raw = ((unbiased as u32) << 10) | kept as u32;
+    if remainder > 0x200_0000_0000 || (remainder == 0x200_0000_0000 && kept & 1 == 1) {
         // A carry out of the mantissa lands in the exponent, which is what makes 65520 round up
         // to an infinity rather than to the largest finite half.
         raw += 1;
@@ -10379,12 +10371,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else if pull {
                         let callback = self.read_property(receiver, "_read", instruction)?;
                         if is_callable(&callback) {
-                            self.call_value(
-                                &callback,
-                                receiver.clone(),
-                                Vec::new(),
-                                instruction,
-                            )?;
+                            self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
                         }
                     }
                 }
@@ -14313,7 +14300,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
-                let combined = match self.drain_iterable(&source, instruction) {
+                // Install a host boundary while obtaining the iterator and draining it. User
+                // code in `Symbol.iterator`, `next`, `done`, or `value` can throw an arbitrary
+                // value; without this boundary it becomes an `Uncaught` machine error before
+                // `thrown_value` gets a chance to turn it into the combinator's rejection.
+                let installed = self.handlers.len();
+                self.handlers.push(Handler {
+                    target: HOST_HANDLER,
+                    frame_depth: self.frames.len(),
+                    stack_height: self.stack.len(),
+                    native_depth: self.native_depth,
+                });
+                let drained = self.drain_iterable(&source, instruction);
+                self.handlers.truncate(installed);
+                let combined = match drained {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
@@ -16382,7 +16382,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         })))
     }
 
-    /// `view.getInt16(byteOffset, littleEndian?)` and its seven siblings.
+    /// `view.getInt16(byteOffset, littleEndian?)` and the other numeric accessors.
     ///
     /// The byte-order argument defaults to *big*-endian -- the opposite of every typed array and
     /// of every platform this runs on. That is deliberate in the specification: a `DataView`
@@ -16410,7 +16410,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(kind.decode(&bytes[..width]))
     }
 
-    /// `view.setInt16(byteOffset, value, littleEndian?)` and its seven siblings.
+    /// `view.setInt16(byteOffset, value, littleEndian?)` and the other numeric accessors.
     fn data_view_set(
         &mut self,
         kind: TypedKind,
@@ -29371,7 +29371,12 @@ fn call_native(
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
-            | Value::TypedArray(_) => own_attributes(intrinsics,
+            | Value::TypedArray(_)
+            // These views also have an own property store, while their standard accessors live
+            // on their prototypes. Falling through to `has_property` would report an inherited
+            // `byteLength` as an own property.
+            | Value::ArrayBuffer(_)
+            | Value::DataView(_) => own_attributes(intrinsics,
                 receiver,
                 &arguments
                     .first()
@@ -30744,12 +30749,9 @@ fn call_native(
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
-        Native::MathF16Round => Value::Number(f64::from(half_to_f32(f32_to_half(
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                argument_number(arguments) as f32
-            },
-        )))),
+        Native::MathF16Round => {
+            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
+        }
         Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
@@ -35773,9 +35775,8 @@ fn iterator_method(name: &str) -> Value {
 
 /// What a `DataView` inherits from `DataView.prototype`.
 ///
-/// The `Float16` pair is absent rather than approximated: half precision is not one of the
-/// element types this engine's buffers know how to read, and a `getFloat16` that answered a
-/// `Float32` decode of the same bytes would be a wrong answer no program could see coming.
+/// The `Float16` pair shares the typed-element conversion, so a `DataView` and a typed array
+/// reading the same two bytes cannot disagree about what a half is.
 fn data_view_method(name: &str) -> Value {
     match name {
         "getInt8" => Value::Native(Native::DataViewGet(TypedKind::Int8)),
@@ -38783,6 +38784,108 @@ fn number_string(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn binary16_rounding_keeps_binary64_bits_near_a_tie() {
+        let above_tie = 1.0 + 2_f64.powi(-11) + 2_f64.powi(-25);
+        assert_eq!(f64_to_half(above_tie), 0x3c01);
+    }
+
+    #[test]
+    fn binary16_patterns_round_trip_through_numbers() {
+        for bits in 0..=u16::MAX {
+            let value = half_to_f32(bits);
+            let got = f64_to_half(f64::from(value));
+            if bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0 {
+                assert_eq!(got, 0x7e00, "NaN pattern {bits:#06x}");
+            } else {
+                assert_eq!(got, bits, "binary16 pattern {bits:#06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_own_property_checks_do_not_follow_their_prototype() {
+        let intrinsics = Intrinsics::default();
+        let buffer = Value::ArrayBuffer(BufferData::fixed(1));
+        let view = Value::DataView(Rc::new(DataViewData {
+            buffer: match &buffer {
+                Value::ArrayBuffer(buffer) => Rc::clone(buffer),
+                _ => unreachable!(),
+            },
+            offset: 0,
+            length: Some(1),
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let key = [Value::String("byteLength".to_owned())];
+        assert_eq!(
+            call_native(&intrinsics, Native::ObjectHasOwnProperty, &buffer, &key),
+            Ok(Value::Boolean(false))
+        );
+        assert_eq!(
+            call_native(&intrinsics, Native::ObjectHasOwnProperty, &view, &key),
+            Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn promise_combinators_reject_with_an_iterator_thrown_value() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                prologue_end: 0,
+                asynchronous: false,
+                name: Some("iterator".to_owned()),
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                parameter_count: 0,
+                declared_length: 0,
+                local_count: 0,
+                code: vec![Instruction::LoadThis, Instruction::Throw],
+                upvalues: Vec::new(),
+            }],
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let method = Value::Function(vm.make_closure(0).expect("iterator closure"));
+        let source = ordinary_object([(WellKnown::Iterator.property_key().to_owned(), method)]);
+
+        for native in [
+            Native::PromiseAll,
+            Native::PromiseAllSettled,
+            Native::PromiseRace,
+            Native::PromiseAny,
+        ] {
+            let result = vm
+                .dispatch_native(
+                    native,
+                    &Value::Native(Native::PromiseConstructor),
+                    std::slice::from_ref(&source),
+                    0,
+                )
+                .expect("combinator returns a promise");
+            let Value::Promise(promise) = result else {
+                panic!("combinator returned a non-promise");
+            };
+            let Some(Settled::Rejected(reason)) = promise.borrow().settled.clone() else {
+                panic!("combinator did not reject immediately");
+            };
+            assert!(
+                strict_equal(&reason, &source),
+                "thrown value identity was lost"
+            );
+        }
+    }
 
     fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
         let mut arguments = vec![Value::String(needle.to_owned())];
