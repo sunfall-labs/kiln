@@ -232,7 +232,8 @@ impl RealmTransport {
 pub(crate) struct HttpTransportDriver {
     stream: StreamDriver,
     transport: RealmTransport,
-    write_in_flight: bool,
+    write_request: Option<RequestId>,
+    write_selected: bool,
     close_requested: bool,
     close_started: bool,
     wrote_bytes: bool,
@@ -246,7 +247,8 @@ impl HttpTransportDriver {
             Self {
                 stream: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                 transport,
-                write_in_flight: false,
+                write_request: None,
+                write_selected: false,
                 close_requested: false,
                 close_started: false,
                 wrote_bytes: false,
@@ -259,7 +261,16 @@ impl HttpTransportDriver {
     }
 
     pub(crate) fn started(&mut self, operation: &AsyncHostOp, request: RequestId) -> bool {
-        self.stream.started(operation, request)
+        if matches!(operation, AsyncHostOp::TcpWrite { .. }) {
+            if !self.write_selected || self.write_request.is_some() {
+                return false;
+            }
+            self.write_selected = false;
+            self.write_request = Some(request);
+            true
+        } else {
+            self.stream.started(operation, request)
+        }
     }
 
     /// Pump bytes produced by the most recent Hyper poll into the stream driver's write queue.
@@ -267,7 +278,7 @@ impl HttpTransportDriver {
     /// Call this at the realm checkpoint after Tokio has polled local connection tasks. A write
     /// remains at the transport front until its HostOps completion arrives.
     pub(crate) fn pump_write(&mut self) -> Vec<StreamAction> {
-        if self.write_in_flight {
+        if self.write_selected || self.write_request.is_some() {
             return Vec::new();
         }
         let Some(bytes) = self.transport.next_write() else {
@@ -278,21 +289,43 @@ impl HttpTransportDriver {
                 Vec::new()
             };
         };
-        let (_, actions) = self.stream.write(bytes);
-        self.write_in_flight = !actions.is_empty();
-        self.wrote_bytes |= self.write_in_flight;
-        actions
+        self.write_selected = true;
+        self.wrote_bytes = true;
+        vec![StreamAction::Start(AsyncHostOp::TcpWrite {
+            stream: self.stream.resource(),
+            data: bytes,
+        })]
     }
 
     pub(crate) fn completed(&mut self, completion: Completion) -> Option<Vec<StreamAction>> {
-        let write_completed = self.stream.is_write_completion(completion.request);
-        let write_succeeded = write_completed && completion.result.is_ok();
-        if write_succeeded {
-            self.write_in_flight = false;
-            assert!(
-                self.transport.acknowledge_write(),
-                "HTTP write completion had no queued transport bytes"
-            );
+        if self.write_request == Some(completion.request) {
+            self.write_request = None;
+            return Some(match completion.result {
+                Ok(kiln_host_abi::AsyncHostValue::Undefined) => {
+                    assert!(
+                        self.transport.acknowledge_write(),
+                        "HTTP write completion must acknowledge one queued protocol frame"
+                    );
+                    // Acknowledgement wakes Hyper's AsyncWrite waiter. Do not inspect the
+                    // transport queue again until the next runtime checkpoint has polled that
+                    // waiter; the front frame remains visible until Hyper consumes the wake.
+                    Vec::new()
+                }
+                Ok(_) => {
+                    let error = AsyncHostError::new(
+                        "ERR_KILN_HOST_VALUE",
+                        "write",
+                        None,
+                        "unexpected host value for write",
+                    );
+                    self.fail_transport(&error);
+                    vec![StreamAction::Error(error)]
+                }
+                Err(error) => {
+                    self.fail_transport(&error);
+                    vec![StreamAction::Error(error)]
+                }
+            });
         }
         let actions = self.stream.completed(completion)?;
         let mut outward = Vec::new();
@@ -321,11 +354,6 @@ impl HttpTransportDriver {
                 action => outward.push(action),
             }
         }
-        if write_completed && self.close_requested && !self.close_started {
-            self.close_started = true;
-            outward.extend(self.stream.close_actions());
-            return Some(outward);
-        }
         // This catches output already produced before the completion. Output produced because
         // this completion woke Hyper is picked up by `pump_write` at the next realm checkpoint.
         outward.extend(self.pump_write());
@@ -335,7 +363,11 @@ impl HttpTransportDriver {
     /// Close the portable resource after Hyper's final buffered write is acknowledged.
     pub(crate) fn close(&mut self) -> Vec<StreamAction> {
         self.close_requested = true;
-        if self.write_in_flight || self.transport.next_write().is_some() || self.close_started {
+        if self.write_selected
+            || self.write_request.is_some()
+            || self.transport.next_write().is_some()
+            || self.close_started
+        {
             Vec::new()
         } else {
             self.close_started = true;
@@ -351,7 +383,8 @@ impl HttpTransportDriver {
         let message = error.to_string();
         self.transport.fail_read(io::Error::other(message.clone()));
         self.transport.fail_write(io::Error::other(message));
-        self.write_in_flight = false;
+        self.write_request = None;
+        self.write_selected = false;
     }
 }
 
@@ -389,6 +422,32 @@ mod tests {
             assert_eq!(realm.next_write().as_deref(), Some(&b"onse"[..]));
             assert!(realm.acknowledge_write());
             task.await.expect("transport task joins");
+        });
+    }
+
+    #[test]
+    fn acknowledged_flush_does_not_requeue_the_same_frame() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (mut hyper, mut realm) = channel_with_limit(64);
+            let task = tokio::task::spawn_local(async move {
+                hyper.write_all(b"one frame").await.expect("write succeeds");
+                hyper.flush().await.expect("flush succeeds");
+            });
+            tokio::task::yield_now().await;
+            assert_eq!(realm.next_write().as_deref(), Some(&b"one frame"[..]));
+            assert!(realm.acknowledge_write());
+            tokio::task::yield_now().await;
+            assert!(realm.next_write().is_none());
+            task.await.expect("writer joins");
+            tokio::task::yield_now().await;
+            assert!(
+                realm.next_write().is_none(),
+                "flush must not replay accepted bytes"
+            );
         });
     }
 
@@ -468,12 +527,14 @@ mod tests {
             };
             assert!(matches!(write, AsyncHostOp::TcpWrite { data, .. } if data == b"response"));
             assert!(driver.started(write, RequestId::new(2)));
+            let completed = driver
+                .completed(completion(2, AsyncHostValue::Undefined))
+                .expect("completion belongs to driver");
             assert!(
-                driver
-                    .completed(completion(2, AsyncHostValue::Undefined))
-                    .expect("completion belongs to driver")
-                    .is_empty()
+                completed.is_empty(),
+                "one protocol frame writes once: {completed:?}"
             );
+            assert!(driver.pump_write().is_empty());
         });
     }
 }

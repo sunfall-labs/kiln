@@ -4028,7 +4028,8 @@ socket.on("end", () => console.log(reply));
     #[test]
     fn native_node_http_server_handles_two_pipelined_requests_on_one_socket() {
         use kiln_module_resolver::NodeRuntimeResolver;
-        use std::io::Read;
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
 
@@ -4037,11 +4038,23 @@ socket.on("end", () => console.log(reply));
             return;
         };
         let project = TestDirectory::new("kiln-native-http-pipelining");
+        let reservation = TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
+        let port = reservation.local_addr().expect("read reserved port").port();
+        drop(reservation);
         let entry = project.path.join("main.mjs");
         fs::write(
             &entry,
-            include_str!(
-                "../../../conformance/node/upstream-adapted/http-pipelined-request-identity.mjs"
+            format!(
+                r#"import {{ createServer }} from "node:http";
+let requests = 0;
+const server = createServer((request, response) => {{
+  console.log(request.url);
+  response.end(request.url);
+  requests += 1;
+  if (requests === 2) server.close();
+}});
+server.listen({port}, "127.0.0.1");
+"#
             ),
         )
         .expect("write HTTP pipelining fixture");
@@ -4068,22 +4081,119 @@ socket.on("end", () => console.log(reply));
             .spawn()
             .expect("run native HTTP pipelining fixture");
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut client = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(client) => break client,
+                Err(error) if Instant::now() < deadline => {
+                    if let Some(status) = child.try_wait().expect("poll native server") {
+                        let mut stderr = String::new();
+                        child
+                            .stderr
+                            .take()
+                            .expect("capture stderr")
+                            .read_to_string(&mut stderr)
+                            .expect("read stderr");
+                        panic!("server exited before listen: {status}; stderr={stderr:?}");
+                    }
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    child.kill().expect("kill server stuck before listen");
+                    child.wait().expect("reap server stuck before listen");
+                    panic!("server did not listen before deadline: {error}");
+                }
+            }
+        };
+        client
+            .set_nonblocking(true)
+            .expect("make HTTP client nonblocking");
+        client
+            .write_all(
+                b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .expect("write pipelined requests");
+        let mut response = String::new();
+        let mut chunk = [0_u8; 4096];
+        let response_deadline = Instant::now() + Duration::from_secs(10);
+        while !response.contains("/second") {
+            match client.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(length) => {
+                    response.push_str(&String::from_utf8_lossy(&chunk[..length]));
+                    if response.len() > 64 * 1024 {
+                        child.kill().expect("kill server repeating response bytes");
+                        child.wait().expect("reap server repeating response bytes");
+                        let prefix = &response[..response.floor_char_boundary(512)];
+                        panic!(
+                            "HTTP bridge repeated response bytes; length={} prefix={prefix:?}",
+                            response.len()
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= response_deadline {
+                        child.kill().expect("kill server stuck during responses");
+                        child.wait().expect("reap server stuck during responses");
+                        panic!("timed out reading pipelined responses; partial={response:?}");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    panic!("read both pipelined responses: {error}; partial response={response:?}")
+                }
+            }
+        }
+        let first = response.find("/first").unwrap_or_else(|| {
+            let status = child
+                .try_wait()
+                .expect("poll server missing first response")
+                .unwrap_or_else(|| {
+                    child.kill().expect("kill server missing first response");
+                    child.wait().expect("reap server missing first response")
+                });
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .expect("capture stderr")
+                .read_to_string(&mut stderr)
+                .expect("read stderr");
+            panic!("first response body missing: {response:?}; status={status}; stderr={stderr:?}")
+        });
+        let second = response.find("/second").unwrap_or_else(|| {
+            child.kill().expect("kill server missing second response");
+            child.wait().expect("reap server missing second response");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .expect("capture stderr")
+                .read_to_string(&mut stderr)
+                .expect("read stderr");
+            panic!("second response body missing: {response:?}; stderr={stderr:?}")
+        });
+        assert!(
+            first < second,
+            "responses preserve request order: {response:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
-            if let Some(status) = child.try_wait().expect("poll native fixture") {
+            if let Some(status) = child.try_wait().expect("poll native server exit") {
                 break status;
             }
             if Instant::now() >= deadline {
-                child.kill().expect("kill stuck native fixture");
-                break child.wait().expect("reap stuck native fixture");
+                child.kill().expect("kill server stuck after responses");
+                break child.wait().expect("reap server stuck after responses");
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        let mut stdout = String::new();
+        let mut rest = String::new();
         child
             .stdout
             .take()
             .expect("capture stdout")
-            .read_to_string(&mut stdout)
+            .read_to_string(&mut rest)
             .expect("read stdout");
         let mut stderr = String::new();
         child
@@ -4094,9 +4204,9 @@ socket.on("end", () => console.log(reply));
             .expect("read stderr");
         assert!(
             status.success(),
-            "status={status} stdout={stdout:?} stderr={stderr:?}"
+            "status={status} stdout={rest:?} stderr={stderr:?}"
         );
-        assert_eq!(stdout, "pass\n");
+        assert_eq!(rest, "/first\n/second\n");
     }
 
     #[test]

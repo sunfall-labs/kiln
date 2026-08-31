@@ -813,6 +813,10 @@ mod realm {
         for action in actions {
             match action {
                 StreamAction::Start(operation) => {
+                    // An attached HTTP connection owns its accepted socket until Node explicitly
+                    // closes or unreferences it. Reads are therefore referenced just like writes;
+                    // otherwise the native drive can declare quiescence between pipelined
+                    // requests and destroy a still-live keep-alive connection.
                     let request = if in_context {
                         let Some(runtime) = active_runtime() else {
                             return INVALID_ARGUMENT;
@@ -869,8 +873,13 @@ mod realm {
         0
     }
 
-    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<bool, i32> {
-        let mut made_progress = false;
+    fn checkpoint_http_after_wake(realm: &NativeRealm) -> Result<usize, i32> {
+        realm.runtime.borrow_mut().poll_http_tasks_after_wake();
+        checkpoint_http(realm, false)
+    }
+
+    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<usize, i32> {
+        let mut event_count = 0;
         if !in_context {
             // A response command can wake Hyper and make a pipelined request runnable without
             // another HostOps completion. Advance the one Tokio scheduler before inspecting
@@ -896,7 +905,6 @@ mod realm {
                 };
                 let Some(actions) = actions else { break };
                 let had_actions = !actions.is_empty();
-                made_progress |= had_actions;
                 let status = apply_http_actions(realm, resource, actions, in_context);
                 if status != 0 {
                     return Err(status);
@@ -1112,7 +1120,7 @@ mod realm {
                     }
                 }
                 let had_events = !payloads.is_empty();
-                made_progress |= had_events;
+                event_count += payloads.len();
                 for payload in payloads {
                     let status = queue_http_event(realm, payload);
                     if status != 0 {
@@ -1158,9 +1166,15 @@ mod realm {
                 if !had_actions && !had_events {
                     break;
                 }
+                if !in_context {
+                    // Applying actions and draining body events can wake the connection future
+                    // again (Finish releases the next buffered HTTP/1 request). Advance that
+                    // concrete progress before deciding the checkpoint is quiescent.
+                    realm.runtime.borrow_mut().poll_http_tasks_after_wake();
+                }
             }
         }
-        Ok(made_progress)
+        Ok(event_count)
     }
 
     #[unsafe(no_mangle)]
@@ -1170,7 +1184,7 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
-            // SAFETY: this private ABI call runs synchronously in the active realm callback.
+            // SAFETY: this private ABI call runs synchronously inside the active realm callback.
             let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource) else {
                 return INVALID_ARGUMENT;
             };
@@ -1192,24 +1206,18 @@ mod realm {
                 continue;
             }
 
-            // HTTP protocol futures can become runnable without a HostOps completion (for
-            // example when ending response N releases a pipelined request N+1 already buffered
-            // by Hyper). Drain that scheduler-owned work before selecting a blocking host turn.
+            // HTTP protocol futures can become runnable without a HostOps completion. A
+            // checkpoint publishes their events into the same FIFO microtask lane; when it did,
+            // loop immediately so callbacks run before any blocking host turn is selected.
             match checkpoint_http(realm, false) {
-                Ok(true) => continue,
-                Ok(false) => {}
+                Ok(events) if events != 0 => continue,
+                Ok(_) => {}
                 Err(status) => return status,
             }
-
             let turn = {
-                let has_pending = realm.runtime.borrow().has_pending_host_work();
                 let mut runtime = realm.runtime.borrow_mut();
                 let mut work = realm.work.borrow_mut();
-                if has_pending {
-                    runtime.next_turn(&mut work)
-                } else {
-                    runtime.next_timer(&mut work).map(RuntimeTurn::Timer)
-                }
+                runtime.next_referenced_turn(&mut work)
             };
             match turn {
                 Some(RuntimeTurn::Completion(completion)) => {
@@ -1227,7 +1235,7 @@ mod realm {
                         if status != 0 {
                             return status;
                         }
-                        if let Err(status) = checkpoint_http(realm, false) {
+                        if let Err(status) = checkpoint_http_after_wake(realm) {
                             return status;
                         }
                         continue;
@@ -1453,7 +1461,7 @@ mod realm {
     ) -> i32 {
         let operation = HostOpView {
             operation: OP_READ_FILE,
-            flags: 0,
+            flags: 1,
             resource: 0,
             argument: 0,
             text: path,

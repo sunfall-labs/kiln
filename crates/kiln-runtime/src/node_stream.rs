@@ -302,17 +302,6 @@ impl StreamDriver {
         Some(actions)
     }
 
-    /// Whether a completion belongs to the currently submitted transport write.
-    ///
-    /// Protocol adapters use this before consuming the completion so their own bounded byte
-    /// queues can retire exactly the write acknowledged by HostOps. This exposes correlation,
-    /// not Tokio or protocol state.
-    pub(crate) fn is_write_completion(&self, request: RequestId) -> bool {
-        self.requests
-            .iter()
-            .any(|(known, kind)| *known == request && matches!(kind, PendingKind::Write))
-    }
-
     fn next_read_action(&self) -> Option<StreamAction> {
         (self.reading
             && !self.closing
