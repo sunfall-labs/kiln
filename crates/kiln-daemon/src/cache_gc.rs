@@ -62,22 +62,15 @@
 //! one method returning the digests, which is also the only place that can compute them
 //! correctly - at which point they go into the policy in `sweep` and nothing else changes.
 //!
-//! # Why the policy type is never named here
-//!
-//! `kiln-daemon` does not declare `kiln-artifact-cache` among its dependencies, and this session
-//! is not permitted to edit any `Cargo.toml`. The cache is reachable anyway, through
-//! [`kiln_native::NativeBuilder::cache`], and its methods can be called on the value that returns;
-//! only *naming* `EvictionPolicy` is impossible. So the policy below is created by inference and
-//! pinned with one call that cannot touch the filesystem. Adding
-//! `kiln-artifact-cache = { workspace = true }` to `crates/kiln-daemon/Cargo.toml` makes
-//! the policy below an ordinary `EvictionPolicy::with_budget(BUDGET_BYTES)`, and lets the pacing
-//! counter below become the `SweepTrigger` the cache crate provides for exactly this purpose.
-//! Nothing else in this file changes.
+//! The daemon depends directly on `kiln-artifact-cache` because cache maintenance must not probe
+//! the native C toolchain. A developer using interpreter-only mode should still be able to sweep
+//! old native artifacts.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
+use kiln_artifact_cache::{ArtifactCache, EvictionPolicy};
 use kiln_proto::{CacheGcSummary, CacheLayerSweep};
 
 /// Bytes one writable cache layer may hold. See the module documentation for the measurement.
@@ -99,11 +92,6 @@ pub(crate) fn cache_root(project_root: &Path) -> PathBuf {
 }
 
 /// Sweep every writable layer of one project's cache and describe what happened.
-///
-/// The cache is reached through a [`kiln_native::NativeBuilder`], which is the only public
-/// constructor of an `ArtifactCache` this crate can see. That costs the same toolchain probe a
-/// build pays, memoized for the daemon's lifetime, so a `cache gc` on a machine with no C
-/// compiler reports the toolchain error rather than silently doing nothing.
 pub(crate) fn sweep(project_root: &Path, dry_run: bool) -> Result<CacheGcSummary, String> {
     sweep_to_budget(project_root, dry_run, BUDGET_BYTES)
 }
@@ -119,15 +107,8 @@ pub(crate) fn sweep_to_budget(
     budget_bytes: u64,
 ) -> Result<CacheGcSummary, String> {
     let root = cache_root(project_root);
-    let builder =
-        kiln_native::NativeBuilder::discover_cached(&root).map_err(|error| error.to_string())?;
-    let cache = builder.cache();
-
-    let mut policy = Default::default();
-    // Pins the inferred policy type; see the module documentation. `usize::MAX` is never a layer
-    // index, so this is rejected before any filesystem work happens.
-    let _ = cache.sweep_layer(usize::MAX, &policy);
-    policy.budget_bytes = budget_bytes;
+    let cache = ArtifactCache::new(root.clone());
+    let mut policy = EvictionPolicy::with_budget(budget_bytes);
     policy.dry_run = dry_run;
     // `live_identities` is deliberately left empty, which disables the identity-stale tier: see
     // the module documentation on why this module cannot declare one correctly.
@@ -285,16 +266,6 @@ mod tests {
         dir
     }
 
-    /// The toolchain probe is the one thing `sweep` needs that a machine may not have. Skipping
-    /// is better than a red suite on a box with no C compiler, and the message is the daemon's.
-    fn skip_without_toolchain(error: &str) -> bool {
-        let skip = error.contains("no supported C compiler");
-        if skip {
-            eprintln!("skipping cache gc test: {error}");
-        }
-        skip
-    }
-
     #[test]
     fn a_dry_sweep_reports_what_it_would_remove_and_removes_nothing() {
         let project = scratch("dry");
@@ -302,11 +273,7 @@ mod tests {
         let old = seed(&root, "generated-c", "a", 4096, Duration::from_secs(7200));
         let fresh = seed(&root, "generated-c", "b", 4096, Duration::ZERO);
 
-        let summary = match sweep_to_budget(&project, true, 1024) {
-            Ok(summary) => summary,
-            Err(error) if skip_without_toolchain(&error) => return,
-            Err(error) => panic!("dry sweep failed: {error}"),
-        };
+        let summary = sweep_to_budget(&project, true, 1024).expect("dry sweep succeeds without C");
         let layer = &summary.layers[0];
         assert!(summary.dry_run);
         assert_eq!(summary.budget_bytes, 1024);
@@ -333,11 +300,7 @@ mod tests {
 
         // Room for one record. Rebuild cost decides which one survives: re-emitting C is free,
         // an object is one compile, and the runtime library is shared by every application.
-        let summary = match sweep_to_budget(&project, false, 4096) {
-            Ok(summary) => summary,
-            Err(error) if skip_without_toolchain(&error) => return,
-            Err(error) => panic!("sweep failed: {error}"),
-        };
+        let summary = sweep_to_budget(&project, false, 4096).expect("sweep succeeds without C");
         let layer = &summary.layers[0];
         assert_eq!(layer.records_evicted, 2);
         assert_eq!(
@@ -361,11 +324,7 @@ mod tests {
     #[test]
     fn a_sweep_of_a_project_that_has_never_built_reports_an_empty_cache() {
         let project = scratch("empty");
-        let summary = match sweep(&project, true) {
-            Ok(summary) => summary,
-            Err(error) if skip_without_toolchain(&error) => return,
-            Err(error) => panic!("sweep failed: {error}"),
-        };
+        let summary = sweep(&project, true).expect("sweep succeeds without C");
         assert_eq!(summary.budget_bytes, BUDGET_BYTES);
         assert_eq!(summary.layers.len(), 1, "one writable layer");
         assert_eq!(summary.layers[0].records_scanned, 0);
