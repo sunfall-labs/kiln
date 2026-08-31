@@ -291,6 +291,16 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
  * so": a `catch` takes this and must not take the others. */
 #define KILN_C99_THROWN (-7)
 
+/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions.  Keep the most specific
+ * detail at the failing helper and attach the generated module + bytecode site as control
+ * unwinds.  The entry boundary renders this into its ordinary scalar result, so no private
+ * runtime pointer or new public ABI type escapes. */
+static const char *kiln_c99_diagnostic_site = NULL;
+static size_t kiln_c99_diagnostic_instruction = 0;
+static uint64_t kiln_c99_diagnostic_method = 0;
+static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
+static int kiln_c99_diagnostic_has_method = 0;
+
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
  * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
@@ -1995,6 +2005,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
+static kiln_value kiln_c99_control_diagnostic(void);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
 static double kiln_c99_date_time(kiln_value value);
@@ -6105,6 +6116,38 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
         memcpy(copy, text, len);
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
+}
+
+static kiln_value kiln_c99_control_diagnostic(void) {
+    kiln_text text = {NULL, 0, 0};
+    char number[32];
+    size_t written;
+    uint64_t value;
+#define KILN_DIAGNOSTIC_DECIMAL(subject) do { \
+    value = (uint64_t)(subject); written = 0; \
+    do { number[written++] = (char)('0' + value % 10); value /= 10; } while (value != 0); \
+    for (size_t left = 0, right = written - 1; left < right; ++left, --right) { \
+        char swap = number[left]; number[left] = number[right]; number[right] = swap; \
+    } \
+} while (0)
+    if (kiln_c99_diagnostic_site != NULL) {
+        (void)kiln_c99_text_append_c(&text, "module=");
+        (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_site);
+        KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_instruction);
+        (void)kiln_c99_text_append_c(&text, " instruction=");
+        (void)kiln_c99_text_append(&text, number, written);
+    }
+    if (kiln_c99_diagnostic_has_method) {
+        KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
+        (void)kiln_c99_text_append_c(&text, " method=");
+        (void)kiln_c99_text_append(&text, number, written);
+        KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_receiver_tag);
+        (void)kiln_c99_text_append_c(&text, " receiver_tag=");
+        (void)kiln_c99_text_append(&text, number, written);
+    }
+#undef KILN_DIAGNOSTIC_DECIMAL
+    if (text.bytes == NULL) return kiln_c99_copy_text("unknown native operation", 24);
+    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
 }
 
 
@@ -12082,6 +12125,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_array *array;
     size_t index;
     int status;
+    kiln_c99_diagnostic_method = code;
+    kiln_c99_diagnostic_receiver_tag = receiver.tag;
+    kiln_c99_diagnostic_has_method = 1;
     if (code >= KILN_C99_METHOD_NODE_EVENT_ON &&
         code <= KILN_C99_METHOD_NODE_EVENT_EMITTER) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
@@ -20973,6 +21019,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::NewRegExp { .. }
         | Instruction::New { .. }
         | Instruction::SetPrototype
+        | Instruction::LoadPrototype
+        | Instruction::LoadSuperProperty(_)
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
@@ -21231,6 +21279,22 @@ fn stack_effect(
                 Err(underflow(2))
             } else {
                 Ok((height - 1, false))
+            }
+        }
+        // The property replaces the prototype it was read from.
+        Instruction::LoadSuperProperty(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
+        // The link replaces the value it was read from.
+        Instruction::LoadPrototype => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
             }
         }
         // The receiver sits under the arguments, exactly where a callee would, and the result
@@ -21552,6 +21616,12 @@ fn render_uncaught(output: &mut String) {
     output.push_str("    return KILN_C99_THROWN;\n");
 }
 
+fn render_refusal(output: &mut String) {
+    output.push_str("kiln_refusal:;\n");
+    output.push_str("    *result = kiln_c99_control_diagnostic();\n");
+    output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+}
+
 /// The instruction indices a body registers as exception handlers.
 ///
 /// The set, not the count: an unwind has to jump to one of them, and C has no computed goto, so
@@ -21814,7 +21884,9 @@ fn render_function(
     render_unwind(output, &emitter.handlers, suspends, false);
     // A body whose control reaches the end without a `Return` is a compiler bug, not a program
     // error: the lowering always ends a body with one.
-    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    output.push_str("    goto kiln_refusal;\n");
+    render_refusal(output);
+    output.push_str("}\n");
 }
 
 /// The constant table.
@@ -22048,7 +22120,9 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     }
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
-    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    output.push_str("    goto kiln_refusal;\n");
+    render_refusal(&mut output);
+    output.push_str("}\n");
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
     }
@@ -22179,7 +22253,9 @@ fn render_module(
     }
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
-    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    output.push_str("    goto kiln_refusal;\n");
+    render_refusal(&mut output);
+    output.push_str("}\n");
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private
          * value layout. Let the translation unit that owns the layout construct the wrapper
@@ -22289,6 +22365,13 @@ fn emit_instruction(
         site,
         guarded,
     } = emitter;
+    let before = output.len();
+    writeln!(
+        output,
+        "    kiln_c99_diagnostic_site = \"{symbol}\"; kiln_c99_diagnostic_instruction = (size_t){index};"
+    )
+    .unwrap();
+    output.push_str("    kiln_c99_diagnostic_has_method = 0;\n");
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
@@ -22896,6 +22979,31 @@ fn emit_instruction(
                 "    { kiln_value prototype = stack[--sp]; int status = kiln_c99_set_prototype(stack[sp - 1], prototype); if (status != KILN_C99_OK) return status; }\n",
             );
         }
+        // `super.x` reads the link the method's home object carries *now*, which is the same
+        // question `Object.getPrototypeOf` answers -- so it is asked through the same
+        // implementation rather than a second one that could drift from it.
+        // The receiver is the frame's own, not the prototype the name was found on -- which is
+        // the one thing that separates `super.x` from an ordinary read of the same name.
+        Instruction::LoadSuperProperty(name) => {
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, stack[sp - 1], kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::LoadPrototype => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value subject = stack[sp - 1]; int status = kiln_c99_invoke_method(host, &stack[sp - 1], KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(), &subject, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
         // The stack height is recorded with the handler, because a `catch` starts from the
         // height the `try` began at however deep the expression that threw had got.
         Instruction::PushHandler(target) => {
@@ -23144,6 +23252,15 @@ fn emit_instruction(
             }
         },
     }
+    if matches!(site, ReturnSite::Entry { .. }) {
+        let emitted = &mut output[before..];
+        let replaced = emitted.replace(
+            "if (status != KILN_C99_OK) return status;",
+            "if (status == KILN_C99_CONTROL_ERROR) goto kiln_refusal; if (status != KILN_C99_OK) return status;",
+        );
+        output.truncate(before);
+        output.push_str(&replaced);
+    }
 }
 
 fn c_string(value: &str) -> String {
@@ -23329,6 +23446,11 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::SuperForward => byte(&mut hash, 36),
             Instruction::SetPrototype => byte(&mut hash, 34),
+            Instruction::LoadPrototype => byte(&mut hash, 71),
+            Instruction::LoadSuperProperty(value) => {
+                byte(&mut hash, 72);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::SuperCall { argc } => {
                 byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));

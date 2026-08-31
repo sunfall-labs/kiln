@@ -299,6 +299,15 @@ impl ErrorKind {
     }
 }
 
+/// Whether a `%TypedArray%.prototype` method checks only that its receiver is a view, or the
+/// whole of `ValidateTypedArray`.
+///
+/// A named type rather than a bare `bool` because the two calls that pass it are three
+/// arguments apart from the name they qualify, and a flag read the wrong way round is a check
+/// that silently does nothing -- which is how it first went in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrandOnly(bool);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
     /// A `Temporal` namespace, constructor, prototype or method; the payload says which.
@@ -820,6 +829,20 @@ pub enum Native {
     TypedArraySet,
     TypedArraySubarray,
     TypedArrayFill,
+    /// A method on `%TypedArray%.prototype` that shares an `Array.prototype` implementation,
+    /// named by the payload.
+    ///
+    /// The two tables ran the same implementations and so held the same *values*: reading `map`
+    /// off `%TypedArray%.prototype` and off `Array.prototype` answered one marker, which made
+    /// them the same function object -- and left the brand check every one of these performs
+    /// with nothing to hang itself on, because by the time a call was dispatched there was no
+    /// longer any record of which table it had been reached through. The payload is that record.
+    /// It is unwrapped to the `Array.prototype` method the moment `ValidateTypedArray` has run,
+    /// so exactly one implementation still carries out the work.
+    ///
+    /// `toString` is deliberately not one of these: the specification says it *is*
+    /// `Array.prototype.toString`, and a distinct marker would be a wrong answer the other way.
+    TypedArrayGeneric(&'static str),
     /// `DataView`, and the accessors that read and write one element through it.
     ///
     /// The element type rides in the variant rather than on the receiver because a `DataView`
@@ -1032,6 +1055,24 @@ impl Native {
                 | Self::ArrayReverse
                 | Self::ArrayFill
         )
+    }
+
+    /// The `%TypedArray%.prototype` method this is, and whether it checks only the brand.
+    ///
+    /// Every method on that table checks its receiver before it does anything else -- before it
+    /// even coerces its arguments -- and naming them here is what lets the two call paths run
+    /// that check once rather than each method growing a guard it can be written without. The
+    /// distinction the flag draws is the specification's own: `set` and `subarray` perform
+    /// `RequireInternalSlot` alone, which is why `new Uint8Array(detached).subarray(0)` answers
+    /// an empty view where `.slice(0)` throws.
+    fn typed_array_prototype_method(self) -> Option<(&'static str, BrandOnly)> {
+        match self {
+            Self::TypedArrayGeneric(name) => Some((name, BrandOnly(false))),
+            Self::TypedArrayFill => Some(("fill", BrandOnly(false))),
+            Self::TypedArraySet => Some(("set", BrandOnly(true))),
+            Self::TypedArraySubarray => Some(("subarray", BrandOnly(true))),
+            _ => None,
+        }
     }
 
     /// Whether this built-in changes how many elements its array has.
@@ -1938,6 +1979,14 @@ pub struct ObjectData {
     /// `Object.freeze`. A frozen object silently ignores every write, which is what sloppy mode
     /// does; strict mode throws, and reaching that needs the write path to know which it is in.
     frozen: bool,
+    /// A module namespace object, whose `[[Set]]` is defined to refuse.
+    ///
+    /// Not the same fact as `frozen`, which is why it is not spelled with it: a namespace
+    /// reports each export as *writable* -- a program reading the descriptor is told so, and
+    /// `Object.isFrozen` of one is `false` -- while the write itself never lands. That pair is
+    /// the specification's own, and collapsing it either way is a wrong answer: freezing makes
+    /// the descriptor lie, and leaving it ordinary lets a program overwrite an export.
+    module_namespace: bool,
     /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
     /// that exists only on the prototype creates an own property rather than mutating the shared
     /// one, which is what keeps two instances of a class independent.
@@ -2129,6 +2178,7 @@ impl Default for ObjectData {
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
+            module_namespace: false,
             prototype: None,
             primitive: None,
             node_events: None,
@@ -2393,7 +2443,7 @@ impl ObjectData {
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
-        if self.frozen {
+        if self.frozen || self.module_namespace {
             return;
         }
         if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
@@ -2451,6 +2501,23 @@ impl ObjectData {
 
     pub fn is_frozen(&self) -> bool {
         self.frozen
+    }
+
+    /// Whether this is a module namespace, whose `[[Set]]` refuses.
+    pub fn is_module_namespace(&self) -> bool {
+        self.module_namespace
+    }
+
+    /// Close a module namespace: no new properties, and no write to an existing one.
+    ///
+    /// Deliberately weaker than [`ObjectData::freeze`] in what it *says* and exactly as strong
+    /// in what it *does*. A namespace's exports are writable and non-configurable, so a program
+    /// reading a descriptor is told the truth, and `Object.isFrozen` of one is false; the write
+    /// is refused all the same, because `[[Set]]` on a namespace is defined to return false
+    /// whatever the flags say.
+    pub fn close_as_module_namespace(&mut self) {
+        self.extensible = false;
+        self.module_namespace = true;
     }
 
     /// Refuse new properties, leaving the existing ones writable.
@@ -7028,6 +7095,17 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
     Ok(vm.steps)
 }
 
+/// Whether this value's `[[Set]]` is defined to refuse, whatever its properties' flags say.
+///
+/// One predicate rather than a check in each of the two spellings of a write, because the two
+/// have to agree: `ns.x = 1` throws in strict code exactly when `Reflect.set(ns, "x", 1)`
+/// answers false, and a module namespace is where the flags cannot be asked -- its exports
+/// report `writable: true` so that a program reading a descriptor is told the truth, while the
+/// write never lands.
+fn refuses_every_write(target: &Value) -> bool {
+    matches!(target, Value::Object(object) if object.borrow().is_module_namespace())
+}
+
 /// The object `import * as ns` binds: one property per export of the provider.
 ///
 /// Built by the linker rather than by the module itself, because the module does not know it is
@@ -7038,9 +7116,39 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     for (name, value) in exports {
         // A namespace object holds values, so an exported cell is read through here. Node's
         // namespace objects are live; this one is a snapshot taken when the provider finished.
-        data.set(&name, read_through_cell(&value));
+        //
+        // Writable and non-configurable, which is the one combination no ordinary object is
+        // built with and the one the specification gives every export: the binding cannot be
+        // removed or redefined, and its *value* is expected to change, because the module it
+        // came from may still assign to it.
+        data.define_value(
+            &name,
+            read_through_cell(&value),
+            Attributes {
+                writable: true,
+                enumerable: true,
+                configurable: false,
+            },
+        );
     }
-    data.freeze();
+    // The tag is what `Object.prototype.toString` reads, and it is the only own property a
+    // namespace has that is not an export -- so `String(ns)` is "[object Module]" rather than
+    // "[object Object]", which is how a program tells a namespace from an object of exports.
+    data.define_value(
+        WellKnown::ToStringTag.property_key(),
+        Value::String("Module".to_owned()),
+        Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
+    );
+    // A namespace inherits from nothing. `ns.toString` is `undefined`, `ns.hasOwnProperty` is
+    // `undefined`, and a name a module did not export is absent rather than answered by
+    // `Object.prototype` -- which is what stops an importer from reading someone else's
+    // furniture through a module it imported.
+    data.set_prototype(Value::Null);
+    data.close_as_module_namespace();
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -7078,6 +7186,10 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
         .borrow()
         .entries()
         .filter_map(|(name, property)| match property {
+            // The tag is the namespace's own furniture, not one of the module's exports. A star
+            // re-export expanded through here would otherwise hand `@@toStringTag` on to the
+            // importer as a name the provider had exported.
+            _ if name == WellKnown::ToStringTag.property_key() => None,
             Property::Value(value) => Some((name.to_owned(), value.clone())),
             Property::Accessor { .. } => None,
         })
@@ -11874,6 +11986,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.stack.push(value);
                 }
+                // The read half of `SetPrototype`, and `super.x`'s first step: the object a
+                // method was defined on answers with the link it carries at this moment rather
+                // than the one it carried when the class was written.
+                Instruction::LoadPrototype => {
+                    let value = self.pop(current)?;
+                    let prototype = prototype_of(&value);
+                    self.stack.push(prototype);
+                }
                 Instruction::SetPrototype => {
                     let prototype = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -12694,6 +12814,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Catchable: a proxy trap and a getter are both ordinary code, and what
                     // they throw is the program's to handle.
                     let read = self.read_property(&target, &name, current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    self.stack.push(value);
+                }
+                // `super.x`. The prototype answers *which* property, and `this` answers who a
+                // getter up there is asked about -- which is the whole reason this is not the
+                // ordinary read: a method reaching an inherited accessor through `super` is
+                // asking it about the instance, not about the prototype it was found on.
+                Instruction::LoadSuperProperty(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    if target.is_nullish() {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read properties of {} (reading '{name}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let receiver = self.this_value.clone();
+                    let read = self.read_computed_with_receiver(
+                        &target,
+                        &Value::String(name),
+                        &receiver,
+                        current,
+                    );
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
@@ -13731,6 +13881,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // walk serves both receivers. The pure arm coerced neither, which made a typed
                 // array and an array disagree about `join({toString(){ return "-" }})`.
                 | Native::ArrayJoin
+        ) || matches!(
+            (native, receiver),
+            // `Array.prototype.toString` is a *call* to the receiver's own `join`, and a view
+            // reaching the pure arm below found no `Vec` to join and answered the empty string:
+            // `String(new Uint8Array([1, 2, 3]))` was `""` where node says `"1,2,3"`. The
+            // exclusion above is there so a view keeps its own element walk; `toString` does no
+            // walking of its own, so it does not want it.
+            (Native::ArrayJoinDefault, Value::TypedArray(_))
         ) {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
@@ -19717,6 +19875,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         match callee {
             Value::Native(native) => {
+                // The head of every `%TypedArray%.prototype` method, run before anything else
+                // here can look at the receiver or the arguments. A branded one then hands the
+                // call on to the `Array.prototype` method it shares, so the work below is done
+                // once whichever table the program reached it through.
+                if let Some((method, brand_only)) = native.typed_array_prototype_method() {
+                    self.validate_typed_array(&this_value, method, brand_only)?;
+                    if let Native::TypedArrayGeneric(method) = native {
+                        return self.call_value_inner(
+                            &array_property(method),
+                            this_value,
+                            arguments,
+                            instruction,
+                        );
+                    }
+                }
                 // A method that changes its array, given a proxy, has to change what is behind
                 // the proxy: the snapshot it would otherwise work on is thrown away, and the
                 // program's `push` would silently do nothing.
@@ -21334,6 +21507,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// swallows the write rather than creating anything. Only when the chain has nothing to say
     /// does it come down to whether the receiver will take a new property at all.
     fn write_accepted(&self, target: &Value, name: &str) -> bool {
+        if refuses_every_write(target) {
+            return false;
+        }
         if let Value::Function(closure) = target
             && name == "prototype"
         {
@@ -22425,7 +22601,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | CallbackMethod::FindIndex
                 | CallbackMethod::FindLast
                 | CallbackMethod::FindLastIndex
-        );
+        )
+        // A view has no holes to skip: its methods read each position with `Get` rather than
+        // asking `HasProperty` first, so the callback is called for every one of the `len`
+        // positions the walk started with. The distinction only shows once a resizable buffer
+        // has shrunk under the walk -- and that is exactly when skipping would end the
+        // iteration early instead of handing the callback the `undefined` it is owed.
+        || matches!(receiver, Value::TypedArray(_));
         let created = match method {
             CallbackMethod::Map => {
                 Some(self.array_species_create(receiver, length, instruction)?)
@@ -22620,6 +22802,75 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(receiver.clone())
     }
 
+    /// Whether a callback method hands its callback the receiver itself rather than a copy.
+    ///
+    /// Every one of these passes the object it is walking as the callback's last argument and
+    /// reads each element at the moment it visits it. A view handed to one got a *snapshot*
+    /// instead, and that is visible twice over: a write the callback performs on the view --
+    /// `a[i + 1] = 1`, which is the whole of what Test262's `values-are-not-cached` files do --
+    /// was invisible to the rest of the walk, and the third argument was an `Array` that a
+    /// program could tell apart from the view it had called the method on.
+    ///
+    /// `sort` is not one of them. Its comparator is handed two elements and never the receiver,
+    /// and the order a view sorts into with no comparator is numeric where an array's is
+    /// lexicographic -- so it keeps the copy that makes those two different sorts, and writes
+    /// the result back.
+    const fn callback_walks_live(method: CallbackMethod) -> bool {
+        !matches!(
+            method,
+            CallbackMethod::Sort
+                | CallbackMethod::GeneratorNext
+                | CallbackMethod::GeneratorReturn
+                | CallbackMethod::GeneratorThrow
+                | CallbackMethod::AsyncGeneratorNext
+                | CallbackMethod::AsyncGeneratorReturn
+                | CallbackMethod::AsyncGeneratorThrow
+        )
+    }
+
+    /// `ValidateTypedArray(O, order)`: what stands at the head of every `%TypedArray%.prototype`
+    /// method.
+    ///
+    /// Three refusals in one, and they are three because the specification's are: a receiver
+    /// with no `[[TypedArrayName]]` slot is not one of these objects at all, a detached buffer
+    /// leaves the view addressing memory that is gone, and a resizable buffer that shrank under
+    /// a view leaves it addressing bytes that were never given back. `brand_only` stops after
+    /// the first, for the two methods the specification stops after the first for.
+    ///
+    /// The message names the method, because the whole point of the check is that the program
+    /// reached a method through a table its receiver does not belong to, and a bare "incompatible
+    /// receiver" leaves it guessing which one.
+    fn validate_typed_array(
+        &self,
+        receiver: &Value,
+        method: &str,
+        BrandOnly(brand_only): BrandOnly,
+    ) -> Result<(), ExecutionError> {
+        let Value::TypedArray(view) = receiver else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Method %TypedArray%.prototype.{method} called on incompatible receiver {}",
+                    receiver.to_display_string()
+                ),
+            });
+        };
+        if brand_only {
+            return Ok(());
+        }
+        if view.buffer.detached() {
+            return Err(ExecutionError::BufferDetached);
+        }
+        if view.out_of_bounds() {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Method %TypedArray%.prototype.{method} called on a view whose buffer no \
+                     longer holds it"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// The receiver an array method should walk, when one is being redirected onto something
     /// that is not an array.
     ///
@@ -22654,10 +22905,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => native.walks_an_array(),
             _ => false,
         };
-        let preserves_live_typed_array = matches!(
-            callee,
-            Value::Native(native) if native.creates_array_iterator()
-        ) && matches!(receiver, Value::TypedArray(_));
+        let preserves_live_typed_array = matches!(receiver, Value::TypedArray(_))
+            && match callee {
+                Value::Native(native) => native.creates_array_iterator(),
+                Value::Callback(method) => Self::callback_walks_live(*method),
+                _ => false,
+            };
         // `ValidateTypedArray`, which every `%TypedArray%.prototype` method performs before it
         // does anything else -- including before it coerces its arguments. This is the choke
         // point for it, because this is where a typed array receiver is recognised: the methods
@@ -26707,6 +26960,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
+        // `ValidateTypedArray`, ahead of the dispatch rather than inside an arm of it: it is what
+        // the specification does before a `%TypedArray%.prototype` method reads anything, and the
+        // three methods a view owns outright still take the arm they always did afterwards.
+        if let Value::Native(native) = &method
+            && let Some((name, brand_only)) = native.typed_array_prototype_method()
+        {
+            self.validate_typed_array(&receiver, name, brand_only)?;
+            if let Native::TypedArrayGeneric(name) = native {
+                return self.invoke(array_property(name), receiver, arguments, instruction);
+            }
+        }
         match method {
             // The same rule as in `call_value`: a mutating array method given a proxy has to
             // write through it, not into a snapshot.
@@ -28053,6 +28317,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        if refuses_every_write(target) {
+            return Ok(false);
+        }
         let own = own_property_state(&self.intrinsics, target, name);
         if let Some((property, attributes)) = own {
             match property {
@@ -30463,6 +30730,17 @@ fn call_native(
             return Err(ExecutionError::TemporalFailure {
                 kind: ErrorKind::Type,
                 message: "Temporal reached the machine-free dispatch path".to_owned(),
+            });
+        }
+        // Unwrapped to the `Array.prototype` method it shares the moment `ValidateTypedArray`
+        // has run, by both of the paths that can call one. Arriving here would mean a third
+        // path had been added that skipped the check, so it says so rather than quietly
+        // answering `undefined`.
+        Native::TypedArrayGeneric(method) => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "%TypedArray%.prototype.{method} was dispatched without being validated"
+                ),
             });
         }
         // Routed the same way, and unreachable for the same reason: an `Intl` option read is
@@ -36896,11 +37174,70 @@ fn typed_array_method(name: &str) -> Value {
         "set" => Value::Native(Native::TypedArraySet),
         "subarray" => Value::Native(Native::TypedArraySubarray),
         "fill" => Value::Native(Native::TypedArrayFill),
-        other => match array_property(other) {
-            Value::Native(native) if native.changes_array_length() => Value::Undefined,
-            method => method,
+        // The one member of the table the specification says *is* the `Array.prototype`
+        // function rather than a distinct one: "the initial value of the
+        // %TypedArray%.prototype.toString data property is the same built-in function object as
+        // the Array.prototype.toString method". Branding it would fail the identity that
+        // sentence describes; the detached check it needs it already gets, because the value it
+        // hands out is `ArrayJoinDefault` and that is named in the validation list below.
+        "toString" => array_property("toString"),
+        // `%TypedArray%.prototype[@@iterator]` is not merely *like* `values`; it is the same
+        // function object, so it resolves to the same marker rather than to one of its own.
+        key if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::TypedArrayGeneric("values"))
+        }
+        other => match typed_array_generic(other) {
+            Some(method) => Value::Native(Native::TypedArrayGeneric(method)),
+            None => Value::Undefined,
         },
     }
+}
+
+/// The `%TypedArray%.prototype` methods that share an `Array.prototype` implementation, spelled
+/// out rather than filtered out of `Array.prototype`.
+///
+/// Filtering was how this table used to be built -- everything an array answers to, less the
+/// methods that change a length -- and it let three names through that a view does not have:
+/// `concat`, `flat` and `flatMap` are `Array.prototype`'s alone, and node answers `undefined`
+/// for each of them on a view. A program feature-detects on exactly that, so answering with a
+/// working function was a wrong answer rather than a bonus. The C backend already listed its
+/// members outright and so already agreed with node; this is the interpreter catching up.
+const TYPED_ARRAY_GENERIC_METHODS: [&str; 27] = [
+    "at",
+    "copyWithin",
+    "entries",
+    "every",
+    "filter",
+    "find",
+    "findIndex",
+    "findLast",
+    "findLastIndex",
+    "forEach",
+    "includes",
+    "indexOf",
+    "join",
+    "keys",
+    "lastIndexOf",
+    "map",
+    "reduce",
+    "reduceRight",
+    "reverse",
+    "slice",
+    "some",
+    "sort",
+    "toLocaleString",
+    "toReversed",
+    "toSorted",
+    "values",
+    "with",
+    // `toString` is answered above, as `Array.prototype.toString` itself.
+];
+
+/// The static spelling of one of those names, which is what a marker can carry.
+fn typed_array_generic(name: &str) -> Option<&'static str> {
+    TYPED_ARRAY_GENERIC_METHODS
+        .into_iter()
+        .find(|method| *method == name)
 }
 
 /// The methods on `ArrayBuffer.prototype`, for the same reason.
@@ -38068,6 +38405,14 @@ const FUNCTION_IDENTITY: Attributes = Attributes {
 /// arguments to forward, so guessing it wrong is worse than not answering.
 fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
     match value {
+        // A `%TypedArray%.prototype` method is a *distinct function* from the `Array.prototype`
+        // one it shares an implementation with, but it is not a differently named or differently
+        // shaped one: `%TypedArray%.prototype.map.name` is `"map"` and its `length` is 1, the
+        // same two answers the array method gives. Delegating keeps them one fact rather than a
+        // second tabulation that can drift from the first.
+        Value::Native(Native::TypedArrayGeneric(method)) => {
+            intrinsic_identity(&array_property(method))
+        }
         Value::Native(native) => {
             // A namespace is an object, not a function: `Math` has no call behaviour, so it has
             // no arity and no name of its own either.
@@ -39735,6 +40080,9 @@ fn native_js_name(native: &Native) -> String {
         // The derivation has no `Iterator` in its table of type prefixes, so it spells this
         // `iteratorFrom` rather than `from`.
         Native::IteratorFrom => "from".to_owned(),
+        // The payload is the whole of the name; the derivation would spell this
+        // `typedArrayGeneric`.
+        Native::TypedArrayGeneric(method) => (*method).to_owned(),
         Native::ThrowTypeError => String::new(),
         Native::ProtoGetter => "get __proto__".to_owned(),
         Native::ProtoSetter => "set __proto__".to_owned(),
