@@ -1283,6 +1283,7 @@ mod realm {
                     };
                     realm.work.borrow_mut().queue_microtask(work);
                 }
+                Some(RuntimeTurn::Failure(_)) => return RUNTIME_ERROR,
                 Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
                     let status = run_in_runtime(realm, || work.run(host, thrown));
                     if status != 0 {

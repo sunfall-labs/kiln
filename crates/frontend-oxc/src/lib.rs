@@ -18,17 +18,20 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
-    ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-    FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
-    PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
-};
-use oxc_ast::ast::{
     ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
+};
+use oxc_ast::{
+    AstKind,
+    ast::{
+        Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
+        Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
+        FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
+        PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
+    },
 };
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_parser::{ParseOptions, Parser};
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{IsGlobalReference, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
@@ -71,6 +74,60 @@ pub fn parse_commonjs(path: &str, source: &str) -> Module {
     parse_source(source, inferred.with_commonjs(true))
 }
 
+/// Parse CommonJS and return the literal dependencies identified by Oxc's own scope graph.
+///
+/// Keeping this fact beside parsing avoids reimplementing JavaScript hoisting and shadowing in
+/// Kiln HIR. Only owned strings cross the frontend boundary; Oxc nodes and arena lifetimes do not.
+pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source_with_commonjs_requires(source, inferred.with_commonjs(true))
+}
+
+fn parse_source_with_commonjs_requires(
+    source: &str,
+    source_type: SourceType,
+) -> (Module, Vec<String>) {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    let requires = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        Vec::new()
+    } else {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        let mut requires = semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    return None;
+                };
+                let Expression::Identifier(callee) = &call.callee else {
+                    return None;
+                };
+                if callee.name != "require" || !callee.is_global_reference(semantic.scoping()) {
+                    return None;
+                }
+                let argument = call.arguments.first()?.as_expression()?;
+                let Expression::StringLiteral(literal) = argument else {
+                    return None;
+                };
+                Some((call.span.start, literal.value.to_string()))
+            })
+            .collect::<Vec<_>>();
+        requires.sort_by_key(|(start, _)| *start);
+        requires.dedup_by(|left, right| left.1 == right.1);
+        requires.into_iter().map(|(_, value)| value).collect()
+    };
+    (lower_parsed(&parsed, source_type), requires)
+}
+
 fn parse_source(source: &str, source_type: SourceType) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
@@ -86,6 +143,10 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         })
         .parse();
 
+    lower_parsed(&parsed, source_type)
+}
+
+fn lower_parsed(parsed: &oxc_parser::ParserReturn<'_>, source_type: SourceType) -> Module {
     let mut requested_modules = parsed
         .module_record
         .requested_modules
@@ -2162,7 +2223,11 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(kiln_hir::commonjs_literal_requires(&module), ["./dep.cjs"]);
+        let (_, requires) = parse_commonjs_with_requires(
+            "fixture.cjs",
+            "module.exports = function () { return require('./dep.cjs'); };",
+        );
+        assert_eq!(requires, ["./dep.cjs"]);
     }
 
     #[test]
@@ -2178,6 +2243,52 @@ mod tests {
         assert!(
             !awaited.diagnostics.is_empty(),
             "CommonJS must reject top-level await"
+        );
+    }
+
+    #[test]
+    fn commonjs_requires_use_oxc_scope_semantics() {
+        let source = r#"
+            require('./first');
+            require('./first');
+            if (ready) require('./nested');
+            require(dynamic);
+            function parameter(require) { require('./parameter'); }
+            function hoisted() {
+                require('./var-before');
+                if (ready) var require;
+                require('./var-after');
+            }
+            {
+                require('./block-before');
+                let require;
+                require('./block-after');
+            }
+            try {} catch (require) { require('./catch'); }
+            require('./last');
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(requires, ["./first", "./nested", "./last"]);
+    }
+
+    #[test]
+    fn commonjs_require_discovery_walks_all_oxc_ast_nodes_in_source_order() {
+        let source = r#"
+            const value = {
+                [require('./key')]: require('./value'),
+                method() { return require('./method'); }
+            };
+            class Example extends require('./base') {
+                field = require('./field');
+            }
+            [require('./array'), ...require('./spread')];
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(
+            requires,
+            [
+                "./key", "./value", "./method", "./base", "./field", "./array", "./spread"
+            ]
         );
     }
 

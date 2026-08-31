@@ -139,7 +139,7 @@ pub fn emit_module_with_policy(
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy);
+    let source = render_module(module, program_hash, &symbol, &policy, false);
     Ok(CModule {
         symbol,
         source,
@@ -172,7 +172,35 @@ pub fn emit_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy);
+    let source = render_module(module, program_hash, &symbol, &policy, false);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
+}
+
+/// Emit a CommonJS body whose private graph ABI exposes the final `module.exports` value as one
+/// synthetic export slot. The five wrapper imports remain ordinary module imports, so compiled
+/// closures capture the exact `exports`, `require`, `module`, `__filename`, and `__dirname`
+/// identities supplied by the graph launcher. This does not widen the public scalar embedding
+/// ABI; it is used only between native graph objects.
+pub fn emit_commonjs_module_with_logical_path_and_policy(
+    module: &ModuleProgram,
+    logical_path: &str,
+    policy: EmissionPolicy,
+) -> Result<CModule, EmitError> {
+    validate_logical_path(logical_path)?;
+    validate_module(module)?;
+    if module.imports.len() < 3 || module.imports[2].imported != "module" {
+        return Err(EmitError::InvalidProgram {
+            message: "CommonJS module is missing its canonical wrapper imports".to_owned(),
+        });
+    }
+    let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let source = render_module(module, program_hash, &symbol, &policy, true);
     Ok(CModule {
         symbol,
         source,
@@ -345,7 +373,10 @@ enum kiln_value_tag {
      * A tag rather than an object because every one of them is immutable and every operation on
      * one has to reach the engine anyway (ADR 0025): an object would be a second place for the
      * state to live and a second thing to keep in step. */
-    KILN_VALUE_TEMPORAL = 25
+    KILN_VALUE_TEMPORAL = 25,
+    /* A graph-scoped CommonJS require function. Private to native graph objects: bits holds a
+     * kiln_commonjs_require*, whose callback and opaque context are supplied by the launcher. */
+    KILN_VALUE_COMMONJS_REQUIRE = 26
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -492,6 +523,11 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_RANGE_ERROR 12
 #define KILN_C99_BUILTIN_REFERENCE_ERROR 13
 #define KILN_C99_BUILTIN_SYNTAX_ERROR 14
+#define KILN_C99_BUILTIN_URI_ERROR 65
+#define KILN_C99_BUILTIN_WEAK_MAP 66
+#define KILN_C99_BUILTIN_WEAK_SET 67
+#define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
+#define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -870,6 +906,31 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_WRITABLE_END 373
 #define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
 #define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
+#define KILN_C99_METHOD_NODE_FS_EXISTS_SYNC 376
+#define KILN_C99_METHOD_NODE_FS_READ_FILE 377
+#define KILN_C99_METHOD_NODE_FS_STAT 378
+#define KILN_C99_METHOD_NODE_FS_WRITE_FILE 379
+#define KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE 380
+#define KILN_C99_METHOD_NODE_PATH_JOIN 381
+#define KILN_C99_METHOD_NODE_PATH_RESOLVE 382
+#define KILN_C99_METHOD_NODE_ASSERT_OK 383
+#define KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR 384
+#define KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE 385
+#define KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH 386
+#define KILN_C99_METHOD_NODE_URL_PARSE 387
+#define KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL 388
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE 389
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND 390
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY 391
+#define KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID 392
+#define KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH 393
+#define KILN_C99_METHOD_PROCESS_NEXT_TICK 394
+#define KILN_C99_METHOD_PROCESS_HRTIME 395
+#define KILN_C99_METHOD_PROCESS_HRTIME_BIGINT 396
+#define KILN_C99_METHOD_PROCESS_CWD 397
+#define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 398
+#define KILN_C99_METHOD_SET_IMMEDIATE 399
+#define KILN_C99_METHOD_CLEAR_IMMEDIATE 400
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -1197,6 +1258,11 @@ typedef struct kiln_collection {
     size_t live;
     size_t capacity;
     int is_map;
+    /* Weak collections share the identity-keyed storage and methods, but deliberately expose
+     * neither size nor iteration. The native runtime has no tracing collector yet, so entries
+     * remain strongly retained for this process lifetime; the observable WeakMap/WeakSet API is
+     * nevertheless correct and this flag prevents accidentally advertising Map semantics. */
+    int is_weak;
     /* Where `class Registry extends Map {}` puts the prototype its instances inherit from, and
      * where a write that is not an entry goes. Undefined until something needs one, so an
      * ordinary Map costs nothing for it. */
@@ -1272,6 +1338,13 @@ typedef struct kiln_bound {
     size_t count;
 } kiln_bound;
 
+typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
+typedef struct kiln_commonjs_require {
+    kiln_commonjs_require_fn call;
+    void *context;
+} kiln_commonjs_require;
+
 /* One entry of the microtask queue: run `handler` against `argument` and settle `derived` with
  * what it produced.  A handler that is not callable passes the value through unchanged, which is
  * what `p.then(undefined, f)` and `p.catch(f)` rely on. */
@@ -1280,6 +1353,7 @@ typedef struct kiln_microtask {
     kiln_value argument;
     kiln_value derived;
     int rejected;
+    int passes_argument;
 } kiln_microtask;
 
 /* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,
@@ -1883,6 +1957,8 @@ static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t 
 static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
                                     const kiln_value *args, size_t argc, int depth,
                                     kiln_value *thrown);
+static int kiln_c99_node_path(kiln_value *out, uint64_t code,
+                              const kiln_value *args, size_t argc, kiln_value *thrown);
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown);
@@ -1898,7 +1974,7 @@ static double kiln_c99_parse_date(const char *bytes, size_t len);
 static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
 static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
-static int kiln_c99_new_collection(kiln_value *out, int is_map);
+static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
@@ -1922,6 +1998,7 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
                          kiln_value *out);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
+static int kiln_c99_enqueue_callback(kiln_value callback);
 static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
 static void kiln_c99_drop_microtask(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
@@ -2172,6 +2249,93 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         *result = receiver; return status;
     }
     return KILN_C99_CONTROL_ERROR;
+}
+
+static int kiln_c99_node_path(kiln_value *result, uint64_t code,
+                              const kiln_value *args, size_t argc, kiln_value *thrown) {
+    kiln_text joined = {0};
+    const char **parts = NULL;
+    size_t *lengths = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    size_t index;
+    int absolute = code == KILN_C99_METHOD_NODE_PATH_RESOLVE;
+    int status = KILN_C99_OK;
+    if (code == KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE) {
+        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
+        if (path.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, path, "string path");
+        *result = kiln_c99_boolean(path.len > 0 && path.ptr[0] == '/');
+        return KILN_C99_OK;
+    }
+    for (index = 0; index < argc; ++index) {
+        kiln_value part;
+        if (args[index].tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, args[index], "string path");
+        part = args[index];
+        if (part.len == 0) continue;
+        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE && part.ptr[0] == '/') {
+            joined.len = 0;
+            absolute = 1;
+        }
+        if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+            status = kiln_c99_text_append_c(&joined, "/");
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
+        if (status != KILN_C99_OK) goto done;
+    }
+    if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
+        kiln_text prefixed = {0};
+        status = kiln_c99_text_append_c(&prefixed, "/");
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
+        free(joined.bytes);
+        joined = prefixed;
+        if (status != KILN_C99_OK) goto done;
+    }
+    /* Normalize in place by retaining slices. `..` cannot escape an absolute root. */
+    for (index = 0; index <= joined.len;) {
+        size_t start = index;
+        size_t length;
+        while (index < joined.len && joined.bytes[index] != '/') ++index;
+        length = index - start;
+        ++index;
+        if (length == 0 || (length == 1 && joined.bytes[start] == '.')) continue;
+        if (length == 2 && joined.bytes[start] == '.' && joined.bytes[start + 1] == '.') {
+            if (count > 0 && !(lengths[count - 1] == 2 &&
+                parts[count - 1][0] == '.' && parts[count - 1][1] == '.')) {
+                --count;
+            } else if (!absolute) {
+                if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+                lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+                if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+                parts[count] = joined.bytes + start; lengths[count++] = length;
+            }
+            continue;
+        }
+        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+        lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+        if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+        parts[count] = joined.bytes + start; lengths[count++] = length;
+    }
+    {
+        kiln_text normalized = {0};
+        if (absolute) status = kiln_c99_text_append_c(&normalized, "/");
+        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
+            if (normalized.len != 0 && normalized.bytes[normalized.len - 1] != '/')
+                status = kiln_c99_text_append_c(&normalized, "/");
+            if (status == KILN_C99_OK)
+                status = kiln_c99_text_append(&normalized, parts[index], lengths[index]);
+        }
+        if (status == KILN_C99_OK && normalized.len == 0)
+            status = kiln_c99_text_append_c(&normalized, absolute ? "/" : ".");
+        if (status == KILN_C99_OK)
+            *result = kiln_c99_value(KILN_VALUE_STRING, 0, normalized.bytes, normalized.len);
+        else free(normalized.bytes);
+    }
+done:
+    free(parts);
+    free(lengths);
+    free(joined.bytes);
+    return status;
 }
 
 static kiln_value kiln_c99_undefined(void) {
@@ -3383,6 +3547,18 @@ static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
 
+static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
+                                           void *context) {
+    kiln_commonjs_require *require;
+    if (out == NULL || call == NULL) return KILN_C99_INVALID_ARGUMENT;
+    require = (kiln_commonjs_require *)malloc(sizeof *require);
+    if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
+    require->call = call;
+    require->context = context;
+    *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
+    return KILN_C99_OK;
+}
+
 /* The name a console shows, which is the JavaScript name rather than the implementation's --
  * `[Function: push]`, the same text the interpreter produces. */
 static const char *kiln_c99_method_name(uint64_t code) {
@@ -4089,6 +4265,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_DATE: return "Date";
     case KILN_C99_BUILTIN_MAP: return "Map";
     case KILN_C99_BUILTIN_SET: return "Set";
+    case KILN_C99_BUILTIN_WEAK_MAP: return "WeakMap";
+    case KILN_C99_BUILTIN_WEAK_SET: return "WeakSet";
     case KILN_C99_BUILTIN_PROMISE: return "Promise";
     case KILN_C99_BUILTIN_BOOLEAN: return "Boolean";
     case KILN_C99_BUILTIN_REFLECT: return "Reflect";
@@ -4110,6 +4288,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE: return "Error";
     case KILN_C99_BUILTIN_MAP_PROTOTYPE: return "Map";
     case KILN_C99_BUILTIN_SET_PROTOTYPE: return "Set";
+    case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE: return "WeakMap";
+    case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE: return "WeakSet";
     case KILN_C99_BUILTIN_STRING_PROTOTYPE: return "String";
     case KILN_C99_BUILTIN_SYMBOL: return "Symbol";
     case KILN_C99_BUILTIN_REGEXP: return "RegExp";
@@ -4296,6 +4476,107 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
  * a list of the realm's furniture -- a program's own additions are enumerable, which is the
  * distinction that makes the question worth asking. */
 static kiln_value kiln_c99_globals;
+static kiln_value kiln_c99_process;
+static kiln_value kiln_c99_atomics;
+
+static int kiln_c99_atomics_object(kiln_value *out) {
+    static const char *const names[] = {
+        "add", "and", "compareExchange", "exchange", "isLockFree", "load", "notify",
+        "or", "pause", "store", "sub", "wait", "waitAsync", "xor",
+    };
+    size_t index;
+    int status;
+    if (kiln_c99_atomics.tag == KILN_VALUE_OBJECT) {
+        *out = kiln_c99_atomics;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(&kiln_c99_atomics);
+    for (index = 0; status == KILN_C99_OK && index < sizeof names / sizeof *names; ++index)
+        status = kiln_c99_define_method(
+            kiln_c99_atomics, names[index], strlen(names[index]),
+            kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_c99_atomics;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_process_object(kiln_value *out) {
+    kiln_value env;
+    kiln_value argv;
+    kiln_value exec_argv;
+    kiln_value versions;
+    kiln_value stream;
+    int status;
+    if (kiln_c99_process.tag == KILN_VALUE_OBJECT) {
+        *out = kiln_c99_process;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(&kiln_c99_process);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
+    if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
+    if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&versions);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, versions, "node", 4,
+                              kiln_c99_copy_text("22.0.0", 6), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "env", 3, env, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "argv", 4, argv, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "execArgv", 8, exec_argv, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "platform", 8,
+                              kiln_c99_copy_text("kiln", 4), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "version", 7,
+                              kiln_c99_copy_text("kiln", 4), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "versions", 8, versions, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, kiln_c99_process, "pid", 3,
+                              kiln_c99_number(1.0), 0, NULL);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(0.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, kiln_c99_process, "stdin", 5, stream, 0, NULL);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, kiln_c99_process, "stdout", 6, stream, 0, NULL);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&stream);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, kiln_c99_process, "stderr", 6, stream, 0, NULL);
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(kiln_c99_process, "nextTick", 8,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(kiln_c99_process, "hrtime", 6,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
+    if (status == KILN_C99_OK) {
+        kiln_value hrtime;
+        status = kiln_c99_get(NULL, kiln_c99_process, "hrtime", 6, &hrtime, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, hrtime, "bigint", 6,
+                                  kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT), 0, NULL);
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(kiln_c99_process, "cwd", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_c99_process;
+    return KILN_C99_OK;
+}
 
 static int kiln_c99_global_object(kiln_value *out) {
     static const struct {
@@ -4322,7 +4603,8 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"TypeError", KILN_C99_BUILTIN_TYPE_ERROR},
                         {"RangeError", KILN_C99_BUILTIN_RANGE_ERROR},
                         {"ReferenceError", KILN_C99_BUILTIN_REFERENCE_ERROR},
-                        {"SyntaxError", KILN_C99_BUILTIN_SYNTAX_ERROR}};
+                        {"SyntaxError", KILN_C99_BUILTIN_SYNTAX_ERROR},
+                        {"URIError", KILN_C99_BUILTIN_URI_ERROR}};
     static const struct {
         const char *name;
         uint64_t code;
@@ -4820,6 +5102,8 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_ERROR_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SET_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
@@ -5108,6 +5392,10 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
          * one reached through an instance can never turn out to be different functions. */
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
                                       KILN_C99_METHOD_COLLECTION_SELF);
+    case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE:
+    case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE:
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+                                      KILN_C99_METHOD_COLLECTION_DELETE);
     case KILN_C99_BUILTIN_STRING_PROTOTYPE:
         return kiln_c99_string_method(key, key_len);
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
@@ -5147,7 +5435,7 @@ static int kiln_c99_is_callable(kiln_value value) {
     value = kiln_c99_proxy_inner(value);
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
            value.tag == KILN_VALUE_METHOD || value.tag == KILN_VALUE_SETTLER ||
-           value.tag == KILN_VALUE_BOUND;
+           value.tag == KILN_VALUE_BOUND || value.tag == KILN_VALUE_COMMONJS_REQUIRE;
 }
 
 /* Every reference value reduces to a primitive before a coercing operator, and none of them can
@@ -5379,6 +5667,11 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
          * limit rather than dying. */
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Maximum call stack size exceeded");
+    }
+    if (callee.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_commonjs_require *require = (kiln_commonjs_require *)(uintptr_t)callee.bits;
+        return require->call(require->context, host,
+                             argc > 0 ? args[0] : kiln_c99_undefined(), result, thrown);
     }
     if (callee.tag == KILN_VALUE_PROXY) {
         /* Calling a proxy is the `apply` trap, which receives the arguments as one array --
@@ -7236,11 +7529,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "size")) {
+            if (collection->is_weak) return KILN_C99_CONTROL_ERROR;
             *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
         }
-        code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
-                                      KILN_C99_METHOD_COLLECTION_SELF);
+        code = kiln_c99_lookup_method(
+            key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+            collection->is_weak ? KILN_C99_METHOD_COLLECTION_DELETE
+                                : KILN_C99_METHOD_COLLECTION_SELF);
         /* A Set has no `get` or `set`, and a Map has no `add`: offering one would let a program
          * call something that has no meaning for the receiver it was reached through. */
         if (code == 0 ||
@@ -7334,6 +7630,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_BOUND:
+    case KILN_VALUE_COMMONJS_REQUIRE:
     case KILN_VALUE_METHOD: {
         uint64_t callable;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
@@ -7536,6 +7833,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                           {KILN_C99_BUILTIN_ERROR_PROTOTYPE, KILN_C99_BUILTIN_ERROR},
                           {KILN_C99_BUILTIN_MAP_PROTOTYPE, KILN_C99_BUILTIN_MAP},
                           {KILN_C99_BUILTIN_SET_PROTOTYPE, KILN_C99_BUILTIN_SET},
+                          {KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE, KILN_C99_BUILTIN_WEAK_MAP},
+                          {KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE, KILN_C99_BUILTIN_WEAK_SET},
                           {KILN_C99_BUILTIN_STRING_PROTOTYPE, KILN_C99_BUILTIN_STRING},
                           {KILN_C99_BUILTIN_REGEXP_PROTOTYPE, KILN_C99_BUILTIN_REGEXP},
                           {KILN_C99_BUILTIN_DATE_PROTOTYPE, KILN_C99_BUILTIN_DATE},
@@ -7615,6 +7914,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             if (target.bits == KILN_C99_BUILTIN_SET) {
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_SET_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_WEAK_MAP) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_WEAK_SET) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (target.bits == KILN_C99_BUILTIN_STRING) {
@@ -11561,6 +11868,185 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         if (status == KILN_C99_OK) *result = kiln_c99_number(milliseconds);
         return status;
     }
+    if (code == KILN_C99_METHOD_NODE_FS_EXISTS_SYNC) {
+        /* A deterministic realm has no ambient synchronous filesystem. Its captured module
+         * graph is resolved before execution, so an optional host path is conservatively absent.
+         * Host-backed filesystem work remains asynchronous and crosses the realm-op boundary. */
+        *result = kiln_c99_boolean(0);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_FS_READ_FILE ||
+        code == KILN_C99_METHOD_NODE_FS_STAT ||
+        code == KILN_C99_METHOD_NODE_FS_WRITE_FILE) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:fs promises require the native async filesystem adapter");
+    }
+    if (code >= KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE &&
+        code <= KILN_C99_METHOD_NODE_PATH_RESOLVE) {
+        return kiln_c99_node_path(result, code, args, argc, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_ASSERT_OK) {
+        if (!kiln_c99_truthy(argc > 0 ? args[0] : kiln_c99_undefined())) {
+            kiln_value message = argc > 1 ? kiln_c99_text(args[1])
+                                          : kiln_c99_copy_text(
+                                                "The expression evaluated to a falsy value", 41);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                        message.ptr != NULL ? message.ptr :
+                                        "The expression evaluated to a falsy value");
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:worker_threads requires an isolated realm worker capability");
+    }
+    if (code == KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:module createRequire requires the captured graph resolution index");
+    }
+    if (code == KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH) {
+        kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_value encoded;
+        kiln_value decode_args[1];
+        if (input.tag != KILN_VALUE_STRING || input.len < 7 ||
+            memcmp(input.ptr, "file://", 7) != 0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "fileURLToPath requires a file: URL");
+        encoded = kiln_c99_copy_text(input.ptr + 7, input.len - 7);
+        decode_args[0] = encoded;
+        return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_DECODE_URI_COMPONENT,
+                                      kiln_c99_undefined(), decode_args, 1, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL) {
+        kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_text url = {0};
+        kiln_value construct_args[1];
+        if (input.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, input, "string path");
+        status = kiln_c99_text_append_c(&url, "file://");
+        if (status == KILN_C99_OK && (input.len == 0 || input.ptr[0] != '/'))
+            status = kiln_c99_text_append_c(&url, "/");
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&url, input.ptr, input.len);
+        if (status != KILN_C99_OK) { free(url.bytes); return status; }
+        construct_args[0] = kiln_c99_value(KILN_VALUE_STRING, 0, url.bytes, url.len);
+        return kiln_c99_url_construct(result, construct_args, 1, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_URL_PARSE) {
+        return kiln_c99_url_construct(result, args, argc, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE) {
+        kiln_value resource = receiver;
+        if (resource.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&resource);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_define_method(
+            resource, "bind", 4,
+            kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                resource, "emitDestroy", 11,
+                kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY));
+        *result = resource;
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND) {
+        kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value this_value = argc > 1 ? args[1] : kiln_c99_undefined();
+        if (!kiln_c99_is_callable(callback))
+            return kiln_c99_throw_not_a(thrown, callback, "function");
+        return kiln_c99_bind(result, callback, this_value);
+    }
+    if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY) {
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID) {
+        static const char hex[] = "0123456789abcdef";
+        uint8_t bytes[16];
+        uint64_t first;
+        uint64_t second;
+        char *uuid;
+        size_t index;
+        size_t at = 0;
+        status = kiln_c99_entropy_word(host, &first);
+        if (status == KILN_C99_OK) status = kiln_c99_entropy_word(host, &second);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < 8; ++index) {
+            bytes[index] = (uint8_t)(first >> (56 - index * 8));
+            bytes[index + 8] = (uint8_t)(second >> (56 - index * 8));
+        }
+        bytes[6] = (uint8_t)((bytes[6] & 0x0f) | 0x40);
+        bytes[8] = (uint8_t)((bytes[8] & 0x3f) | 0x80);
+        uuid = (char *)malloc(36);
+        if (uuid == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < 16; ++index) {
+            if (index == 4 || index == 6 || index == 8 || index == 10) uuid[at++] = '-';
+            uuid[at++] = hex[bytes[index] >> 4];
+            uuid[at++] = hex[bytes[index] & 0x0f];
+        }
+        *result = kiln_c99_value(KILN_VALUE_STRING, 0, uuid, 36);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:crypto createHash is not yet implemented by the native crypto provider");
+    }
+    if (code == KILN_C99_METHOD_PROCESS_NEXT_TICK) {
+        kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+        size_t extra = argc > 1 ? argc - 1 : 0;
+        kiln_value queued = callback;
+        if (!kiln_c99_is_callable(callback))
+            return kiln_c99_throw_not_a(thrown, callback, "function");
+        /* `nextTick(callback, ...args)` queues one invocation carrying all of the supplied
+         * arguments.  Promise reactions use the same realm-owned microtask queue, but their
+         * payload has exactly one settlement value; bind the variadic Node shape before it
+         * crosses that intentionally small queue ABI. */
+        if (extra != 0) {
+            status = kiln_c99_bind_with(&queued, callback, kiln_c99_undefined(), args + 1,
+                                        extra);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = kiln_c99_undefined();
+        return kiln_c99_enqueue_callback(queued);
+    }
+    if (code == KILN_C99_METHOD_PROCESS_CWD) {
+        *result = kiln_c99_copy_text("/", 1);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_PROCESS_HRTIME ||
+        code == KILN_C99_METHOD_PROCESS_HRTIME_BIGINT) {
+        int64_t high;
+        uint64_t low;
+        status = kiln_realm_now_nanoseconds(&high, &low);
+        if (status != KILN_C99_OK) return status;
+        if (code == KILN_C99_METHOD_PROCESS_HRTIME_BIGINT) {
+            *result = kiln_c99_number((double)low);
+            return KILN_C99_OK;
+        }
+        {
+            kiln_value parts;
+            status = kiln_c99_new_array(&parts);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(parts,
+                                             kiln_c99_number((double)(low / 1000000000)));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(parts,
+                                             kiln_c99_number((double)(low % 1000000000)));
+            if (status == KILN_C99_OK) *result = parts;
+            return status;
+        }
+    }
+    if (code == KILN_C99_METHOD_ATOMICS_UNAVAILABLE) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "Atomics requires native SharedArrayBuffer support");
+    }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_LAST) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
@@ -11799,9 +12285,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return kiln_c99_to_fixed(result, kiln_c99_as_number(receiver), (int)digits);
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
-        case KILN_C99_METHOD_SET_INTERVAL: {
+        case KILN_C99_METHOD_SET_INTERVAL:
+        case KILN_C99_METHOD_SET_IMMEDIATE: {
             kiln_timer *entry;
-            double delay = argc > 1 ? second : 0.0;
+            double delay = code == KILN_C99_METHOD_SET_IMMEDIATE
+                               ? 0.0
+                               : (argc > 1 ? second : 0.0);
             uint64_t id = 0;
             /* A negative, missing or NaN delay is zero: "as soon as possible", which is still
              * after everything already queued. */
@@ -11815,7 +12304,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             entry->callback = argc > 0 ? args[0] : kiln_c99_undefined();
             /* Everything after the delay is handed to the callback, which is how a timer carries
              * state without a closure. */
-            entry->argc = argc > 2 ? argc - 2 : 0;
+            entry->argc = code == KILN_C99_METHOD_SET_IMMEDIATE
+                              ? (argc > 1 ? argc - 1 : 0)
+                              : (argc > 2 ? argc - 2 : 0);
             entry->args = NULL;
             if (entry->argc != 0) {
                 entry->args = (kiln_value *)malloc(entry->argc * sizeof *entry->args);
@@ -11823,7 +12314,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     free(entry);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                memcpy(entry->args, args + 2, entry->argc * sizeof *entry->args);
+                memcpy(entry->args,
+                       args + (code == KILN_C99_METHOD_SET_IMMEDIATE ? 1 : 2),
+                       entry->argc * sizeof *entry->args);
             }
             status = code == KILN_C99_METHOD_SET_INTERVAL
                          ? kiln_realm_set_interval(delay, kiln_c99_run_timer,
@@ -11838,7 +12331,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_CLEAR_TIMEOUT:
-        case KILN_C99_METHOD_CLEAR_INTERVAL: {
+        case KILN_C99_METHOD_CLEAR_INTERVAL:
+        case KILN_C99_METHOD_CLEAR_IMMEDIATE: {
             double id = argc > 0 ? first : 0.0 / 0.0;
             if (isfinite(id) && id >= 1.0 && floor(id) == id &&
                 id <= 9007199254740991.0) {
@@ -13382,7 +13876,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             /* One tag holds both collections, so which one it is comes from the collection
              * rather than from the value tag. */
             case KILN_VALUE_COLLECTION:
-                tag = kiln_c99_collection_of(receiver)->is_map ? "Map" : "Set";
+                {
+                    kiln_collection *collection = kiln_c99_collection_of(receiver);
+                    tag = collection->is_weak
+                              ? (collection->is_map ? "WeakMap" : "WeakSet")
+                              : (collection->is_map ? "Map" : "Set");
+                }
                 break;
             case KILN_VALUE_BUILTIN:
                 /* `Math` and `JSON` are the two namespaces the language gives a tag of their own,
@@ -13397,6 +13896,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             case KILN_VALUE_FUNCTION:
             case KILN_VALUE_METHOD:
             case KILN_VALUE_BOUND:
+            case KILN_VALUE_COMMONJS_REQUIRE:
             case KILN_VALUE_SETTLER: tag = "Function"; break;
             default: tag = "Object"; break;
             }
@@ -13803,10 +14303,17 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     *result = linked;
                     return KILN_C99_OK;
                 }
-                *result = kiln_c99_builtin(
-                    subject.tag == KILN_VALUE_ARRAY          ? KILN_C99_BUILTIN_ARRAY_PROTOTYPE
-                    : kiln_c99_collection_of(subject)->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
-                                                             : KILN_C99_BUILTIN_SET_PROTOTYPE);
+                if (subject.tag == KILN_VALUE_ARRAY) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+                } else {
+                    kiln_collection *collection = kiln_c99_collection_of(subject);
+                    *result = kiln_c99_builtin(
+                        collection->is_weak
+                            ? (collection->is_map ? KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE
+                                                  : KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE)
+                            : (collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                                  : KILN_C99_BUILTIN_SET_PROTOTYPE));
+                }
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_STRING) {
@@ -17650,7 +18157,7 @@ static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value han
     return KILN_C99_OK;
 }
 
-static int kiln_c99_new_collection(kiln_value *out, int is_map) {
+static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     kiln_collection *collection = (kiln_collection *)malloc(sizeof *collection);
     if (collection == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
@@ -17660,6 +18167,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map) {
     collection->live = 0;
     collection->capacity = 0;
     collection->is_map = is_map;
+    collection->is_weak = is_weak;
     collection->properties = kiln_c99_undefined();
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
     return KILN_C99_OK;
@@ -17752,6 +18260,7 @@ static const char *kiln_c99_error_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_RANGE_ERROR: return "RangeError";
     case KILN_C99_BUILTIN_REFERENCE_ERROR: return "ReferenceError";
     case KILN_C99_BUILTIN_SYNTAX_ERROR: return "SyntaxError";
+    case KILN_C99_BUILTIN_URI_ERROR: return "URIError";
     case KILN_C99_BUILTIN_ERROR: return "Error";
     default: return NULL;
     }
@@ -18170,8 +18679,27 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     task->argument = argument;
     task->derived = derived;
     task->rejected = rejected;
+    task->passes_argument = 1;
     status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
                                         task);
+    if (status != KILN_C99_OK) {
+        kiln_c99_drop_microtask(task);
+        return status;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_enqueue_callback(kiln_value callback) {
+    kiln_microtask *task;
+    int status;
+    task = (kiln_microtask *)malloc(sizeof *task);
+    if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
+    task->handler = callback;
+    task->argument = kiln_c99_undefined();
+    task->derived = kiln_c99_undefined();
+    task->rejected = 0;
+    task->passes_argument = 0;
+    status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask, task);
     if (status != KILN_C99_OK) {
         kiln_c99_drop_microtask(task);
         return status;
@@ -18324,7 +18852,8 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         return KILN_C99_OK;
     }
     status = kiln_c99_call(host, &produced, task->handler, kiln_c99_undefined(),
-                           &task->argument, 1, 0, thrown);
+                           task->passes_argument ? &task->argument : NULL,
+                           task->passes_argument ? 1 : 0, 0, thrown);
     if (status == KILN_C99_THROWN) {
         /* A handler that throws rejects the promise it was producing, rather than failing the
          * program: that is the whole reason `catch` exists further down the chain. */
@@ -18857,11 +19386,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_new_typed_array(result, kind, source, byte_offset, length, has_length,
                                         thrown);
     }
-    if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_MAP ||
-                                             callee.bits == KILN_C99_BUILTIN_SET)) {
-        int is_map = callee.bits == KILN_C99_BUILTIN_MAP;
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        (callee.bits == KILN_C99_BUILTIN_MAP || callee.bits == KILN_C99_BUILTIN_SET ||
+         callee.bits == KILN_C99_BUILTIN_WEAK_MAP ||
+         callee.bits == KILN_C99_BUILTIN_WEAK_SET)) {
+        int is_map = callee.bits == KILN_C99_BUILTIN_MAP ||
+                     callee.bits == KILN_C99_BUILTIN_WEAK_MAP;
+        int is_weak = callee.bits == KILN_C99_BUILTIN_WEAK_MAP ||
+                      callee.bits == KILN_C99_BUILTIN_WEAK_SET;
         kiln_value built;
-        status = kiln_c99_new_collection(&built, is_map);
+        status = kiln_c99_new_collection(&built, is_map, is_weak);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -19138,7 +19672,8 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_TYPE_ERROR:
         case KILN_C99_BUILTIN_RANGE_ERROR:
         case KILN_C99_BUILTIN_REFERENCE_ERROR:
-        case KILN_C99_BUILTIN_SYNTAX_ERROR: {
+        case KILN_C99_BUILTIN_SYNTAX_ERROR:
+        case KILN_C99_BUILTIN_URI_ERROR: {
             /* `Error` is the base of all of them, so it accepts any kind; the others accept only
              * their own. There is no prototype chain here to walk, and this is the same answer
              * one would give. */
@@ -19157,11 +19692,23 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_MAP:
             *answer = value.tag == KILN_VALUE_COLLECTION &&
-                      kiln_c99_collection_of(value)->is_map;
+                      kiln_c99_collection_of(value)->is_map &&
+                      !kiln_c99_collection_of(value)->is_weak;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_SET:
             *answer = value.tag == KILN_VALUE_COLLECTION &&
-                      !kiln_c99_collection_of(value)->is_map;
+                      !kiln_c99_collection_of(value)->is_map &&
+                      !kiln_c99_collection_of(value)->is_weak;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_WEAK_MAP:
+            *answer = value.tag == KILN_VALUE_COLLECTION &&
+                      kiln_c99_collection_of(value)->is_map &&
+                      kiln_c99_collection_of(value)->is_weak;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_WEAK_SET:
+            *answer = value.tag == KILN_VALUE_COLLECTION &&
+                      !kiln_c99_collection_of(value)->is_map &&
+                      kiln_c99_collection_of(value)->is_weak;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_OBJECT:
             *answer = value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_ARRAY ||
@@ -19239,6 +19786,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     /* A bound function is a function, and so is a settler: `typeof resolve` is what an executor
      * checks before calling it. */
     case KILN_VALUE_BOUND:
+    case KILN_VALUE_COMMONJS_REQUIRE:
     case KILN_VALUE_SETTLER:
         return kiln_c99_value(KILN_VALUE_STRING, 0, function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
@@ -19937,12 +20485,15 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Date
             | kiln_ir::Builtin::Map
             | kiln_ir::Builtin::Set
+            | kiln_ir::Builtin::WeakMap
+            | kiln_ir::Builtin::WeakSet
             | kiln_ir::Builtin::Promise
             | kiln_ir::Builtin::Error
             | kiln_ir::Builtin::TypeError
             | kiln_ir::Builtin::RangeError
             | kiln_ir::Builtin::ReferenceError
             | kiln_ir::Builtin::SyntaxError
+            | kiln_ir::Builtin::UriError
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity
             | kiln_ir::Builtin::Boolean
@@ -19979,7 +20530,11 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Float32Array
             | kiln_ir::Builtin::Float64Array
             | kiln_ir::Builtin::Url
-            | kiln_ir::Builtin::Buffer,
+            | kiln_ir::Builtin::Buffer
+            | kiln_ir::Builtin::Process
+            | kiln_ir::Builtin::Atomics
+            | kiln_ir::Builtin::SetImmediate
+            | kiln_ir::Builtin::ClearImmediate,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -21093,7 +21648,10 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         symbol,
         callables,
         handlers: handler_targets(&program.code),
-        site: ReturnSite::Entry { exports: None },
+        site: ReturnSite::Entry {
+            exports: None,
+            commonjs: false,
+        },
         guarded: dead_zone_slots(&program.code),
     };
     for index in 0..program.code.len() {
@@ -21114,6 +21672,7 @@ fn render_module(
     program_hash: u64,
     symbol: &str,
     policy: &EmissionPolicy,
+    commonjs: bool,
 ) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
@@ -21131,7 +21690,7 @@ fn render_module(
         output,
         "/* Module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
         module.imports.len(),
-        module.exports.len()
+        if commonjs { 1 } else { module.exports.len() }
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
@@ -21191,7 +21750,7 @@ fn render_module(
     writeln!(
         output,
         "    if (export_count != (size_t){} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
-        module.exports.len()
+        if commonjs { 1 } else { module.exports.len() }
     )
     .unwrap();
     for local in 0..program.local_count {
@@ -21222,6 +21781,7 @@ fn render_module(
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
             exports: Some(&module.exports),
+            commonjs,
         },
         guarded: dead_zone_slots(&program.code),
     };
@@ -21232,6 +21792,17 @@ fn render_module(
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_CONTROL_ERROR;\n}\n");
+    if commonjs {
+        /* The launcher cannot manufacture native objects without coupling itself to this private
+         * value layout. Let the translation unit that owns the layout construct the wrapper
+         * values instead. The helper is linked only into native graphs; it is not part of the
+         * public scalar embedding header or ABI. */
+        writeln!(
+            output,
+            "int {symbol}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context) {{\n    kiln_value initial;\n    kiln_value module;\n    int status;\n    if (imports == NULL || import_count != (size_t)5) return KILN_C99_INVALID_ARGUMENT;\n    status = kiln_c99_new_object(&initial);\n    if (status == KILN_C99_OK) status = kiln_c99_new_object(&module);\n    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, module, \"exports\", 7, initial, 0, NULL);\n    if (status == KILN_C99_OK) status = kiln_c99_commonjs_require_value(&imports[1], require_call, require_context);\n    if (status != KILN_C99_OK) return status;\n    imports[0] = initial;\n    imports[2] = module;\n    imports[3] = kiln_c99_copy_text(filename, filename_len);\n    imports[4] = kiln_c99_copy_text(dirname, dirname_len);\n    return KILN_C99_OK;\n}}"
+        )
+        .unwrap();
+    }
     if callables {
         render_module_realm_wrapper(&mut output, symbol);
     }
@@ -21309,6 +21880,7 @@ struct Emitter<'a> {
 enum ReturnSite<'a> {
     Entry {
         exports: Option<&'a [kiln_ir::ExportBinding]>,
+        commonjs: bool,
     },
     Body,
 }
@@ -21979,6 +22551,26 @@ fn emit_instruction(
                 "    { int status = kiln_c99_global_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
             );
         }
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Process) => {
+            output.push_str(
+                "    { int status = kiln_c99_process_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
+            );
+        }
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Atomics) => {
+            output.push_str(
+                "    { int status = kiln_c99_atomics_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
+            );
+        }
+        Instruction::LoadBuiltin(kiln_ir::Builtin::SetImmediate) => {
+            output.push_str(
+                "    stack[sp++] = kiln_c99_method(KILN_C99_METHOD_SET_IMMEDIATE);\n",
+            );
+        }
+        Instruction::LoadBuiltin(kiln_ir::Builtin::ClearImmediate) => {
+            output.push_str(
+                "    stack[sp++] = kiln_c99_method(KILN_C99_METHOD_CLEAR_IMMEDIATE);\n",
+            );
+        }
         Instruction::LoadBuiltin(builtin) => {
             // `NaN` and `Infinity` are values rather than callables, but they reach the program
             // the same way -- as a name the compiler resolves to something the runtime supplies.
@@ -21992,6 +22584,8 @@ fn emit_instruction(
                 kiln_ir::Builtin::Date => "kiln_c99_builtin(KILN_C99_BUILTIN_DATE)",
                 kiln_ir::Builtin::Map => "kiln_c99_builtin(KILN_C99_BUILTIN_MAP)",
                 kiln_ir::Builtin::Set => "kiln_c99_builtin(KILN_C99_BUILTIN_SET)",
+                kiln_ir::Builtin::WeakMap => "kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_MAP)",
+                kiln_ir::Builtin::WeakSet => "kiln_c99_builtin(KILN_C99_BUILTIN_WEAK_SET)",
                 kiln_ir::Builtin::Promise => "kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE)",
                 kiln_ir::Builtin::Error => "kiln_c99_builtin(KILN_C99_BUILTIN_ERROR)",
                 kiln_ir::Builtin::TypeError => "kiln_c99_builtin(KILN_C99_BUILTIN_TYPE_ERROR)",
@@ -22000,6 +22594,7 @@ fn emit_instruction(
                     "kiln_c99_builtin(KILN_C99_BUILTIN_REFERENCE_ERROR)"
                 }
                 kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
+                kiln_ir::Builtin::UriError => "kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)",
                 kiln_ir::Builtin::Boolean => "kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)",
                 // A global function is a namespace method with no namespace: nothing is reached
                 // through to get at it, so the method value is what the name resolves to.
@@ -22100,14 +22695,19 @@ fn emit_instruction(
             ReturnSite::Body => output.push_str(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
-            ReturnSite::Entry { exports: None } if !callables => output.push_str(
+            ReturnSite::Entry {
+                exports: None, ..
+            } if !callables => output.push_str(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
             ),
-            ReturnSite::Entry { exports: None } => output.push_str(
+            ReturnSite::Entry {
+                exports: None, ..
+            } => output.push_str(
                 "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
+                commonjs,
             } => {
                 output.push_str(
                     "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
@@ -22115,6 +22715,11 @@ fn emit_instruction(
                 if *callables {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
+                    );
+                }
+                if *commonjs {
+                    output.push_str(
+                        "    { kiln_value module_value = locals[2].tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(locals[2]) : locals[2]; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], depth, thrown); if (export_status != KILN_C99_OK) return export_status; }\n",
                     );
                 }
                 for (index, binding) in exports.iter().enumerate() {
@@ -24154,10 +24759,7 @@ int main(void) {{
     }
 
     #[test]
-    fn unreachable_unsupported_instructions_are_refused_before_rendering() {
-        // Every *instruction* is emitted now, so the thing that can still be refused is a
-        // builtin -- which is the same question about reachability with the one operand that has
-        // any left to refuse.
+    fn unreachable_weak_map_builtin_is_still_rendered_consistently() {
         let result = emit(&program(
             vec![Constant::Boolean(true)],
             vec![
@@ -24167,11 +24769,9 @@ int main(void) {{
                 Instruction::Return,
             ],
             0,
-        ));
-        assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("WeakMap")),
-            "dead code must not bypass the native builtin allowlist"
-        );
+        ))
+        .expect("WeakMap is a native builtin");
+        assert!(result.source.contains("KILN_C99_BUILTIN_WEAK_MAP"));
     }
 
     /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.

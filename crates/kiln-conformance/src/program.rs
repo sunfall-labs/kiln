@@ -124,8 +124,13 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
             parse_with_goal(path, source, SourceGoal::Module)
         }
 
-        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_hir::Module {
-            parse_with_goal(path, source, SourceGoal::Script)
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_module_graph::CommonJsParse {
+            let (module, static_requires) =
+                frontend_oxc::parse_commonjs_with_requires(path, source);
+            kiln_module_graph::CommonJsParse {
+                module,
+                static_requires,
+            }
         }
     }
     let graph = match ModuleGraph::build_node(

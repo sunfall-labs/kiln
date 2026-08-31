@@ -26,8 +26,8 @@ use kiln_artifact_cache::{
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
     C_ABI_VERSION, EmissionPolicy, EmissionStringPolicy, EmitError,
-    emit_module_with_logical_path_and_policy, emit_runtime_module_with_logical_path,
-    emit_with_policy,
+    emit_commonjs_module_with_logical_path_and_policy, emit_module_with_logical_path_and_policy,
+    emit_runtime_module_with_logical_path, emit_with_policy,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
@@ -1948,6 +1948,24 @@ fn native_builtin_supports_export(
             "Readable" | "Writable" | "addAbortSignal" | "default" | "finished"
         ),
         NodeBuiltin::PerfHooks => matches!(export_name, "default" | "performance"),
+        NodeBuiltin::Fs => matches!(export_name, "default" | "existsSync" | "promises"),
+        NodeBuiltin::FsPromises => matches!(export_name, "readFile" | "stat" | "writeFile"),
+        NodeBuiltin::Path => matches!(
+            export_name,
+            "default" | "isAbsolute" | "join" | "resolve" | "sep"
+        ),
+        NodeBuiltin::Assert => {
+            matches!(export_name, "default" | "ok" | "strict")
+        }
+        NodeBuiltin::WorkerThreads => matches!(export_name, "Worker" | "default"),
+        NodeBuiltin::Module => matches!(export_name, "createRequire" | "default"),
+        NodeBuiltin::Url => matches!(
+            export_name,
+            "URL" | "default" | "fileURLToPath" | "parse" | "pathToFileURL"
+        ),
+        NodeBuiltin::Buffer => matches!(export_name, "Buffer" | "constants" | "default"),
+        NodeBuiltin::AsyncHooks => matches!(export_name, "AsyncResource" | "default"),
+        NodeBuiltin::Crypto => matches!(export_name, "createHash" | "default" | "randomUUID"),
         _ => false,
     }
 }
@@ -1968,6 +1986,11 @@ fn emit_native_graph_module(
                 body,
             )?)
         }
+        ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
+            &node.program,
+            logical_path,
+            policy.emission(),
+        )?),
         _ => Ok(emit_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
@@ -2164,6 +2187,142 @@ status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = namespace;
 exports[1] = performance;"#,
+        ),
+        NodeBuiltin::FsPromises => Some(
+            r#"kiln_value read_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE);
+kiln_value stat = kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT);
+kiln_value write_file = kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE);
+exports[0] = read_file;
+exports[1] = stat;
+exports[2] = write_file;"#,
+        ),
+        NodeBuiltin::Fs => Some(
+            r#"kiln_value exists_sync = kiln_c99_method(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC);
+kiln_value promises;
+int status = kiln_c99_new_object(&promises);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, promises, "readFile", 8, kiln_c99_method(KILN_C99_METHOD_NODE_FS_READ_FILE), 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, promises, "stat", 4, kiln_c99_method(KILN_C99_METHOD_NODE_FS_STAT), 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, promises, "writeFile", 9, kiln_c99_method(KILN_C99_METHOD_NODE_FS_WRITE_FILE), 0, NULL);
+if (status != KILN_C99_OK) return status;
+kiln_value namespace;
+status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "existsSync", 10, exists_sync, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "promises", 8, promises, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = exists_sync;
+exports[2] = promises;"#,
+        ),
+        NodeBuiltin::Path => Some(
+            r#"kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
+kiln_value join = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_JOIN);
+kiln_value resolve = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_RESOLVE);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "isAbsolute", 10, is_absolute, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "join", 4, join, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "resolve", 7, resolve, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "sep", 3, kiln_c99_copy_text("/", 1), 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = is_absolute;
+exports[2] = join;
+exports[3] = resolve;
+exports[4] = kiln_c99_copy_text("/", 1);"#,
+        ),
+        NodeBuiltin::Assert => Some(
+            r#"kiln_value assert = kiln_c99_method(KILN_C99_METHOD_NODE_ASSERT_OK);
+exports[0] = assert;
+exports[1] = assert;
+exports[2] = assert;"#,
+        ),
+        NodeBuiltin::WorkerThreads => Some(
+            r#"kiln_value worker = kiln_c99_method(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Worker", 6, worker, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = worker;
+exports[1] = namespace;"#,
+        ),
+        NodeBuiltin::Module => Some(
+            r#"kiln_value create_require = kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createRequire", 13, create_require, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = create_require;
+exports[1] = namespace;"#,
+        ),
+        NodeBuiltin::Url => Some(
+            r#"kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_URL);
+kiln_value file_url_to_path = kiln_c99_method(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH);
+kiln_value parse = kiln_c99_method(KILN_C99_METHOD_NODE_URL_PARSE);
+kiln_value path_to_file_url = kiln_c99_method(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "URL", 3, constructor, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "fileURLToPath", 13, file_url_to_path, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "parse", 5, parse, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "pathToFileURL", 13, path_to_file_url, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = constructor;
+exports[1] = namespace;
+exports[2] = file_url_to_path;
+exports[3] = parse;
+exports[4] = path_to_file_url;"#,
+        ),
+        NodeBuiltin::Buffer => Some(
+            r#"kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER);
+kiln_value constants;
+int status = kiln_c99_new_object(&constants);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, constants, "MAX_STRING_LENGTH", 17, kiln_c99_number(536870888.0), 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, constructor, "constants", 9, constants, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = constructor;
+exports[1] = constants;
+exports[2] = constructor;"#,
+        ),
+        NodeBuiltin::AsyncHooks => Some(
+            r#"kiln_value resource = kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_RESOURCE);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "AsyncResource", 13, resource, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = resource;
+exports[1] = namespace;"#,
+        ),
+        NodeBuiltin::Crypto => Some(
+            r#"kiln_value create_hash = kiln_c99_method(KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH);
+kiln_value random_uuid = kiln_c99_method(KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createHash", 10, create_hash, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "randomUUID", 10, random_uuid, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = create_hash;
+exports[1] = namespace;
+exports[2] = random_uuid;"#,
         ),
         _ => None,
     }
@@ -2484,6 +2643,13 @@ fn graph_import_slot(
     node: &kiln_module_graph::ModuleNode,
     import: &kiln_ir::ImportBinding,
 ) -> Result<Option<(usize, usize)>, NativeError> {
+    /* CommonJS's five wrapper bindings are supplied by the graph launcher, not by another
+     * module node. Keeping this sentinel out of ordinary dependency resolution is what lets the
+     * launcher preserve one cache identity for `exports`/`module.exports` and attach a require
+     * function whose target table is scoped to this importer. */
+    if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
+        return Ok(None);
+    }
     let dependency = node
         .dependencies
         .iter()
@@ -2534,6 +2700,9 @@ fn graph_import_slot(
             path: origin.clone(),
         })
     })?;
+    if modules[provider_index].0.source == ModuleSource::CommonJs && import.imported == "default" {
+        return Ok(Some((provider_index, 0)));
+    }
     let export_index = modules[provider_index]
         .0
         .program
@@ -2553,6 +2722,31 @@ fn graph_import_slot(
     Ok(Some((provider_index, export_index)))
 }
 
+fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
+    if node.source == ModuleSource::CommonJs {
+        1
+    } else {
+        node.program.exports.len()
+    }
+}
+
+fn native_c_string(value: &str) -> String {
+    let mut output = String::from("\"");
+    for byte in value.bytes() {
+        match byte {
+            b'\"' => output.push_str("\\\""),
+            b'\\' => output.push_str("\\\\"),
+            b'\n' => output.push_str("\\n"),
+            b'\r' => output.push_str("\\r"),
+            b'\t' => output.push_str("\\t"),
+            0x20..=0x7e => output.push(char::from(byte)),
+            _ => write!(output, "\\x{byte:02X}\"\"").unwrap(),
+        }
+    }
+    output.push('\"');
+    output
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -2567,6 +2761,7 @@ fn graph_launcher_source(
 #include <locale.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -2594,6 +2789,8 @@ typedef struct kiln_host {
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     const kiln_value *imports, size_t import_count,
                                     kiln_value *exports, size_t export_count);
+typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                       kiln_value *result, kiln_value *thrown);
 typedef int (*kiln_realm_entry_fn)(void *context);
 
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
@@ -2614,12 +2811,23 @@ extern int kiln_realm_destroy(uint64_t realm);
         )
         .unwrap();
     }
+    for (node, module) in modules {
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context);",
+                module.symbol
+            )
+            .unwrap();
+        }
+    }
     for (index, (node, _)) in modules.iter().enumerate() {
-        if !node.program.exports.is_empty() {
+        let export_count = native_graph_export_count(node);
+        if export_count != 0 {
             writeln!(
                 output,
                 "static kiln_value kiln_exports_{index}[{}];",
-                node.program.exports.len()
+                export_count
             )
             .unwrap();
         }
@@ -2628,6 +2836,36 @@ extern int kiln_realm_destroy(uint64_t realm);
                 output,
                 "static kiln_value kiln_imports_{index}[{}];",
                 node.program.imports.len()
+            )
+            .unwrap();
+        }
+    }
+    output.push_str(
+        r#"
+typedef struct kiln_commonjs_context {
+    kiln_graph_module_fn module;
+    kiln_host *host;
+    kiln_value *imports;
+    size_t import_count;
+    kiln_value *exports;
+    int state;
+} kiln_commonjs_context;
+"#,
+    );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "static kiln_commonjs_context kiln_commonjs_{index};"
+            )
+            .unwrap();
+        }
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "static int kiln_commonjs_require_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);"
             )
             .unwrap();
         }
@@ -2644,6 +2882,64 @@ typedef struct kiln_graph_entry_context {
     size_t export_count;
 } kiln_graph_entry_context;
 
+static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *result,
+                                    kiln_value *thrown) {
+    int status;
+    if (context == NULL || result == NULL || context->exports == NULL) return -1;
+    if (context->state != 0) {
+        *result = context->exports[0];
+        return 0;
+    }
+    context->state = 1;
+    status = context->module(context->host, result, context->imports, context->import_count,
+                             context->exports, (size_t)1);
+    if (status != 0) {
+        context->state = 0;
+        if (thrown != NULL) *thrown = *result;
+        return status;
+    }
+    context->state = 2;
+    *result = context->exports[0];
+    return 0;
+}
+
+"#,
+    );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source != ModuleSource::CommonJs {
+            continue;
+        }
+        writeln!(
+            output,
+            "\nstatic int kiln_commonjs_require_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    (void)opaque;\n    (void)host;\n    if (result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return -1;"
+        )
+        .unwrap();
+        for dependency in &node.dependencies {
+            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: dependency.target.clone(),
+                })
+            })?;
+            let specifier = native_c_string(&dependency.specifier);
+            let specifier_len = dependency.specifier.len();
+            if modules[provider_index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = kiln_exports_{provider_index}[0]; return 0; }}"
+                )
+                .unwrap();
+            }
+        }
+        output.push_str("    if (thrown != NULL) *thrown = specifier;\n    return -2;\n}\n");
+    }
+    output.push_str(
+        r#"
 static int kiln_graph_enter_module(void *opaque) {
     kiln_graph_entry_context *context = (kiln_graph_entry_context *)opaque;
     if (context == NULL || context->module == NULL) return -1;
@@ -2675,6 +2971,29 @@ int main(void) {
     }
 "#,
     );
+    // CommonJS cache identities and wrapper locals exist before any module body runs, so cycles
+    // can return the initially allocated exports object without re-entering a module.
+    for (index, (node, module)) in modules.iter().enumerate() {
+        if node.source == ModuleSource::CommonJs {
+            let filename = node.path.to_string_lossy();
+            let dirname = node
+                .path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_string_lossy();
+            writeln!(
+                output,
+                "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+                module.symbol,
+                native_c_string(&filename),
+                filename.len(),
+                native_c_string(&dirname),
+                dirname.len(),
+                module.symbol,
+            )
+            .unwrap();
+        }
+    }
     for (index, (node, module)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
             let Some((provider_index, export_index)) =
@@ -2682,6 +3001,13 @@ int main(void) {
             else {
                 continue;
             };
+            if modules[provider_index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+                )
+                .unwrap();
+            }
             writeln!(
                 output,
                 "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
@@ -2693,11 +3019,23 @@ int main(void) {
         } else {
             format!("kiln_imports_{index}")
         };
-        let exports = if node.program.exports.is_empty() {
+        let export_count = native_graph_export_count(node);
+        let exports = if export_count == 0 {
             "NULL".to_owned()
         } else {
             format!("kiln_exports_{index}")
         };
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+            )
+            .unwrap();
+            if node.path == graph.entry() {
+                output.push_str("    entry_result = result;\n");
+            }
+            continue;
+        }
         writeln!(output, "    context.module = {};", module.symbol).unwrap();
         output.push_str("    context.host = &host;\n    context.result = &result;\n");
         writeln!(output, "    context.imports = {imports};").unwrap();
@@ -2711,7 +3049,7 @@ int main(void) {
         writeln!(
             output,
             "    context.export_count = (size_t){};",
-            node.program.exports.len()
+            export_count
         )
         .unwrap();
         output
@@ -3069,6 +3407,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     result->ptr = copy;
     return KILN_C99_OK;
 }
+
 "#,
     );
     writeln!(
@@ -3887,8 +4226,13 @@ mod tests {
             frontend_oxc::parse(path, source)
         }
 
-        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_hir::Module {
-            frontend_oxc::parse_commonjs(path, source)
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_module_graph::CommonJsParse {
+            let (module, static_requires) =
+                frontend_oxc::parse_commonjs_with_requires(path, source);
+            kiln_module_graph::CommonJsParse {
+                module,
+                static_requires,
+            }
         }
     }
 
@@ -4167,12 +4511,8 @@ mod tests {
         )
         .expect("typed node graph");
 
-        assert_eq!(
-            validate_native_node_builtins(&graph)
-                .expect_err("unmaterialized builtin must fail")
-                .to_string(),
-            "native Node execution does not yet materialize the `node:path` builtin"
-        );
+        validate_native_node_builtins(&graph).expect("node:path materializes natively");
+        assert!(native_builtin_body(NodeBuiltin::Path).is_some());
         assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
         assert!(!native_builtin_supports_export(
             NodeBuiltin::QueryString,
@@ -4227,7 +4567,7 @@ mod tests {
         assert!(emitted.source.contains("exports[0] = constructor;"));
         assert!(emitted.source.contains("exports[1] = constructor;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_some());
-        assert!(native_builtin_body(NodeBuiltin::Path).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Path).is_some());
     }
 
     #[test]
@@ -4240,7 +4580,7 @@ mod tests {
         assert!(body.contains("exports[1] = connect;"));
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_some());
-        assert!(native_builtin_body(NodeBuiltin::Path).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Path).is_some());
     }
 
     #[test]
@@ -4263,6 +4603,53 @@ mod tests {
             NodeBuiltin::PerfHooks,
             "performance"
         ));
+    }
+
+    #[test]
+    fn native_process_next_tick_forwards_variadic_arguments() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native process.nextTick integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-process-next-tick");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"process.nextTick((left, right) => console.log(left + right), 19, 23);
+"#,
+        )
+        .expect("write process.nextTick fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native process.nextTick graph builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native process.nextTick fixture");
+        assert!(
+            output.status.success(),
+            "status={} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"42\n");
     }
 
     #[test]
@@ -5721,6 +6108,123 @@ int main(void) {{
                 },
             )
             .expect("native shared star graph links");
+    }
+
+    #[test]
+    fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-commonjs-wrapper");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write root package");
+        fs::create_dir(root.path.join("pkg")).expect("create package directory");
+        fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write CommonJS package");
+        fs::write(root.path.join("pkg/index.js"), "module.exports = 42;")
+            .expect("write CommonJS module");
+        fs::write(root.path.join("pkg/dep.js"), "module.exports = 41;")
+            .expect("write CommonJS dependency");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            "import answer from './pkg/index.js'; console.log(answer);",
+        )
+        .expect("write entry");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build mixed graph");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    emit_native_graph_module(
+                        node,
+                        &logical_module_path(graph.project_root(), &node.path)
+                            .expect("logical path"),
+                        &NativeRealmPolicy::default(),
+                    )
+                    .expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let launcher = graph_launcher_source(&graph, &modules).expect("launcher reserves wrappers");
+        assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native CommonJS execution: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let report = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native mixed graph builds and runs");
+        assert_eq!(report.stdout, b"42\n");
+
+        fs::write(
+            root.path.join("pkg/index.js"),
+            "module.exports = require('./dep.js') + 1;",
+        )
+        .expect("rewrite CommonJS module with require");
+        let require_graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS require graph");
+        let required = builder
+            .run_graph(
+                &require_graph,
+                &NativeBuildOptions {
+                    output: root.path.join("required-program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native CommonJS require graph builds and runs");
+        assert_eq!(required.stdout, b"42\n");
+
+        fs::write(
+            root.path.join("pkg/index.js"),
+            "const first = require('./dep.js'); const second = require('./dep.js'); console.log(first === second, first.loads); module.exports = 42;",
+        )
+        .expect("rewrite CommonJS module with repeated require");
+        fs::write(
+            root.path.join("pkg/dep.js"),
+            "globalThis.__kilnLoads = (globalThis.__kilnLoads || 0) + 1; module.exports = { loads: globalThis.__kilnLoads };",
+        )
+        .expect("write stateful CommonJS dependency");
+        let cached_graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build repeated CommonJS require graph");
+        let cached = builder
+            .run_graph(
+                &cached_graph,
+                &NativeBuildOptions {
+                    output: root.path.join("cached-program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native repeated CommonJS require graph builds and runs");
+        assert_eq!(cached.stdout, b"true 1\n42\n");
     }
 
     #[test]
