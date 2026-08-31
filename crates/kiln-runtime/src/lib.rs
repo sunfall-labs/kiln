@@ -55,6 +55,47 @@ pub enum RuntimeHttpEvent {
     Closed,
 }
 
+/// Runtime-owned HTTP/1 control used by language adapters.
+///
+/// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
+/// framing and body backpressure are realm-runtime policy. Only Kiln types cross this seam.
+pub trait ActiveHttpRuntime {
+    fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction>;
+    fn connection_started(
+        &mut self,
+        resource: ResourceId,
+        operation: &AsyncHostOp,
+        request: RequestId,
+    ) -> bool;
+    fn complete_connection(
+        &mut self,
+        resource: ResourceId,
+        completion: Completion,
+    ) -> Option<Vec<node_stream::StreamAction>>;
+    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>>;
+    fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
+    fn start_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        high_water_mark: usize,
+    ) -> bool;
+    fn write_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition>;
+    fn end_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition>;
+}
+
 /// Default deterministic entropy seed from ADR 0026.
 pub const DEFAULT_ENTROPY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -799,6 +840,66 @@ struct RuntimeHttpConnection {
     responses: mpsc::UnboundedSender<hyper_http::ResponseCommand>,
     response_bodies: BTreeMap<u64, ResponseBodyDriver>,
     body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
+}
+
+impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
+    fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction> {
+        self.start_http1_connection(resource)
+    }
+
+    fn connection_started(
+        &mut self,
+        resource: ResourceId,
+        operation: &AsyncHostOp,
+        request: RequestId,
+    ) -> bool {
+        self.http_connection_started(resource, operation, request)
+    }
+
+    fn complete_connection(
+        &mut self,
+        resource: ResourceId,
+        completion: Completion,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.complete_http_connection(resource, completion)
+    }
+
+    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>> {
+        self.poll_http_connection(resource)
+    }
+
+    fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
+        self.take_http_events(resource)
+    }
+
+    fn start_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        high_water_mark: usize,
+    ) -> bool {
+        self.start_http1_response(resource, id, status, headers, high_water_mark)
+    }
+
+    fn write_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.write_http1_response(resource, id, data)
+    }
+
+    fn end_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.end_http1_response(resource, id, data)
+    }
 }
 
 impl Drop for RuntimeHttpConnection {
