@@ -75,6 +75,9 @@ pub struct RuntimeHttpClientRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpClientEvent {
+    Ready {
+        id: u64,
+    },
     Drain {
         id: u64,
     },
@@ -376,6 +379,14 @@ pub trait RealmHostProvider: AsyncHostOps {
         AsyncHostOps::cancel(self, request)
     }
 
+    /// Update provider-owned resource liveness synchronously.
+    ///
+    /// This is metadata, not I/O: Agent idle/reuse transitions must work both inside a running
+    /// LocalSet and in deterministic policy tests that never enter Tokio.
+    fn set_resource_referenced_now(&mut self, _resource: ResourceId, _referenced: bool) -> bool {
+        false
+    }
+
     /// Whether the provider still owns a request that can complete.
     fn has_pending_work(&self) -> bool;
 
@@ -456,6 +467,10 @@ impl AsyncHostOps for ScriptedHost {
 impl RealmHostProvider for ScriptedHost {
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn set_resource_referenced_now(&mut self, _resource: ResourceId, _referenced: bool) -> bool {
+        true
     }
 
     fn next_completion_async<'a>(
@@ -609,6 +624,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.host.has_pending_work()
     }
 
+    /// Returns whether pending requests or live resources should keep this realm running.
+    ///
+    /// Adapters retain bookkeeping for unreferenced sockets so future work can reuse them, but
+    /// only the provider owns the authoritative resource-liveness bit.
+    pub fn has_referenced_host_work(&self) -> bool {
+        self.host.has_referenced_work()
+    }
+
     /// Cancels one asynchronous host request owned by this realm.
     pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
@@ -661,6 +684,22 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
     }
 
+    /// Select a turn only while referenced host work or a realm timer can keep execution alive.
+    /// Unreferenced I/O remains registered and may still complete at later checkpoints, but does
+    /// not make a Node realm wait indefinitely on an idle keep-alive socket.
+    pub fn next_referenced_turn<M, T>(
+        &mut self,
+        realm: &mut Realm<M, T>,
+    ) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if !self.host.has_referenced_work() && realm.next_timer_deadline().is_none() {
+            return None;
+        }
+        self.next_turn(realm)
+    }
+
     /// Runs one synchronous realm operation as the current Tokio task.
     ///
     /// Interpreted bytecode and native continuation calls use this entry rather than executing
@@ -710,6 +749,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 client_events: None,
                 client_bodies: BTreeMap::new(),
                 client_body_events: BTreeMap::new(),
+                completed_client_requests: HashSet::new(),
             },
         );
         actions
@@ -742,6 +782,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 client_events: Some(event_receiver),
                 client_bodies: BTreeMap::new(),
                 client_body_events: BTreeMap::new(),
+                completed_client_requests: HashSet::new(),
             },
         );
         actions
@@ -1062,15 +1103,27 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             connection.client_bodies.remove(&id);
             connection.client_body_events.remove(&id);
         }
-        let Some(receiver) = self
-            .http_connections
-            .get_mut(&resource)
-            .and_then(|connection| connection.client_events.as_mut())
-        else {
+        let Some(receiver) = connection.client_events.as_mut() else {
             return events;
         };
         while let Ok(event) = receiver.try_recv() {
-            events.push(match event {
+            let id = match &event {
+                hyper_http::ClientEvent::ResponseHead { id, .. }
+                | hyper_http::ClientEvent::Ready { id }
+                | hyper_http::ClientEvent::ResponseData { id, .. }
+                | hyper_http::ClientEvent::ResponseEnd { id }
+                | hyper_http::ClientEvent::Error { id, .. } => Some(*id),
+                hyper_http::ClientEvent::Closed => None,
+            };
+            if id.is_some_and(|id| connection.completed_client_requests.contains(&id)) {
+                continue;
+            }
+            let terminal = matches!(
+                event,
+                hyper_http::ClientEvent::ResponseEnd { .. } | hyper_http::ClientEvent::Error { .. }
+            );
+            let mapped = match event {
+                hyper_http::ClientEvent::Ready { id } => RuntimeHttpClientEvent::Ready { id },
                 hyper_http::ClientEvent::ResponseHead {
                     id,
                     status,
@@ -1092,7 +1145,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                     RuntimeHttpClientEvent::Error { id, message }
                 }
                 hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
-            });
+            };
+            if terminal && let Some(id) = id {
+                connection.completed_client_requests.insert(id);
+            }
+            events.push(mapped);
         }
         events
     }
@@ -1157,11 +1214,16 @@ struct RuntimeHttpConnection {
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
     client_bodies: BTreeMap<u64, ResponseBodyDriver>,
     client_body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
+    completed_client_requests: HashSet<u64>,
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
-        self.http_agent.acquire(origin, request)
+        let decision = self.http_agent.acquire(origin, request);
+        if let AgentDecision::Reuse(resource) = decision {
+            let _ = self.host.set_resource_referenced_now(resource, true);
+        }
+        decision
     }
 
     fn client_connection_connected(
@@ -1174,7 +1236,11 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
-        self.http_agent.release(resource, reusable)
+        let release = self.http_agent.release(resource, reusable);
+        if release == AgentRelease::Idle {
+            let _ = self.host.set_resource_referenced_now(resource, false);
+        }
+        release
     }
 
     fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
@@ -2035,6 +2101,10 @@ impl RealmHostProvider for TokioHost {
 
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn set_resource_referenced_now(&mut self, resource: ResourceId, referenced: bool) -> bool {
+        self.set_resource_referenced(resource, referenced).is_ok()
     }
 
     fn next_completion_async<'a>(

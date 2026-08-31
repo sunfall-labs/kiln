@@ -8983,6 +8983,16 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         }
         return KILN_C99_OK;
     }
+    if (event->kind == 5) {
+        for (response = socket->responses; response != NULL; response = response->next) {
+            if (response->request_id == event->id) {
+                status = kiln_c99_node_emit(socket->host, response->object, "finish",
+                                            kiln_c99_undefined(), 0, 0, exception);
+                kiln_c99_node_unlink_response(response);
+                return status;
+            }
+        }
+    }
     if (client != NULL && event->kind == 6) {
         status = kiln_c99_new_object(&client->response);
             if (status == KILN_C99_OK)
@@ -9052,24 +9062,25 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                   0, exception);
     }
     if (client != NULL && event->kind == 8) {
-        uint64_t next_request_id = 0;
-        int release;
-        kiln_node_client_request *next = NULL;
         if (client->response_ended) return KILN_C99_OK;
         client->response_ended = 1;
-        release = kiln_realm_http_agent_release_active(
+        return kiln_c99_node_emit(client->host, client->response, "end",
+                                  kiln_c99_undefined(), 0, 0, exception);
+    }
+    if (event->kind == 11) {
+        uint64_t next_request_id = 0;
+        int release = kiln_realm_http_agent_release_active(
             socket->resource, 1, &next_request_id);
         if (release == KILN_REALM_HTTP_AGENT_DISPATCH) {
-            next = kiln_c99_node_client_for_id(socket, next_request_id);
+            kiln_node_client_request *next =
+                kiln_c99_node_client_for_id(socket, next_request_id);
             if (next == NULL) return KILN_C99_CONTROL_ERROR;
-        } else if (release != KILN_REALM_HTTP_AGENT_IDLE &&
-                   release != KILN_REALM_HTTP_AGENT_RETIRE) {
-            return KILN_C99_CONTROL_ERROR;
+            return kiln_c99_node_client_try_start(next);
         }
-        status = kiln_c99_node_emit(client->host, client->response, "end",
-                                    kiln_c99_undefined(), 0, 0, exception);
-        if (status != KILN_C99_OK || next == NULL) return status;
-        return kiln_c99_node_client_try_start(next);
+        if (release != KILN_REALM_HTTP_AGENT_IDLE &&
+            release != KILN_REALM_HTTP_AGENT_RETIRE)
+            return KILN_C99_CONTROL_ERROR;
+        return KILN_C99_OK;
     }
     if (event->kind == 9) {
         kiln_value message = kiln_c99_copy_text((const char *)event->data,
@@ -9346,11 +9357,9 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (server->accept_request != 0) {
                 kiln_c99_node_cancel_request(&server->accept_request);
             }
-            if (!server->protocol_http) {
-                for (socket = server->sockets; socket != NULL; socket = socket->next) {
-                    status = kiln_c99_node_close_socket(socket, 1);
-                    if (status != KILN_C99_OK) return status;
-                }
+            for (socket = server->sockets; socket != NULL; socket = socket->next) {
+                status = kiln_c99_node_close_socket(socket, 1);
+                if (status != KILN_C99_OK) return status;
             }
             if (server->listener != 0) {
                 work = (kiln_node_completion *)calloc(1, sizeof *work);
@@ -9715,7 +9724,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         if (status < KILN_C99_OK) return status;
         response->ended = 1;
-        kiln_c99_node_unlink_response(response);
         *result = receiver;
         return KILN_C99_OK;
     }
