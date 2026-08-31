@@ -49,6 +49,12 @@ pub struct ConformanceTest {
 enum Declaration {
     /// Boxed so that a manifest test does not carry the footprint of a whole parsed Test262 case.
     Frontmatter(Box<TestCase>),
+    /// A source file that could not be parsed as a Test262 test.
+    ///
+    /// External suites are often large and imperfect.  Keeping the parse error as a declaration
+    /// makes the bad file a real, selectable result instead of abandoning every valid file that
+    /// happened to be discovered beside it.
+    FrontmatterError(kiln_test262::ParseError),
     /// The program must run to completion and write exactly this.
     ExpectedStdout {
         expected: String,
@@ -91,7 +97,9 @@ impl ConformanceTest {
 
     pub fn provenance(&self) -> Provenance {
         match self.declaration {
-            Declaration::Frontmatter(_) => Provenance::Frontmatter,
+            Declaration::Frontmatter(_) | Declaration::FrontmatterError(_) => {
+                Provenance::Frontmatter
+            }
             Declaration::ExpectedStdout { .. } => Provenance::Manifest,
         }
     }
@@ -106,6 +114,22 @@ impl ConformanceTest {
             Declaration::Frontmatter(case) => {
                 test262::run_case_variants_with_harness(case, mode, self.harness.as_deref())
             }
+            Declaration::FrontmatterError(error) => vec![VariantResult {
+                // Metadata could not be read, so there is no honest way to infer strictness or a
+                // module goal.  One harness failure is still enough to preserve the source file's
+                // identity and keep the result visible to selectors and reporters.
+                variant: Variant::Sloppy,
+                result: CaseResult::new(
+                    Outcome::Fail,
+                    vec![Diagnostic::new(
+                        DiagnosticPhase::Harness,
+                        format!("invalid Test262 frontmatter: {error}"),
+                        None,
+                    )],
+                    String::new(),
+                    Instant::now(),
+                ),
+            }],
             Declaration::ExpectedStdout {
                 expected: _,
                 unavailable_reason: Some(reason),
@@ -164,6 +188,27 @@ impl ConformanceTest {
             declaration: Declaration::Frontmatter(Box::new(case)),
         }
     }
+
+    fn from_frontmatter_error(root: &Path, error: kiln_test262::ParseError) -> Self {
+        let path = error
+            .path
+            .clone()
+            .unwrap_or_else(|| root.join("<unknown-frontmatter-file>"));
+        let id = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        Self {
+            harness: None,
+            id,
+            source_path: path.clone(),
+            path,
+            bundle_input_paths: Vec::new(),
+            features: Vec::new(),
+            declaration: Declaration::FrontmatterError(error),
+        }
+    }
 }
 
 fn skip_build_requirement(reason: &str) -> VariantResult {
@@ -183,7 +228,8 @@ fn skip_build_requirement(reason: &str) -> VariantResult {
 /// A `manifest.toml` at `root` or above it wins for the tests it declares there; otherwise the
 /// tree is read as Test262 frontmatter.  A manifest that declares nothing under `root` is not
 /// this root's manifest and is ignored, so an unrelated file further up the tree cannot capture
-/// a directory it says nothing about.
+/// a directory it says nothing about.  A malformed frontmatter file is returned as one failed
+/// harness case while valid neighboring files remain runnable.
 pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
     if let Some(manifest) = governing_manifest(root)? {
         return Ok(manifest
@@ -198,10 +244,16 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
             })
             .collect());
     }
-    let mut tests: Vec<_> = kiln_test262::discover(root)
-        .map_err(DiscoveryError::Frontmatter)?
+    let (cases, errors) =
+        kiln_test262::discover_reporting(root).map_err(DiscoveryError::Frontmatter)?;
+    let mut tests: Vec<_> = cases
         .into_iter()
         .map(|case| ConformanceTest::from_frontmatter(root, case))
+        .chain(
+            errors
+                .into_iter()
+                .map(|error| ConformanceTest::from_frontmatter_error(root, error)),
+        )
         .collect();
     // Loaded once for the whole tree and shared: every case needs at least `assert.js`, and a
     // hundred thousand variants re-reading it would cost more than the run.
@@ -259,5 +311,55 @@ impl Error for DiscoveryError {
             Self::Manifest(error) => Some(error),
             Self::Frontmatter(error) => Some(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn malformed_frontmatter_is_a_failure_without_hiding_valid_neighbors() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-conformance-discovery-{stamp}"));
+        fs::create_dir_all(&root).expect("create corpus");
+        fs::write(root.join("good.js"), "/*---\ndescription: valid\n---*/\n")
+            .expect("write valid test");
+        fs::write(root.join("bad.js"), "let missing_frontmatter = true;\n")
+            .expect("write malformed test");
+
+        let tests = discover(&root).expect("one malformed file must not abort discovery");
+        assert_eq!(
+            tests.iter().map(ConformanceTest::id).collect::<Vec<_>>(),
+            ["bad.js", "good.js"]
+        );
+        let bad = tests.iter().find(|test| test.id() == "bad.js").unwrap();
+        let result = &bad.run(RunMode::Interpreter)[0].result;
+        assert_eq!(result.outcome, Outcome::Fail);
+        assert_eq!(
+            result.primary_diagnostic().unwrap().phase,
+            DiagnosticPhase::Harness
+        );
+        assert!(
+            result
+                .primary_diagnostic()
+                .unwrap()
+                .message
+                .contains("bad.js")
+        );
+
+        // Deleting the broken source removes exactly that result; a stale discovery error cannot
+        // survive a fresh scan of the corpus.
+        fs::remove_file(root.join("bad.js")).expect("delete malformed test");
+        let remaining = discover(&root).expect("the valid neighbor remains discoverable");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id(), "good.js");
+        fs::remove_dir_all(root).expect("remove corpus");
     }
 }
