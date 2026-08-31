@@ -4,7 +4,9 @@
 //! is written against is [`QueryEngine`], and a stub is the only way to provoke the failure modes
 //! that matter here - notably a query that panics, which a correct engine never does.
 
-use crate::dispatch::{execute_prepared_run, install_run_gate, install_test_gate, prepare_run};
+use crate::dispatch::{
+    execute_prepared_run, install_graph_gate, install_run_gate, install_test_gate, prepare_run,
+};
 use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
@@ -922,6 +924,153 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
     assert_eq!(stats.graph_cache_partial_hits, 1);
     assert_eq!(stats.graph_cache_misses, 1);
     assert_eq!(stats.graph_cache_entries, 1);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
+fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("gated-dependency.js");
+    let entry = fixture.dir.join("gated-entry.js");
+    std::fs::write(
+        &dependency,
+        "console.log('old'); export const answer = 42;\n",
+    )
+    .expect("write dependency");
+    std::fs::write(
+        &entry,
+        "import { answer } from './gated-dependency.js'; console.log(answer);\n",
+    )
+    .expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut setup = Client::connect(&fixture.socket).expect("connect");
+    setup.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let dependency = std::fs::canonicalize(dependency).expect("canonical dependency");
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    for path in [&dependency, &entry] {
+        setup
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: path.to_string_lossy().into_owned(),
+                text: std::fs::read_to_string(path).expect("read source"),
+            })
+            .expect("set source");
+    }
+    let initial_view = setup.source_view();
+    let dependency_path = dependency.to_string_lossy().into_owned();
+    let entry_path = entry.to_string_lossy().into_owned();
+    let (entered_rx, gate) = install_graph_gate(&dependency_path);
+
+    let socket = fixture.socket.clone();
+    let run_path = entry_path.clone();
+    let run_root = root.clone();
+    let blocked = std::thread::spawn(move || {
+        let mut client = Client::connect(&socket).expect("connect run client");
+        client.source_view = initial_view;
+        client.handshake().expect("run handshake");
+        client.raw_request(&Request::Run {
+            node: false,
+            source_view: initial_view,
+            path: run_path,
+            project_root: run_root,
+        })
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("graph preparation reached frontend gate");
+
+    let socket = fixture.socket.clone();
+    let update_path = dependency_path.clone();
+    let updater = std::thread::spawn(move || {
+        let mut client = Client::connect(&socket).expect("connect update client");
+        client.source_view = initial_view;
+        client.handshake().expect("update handshake");
+        let response = client.request(&Request::SetSource {
+            source_view: initial_view,
+            path: update_path,
+            text: "console.log('new'); export const answer = 7;\n".into(),
+        });
+        (client, response)
+    });
+    let (mut updater, update_response) = within(Duration::from_secs(5), move || updater.join())
+        .expect("SetSource must proceed while graph preparation is gated");
+    assert!(matches!(
+        update_response.expect("update request"),
+        Response::Ok
+    ));
+
+    gate.release();
+    let stale = within(Duration::from_secs(5), move || blocked.join())
+        .expect("stale graph preparation must finish");
+    let stale = stale.expect("stale run response");
+    assert!(
+        matches!(stale, Response::StaleSourceView { .. }),
+        "{stale:?}"
+    );
+    let Response::Stats(stats) = updater.request(&Request::Stats).expect("stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_entries, 0, "stale graph was not cached");
+
+    let updated_view = updater.source_view();
+    let Response::Ran(fresh) = updater
+        .request(&Request::Run {
+            node: false,
+            source_view: updated_view,
+            path: entry_path,
+            project_root: root.clone(),
+        })
+        .expect("fresh run")
+    else {
+        panic!("expected fresh run response");
+    };
+    assert_eq!(fresh.stdout, "new\n7\n");
+    let Response::Stats(stats) = updater.request(&Request::Stats).expect("fresh stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_entries, 1);
+    assert_eq!(stats.graph_cache_modules, 2);
+
+    let updated_view = updater.source_view();
+    updater
+        .request(&Request::SetSource {
+            source_view: updated_view,
+            path: dependency_path,
+            text: "console.log('newer'); export const answer = 8;\n".into(),
+        })
+        .expect("second edit");
+    let updated_view = updater.source_view();
+    let Response::Ran(fresh) = updater
+        .request(&Request::Run {
+            node: false,
+            source_view: updated_view,
+            path: std::fs::canonicalize(fixture.dir.join("gated-entry.js"))
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root.clone(),
+        })
+        .expect("partial fresh run")
+    else {
+        panic!("expected partial fresh run response");
+    };
+    assert_eq!(fresh.stdout, "newer\n8\n");
+    let Response::Stats(stats) = updater.request(&Request::Stats).expect("partial stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(
+        stats.graph_cache_partial_hits, 1,
+        "source revisions were captured"
+    );
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
