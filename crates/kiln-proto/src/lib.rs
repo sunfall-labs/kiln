@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -97,13 +97,39 @@ pub struct PackageResolution {
     pub importer: String,
     pub specifier: String,
     pub target: String,
+    pub condition: NodeRequestKind,
     pub package_json: Option<String>,
     pub package_json_hash: Option<SourceDigest>,
 }
 
+/// The package export condition selected by one source request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum NodeRequestKind {
+    Import,
+    Require,
+}
+
+/// The Node grammar selected for one synchronized source path.
+///
+/// This is deliberately a wire-owned value rather than a dependency on the resolver crate. The
+/// daemon must be able to replay the client's classification after package metadata disappears or
+/// changes on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeModuleFormat {
+    EsModule,
+    CommonJs,
+}
+
+/// The effective Node format for one canonical synchronized source path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeSourceFormat {
+    pub path: String,
+    pub format: NodeModuleFormat,
+}
+
 /// The package-resolution snapshot belonging to one [`Request::Sync`].
 ///
-/// Entries are canonicalized by `(importer, specifier)`. Construct maps through [`Self::new`],
+/// Entries are canonicalized by `(importer, specifier, condition)`. Construct maps through [`Self::new`],
 /// which sorts entries and rejects duplicate import keys. Wire deserialization is stricter: it
 /// rejects a map that is not already sorted and unique, so every accepted map has one stable
 /// representation and identity.
@@ -111,6 +137,8 @@ pub struct PackageResolution {
 pub struct ResolutionMap {
     pub project_root: String,
     pub entries: Vec<PackageResolution>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_formats: Vec<NodeSourceFormat>,
 }
 
 /// A malformed package-resolution snapshot.
@@ -118,6 +146,8 @@ pub struct ResolutionMap {
 pub enum ResolutionMapError {
     EmptyField { field: &'static str, index: usize },
     IncompleteManifest { index: usize },
+    NodeFormatsNotSorted { previous: String, current: String },
+    DuplicateNodeFormat { path: String },
     EntriesNotSorted { previous: String, current: String },
     DuplicateEntry { importer: String, specifier: String },
 }
@@ -132,6 +162,13 @@ impl fmt::Display for ResolutionMapError {
                 formatter,
                 "resolution entry {index} must provide both package_json and package_json_hash"
             ),
+            Self::NodeFormatsNotSorted { previous, current } => write!(
+                formatter,
+                "node format entries are not sorted: {previous:?} appears before {current:?}"
+            ),
+            Self::DuplicateNodeFormat { path } => {
+                write!(formatter, "duplicate node format for {path:?}")
+            }
             Self::EntriesNotSorted { previous, current } => write!(
                 formatter,
                 "resolution entries are not sorted: {previous:?} appears before {current:?}"
@@ -153,6 +190,8 @@ impl std::error::Error for ResolutionMapError {}
 struct ResolutionMapWire {
     project_root: String,
     entries: Vec<PackageResolution>,
+    #[serde(default)]
+    node_formats: Vec<NodeSourceFormat>,
 }
 
 impl<'de> Deserialize<'de> for ResolutionMap {
@@ -161,7 +200,8 @@ impl<'de> Deserialize<'de> for ResolutionMap {
         D: Deserializer<'de>,
     {
         let wire = ResolutionMapWire::deserialize(deserializer)?;
-        Self::from_sorted(wire.project_root, wire.entries).map_err(de::Error::custom)
+        Self::from_sorted(wire.project_root, wire.entries, wire.node_formats)
+            .map_err(de::Error::custom)
     }
 }
 
@@ -175,6 +215,24 @@ impl ResolutionMap {
         let map = Self {
             project_root: project_root.into(),
             entries,
+            node_formats: Vec::new(),
+        };
+        map.validate()?;
+        Ok(map)
+    }
+
+    /// Construct a map with the effective Node format for every source the client synchronized.
+    pub fn with_node_formats(
+        project_root: impl Into<String>,
+        mut entries: Vec<PackageResolution>,
+        mut node_formats: Vec<NodeSourceFormat>,
+    ) -> Result<Self, ResolutionMapError> {
+        entries.sort_by(Self::compare_entries);
+        node_formats.sort_by(|left, right| left.path.cmp(&right.path));
+        let map = Self {
+            project_root: project_root.into(),
+            entries,
+            node_formats,
         };
         map.validate()?;
         Ok(map)
@@ -226,6 +284,33 @@ impl ResolutionMap {
                 }
             }
         }
+        for (index, format) in self.node_formats.iter().enumerate() {
+            if format.path.is_empty() {
+                return Err(ResolutionMapError::EmptyField {
+                    field: "node_formats.path",
+                    index,
+                });
+            }
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| self.node_formats.get(previous))
+            {
+                match previous.path.cmp(&format.path) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => {
+                        return Err(ResolutionMapError::DuplicateNodeFormat {
+                            path: format.path.clone(),
+                        });
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return Err(ResolutionMapError::NodeFormatsNotSorted {
+                            previous: previous.path.clone(),
+                            current: format.path.clone(),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -237,13 +322,20 @@ impl ResolutionMap {
     pub fn identity(&self) -> Digest {
         debug_assert!(self.validate().is_ok());
         let mut bytes = Vec::new();
-        frame(&mut bytes, b"kiln-resolution-map\0v2");
+        frame(&mut bytes, b"kiln-resolution-map\0v4");
         frame(&mut bytes, self.project_root.as_bytes());
         frame_u64(&mut bytes, self.entries.len() as u64);
         for entry in &self.entries {
             frame(&mut bytes, entry.importer.as_bytes());
             frame(&mut bytes, entry.specifier.as_bytes());
             frame(&mut bytes, entry.target.as_bytes());
+            frame(
+                &mut bytes,
+                match entry.condition {
+                    NodeRequestKind::Import => b"import",
+                    NodeRequestKind::Require => b"require",
+                },
+            );
             match (&entry.package_json, &entry.package_json_hash) {
                 (Some(path), Some(hash)) => {
                     frame(&mut bytes, b"manifest");
@@ -254,16 +346,29 @@ impl ResolutionMap {
                 _ => unreachable!("validated resolution manifest provenance"),
             }
         }
+        frame_u64(&mut bytes, self.node_formats.len() as u64);
+        for format in &self.node_formats {
+            frame(&mut bytes, format.path.as_bytes());
+            frame(
+                &mut bytes,
+                match format.format {
+                    NodeModuleFormat::EsModule => b"esm",
+                    NodeModuleFormat::CommonJs => b"cjs",
+                },
+            );
+        }
         Digest::hash(&bytes)
     }
 
     fn from_sorted(
         project_root: String,
         entries: Vec<PackageResolution>,
+        node_formats: Vec<NodeSourceFormat>,
     ) -> Result<Self, ResolutionMapError> {
         let map = Self {
             project_root,
             entries,
+            node_formats,
         };
         map.validate()?;
         Ok(map)
@@ -273,6 +378,7 @@ impl ResolutionMap {
         left.importer
             .cmp(&right.importer)
             .then_with(|| left.specifier.cmp(&right.specifier))
+            .then_with(|| left.condition.cmp(&right.condition))
     }
 
     fn entry_key(entry: &PackageResolution) -> String {
@@ -735,8 +841,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v20_sync_source_view_and_cache_gc_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+    fn protocol_v21_sync_source_view_and_cache_gc_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 21);
 
         let requests = [
             (
@@ -950,6 +1056,7 @@ mod tests {
             importer: importer.to_owned(),
             specifier: specifier.to_owned(),
             target: target.to_owned(),
+            condition: NodeRequestKind::Import,
             package_json: Some("/project/node_modules/pkg/package.json".to_owned()),
             package_json_hash: Some(source_digest("package metadata")),
         }
@@ -1035,6 +1142,34 @@ mod tests {
         changed_hash.package_json_hash = Some(source_digest("different package metadata"));
         let changed_map = ResolutionMap::new("/project", vec![changed_hash]).expect("valid map");
         assert_ne!(left_map.identity(), changed_map.identity());
+
+        let formatted_map = ResolutionMap::with_node_formats(
+            "/project",
+            vec![package_resolution(
+                "a",
+                "bc",
+                "/project/node_modules/pkg/index.js",
+            )],
+            vec![NodeSourceFormat {
+                path: "/project/node_modules/pkg/index.js".to_owned(),
+                format: NodeModuleFormat::EsModule,
+            }],
+        )
+        .expect("format is a valid pinned decision");
+        assert_ne!(left_map.identity(), formatted_map.identity());
+
+        let encoded = serde_json::to_value(&formatted_map).expect("encode format snapshot");
+        assert_eq!(
+            encoded["node_formats"],
+            serde_json::json!([{
+                "path": "/project/node_modules/pkg/index.js",
+                "format": "EsModule"
+            }])
+        );
+        assert_eq!(
+            serde_json::from_value::<ResolutionMap>(encoded).expect("decode format snapshot"),
+            formatted_map
+        );
     }
 
     #[test]

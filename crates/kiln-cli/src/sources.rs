@@ -13,9 +13,10 @@ use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 use kiln_module_resolver::{
-    NodeModuleFormat, NodePackageResolver, ResolutionKind, ResolutionPolicy,
+    NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
+    ResolutionKind, ResolutionPolicy,
 };
-use kiln_proto::{PackageResolution, source_digest};
+use kiln_proto::{NodeModuleFormat, NodeSourceFormat, PackageResolution, source_digest};
 use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
@@ -135,12 +136,12 @@ pub(crate) fn include_reachable_dependencies(
     entry: &str,
     texts: &mut Vec<(String, String)>,
     node: bool,
-) -> Result<Vec<PackageResolution>> {
+) -> Result<(Vec<PackageResolution>, Vec<NodeSourceFormat>)> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let mut indexes = texts
@@ -151,6 +152,7 @@ pub(crate) fn include_reachable_dependencies(
     let mut pending = vec![entry];
     let mut visited = HashSet::new();
     let mut resolutions = BTreeMap::new();
+    let mut node_formats = BTreeMap::new();
 
     while let Some(importer) = pending.pop() {
         if !visited.insert(importer.clone()) {
@@ -168,11 +170,30 @@ pub(crate) fn include_reachable_dependencies(
         })?;
         let resolved_importer =
             kiln_module_resolver::ResolvedModule::new(importer.clone(), ResolutionKind::Relative);
-        let commonjs = node
-            && resolver
-                .node_format(&resolved_importer)
-                .map_err(|error| Error::BadInput(error.to_string()))?
-                == Some(NodeModuleFormat::CommonJs);
+        let importer_format = if node {
+            Some(
+                resolver
+                    .node_format(&resolved_importer)
+                    .map_err(|error| Error::BadInput(error.to_string()))?
+                    .ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "Node resolver did not classify source {}",
+                            importer.display()
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if let Some(format) = importer_format {
+            node_formats.insert(importer.clone(), to_wire_node_format(format));
+        }
+        let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
+        let request = if commonjs {
+            NodeRequestKind::Require
+        } else {
+            NodeRequestKind::Import
+        };
         let module = if commonjs {
             frontend_oxc::parse_commonjs(importer_path, importer_text)
         } else {
@@ -195,9 +216,21 @@ pub(crate) fn include_reachable_dependencies(
                 continue;
             }
             let resolved = resolver
-                .resolve_with_metadata(&specifier, &importer)
+                .resolve_with_metadata_for_request(&specifier, &importer, request)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
-            let target = resolved.module.path;
+            let target = resolved.module.path.clone();
+            if node {
+                let format = resolver
+                    .node_format(&resolved.module)
+                    .map_err(|error| Error::BadInput(error.to_string()))?
+                    .ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "Node resolver did not classify source {}",
+                            target.display()
+                        ))
+                    })?;
+                node_formats.insert(target.clone(), to_wire_node_format(format));
+            }
             let exact_explicit = match resolved.module.kind {
                 ResolutionKind::Relative => importer
                     .parent()
@@ -205,7 +238,7 @@ pub(crate) fn include_reachable_dependencies(
                 ResolutionKind::Absolute => Path::new(&specifier).is_file(),
                 _ => false,
             };
-            if !exact_explicit {
+            if node || !exact_explicit {
                 let package_json = resolved.package_json.as_deref();
                 let (package_json, package_json_hash) = if let Some(package_json) = package_json {
                     let package_json_text =
@@ -226,11 +259,15 @@ pub(crate) fn include_reachable_dependencies(
                     (None, None)
                 };
                 resolutions.insert(
-                    (importer_path.to_owned(), specifier.clone()),
+                    (importer_path.to_owned(), specifier.clone(), request),
                     PackageResolution {
                         importer: importer_path.to_owned(),
                         specifier: specifier.clone(),
                         target: target.to_string_lossy().into_owned(),
+                        condition: match request {
+                            NodeRequestKind::Import => kiln_proto::NodeRequestKind::Import,
+                            NodeRequestKind::Require => kiln_proto::NodeRequestKind::Require,
+                        },
                         package_json,
                         package_json_hash,
                     },
@@ -251,7 +288,23 @@ pub(crate) fn include_reachable_dependencies(
     }
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(resolutions.into_values().collect())
+    Ok((
+        resolutions.into_values().collect(),
+        node_formats
+            .into_iter()
+            .map(|(path, format)| NodeSourceFormat {
+                path: path.to_string_lossy().into_owned(),
+                format,
+            })
+            .collect(),
+    ))
+}
+
+fn to_wire_node_format(format: ResolverNodeModuleFormat) -> NodeModuleFormat {
+    match format {
+        ResolverNodeModuleFormat::EsModule => NodeModuleFormat::EsModule,
+        ResolverNodeModuleFormat::CommonJs => NodeModuleFormat::CommonJs,
+    }
 }
 
 fn collect_with_limit(root: &Path, max_files: usize) -> Result<Walk> {
@@ -478,7 +531,7 @@ mod tests {
             .canonicalize()
             .expect("canonical entry");
 
-        let resolutions = include_reachable_dependencies(
+        let (resolutions, node_formats) = include_reachable_dependencies(
             &tree.0,
             entry.to_str().expect("UTF-8 entry"),
             &mut texts,
@@ -518,6 +571,7 @@ mod tests {
                     .into_owned()
             )
         );
+        assert!(node_formats.is_empty());
     }
 
     #[test]
@@ -535,7 +589,7 @@ mod tests {
             canonical.to_string_lossy().into_owned(),
             std::fs::read_to_string(&entry).expect("read entry"),
         )];
-        let resolutions = include_reachable_dependencies(
+        let (resolutions, node_formats) = include_reachable_dependencies(
             &tree.0,
             canonical.to_str().expect("UTF-8 entry"),
             &mut texts,
@@ -543,6 +597,13 @@ mod tests {
         )
         .expect("recognized builtin needs no source snapshot");
         assert!(resolutions.is_empty());
+        assert_eq!(
+            node_formats,
+            vec![NodeSourceFormat {
+                path: canonical.to_string_lossy().into_owned(),
+                format: NodeModuleFormat::EsModule,
+            }]
+        );
         assert_eq!(texts.len(), 1);
 
         let error = include_reachable_dependencies(

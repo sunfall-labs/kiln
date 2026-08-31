@@ -189,7 +189,7 @@ impl GraphCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_proto::{PackageResolution, source_digest};
+    use kiln_proto::{NodeRequestKind, PackageResolution, source_digest};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn graph_fixture() -> (PathBuf, PathBuf, PathBuf, ModuleGraph) {
@@ -251,6 +251,7 @@ mod tests {
                 importer: first.to_string_lossy().into_owned(),
                 specifier: "pkg".into(),
                 target: second.to_string_lossy().into_owned(),
+                condition: NodeRequestKind::Import,
                 package_json: Some(root.join("package.json").to_string_lossy().into_owned()),
                 package_json_hash: Some(source_digest("manifest")),
             }],

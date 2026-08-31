@@ -109,7 +109,10 @@ mod tests {
     use super::*;
     use crate::backend::{SourceResponse, SyncCommit};
     use crate::commands;
-    use kiln_proto::{PackageResolution, ResolutionMap, SourceHash, source_digest};
+    use kiln_proto::{
+        NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution, ResolutionMap,
+        SourceHash, source_digest,
+    };
 
     #[test]
     fn concurrent_one_shot_sessions_have_private_socket_directories() {
@@ -208,6 +211,46 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_node_run_selects_dual_package_exports_by_request_kind() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-dual-package-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let package = fixture.join("node_modules/pkg");
+        std::fs::create_dir_all(&package).expect("create dual package fixture");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"exports":{"import":"./esm.mjs","require":"./cjs.cjs"}}"#,
+        )
+        .expect("write dual package manifest");
+        std::fs::write(package.join("esm.mjs"), "export default 'import';\n")
+            .expect("write import target");
+        std::fs::write(package.join("cjs.cjs"), "module.exports = 'require';\n")
+            .expect("write require target");
+        std::fs::write(
+            fixture.join("bridge.cjs"),
+            "module.exports = require('pkg');\n",
+        )
+        .expect("write CommonJS bridge");
+        let entry = fixture.join("main.mjs");
+        std::fs::write(
+            &entry,
+            "import imported from 'pkg'; import required from './bridge.cjs'; console.log(imported, required);\n",
+        )
+        .expect("write dual package entry");
+
+        let output = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::run(&mut session, &entry, &fixture, true).expect("run dual package graph")
+        };
+
+        assert_eq!(output.text, "import require\n");
+        assert_eq!(output.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn daemon_replays_the_pinned_package_target_after_the_manifest_disappears() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-pinned-package-fixture-{}",
@@ -219,9 +262,9 @@ mod tests {
         let source = fixture.join("main.js");
         let target = package.join("index.js");
         let manifest = package.join("package.json");
-        let source_text = "import { answer } from 'pkg'; console.log(answer);\n";
-        let target_text = "export const answer = 42;\n";
-        let manifest_text = r#"{"exports":"./index.js"}"#;
+        let source_text = "const { answer } = require('pkg'); console.log(answer);\n";
+        let target_text = "module.exports = { answer: 42 };\n";
+        let manifest_text = r#"{"exports":"./index.js","type":"commonjs"}"#;
         std::fs::write(&source, source_text).expect("write entry");
         std::fs::write(&target, target_text).expect("write package entry");
         std::fs::write(&manifest, manifest_text).expect("write package manifest");
@@ -245,15 +288,26 @@ mod tests {
                         hash: source_digest(target_text),
                     },
                 ],
-                ResolutionMap::new(
+                ResolutionMap::with_node_formats(
                     root.to_string_lossy(),
                     vec![PackageResolution {
                         importer: source_path.clone(),
                         specifier: "pkg".to_owned(),
                         target: target_path.clone(),
+                        condition: NodeRequestKind::Require,
                         package_json: Some(manifest.to_string_lossy().into_owned()),
                         package_json_hash: Some(source_digest(manifest_text)),
                     }],
+                    vec![
+                        NodeSourceFormat {
+                            path: source_path.clone(),
+                            format: NodeModuleFormat::CommonJs,
+                        },
+                        NodeSourceFormat {
+                            path: target_path.clone(),
+                            format: NodeModuleFormat::CommonJs,
+                        },
+                    ],
                 )
                 .expect("valid resolution map"),
             )
@@ -277,12 +331,7 @@ mod tests {
 
         std::fs::remove_file(&manifest).expect("remove manifest after commit");
         let SourceResponse::Ready(summary) = session
-            .run_at_view(
-                source_path,
-                root.to_string_lossy().into_owned(),
-                false,
-                view,
-            )
+            .run_at_view(source_path, root.to_string_lossy().into_owned(), true, view)
             .expect("run pinned graph")
         else {
             panic!("fresh source view became stale");

@@ -557,7 +557,32 @@ fn build_graph<E: QueryEngine>(
             (
                 PathBuf::from(&entry.importer),
                 entry.specifier.clone(),
+                match entry.condition {
+                    kiln_proto::NodeRequestKind::Import => {
+                        kiln_module_resolver::NodeRequestKind::Import
+                    }
+                    kiln_proto::NodeRequestKind::Require => {
+                        kiln_module_resolver::NodeRequestKind::Require
+                    }
+                },
                 PathBuf::from(&entry.target),
+            )
+        })
+        .collect::<Vec<_>>();
+    let formats = resolutions
+        .into_iter()
+        .flat_map(|map| &map.node_formats)
+        .map(|format| {
+            (
+                PathBuf::from(&format.path),
+                match format.format {
+                    kiln_proto::NodeModuleFormat::EsModule => {
+                        kiln_module_resolver::NodeModuleFormat::EsModule
+                    }
+                    kiln_proto::NodeModuleFormat::CommonJs => {
+                        kiln_module_resolver::NodeModuleFormat::CommonJs
+                    }
+                },
             )
         })
         .collect::<Vec<_>>();
@@ -603,9 +628,17 @@ fn build_graph<E: QueryEngine>(
             })
     };
     let resolver = if node {
-        kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins(project_root, entries)
+        kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
+            project_root,
+            entries,
+            formats,
+        )
     } else {
-        kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
+        kiln_module_resolver::PinnedPackageResolver::new_with_requests_and_formats(
+            project_root,
+            entries,
+            formats,
+        )
     }
     .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
         importer: PathBuf::new(),

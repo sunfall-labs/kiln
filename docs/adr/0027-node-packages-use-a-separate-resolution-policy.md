@@ -50,16 +50,38 @@ the same compare-and-swap update path as project dependencies.
 ### Package decisions are part of source authority
 
 The client records every package edge selected by `oxc_resolver`, the exact `package.json` path and
-its content digest in the staged `ResolutionMap`. Commit publishes that map atomically with source
-bytes and `SourceView`. Daemon graph construction uses `PinnedPackageResolver`: explicit paths keep
-the exact filesystem policy, while package requests select targets by pure `(importer, specifier)`
-lookup and then canonicalize and revalidate that target's containment, file kind and extension.
+its content digest in the staged `ResolutionMap`. The edge also records whether its request came
+from an ESM import or a CommonJS require. Commit publishes that map atomically with source bytes
+and `SourceView`. Daemon graph construction uses `PinnedPackageResolver`: explicit paths keep the
+exact filesystem policy, while package requests select targets by `(importer, specifier, request
+condition)` lookup and then canonicalize and revalidate that target's containment, file kind and
+extension.
 The daemon therefore cannot observe a different manifest generation from the client that produced
 the view or admit a mapped symlink that escapes the project. Resolution-map identity includes the
 manifest digest.
 
 Alternative install layouts such as Plug'n'Play and packages outside the canonical project root
 still require explicit policy additions.
+
+### Request conditions are part of the resolution policy
+
+The `ResolutionPolicy` seam accepts the request kind alongside the specifier and importer. The
+Node Adapter selects Oxc's `import` condition for ESM edges and `require` for CommonJS edges; the
+exact filesystem Adapter ignores the context and retains ADR 0011 behavior. The chosen condition
+and target are serialized into the authoritative resolution snapshot, so daemon replay does not
+rerun package export selection against ambient metadata. Effective source format remains a
+separate pinned field in the same snapshot, so package condition and wrapper classification are
+both stable during replay.
+
+### Format classification is pinned with the resolution snapshot
+
+The authoritative `ResolutionMap` also records the effective Node module format for every
+synchronized source, including the entry source. The client-side Node policy may inspect the
+selected package metadata while capturing the snapshot; daemon replay consumes only these pinned
+format records (with `.mjs` and `.cjs` remaining definitive from their extensions). This keeps
+CommonJS wrapper selection and graph execution stable if a package manifest is edited or deleted
+after capture. A missing pinned format is a fail-closed resolution error rather than permission to
+re-read ambient package metadata.
 
 ## Consequences
 
@@ -76,10 +98,13 @@ still require explicit policy additions.
 - Explicit relative/absolute resolution retains all ADR 0011 behavior.
 - Scoped and unscoped packages use the nearest eligible `node_modules` directory.
 - Package roots, conditional exports and wildcard subpaths resolve; blocked exports remain failures.
+- Dual packages select their `import` and `require` export targets according to the requesting
+  module's syntax in both direct graph and daemon-backed execution.
 - Traversal and symlink targets cannot escape the selected package or project root.
 - A one-shot command synchronizes only the reachable package sources, executes a named import, and
   observes a package-source edit on the next authoritative Sync.
 - Watch recognizes a synchronized package source without broadening project discovery to all of
   `node_modules`.
 - The staged source view pins the package metadata/resolution map, and daemon graph construction
-  cannot observe a different manifest generation from the client that produced the view.
+  cannot observe a different manifest generation from the client that produced the view, including
+  for Node module-format classification.

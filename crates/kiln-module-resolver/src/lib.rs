@@ -160,6 +160,13 @@ pub enum NodeModuleFormat {
     CommonJs,
 }
 
+/// The Node package condition selected by the syntax that made a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NodeRequestKind {
+    Import,
+    Require,
+}
+
 /// Classify from explicit extension and the nearest package manifest selected by resolution.
 /// `.mjs`/`.cjs` are definitive; `.js` follows `type`, defaulting to CommonJS as Node does.
 pub fn node_module_format(
@@ -283,6 +290,9 @@ pub enum ResolveError {
     UnsupportedExtension {
         path: PathBuf,
     },
+    NodeFormatNotPinned {
+        path: PathBuf,
+    },
     PackageNotFound {
         package: String,
         importer: PathBuf,
@@ -355,6 +365,11 @@ impl fmt::Display for ResolveError {
             Self::UnsupportedExtension { path } => write!(
                 formatter,
                 "unsupported module extension: {}",
+                display_path(path)
+            ),
+            Self::NodeFormatNotPinned { path } => write!(
+                formatter,
+                "Node module format is not pinned for {}",
                 display_path(path)
             ),
             Self::PackageNotFound { package, importer } => write!(
@@ -440,6 +455,19 @@ pub trait ResolutionPolicy {
 
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError>;
 
+    /// Resolve a request with the Node package condition implied by its syntax.
+    ///
+    /// Exact filesystem policies ignore this context; Node adapters select `import` or
+    /// `require` export conditions behind the same seam.
+    fn resolve_for_request(
+        &self,
+        specifier: &str,
+        importer: &Path,
+        _request: NodeRequestKind,
+    ) -> Result<ResolvedModule, ResolveError> {
+        self.resolve(specifier, importer)
+    }
+
     /// Node execution format when this policy has authoritative package metadata.
     fn node_format(
         &self,
@@ -467,14 +495,23 @@ impl ResolutionPolicy for ModuleResolver {
 #[derive(Debug)]
 pub struct NodePackageResolver {
     explicit: ModuleResolver,
-    packages: oxc_resolver::Resolver,
+    import_packages: oxc_resolver::Resolver,
+    require_packages: oxc_resolver::Resolver,
 }
 
 impl NodePackageResolver {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
         let explicit = ModuleResolver::new(project_root)?;
+        Ok(Self {
+            explicit,
+            import_packages: Self::package_resolver("import"),
+            require_packages: Self::package_resolver("require"),
+        })
+    }
+
+    fn package_resolver(condition: &str) -> oxc_resolver::Resolver {
         let options = oxc_resolver::ResolveOptions {
-            condition_names: vec!["node".to_owned(), "import".to_owned()],
+            condition_names: vec!["node".to_owned(), condition.to_owned()],
             extensions: SUPPORTED_EXTENSIONS
                 .iter()
                 .map(|extension| format!(".{extension}"))
@@ -485,10 +522,7 @@ impl NodePackageResolver {
             builtin_modules: true,
             ..oxc_resolver::ResolveOptions::default()
         };
-        Ok(Self {
-            explicit,
-            packages: oxc_resolver::Resolver::new(options),
-        })
+        oxc_resolver::Resolver::new(options)
     }
 
     pub fn project_root(&self) -> &Path {
@@ -504,13 +538,38 @@ impl NodePackageResolver {
             .map(|resolved| resolved.module)
     }
 
+    /// Resolve one request under the selected Node package condition.
+    pub fn resolve_for_request(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedModule, ResolveError> {
+        self.resolve_with_metadata_for_request(specifier, importer, request)
+            .map(|resolved| resolved.module)
+    }
+
     /// Resolve one request and retain the exact package manifest Oxc consulted.
     pub fn resolve_with_metadata(
         &self,
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedRequest, ResolveError> {
+        self.resolve_with_metadata_for_request(specifier, importer, NodeRequestKind::Import)
+    }
+
+    /// Resolve one request and retain metadata while selecting import or require conditions.
+    pub fn resolve_with_metadata_for_request(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedRequest, ResolveError> {
         let importer = importer.as_ref();
+        let packages = match request {
+            NodeRequestKind::Import => &self.import_packages,
+            NodeRequestKind::Require => &self.require_packages,
+        };
         if !matches!(
             classify_specifier(specifier),
             Err(ResolveError::InvalidSpecifier {
@@ -521,8 +580,7 @@ impl NodePackageResolver {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
-                let resolution = self
-                    .packages
+                let resolution = packages
                     .resolve(importer_directory, specifier)
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
@@ -547,8 +605,7 @@ impl NodePackageResolver {
 
         let canonical_importer = canonical_importer(importer, self.project_root())?;
         let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
-        let resolution = self
-            .packages
+        let resolution = packages
             .resolve(importer_directory, specifier)
             .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
         let package_json = resolution
@@ -601,6 +658,15 @@ impl ResolutionPolicy for NodePackageResolver {
 
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
         NodePackageResolver::resolve(self, specifier, importer)
+    }
+
+    fn resolve_for_request(
+        &self,
+        specifier: &str,
+        importer: &Path,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedModule, ResolveError> {
+        NodePackageResolver::resolve_for_request(self, specifier, importer, request)
     }
 
     fn node_format(
@@ -661,6 +727,28 @@ impl ResolutionPolicy for NodeRuntimeResolver {
         NodeRuntimeResolver::resolve(self, specifier, importer)
     }
 
+    fn resolve_for_request(
+        &self,
+        specifier: &str,
+        importer: &Path,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedModule, ResolveError> {
+        if let Some(builtin) = NodeBuiltin::parse(specifier) {
+            return Ok(ResolvedModule::new(
+                builtin.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
+        if specifier.starts_with("node:") {
+            return Err(ResolveError::InvalidSpecifier {
+                specifier: specifier.to_owned(),
+                reason: InvalidSpecifierReason::UrlScheme,
+            });
+        }
+        self.packages
+            .resolve_for_request(specifier, importer, request)
+    }
+
     fn node_format(
         &self,
         module: &ResolvedModule,
@@ -699,7 +787,8 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
 #[derive(Debug, Clone)]
 pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
-    packages: HashMap<(PathBuf, String), PathBuf>,
+    packages: HashMap<(PathBuf, String, NodeRequestKind), PathBuf>,
+    formats: HashMap<PathBuf, NodeModuleFormat>,
     node_builtins: bool,
 }
 
@@ -708,12 +797,66 @@ impl PinnedPackageResolver {
     where
         I: IntoIterator<Item = (PathBuf, String, PathBuf)>,
     {
+        Self::new_with_requests_and_formats(
+            project_root,
+            entries.into_iter().map(|(importer, specifier, target)| {
+                (importer, specifier, NodeRequestKind::Import, target)
+            }),
+            std::iter::empty(),
+        )
+    }
+
+    /// Construct a pinned resolver with the request condition selected for each package edge.
+    pub fn new_with_requests<I>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, NodeRequestKind, PathBuf)>,
+    {
+        Self::new_with_requests_and_formats(project_root, entries, std::iter::empty())
+    }
+
+    /// Construct a pinned resolver with effective Node formats captured for canonical sources.
+    ///
+    /// The format table is authoritative: replay never searches for or reads a package manifest.
+    pub fn new_with_formats<I, F>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+        formats: F,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, PathBuf)>,
+        F: IntoIterator<Item = (PathBuf, NodeModuleFormat)>,
+    {
+        Self::new_with_requests_and_formats(
+            project_root,
+            entries.into_iter().map(|(importer, specifier, target)| {
+                (importer, specifier, NodeRequestKind::Import, target)
+            }),
+            formats,
+        )
+    }
+
+    /// Construct a pinned resolver with request conditions and effective Node source formats.
+    pub fn new_with_requests_and_formats<I, F>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+        formats: F,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, NodeRequestKind, PathBuf)>,
+        F: IntoIterator<Item = (PathBuf, NodeModuleFormat)>,
+    {
         Ok(Self {
             explicit: ModuleResolver::new(project_root)?,
             packages: entries
                 .into_iter()
-                .map(|(importer, specifier, target)| ((importer, specifier), target))
+                .map(|(importer, specifier, request, target)| {
+                    ((importer, specifier, request), target)
+                })
                 .collect(),
+            formats: formats.into_iter().collect(),
             node_builtins: false,
         })
     }
@@ -732,6 +875,36 @@ impl PinnedPackageResolver {
         Ok(resolver)
     }
 
+    /// Construct a pinned resolver with Node builtins and effective Node source formats enabled.
+    pub fn new_with_node_builtins_and_formats<I, F>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+        formats: F,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, PathBuf)>,
+        F: IntoIterator<Item = (PathBuf, NodeModuleFormat)>,
+    {
+        let mut resolver = Self::new_with_formats(project_root, entries, formats)?;
+        resolver.node_builtins = true;
+        Ok(resolver)
+    }
+
+    /// Construct a pinned resolver with Node builtins, request conditions, and formats.
+    pub fn new_with_node_builtins_requests_and_formats<I, F>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+        formats: F,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, NodeRequestKind, PathBuf)>,
+        F: IntoIterator<Item = (PathBuf, NodeModuleFormat)>,
+    {
+        let mut resolver = Self::new_with_requests_and_formats(project_root, entries, formats)?;
+        resolver.node_builtins = true;
+        Ok(resolver)
+    }
+
     pub fn project_root(&self) -> &Path {
         self.explicit.project_root()
     }
@@ -740,6 +913,15 @@ impl PinnedPackageResolver {
         &self,
         specifier: &str,
         importer: impl AsRef<Path>,
+    ) -> Result<ResolvedModule, ResolveError> {
+        self.resolve_with_request(specifier, importer, NodeRequestKind::Import)
+    }
+
+    pub fn resolve_with_request(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+        request: NodeRequestKind,
     ) -> Result<ResolvedModule, ResolveError> {
         let importer = importer.as_ref();
         if self.node_builtins
@@ -753,7 +935,7 @@ impl PinnedPackageResolver {
         let canonical_importer = canonical_importer(importer, self.project_root())?;
         let Some(target) = self
             .packages
-            .get(&(canonical_importer.clone(), specifier.to_owned()))
+            .get(&(canonical_importer.clone(), specifier.to_owned(), request))
             .cloned()
         else {
             if !matches!(
@@ -804,14 +986,37 @@ impl ResolutionPolicy for PinnedPackageResolver {
         PinnedPackageResolver::resolve(self, specifier, importer)
     }
 
+    fn resolve_for_request(
+        &self,
+        specifier: &str,
+        importer: &Path,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedModule, ResolveError> {
+        PinnedPackageResolver::resolve_with_request(self, specifier, importer, request)
+    }
+
     fn node_format(
         &self,
         module: &ResolvedModule,
     ) -> Result<Option<NodeModuleFormat>, ResolveError> {
         if !self.node_builtins || module.kind == ResolutionKind::Builtin {
             Ok(None)
+        } else if matches!(
+            module
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("mjs" | "cjs")
+        ) {
+            Ok(Some(node_module_format(&module.path, None)?))
         } else {
-            Ok(Some(node_module_format_for_path(&module.path)?))
+            self.formats
+                .get(&module.path)
+                .copied()
+                .map(Some)
+                .ok_or_else(|| ResolveError::NodeFormatNotPinned {
+                    path: module.path.clone(),
+                })
         }
     }
 }
@@ -1344,6 +1549,118 @@ mod tests {
             pinned.resolve("other", &importer),
             Err(ResolveError::PackageResolution { .. })
         ));
+    }
+
+    #[test]
+    fn pinned_node_format_is_replayed_without_the_package_manifest() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let target = project.write("node_modules/pkg/index.js", "");
+        write_package(
+            &project,
+            "pkg",
+            r#"{"exports":"./index.js","type":"module"}"#,
+        );
+
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        let live = resolver
+            .resolve_with_metadata("pkg", &importer)
+            .expect("resolve package with metadata");
+        assert_eq!(
+            resolver.node_format(&live.module).unwrap(),
+            Some(NodeModuleFormat::EsModule)
+        );
+        let importer = fs::canonicalize(importer).expect("canonical importer");
+        let target = fs::canonicalize(target).expect("canonical target");
+        let pinned = PinnedPackageResolver::new_with_node_builtins_and_formats(
+            &project.root,
+            [(importer.clone(), "pkg".to_owned(), target.clone())],
+            [(target.clone(), NodeModuleFormat::EsModule)],
+        )
+        .expect("construct pinned resolver");
+
+        let resolved = pinned
+            .resolve("pkg", &importer)
+            .expect("replay package target");
+        fs::write(
+            project.root.join("node_modules/pkg/package.json"),
+            r#"{"exports":"./index.js","type":"commonjs"}"#,
+        )
+        .expect("modify manifest after capture");
+        assert_eq!(
+            pinned.node_format(&resolved).unwrap(),
+            Some(NodeModuleFormat::EsModule)
+        );
+        fs::remove_file(project.root.join("node_modules/pkg/package.json"))
+            .expect("remove manifest after capture");
+        assert_eq!(
+            pinned.node_format(&resolved).unwrap(),
+            Some(NodeModuleFormat::EsModule)
+        );
+    }
+
+    #[test]
+    fn package_conditions_follow_import_and_require_requests_and_can_be_pinned() {
+        let project = TempProject::new();
+        let importer = project.write("main.mjs", "");
+        let esm = project.write("node_modules/pkg/esm.mjs", "");
+        let cjs = project.write("node_modules/pkg/cjs.cjs", "");
+        write_package(
+            &project,
+            "pkg",
+            r#"{"exports":{"import":"./esm.mjs","require":"./cjs.cjs"}}"#,
+        );
+        let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
+        let import_target = resolver
+            .resolve_with_metadata_for_request("pkg", &importer, NodeRequestKind::Import)
+            .expect("resolve import condition");
+        let require_target = resolver
+            .resolve_with_metadata_for_request("pkg", &importer, NodeRequestKind::Require)
+            .expect("resolve require condition");
+        let importer = fs::canonicalize(importer).expect("canonical importer");
+        let esm = fs::canonicalize(esm).expect("canonical ESM target");
+        let cjs = fs::canonicalize(cjs).expect("canonical CommonJS target");
+        assert_eq!(import_target.module.path, esm);
+        assert_eq!(require_target.module.path, cjs);
+
+        let pinned = PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
+            &project.root,
+            [
+                (
+                    importer.clone(),
+                    "pkg".to_owned(),
+                    NodeRequestKind::Import,
+                    esm.clone(),
+                ),
+                (
+                    importer.clone(),
+                    "pkg".to_owned(),
+                    NodeRequestKind::Require,
+                    cjs.clone(),
+                ),
+            ],
+            [
+                (esm.clone(), NodeModuleFormat::EsModule),
+                (cjs.clone(), NodeModuleFormat::CommonJs),
+            ],
+        )
+        .expect("construct pinned resolver");
+        fs::remove_file(project.root.join("node_modules/pkg/package.json"))
+            .expect("remove manifest after capture");
+        assert_eq!(
+            pinned
+                .resolve_with_request("pkg", &importer, NodeRequestKind::Import)
+                .unwrap()
+                .path,
+            esm
+        );
+        assert_eq!(
+            pinned
+                .resolve_with_request("pkg", &importer, NodeRequestKind::Require)
+                .unwrap()
+                .path,
+            cjs
+        );
     }
 
     #[test]
