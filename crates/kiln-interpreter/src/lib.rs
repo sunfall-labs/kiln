@@ -39028,12 +39028,12 @@ mod tests {
         let readable = node_readable(
             &[ordinary_object([(
                 "highWaterMark".into(),
-                Value::Number(2.0),
+                Value::Number(4.0),
             )])],
             None,
         );
         let state = node_readable_state(&readable).expect("Readable owns semantic state");
-        assert_eq!(state.borrow().high_water_mark, 2);
+        assert_eq!(state.borrow().high_water_mark, 4);
         assert!(matches!(
             Native::PrototypeOf(PrototypeTable::Readable).property("on"),
             Some(Value::Native(Native::NodeEventOn))
