@@ -6,15 +6,17 @@
 //! exceptions, and async scheduling belong above this VM.
 
 use kiln_host_abi::{
-    ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
+    ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOp, HostOps, HostValue,
+    RequestId,
 };
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, Strictness,
     UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
-    RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+    ActiveHttpRuntime, ClockCapability, Realm, RealmRuntime, RuntimeHttpClientEvent,
+    RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
+    duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
@@ -5656,8 +5658,23 @@ pub fn execute_with_strictness<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
-    let locals = vec![Value::Undefined; program.local_count as usize];
     let mut runtime = realm_runtime()?;
+    execute_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+}
+
+/// Execute one script under a caller-owned realm runtime.
+///
+/// This is ADR 0031's policy injection seam: the ordinary [`execute`] API keeps the deterministic
+/// default, while embedders can construct a runtime with explicit capabilities without adding a
+/// parallel scheduler or letting the interpreter discover ambient state.
+pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+) -> Result<ExecutionResult, ExecutionError> {
+    let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
         strictness,
@@ -5665,6 +5682,7 @@ pub fn execute_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().clock,
     );
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
@@ -5676,7 +5694,7 @@ pub fn execute_with_strictness<H: HostOps + ?Sized>(
     // The program is not finished when its last statement is: anything it scheduled still has
     // to run, which is what makes a `setTimeout` observable at all.
     let execution = runtime.enter(|| vm.run())?;
-    vm.run_event_loop(&mut runtime)?;
+    vm.run_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
         ..execution
@@ -5705,6 +5723,17 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
+    execute_node_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+}
+
+/// Execute one Node script under a caller-owned realm runtime and capability policy.
+pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+) -> Result<ExecutionResult, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -5713,11 +5742,12 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().clock,
     );
-    vm.async_host = Some(&mut runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
-    vm.http_runtime = Some(&mut runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
+    vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
+    vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     let execution = runtime.enter(|| vm.run())?;
-    vm.run_node_event_loop(&mut runtime)?;
+    vm.run_node_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
         ..execution
@@ -5758,6 +5788,7 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().clock,
     );
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
@@ -6150,6 +6181,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         locals,
         limits,
         runtime_entropy_seed(runtime)?,
+        runtime.capabilities().clock,
     );
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
@@ -6595,6 +6627,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
     realm: Realm<Job, Timer>,
+    /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
+    /// clock regardless of this setting.
+    clock_capability: ClockCapability,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
@@ -6713,6 +6748,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         locals: Vec<Value>,
         limits: ExecutionLimits,
         entropy_seed: u64,
+        clock_capability: ClockCapability,
     ) -> Self {
         Self {
             program,
@@ -6739,6 +6775,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             steps: 0,
             symbol_serial: 0,
             realm: Realm::new(),
+            clock_capability,
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -6758,6 +6795,36 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             dynamic_modules: std::collections::HashMap::new(),
             dynamic_namespaces: std::collections::HashMap::new(),
             limits,
+        }
+    }
+
+    /// Read the realm's civil-time clock.
+    ///
+    /// The scheduler clock remains virtual even in a host-clock realm: timers, `performance.now`
+    /// and `process.hrtime` are monotonic measurements, not wall time. Only APIs whose meaning is
+    /// an epoch instant cross HostOps, and only when the caller explicitly selected that policy.
+    fn wall_clock_milliseconds(
+        &mut self,
+        capability: ClockCapability,
+        instruction: usize,
+    ) -> Result<f64, ExecutionError> {
+        match capability {
+            ClockCapability::Virtual => {
+                Ok(self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0)
+            }
+            ClockCapability::Host => self
+                .host
+                .call(HostOp::ClockNow, &[])
+                .map_err(|error| ExecutionError::Host {
+                    instruction,
+                    message: error.to_string(),
+                })?
+                .as_number()
+                .filter(|milliseconds| milliseconds.is_finite())
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "HostOp::ClockNow must return finite epoch milliseconds".to_owned(),
+                }),
         }
     }
 
@@ -13142,12 +13209,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     },
                 )
             }
-            // The *virtual* clock, not the host's. A program that asks the time twice with no
-            // timer in between gets the same answer, which is what makes a run repeatable --
-            // and is the whole point of the clock being the machine's. ADR 0015.
-            // The same virtual clock `Date.now` reads, so a program that measures with one and
-            // reports with the other stays consistent.
-            Native::DateNow | Native::PerformanceNow => Ok(Value::Number(
+            Native::DateNow => Ok(Value::Number(
+                self.wall_clock_milliseconds(self.clock_capability, instruction)?,
+            )),
+            // Monotonic measurement stays on the Tokio-owned virtual clock. A host-backed Date
+            // must not make elapsed-time APIs jump when the operating-system wall clock changes.
+            Native::PerformanceNow => Ok(Value::Number(
                 self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0,
             )),
             Native::ProcessHrtimeBigInt => {
@@ -13883,7 +13950,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
-                    0 => self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0,
+                    0 => self.wall_clock_milliseconds(self.clock_capability, instruction)?,
                     1 => match arguments.first() {
                         // `new Date(otherDate)` copies the instant rather than stringifying it.
                         Some(Value::Date(existing)) => existing.get(),
@@ -36346,7 +36413,10 @@ mod tests {
             Some(Value::Native(Native::NodeEventOn))
         ));
 
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
                 version: kiln_ir::BYTECODE_VERSION,
@@ -36360,6 +36430,7 @@ mod tests {
             Vec::new(),
             ExecutionLimits::default(),
             DEFAULT_ENTROPY_SEED,
+            ClockCapability::Virtual,
         );
         assert_eq!(
             vm.dispatch_memory_readable(
@@ -36411,7 +36482,10 @@ mod tests {
     fn node_writable_owns_lifecycle_without_owning_a_transport() {
         let writable = node_writable(&[], None);
         let state = node_writable_state(&writable).expect("Writable owns semantic state");
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
                 version: kiln_ir::BYTECODE_VERSION,
@@ -36425,6 +36499,7 @@ mod tests {
             Vec::new(),
             ExecutionLimits::default(),
             DEFAULT_ENTROPY_SEED,
+            ClockCapability::Virtual,
         );
         assert_eq!(
             vm.dispatch_memory_writable(
@@ -36449,6 +36524,7 @@ mod tests {
 
     struct TestHost {
         calls: Vec<(HostOp, Vec<HostValue>)>,
+        clock_now: Option<f64>,
     }
 
     impl HostOps for TestHost {
@@ -36458,7 +36534,10 @@ mod tests {
             arguments: &[HostValue],
         ) -> Result<HostValue, HostError> {
             self.calls.push((operation, arguments.to_vec()));
-            Ok(HostValue::Undefined)
+            match (operation, self.clock_now) {
+                (HostOp::ClockNow, Some(milliseconds)) => Ok(HostValue::number(milliseconds)),
+                _ => Ok(HostValue::Undefined),
+            }
         }
     }
 
@@ -36504,7 +36583,10 @@ mod tests {
     }
 
     fn run(program: &Program) -> Result<Value, ExecutionError> {
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         execute(
             Rc::new(program.clone()),
             &mut host,
@@ -36521,7 +36603,81 @@ mod tests {
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
             DEFAULT_ENTROPY_SEED,
+            ClockCapability::Virtual,
         )
+    }
+
+    #[test]
+    fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: Some(1_725_000_123_456.25),
+        };
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(program),
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            DEFAULT_ENTROPY_SEED,
+            ClockCapability::Host,
+        );
+
+        assert_eq!(
+            vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 7),
+            Ok(Value::Number(1_725_000_123_456.25))
+        );
+        assert_eq!(
+            vm.dispatch_native(Native::DateConstructor, &Value::Undefined, &[], 8),
+            Ok(Value::Date(Rc::new(std::cell::Cell::new(
+                1_725_000_123_456.0
+            ))))
+        );
+        assert_eq!(
+            vm.dispatch_native(Native::PerformanceNow, &Value::Undefined, &[], 9),
+            Ok(Value::Number(0.0))
+        );
+        assert_eq!(
+            vm.dispatch_native(Native::ProcessHrtimeBigInt, &Value::Undefined, &[], 10),
+            Ok(Value::BigInt(Rc::new(num_bigint::BigInt::from(0_u8))))
+        );
+        drop(vm);
+        assert_eq!(
+            host.calls,
+            vec![
+                (HostOp::ClockNow, Vec::new()),
+                (HostOp::ClockNow, Vec::new())
+            ]
+        );
+    }
+
+    #[test]
+    fn virtual_clock_never_calls_the_host() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: Some(123.0),
+        };
+        let mut vm = test_vm(&program, &mut host);
+        assert_eq!(
+            vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 0),
+            Ok(Value::Number(0.0))
+        );
+        drop(vm);
+        assert!(host.calls.is_empty());
     }
 
     #[test]
@@ -36533,7 +36689,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let date = Value::Date(Rc::new(std::cell::Cell::new(0.0)));
 
@@ -36552,7 +36711,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let target = ordinary_object(Vec::<(String, Value)>::new());
         let handler = ordinary_object([(
@@ -36579,7 +36741,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let original = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
         if let Value::Array(items) = &original {
@@ -36611,7 +36776,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         assert_eq!(
             vm.dispatch_native(
@@ -36654,7 +36822,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
         let listener = Value::Native(Native::ArrayConstructor);
@@ -36701,7 +36872,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
         let listener = Value::Native(Native::ArrayConstructor);
@@ -36742,7 +36916,10 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
         let observer = Value::Native(Native::ArrayConstructor);
@@ -37668,7 +37845,10 @@ mod tests {
                 upvalues: Vec::new(),
             }],
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let limits = ExecutionLimits {
             max_call_depth: 8,
             ..ExecutionLimits::default()
@@ -37830,7 +38010,10 @@ mod tests {
                 Instruction::Return,
             ],
         );
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let result = execute(
             Rc::new(program.clone()),
             &mut host,
@@ -37854,7 +38037,10 @@ mod tests {
                 Instruction::Return,
             ],
         );
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let result = execute(
             Rc::new(program.clone()),
             &mut host,
@@ -37883,7 +38069,10 @@ mod tests {
                 Instruction::Return,
             ],
         );
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let result = execute(
             Rc::new(program.clone()),
             &mut host,
@@ -37907,7 +38096,10 @@ mod tests {
                 Instruction::Return,
             ],
         );
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         execute(
             Rc::new(program.clone()),
             &mut host,
@@ -37923,7 +38115,10 @@ mod tests {
     #[test]
     fn step_limit_stops_an_infinite_program() {
         let program = program(Vec::new(), vec![Instruction::Jump(0)]);
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
         let error = execute(
             Rc::new(program.clone()),
             &mut host,
@@ -37972,7 +38167,10 @@ mod tests {
                 local_slot: 1,
             }],
         };
-        let mut host = TestHost { calls: Vec::new() };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+        };
 
         let result = execute_module(
             &module,

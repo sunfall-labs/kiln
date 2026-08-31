@@ -17,6 +17,15 @@ use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
 
+/// Realm policy that changes observable native execution.
+///
+/// The default deliberately preserves every pre-ADR-0031 artifact. Host-backed values are never
+/// captured here; only the policy participates in emission and identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EmissionPolicy {
+    pub host_clock: bool,
+}
+
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 const _: () = assert!(NUMBER_PARSE_VERSION == 1);
 
@@ -66,10 +75,14 @@ impl std::error::Error for EmitError {}
 /// externally linkable entry point.  The entry point includes two independently seeded 64-bit
 /// FNV-1a digests; [`CModule::program_hash`] remains the primary digest for API compatibility.
 pub fn emit(program: &Program) -> Result<CModule, EmitError> {
+    emit_with_policy(program, EmissionPolicy::default())
+}
+
+pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CModule, EmitError> {
     validate(program)?;
-    let (program_hash, symbol_hash) = hash_program_pair(program);
+    let (program_hash, symbol_hash) = hash_program_pair_with_policy(program, policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render(program, program_hash, &symbol);
+    let source = render(program, program_hash, &symbol, policy);
     Ok(CModule {
         symbol,
         source,
@@ -97,10 +110,17 @@ pub fn emit_c(program: &Program) -> Result<CModule, EmitError> {
 /// [`ModuleProgram::exports`].  Import slots are initialized before the first instruction and
 /// export slots are written only after successful execution.
 pub fn emit_module(module: &ModuleProgram) -> Result<CModule, EmitError> {
+    emit_module_with_policy(module, EmissionPolicy::default())
+}
+
+pub fn emit_module_with_policy(
+    module: &ModuleProgram,
+    policy: EmissionPolicy,
+) -> Result<CModule, EmitError> {
     validate_module(module)?;
-    let (program_hash, symbol_hash) = hash_module_pair(module);
+    let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, policy);
     Ok(CModule {
         symbol,
         source,
@@ -120,12 +140,20 @@ pub fn emit_module_with_logical_path(
     module: &ModuleProgram,
     logical_path: &str,
 ) -> Result<CModule, EmitError> {
+    emit_module_with_logical_path_and_policy(module, logical_path, EmissionPolicy::default())
+}
+
+pub fn emit_module_with_logical_path_and_policy(
+    module: &ModuleProgram,
+    logical_path: &str,
+    policy: EmissionPolicy,
+) -> Result<CModule, EmitError> {
     validate_logical_path(logical_path)?;
     validate_module(module)?;
-    let (program_hash, _) = hash_module_pair(module);
+    let (program_hash, _) = hash_module_pair_with_policy(module, policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol);
+    let source = render_module(module, program_hash, &symbol, policy);
     Ok(CModule {
         symbol,
         source,
@@ -1399,6 +1427,10 @@ int kiln_realm_now(double *out_milliseconds);
  * clock through the millisecond accessor above would make the two engines disagree below the
  * millisecond rather than refuse. */
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
+/* ADR 0031 civil time. Deterministic realms use the virtual accessor above; host realms call
+ * HostOps::ClockNow through the explicit host argument. */
+static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
+static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                            void *work, uint64_t *out_id);
@@ -4913,6 +4945,49 @@ static kiln_value kiln_c99_number(double value) {
     uint64_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return kiln_c99_value(KILN_VALUE_NUMBER, bits, NULL, 0);
+}
+
+static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds) {
+#if KILN_REALM_HOST_CLOCK
+    kiln_value answer;
+    double milliseconds;
+    if (host == NULL || host->call == NULL || out_milliseconds == NULL) {
+        return KILN_C99_HOST_ERROR;
+    }
+    if (host->call(host->context, UINT16_C(2), UINT16_C(0), NULL, &answer) != 0 ||
+        answer.tag != KILN_VALUE_NUMBER) {
+        return KILN_C99_HOST_ERROR;
+    }
+    memcpy(&milliseconds, &answer.bits, sizeof(milliseconds));
+    if (!isfinite(milliseconds)) return KILN_C99_HOST_ERROR;
+    *out_milliseconds = milliseconds;
+    return KILN_C99_OK;
+#else
+    (void)host;
+    return kiln_realm_now(out_milliseconds);
+#endif
+}
+
+static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high,
+                                           uint64_t *out_low) {
+#if KILN_REALM_HOST_CLOCK
+    double milliseconds;
+    double nanoseconds;
+    if (out_high == NULL || out_low == NULL ||
+        kiln_c99_wall_clock_milliseconds(host, &milliseconds) != KILN_C99_OK) {
+        return KILN_C99_HOST_ERROR;
+    }
+    nanoseconds = trunc(milliseconds * 1000000.0);
+    if (!isfinite(nanoseconds) || nanoseconds < 0.0 || nanoseconds > 18446744073709551615.0) {
+        return KILN_C99_HOST_ERROR;
+    }
+    *out_high = 0;
+    *out_low = (uint64_t)nanoseconds;
+    return KILN_C99_OK;
+#else
+    (void)host;
+    return kiln_realm_now_nanoseconds(out_high, out_low);
+#endif
 }
 
 static kiln_value kiln_c99_number_bits(uint64_t bits) {
@@ -10601,7 +10676,7 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
         if (zone.tag != KILN_VALUE_UNDEFINED && zone.tag != KILN_VALUE_STRING) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        if (kiln_realm_now_nanoseconds(&high, &low) != KILN_C99_OK) {
+        if (kiln_c99_wall_clock_nanoseconds(host, &high, &low) != KILN_C99_OK) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                         "the realm clock is not readable here");
         }
@@ -11744,7 +11819,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_DATE_NOW:
         {
             double milliseconds;
-            status = kiln_realm_now(&milliseconds);
+            status = kiln_c99_wall_clock_milliseconds(host, &milliseconds);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -19908,7 +19983,19 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     .unwrap();
 }
 
-fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
+fn render_emission_policy(output: &mut String, policy: EmissionPolicy) {
+    if policy == EmissionPolicy::default() {
+        return;
+    }
+    writeln!(
+        output,
+        "#define KILN_REALM_HOST_CLOCK {}",
+        u8::from(policy.host_clock)
+    )
+    .unwrap();
+}
+
+fn render(program: &Program, program_hash: u64, symbol: &str, policy: EmissionPolicy) -> String {
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
     let entry_symbol = if callables {
@@ -19918,6 +20005,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     };
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 64);
+    render_emission_policy(&mut output, policy);
     output.push_str(HEADER);
     writeln!(
         output,
@@ -19998,7 +20086,12 @@ fn render(program: &Program, program_hash: u64, symbol: &str) -> String {
     output
 }
 
-fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> String {
+fn render_module(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    policy: EmissionPolicy,
+) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
@@ -20009,6 +20102,7 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     };
     let max_stack = plan.body;
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
+    render_emission_policy(&mut output, policy);
     output.push_str(HEADER);
     writeln!(
         output,
@@ -21068,13 +21162,26 @@ fn host_op_code(operation: HostOp) -> u16 {
     operation as u16
 }
 
-fn hash_program_pair(program: &Program) -> (u64, u64) {
+fn hash_program_pair_with_policy(program: &Program, policy: EmissionPolicy) -> (u64, u64) {
     (
-        hash_program(program),
-        hash_program_with_seed(program, 0x84222325cbf29ce4),
+        hash_program_with_policy_and_seed(program, policy, 0xcbf29ce484222325),
+        hash_program_with_policy_and_seed(program, policy, 0x84222325cbf29ce4),
     )
 }
 
+fn hash_program_with_policy_and_seed(program: &Program, policy: EmissionPolicy, seed: u64) -> u64 {
+    let mut hash = hash_program_with_seed(program, seed);
+    if policy == EmissionPolicy::default() {
+        return hash;
+    }
+    for value in [0x70, u8::from(policy.host_clock)] {
+        hash ^= u64::from(value);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[cfg(test)]
 fn hash_program(program: &Program) -> u64 {
     hash_program_with_seed(program, 0xcbf29ce484222325)
 }
@@ -21413,10 +21520,30 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
 }
 
 fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
+    hash_module_pair_with_policy(module, EmissionPolicy::default())
+}
+
+fn hash_module_pair_with_policy(module: &ModuleProgram, policy: EmissionPolicy) -> (u64, u64) {
     (
-        hash_module_with_seed(module, 0xcbf29ce484222325),
-        hash_module_with_seed(module, 0x84222325cbf29ce4),
+        hash_module_with_policy_and_seed(module, policy, 0xcbf29ce484222325),
+        hash_module_with_policy_and_seed(module, policy, 0x84222325cbf29ce4),
     )
+}
+
+fn hash_module_with_policy_and_seed(
+    module: &ModuleProgram,
+    policy: EmissionPolicy,
+    seed: u64,
+) -> u64 {
+    let mut hash = hash_module_with_seed(module, seed);
+    if policy == EmissionPolicy::default() {
+        return hash;
+    }
+    for value in [0x71, u8::from(policy.host_clock)] {
+        hash ^= u64::from(value);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn hash_logical_path_pair(logical_path: &str) -> (u64, u64) {
@@ -21492,6 +21619,33 @@ mod tests {
     use kiln_ir::Builtin;
     use std::io::Write as _;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let legacy = emit(&program).expect("default program emits");
+        let explicit_default =
+            emit_with_policy(&program, EmissionPolicy::default()).expect("default policy emits");
+        let host_clock = emit_with_policy(&program, EmissionPolicy { host_clock: true })
+            .expect("host-clock policy emits");
+
+        assert_eq!(legacy, explicit_default);
+        assert_ne!(legacy.symbol, host_clock.symbol);
+        assert_ne!(legacy.program_hash, host_clock.program_hash);
+        assert!(!legacy.source.contains("#define KILN_REALM_HOST_CLOCK"));
+        assert!(
+            host_clock
+                .source
+                .contains("#define KILN_REALM_HOST_CLOCK 1")
+        );
+        assert!(host_clock.source.contains("UINT16_C(2)"));
+    }
 
     #[test]
     fn runtime_module_materializer_stays_inside_the_backend_value_abi() {

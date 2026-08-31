@@ -3,9 +3,11 @@
 ## Status
 
 Accepted. The capability vocabulary, deterministic defaults, HostOps identifiers, and
-artifact-policy identity are implemented. Interpreter/native consumption of all four values and
-scripted deterministic networking remain migration work; live interpreted Node networking already
-uses the production Tokio provider without weakening the default realm.
+artifact-policy identity are implemented. Clock consumption is implemented on interpreted and
+native paths: civil-time APIs use explicit `HostOp::ClockNow` only for a host-clock realm, while
+Tokio's virtual clock remains the scheduler and monotonic source. Entropy, timezone and locale
+consumption plus scripted deterministic networking remain migration work; live interpreted Node
+networking already uses the production Tokio provider without weakening the default realm.
 
 ## Context
 
