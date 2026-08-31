@@ -4,8 +4,8 @@
 
 **Superseded by ADR 0028.** This document records the former per-translation-unit approximation.
 The Realm-owned correction described below is now implemented for Promise reactions,
-`queueMicrotask`, timers and native HTTP event ingress. `process.nextTick` is the remaining native
-callback lane that has not crossed the Realm ABI.
+`queueMicrotask`, `process.nextTick`, timers and native HTTP event ingress. The native next-tick
+lane has its own Realm queue and drains before ordinary microtasks at every checkpoint.
 
 ## Context
 
@@ -35,9 +35,10 @@ implementation chose.
 Implementation update (31 August 2026): generated C now submits opaque microtask payloads through
 the private Realm ABI, the native launcher gives every module in a graph the same Realm, and it
 drives that Realm only after the complete graph has entered. The per-unit queue described by this
-ADR is no longer the implementation. The private ABI still needs a distinct `process.nextTick`
-lane so its FIFO drains before ordinary microtasks at every checkpoint, including when a nextTick
-callback queues another nextTick.
+ADR is no longer the implementation. A distinct private-ABI `process.nextTick` lane was added in
+commit `b0869ee8`; its FIFO drains before ordinary microtasks at every
+checkpoint, including when a nextTick callback queues another nextTick. Cross-module coverage in
+`kiln-module-graph` and the public native probe both pin that ordering.
 
 ## Decision (superseded)
 
@@ -60,7 +61,7 @@ silent -- `scripts/native.sh` compares the two engines on whatever is put in fro
 - Microtask ordering is now a Realm/program invariant rather than a translation-unit invariant.
 - A graph shares one queue and reaches its first checkpoint after dependency-first module entry,
   removing the cross-module approximation this ADR accepted temporarily.
-- Adding native `process.nextTick` requires a private async ABI revision and cache-identity miss,
-  but no public embedding ABI or IR discriminant change.
+- Native `process.nextTick` used a private async ABI revision and cache-identity miss without
+  changing the public embedding ABI or an IR discriminant.
 - Unhandled-rejection reporting remains a separate compatibility question; moving queue ownership
   did not silently claim Node's complete reporting policy.
