@@ -216,7 +216,7 @@ fn lower_parsed(parsed: &oxc_parser::ParserReturn<'_>, source_type: SourceType) 
         .iter()
         .map(lower_diagnostic)
         .collect::<Vec<_>>();
-    diagnostics.extend(early_errors(&parsed));
+    diagnostics.extend(early_errors(parsed));
     let mut lowerer = Lowerer;
     let body = lowerer.statements(&parsed.program.body);
 
@@ -913,6 +913,13 @@ impl Lowerer {
                 property: member.property.name.to_string(),
                 optional: member.optional,
             },
+            Expression::ComputedMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                HirExpressionKind::SuperComputedMember {
+                    property: Box::new(self.expression(&member.expression)),
+                }
+            }
             Expression::ComputedMemberExpression(member) => HirExpressionKind::ComputedMember {
                 object: Box::new(self.expression(&member.object)),
                 property: Box::new(self.expression(&member.expression)),
@@ -1252,6 +1259,21 @@ impl Lowerer {
                     value: Box::new(value),
                 }
             }
+            // `super[k] = v` takes the same shortcut as `super.x = v`, and inherits the same
+            // single wrong case; the reasoning is written out below.
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(member.object, Expression::Super(_)) =>
+            {
+                HirExpressionKind::ComputedAssignment {
+                    operator,
+                    object: Box::new(HirExpression {
+                        kind: HirExpressionKind::This,
+                        span,
+                    }),
+                    property: Box::new(self.expression(&member.expression)),
+                    value: Box::new(value),
+                }
+            }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
                 HirExpressionKind::ComputedAssignment {
                     operator,
@@ -1399,6 +1421,17 @@ impl Lowerer {
     /// has to already exist on the object, and a static name is neither.
     fn reference_pattern(&mut self, target: &AssignmentTarget<'_>) -> Option<kiln_hir::Pattern> {
         match target {
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(member.object, Expression::Super(_)) =>
+            {
+                Some(kiln_hir::Pattern::Computed {
+                    object: Box::new(HirExpression {
+                        kind: HirExpressionKind::This,
+                        span: span(member.span),
+                    }),
+                    property: Box::new(self.expression(&member.expression)),
+                })
+            }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
                 Some(kiln_hir::Pattern::Computed {
                     object: Box::new(self.expression(&member.object)),
