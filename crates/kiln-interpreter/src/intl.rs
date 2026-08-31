@@ -587,7 +587,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let Value::Date(instant) = receiver else {
                     return Err(type_error("this is not a Date object."));
                 };
-                let time = instant.get();
+                let time = instant.time.get();
                 // Before any option is read: an invalid date is the string, not a formatting
                 // attempt, so a throwing getter on the options bag never runs for one.
                 if !time.is_finite() {
