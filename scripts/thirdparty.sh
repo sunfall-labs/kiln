@@ -36,6 +36,13 @@ if [[ -z $KILN ]]; then
 	KILN="$(kiln_repo_root)/target/debug/kiln"
 fi
 
+# The four probes build.sh bundles as CommonJS for the *node* platform, because the libraries
+# behind them reach `path`, `fs`, `os` and `util` and cannot be bundled for the neutral one at
+# all. Running one of those without the Node Adapter is a harness bug rather than a finding: it
+# reports "require is not defined", which says nothing about the library. Kept in step with the
+# NODE_PLATFORM list in conformance/thirdparty/build.sh, which is where the decision is made.
+NODE_PLATFORM=" typescript babel postcss react-ssr "
+
 matched=0
 missing=0
 DIVERGENCES=()
@@ -47,10 +54,14 @@ for probe in "$BUNDLES"/probes/*.mjs; do
 		missing=$((missing + 1))
 		continue
 	fi
+	adapter=""
+	if [[ $NODE_PLATFORM == *" $name "* ]]; then
+		adapter="--node"
+	fi
 	# Same TZ discipline as the differential harness: kiln's realm is always UTC (ADR 0015) and
 	# node takes its zone from the environment, so the two are only comparable under TZ=UTC.
 	expected="$(TZ=UTC node "$bundle" 2>&1 || true)"
-	actual="$("$KILN" --one-shot run "$bundle" 2>&1 || true)"
+	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 || true)"
 	if [[ $actual == "$expected" ]]; then
 		matched=$((matched + 1))
 	else
