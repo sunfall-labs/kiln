@@ -19188,6 +19188,43 @@ int kiln_realm_cancel_active_request(uint64_t request) {
     (void)request;
     return KILN_REALM_ASYNC_NOT_FOUND;
 }
+
+/* The generated prelude declares the HTTP provider ABI for every unit. Backend tests link
+ * generated scalar C directly and do not exercise Node HTTP, so these symbols deliberately
+ * refuse every HTTP operation. The real Rust adapter is linked by native/runtime integration
+ * tests and production artifacts. */
+int32_t kiln_http1_decoder_create(void **out_decoder) {
+    if (out_decoder != NULL) *out_decoder = NULL;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+void kiln_http1_decoder_free(void *decoder) { (void)decoder; }
+int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
+                                kiln_http1_request_view *out_request) {
+    (void)decoder;
+    (void)bytes;
+    (void)bytes_len;
+    (void)out_request;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
+                                   const size_t *header_name_lens,
+                                   const uint8_t *const *header_values,
+                                   const size_t *header_value_lens, size_t header_count,
+                                   const uint8_t *body, size_t body_len, uint8_t keep_alive,
+                                   uint8_t *buffer, size_t capacity) {
+    (void)status;
+    (void)header_names;
+    (void)header_name_lens;
+    (void)header_values;
+    (void)header_value_lens;
+    (void)header_count;
+    (void)body;
+    (void)body_len;
+    (void)keep_alive;
+    (void)buffer;
+    (void)capacity;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 "#;
 
     fn linked_source(module_source: &str, wrapper: &str) -> String {
