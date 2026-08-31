@@ -202,7 +202,6 @@ struct WarmDaemonFixture {
 impl WarmDaemonFixture {
     fn new() -> Result<Self, String> {
         let root = reserve_daemon_root("warm")?;
-        let socket = root.join("daemon.sock");
         let dependency_path = root.join("dep.js");
         let entry_path = root.join("main.js");
         fs::write(&dependency_path, "export const value = 42;\n")
@@ -384,7 +383,7 @@ fn assert_run_stdout(summary: &RunSummary, expected: &str, label: &str) -> Resul
     ))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GraphExpectation {
     hits: u64,
     misses: u64,
