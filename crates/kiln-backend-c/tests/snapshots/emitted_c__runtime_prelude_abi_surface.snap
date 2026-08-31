@@ -332,6 +332,13 @@ KILN_VALUE_PROXY = 24
 #define KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS 265
 #define KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS 266
 #define KILN_C99_METHOD_NODE_EVENT_EMITTER 267
+#define KILN_C99_METHOD_NODE_NET_CREATE_SERVER 268
+#define KILN_C99_METHOD_NODE_SERVER_LISTEN 269
+#define KILN_C99_METHOD_NODE_SERVER_CLOSE 270
+#define KILN_C99_METHOD_NODE_SERVER_ADDRESS 271
+#define KILN_C99_METHOD_NODE_SOCKET_WRITE 272
+#define KILN_C99_METHOD_NODE_SOCKET_END 273
+#define KILN_C99_METHOD_NODE_SOCKET_DESTROY 274
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -370,6 +377,9 @@ typedef struct kiln_symbol {
 typedef struct kiln_bound {
 typedef struct kiln_microtask {
 typedef struct kiln_timer {
+typedef struct kiln_node_server {
+typedef struct kiln_node_socket {
+typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
 typedef struct kiln_text {
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
@@ -387,6 +397,12 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_ASYNC_RESOURCE 3
 #define KILN_REALM_ASYNC_RESOURCE_STATE 4
 #define KILN_REALM_ASYNC_ACCEPTED_STREAM 5
+#define KILN_REALM_OP_CLOSE_RESOURCE 4
+#define KILN_REALM_OP_TCP_LISTEN 7
+#define KILN_REALM_OP_TCP_ACCEPT 8
+#define KILN_REALM_OP_TCP_READ 10
+#define KILN_REALM_OP_TCP_WRITE 11
+#define KILN_REALM_OP_TCP_SHUTDOWN 12
 typedef struct kiln_async_host_op {
 typedef struct kiln_async_completion {
 typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
@@ -585,6 +601,7 @@ static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
@@ -738,6 +755,15 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
+static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
+static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
+static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
+static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
+static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
+static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
+static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
