@@ -520,12 +520,39 @@ const fn assert_method_immediately_after(ids: &[MethodId], previous: &str, next:
 }
 
 const fn validate_method_ids(ids: &[MethodId]) {
+    // `kiln_c99_invoke_method` returns immediately from each of these adapter handlers. A method
+    // in two such groups is therefore routed by source order rather than receiver shape, which is
+    // never a meaningful contract. Receiver-specific secondary routing (for example raw-socket
+    // `setEncoding`) must remain an explicit check in the generated dispatcher.
+    let terminal_adapter_groups = method_group_bit!(NodeEvent)
+        | method_group_bit!(NodeNet)
+        | method_group_bit!(NodeHttp)
+        | method_group_bit!(NodeResponse)
+        | method_group_bit!(Buffer)
+        | method_group_bit!(NodeUtil)
+        | method_group_bit!(NodeDiagnostics)
+        | method_group_bit!(NodeStream)
+        | method_group_bit!(NodePath);
     let mut index = 0;
     while index < ids.len() {
         assert!(ids[index].value > 0, "method IDs must be positive");
         assert!(
             ids[index].groups != 0,
             "every method must have a dispatch category"
+        );
+        let terminal_groups = ids[index].groups & terminal_adapter_groups;
+        let receiver_routed_set_encoding = method_name_is(
+            ids[index].name,
+            "KILN_C99_METHOD_NODE_READABLE_SET_ENCODING",
+        ) && terminal_groups
+            == method_group_bit!(NodeNet)
+                | method_group_bit!(NodeHttp)
+                | method_group_bit!(NodeStream);
+        assert!(
+            terminal_groups == 0
+                || terminal_groups & (terminal_groups - 1) == 0
+                || receiver_routed_set_encoding,
+            "only explicitly receiver-routed setEncoding may span terminal adapter groups"
         );
         let mut other = index + 1;
         while other < ids.len() {
