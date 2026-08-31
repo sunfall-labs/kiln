@@ -1600,6 +1600,9 @@ impl Lowerer {
 
         Ok(kiln_hir::Class {
             name: class.id.as_ref().map(|id| id.name.to_string()),
+            // Supplied by the named evaluation that encloses this, if any: the parser sees only
+            // that the class is anonymous.
+            inferred_name: None,
             superclass: class
                 .heritage
                 .as_ref()
@@ -2108,21 +2111,25 @@ fn span(value: Span) -> HirSpan {
     HirSpan::new(value.start, value.end)
 }
 
-/// Give an anonymous function expression the name of the binding it is being assigned to.
+/// Give an anonymous function or class expression the name of the binding it is being assigned
+/// to.
 ///
-/// Only functions: a class expression's name becomes a binding inside its own body, so inventing
-/// one would invent a scope the program did not write. A function expression's name is metadata
-/// -- `f.name` and a stack frame -- which is exactly what is missing without this.
-///
-/// That leaves `var C = class {}` reporting an empty name, which no engine does. Fixing it needs
-/// the two to be told apart below this crate: `kiln_hir::Class` has no counterpart to
-/// [`kiln_hir::Function::binds_own_name`], and `kiln-ir` derives the binding a class expression
-/// scopes itself in from the same `name` field it reports.
+/// A function's written name becomes a binding inside its own body and an inferred one does not,
+/// which is why a class carries the two apart in [`kiln_hir::Class::inferred_name`]: writing an
+/// inferred name into `name` would make `var C = class { m() { return C } }` resolve `C` from a
+/// scope the program never wrote. With the field there, both kinds of anonymous definition can
+/// be named -- and `var C = class {}` stops reporting the empty string, which no engine does.
 fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
-    if let kiln_hir::ExpressionKind::Function(function) = &mut value.kind
-        && function.name.is_none()
-    {
-        function.name = Some(name.to_owned());
+    match &mut value.kind {
+        kiln_hir::ExpressionKind::Function(function) if function.name.is_none() => {
+            function.name = Some(name.to_owned());
+        }
+        kiln_hir::ExpressionKind::Class(class)
+            if class.name.is_none() && class.inferred_name.is_none() =>
+        {
+            class.inferred_name = Some(name.to_owned());
+        }
+        _ => {}
     }
 }
 

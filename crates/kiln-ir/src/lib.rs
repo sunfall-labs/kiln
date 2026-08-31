@@ -4904,8 +4904,12 @@ impl Compiler {
         // `class_expression` invents one carrying a `%` that no identifier can contain. That
         // binding is scaffolding: `(class {}).name` is the empty string, and reporting the
         // scaffolding instead put `"%class0"` where the program could read it.
+        // A `%` carries the scaffolding binding an anonymous class expression is held in, which
+        // the program cannot spell and must never read back. What it *does* read back is the name
+        // a named evaluation supplied -- `var C = class {}` is `"C"` -- and the empty string only
+        // when nothing named it.
         let written_name = if name.starts_with('%') {
-            String::new()
+            class.inferred_name.clone().unwrap_or_default()
         } else {
             name.clone()
         };
@@ -7730,6 +7734,7 @@ mod tests {
 
         inner.name = Some("m".to_owned());
         let class = kiln_hir::Class {
+            inferred_name: None,
             name: Some("C".to_owned()),
             superclass: None,
             constructor: None,
@@ -8442,6 +8447,7 @@ mod tests {
                 }],
             }),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Reader".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8509,6 +8515,7 @@ mod tests {
             }],
             rest: None,
             body: vec![statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Name".to_owned()),
                 superclass: None,
                 constructor: Some(constructor),
@@ -8550,6 +8557,7 @@ mod tests {
     fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
         let program = compile(&module(vec![
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Base".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8558,6 +8566,7 @@ mod tests {
                 span: Span::default(),
             }))),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Derived".to_owned()),
                 superclass: Some(identifier("Base")),
                 constructor: Some(kiln_hir::Function {
@@ -8694,6 +8703,7 @@ mod tests {
         let program = compile(&module(vec![statement(StatementKind::Expression(
             Expression {
                 kind: ExpressionKind::Class(Box::new(kiln_hir::Class {
+                    inferred_name: None,
                     name: None,
                     superclass: None,
                     constructor: None,
