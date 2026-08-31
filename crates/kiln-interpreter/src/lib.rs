@@ -5330,8 +5330,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(), ExecutionError> {
         let mut incoming = ObjectData::default();
+        incoming.node_events = Some(Vec::new());
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
+        incoming.set("on", Value::Native(Native::NodeEventOn));
+        incoming.set("once", Value::Native(Native::NodeEventOnce));
+        incoming.set("emit", Value::Native(Native::NodeEventEmit));
         let mut headers = ObjectData::default();
         for (name, value) in request.headers_object() {
             headers.set(&name, Value::String(value));
@@ -5362,7 +5366,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.call_value(
             &handler,
             Value::Undefined,
-            vec![incoming, response],
+            vec![incoming.clone(), response],
+            instruction,
+        )?;
+        if !request.body.is_empty() {
+            let body = Value::TypedArray(Rc::new(TypedArrayData {
+                buffer: BufferData::fixed(request.body.len()),
+                offset: 0,
+                length: Some(request.body.len()),
+                kind: TypedKind::Uint8,
+            }));
+            if let Value::TypedArray(view) = &body {
+                view.buffer
+                    .bytes
+                    .borrow_mut()
+                    .copy_from_slice(&request.body);
+            }
+            self.dispatch_node_event(
+                Native::NodeEventEmit,
+                &incoming,
+                &[Value::String("data".into()), body],
+                instruction,
+            )?;
+        }
+        self.dispatch_node_event(
+            Native::NodeEventEmit,
+            &incoming,
+            &[Value::String("end".into())],
             instruction,
         )?;
         Ok(())
@@ -5403,7 +5433,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !(100.0..=999.0).contains(&status) || status.fract() != 0.0 {
                     return Err(ExecutionError::InvalidHttpStatus);
                 }
-                state.borrow_mut().status = status as u16;
+                let mut state = state.borrow_mut();
+                state.status = status as u16;
+                if let Some(Value::Object(headers)) = arguments.get(1) {
+                    let headers = headers.borrow();
+                    for property in headers
+                        .properties
+                        .iter()
+                        .filter(|property| property.attributes.enumerable)
+                    {
+                        let name = property.key.clone();
+                        let Property::Value(value) = &property.property else {
+                            continue;
+                        };
+                        let value = value.to_display_string();
+                        if let Some(header) = state
+                            .headers
+                            .iter_mut()
+                            .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+                        {
+                            header.1 = value;
+                        } else {
+                            state.headers.push((name, value));
+                        }
+                    }
+                }
                 Ok(receiver.clone())
             }
             Native::NodeResponseWrite => {
