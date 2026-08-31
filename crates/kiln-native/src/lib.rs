@@ -1928,6 +1928,26 @@ fn native_builtin_supports_export(
                 "Server" | "createServer" | "default" | "get" | "request"
             )
         }
+        NodeBuiltin::Util => matches!(
+            export_name,
+            "debuglog" | "default" | "deprecate" | "format" | "inherits" | "inspect"
+        ),
+        NodeBuiltin::DiagnosticsChannel => matches!(
+            export_name,
+            "channel" | "default" | "hasSubscribers" | "tracingChannel"
+        ),
+        NodeBuiltin::Https => matches!(export_name, "createServer" | "default"),
+        NodeBuiltin::Http2 => matches!(
+            export_name,
+            "createSecureServer" | "createServer" | "default"
+        ),
+        NodeBuiltin::Dns => matches!(export_name, "default" | "lookup"),
+        NodeBuiltin::Os => matches!(export_name, "default" | "hostname" | "networkInterfaces"),
+        NodeBuiltin::Stream => matches!(
+            export_name,
+            "Readable" | "Writable" | "addAbortSignal" | "default" | "finished"
+        ),
+        NodeBuiltin::PerfHooks => matches!(export_name, "default" | "performance"),
         _ => false,
     }
 }
@@ -2019,6 +2039,131 @@ exports[4] = create_server;
 exports[5] = namespace;
 exports[6] = get;
 exports[7] = request;"#,
+        ),
+        NodeBuiltin::Util => Some(
+            r#"kiln_value debuglog = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG);
+kiln_value deprecate = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_DEPRECATE);
+kiln_value format = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_FORMAT);
+kiln_value inherits = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_INHERITS);
+kiln_value inspect = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_INSPECT);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "debuglog", 8, debuglog, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "deprecate", 9, deprecate, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "format", 6, format, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "inherits", 8, inherits, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "inspect", 7, inspect, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = debuglog;
+exports[1] = namespace;
+exports[2] = deprecate;
+exports[3] = format;
+exports[4] = inherits;
+exports[5] = inspect;"#,
+        ),
+        NodeBuiltin::DiagnosticsChannel => Some(
+            r#"kiln_value channel = kiln_c99_method(KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL);
+kiln_value tracing_channel = kiln_c99_method(KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "channel", 7, channel, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "hasSubscribers", 14, kiln_c99_boolean(0), 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "tracingChannel", 14, tracing_channel, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = channel;
+exports[1] = namespace;
+exports[2] = kiln_c99_boolean(0);
+exports[3] = tracing_channel;"#,
+        ),
+        NodeBuiltin::Https => Some(
+            r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = create_server;
+exports[1] = namespace;"#,
+        ),
+        NodeBuiltin::Http2 => Some(
+            r#"kiln_value create_secure = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER);
+kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createSecureServer", 18, create_secure, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = create_secure;
+exports[1] = create_server;
+exports[2] = namespace;"#,
+        ),
+        NodeBuiltin::Dns => Some(
+            r#"kiln_value lookup = kiln_c99_method(KILN_C99_METHOD_NODE_DNS_LOOKUP);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "lookup", 6, lookup, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = lookup;"#,
+        ),
+        NodeBuiltin::Os => Some(
+            r#"kiln_value hostname = kiln_c99_method(KILN_C99_METHOD_NODE_OS_HOSTNAME);
+kiln_value network_interfaces = kiln_c99_method(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "hostname", 8, hostname, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "networkInterfaces", 17, network_interfaces, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = hostname;
+exports[2] = network_interfaces;"#,
+        ),
+        NodeBuiltin::Stream => Some(
+            r#"kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
+kiln_value writable = kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE);
+kiln_value add_abort_signal = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL);
+kiln_value finished = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM_FINISHED);
+kiln_value stream = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM);
+int status = kiln_c99_put(host, stream, "Readable", 8, readable, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "Writable", 8, writable, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "addAbortSignal", 14, add_abort_signal, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "finished", 8, finished, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = readable;
+exports[1] = writable;
+exports[2] = add_abort_signal;
+exports[3] = stream;
+exports[4] = finished;"#,
+        ),
+        NodeBuiltin::PerfHooks => Some(
+            r#"kiln_value performance;
+int status = kiln_c99_new_object(&performance);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, performance, "now", 3, kiln_c99_method(KILN_C99_METHOD_NODE_PERFORMANCE_NOW), 0, NULL);
+if (status != KILN_C99_OK) return status;
+kiln_value namespace;
+status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = performance;"#,
         ),
         _ => None,
     }
@@ -3977,7 +4122,7 @@ mod tests {
         let project = TestDirectory::new("native-node-builtin-gate");
         let entry = project.path.join("main.mjs");
         fs::write(&entry, "export const marker = 1;\n").expect("write entry");
-        let builtin_path = NodeBuiltin::Https.virtual_path(&project.path);
+        let builtin_path = NodeBuiltin::Path.virtual_path(&project.path);
         let entry_program = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
@@ -3991,7 +4136,7 @@ mod tests {
                 local_count: 1,
                 functions: Vec::new(),
             },
-            dependencies: vec!["node:https".to_owned()],
+            dependencies: vec!["node:path".to_owned()],
             imports: Vec::new(),
             exports: vec![ExportBinding {
                 exported: "marker".to_owned(),
@@ -4005,7 +4150,7 @@ mod tests {
                 &project.path,
                 [(
                     entry.clone(),
-                    "node:https".to_owned(),
+                    "node:path".to_owned(),
                     NodeRequestKind::Import,
                     builtin_path,
                 )],
@@ -4026,7 +4171,7 @@ mod tests {
             validate_native_node_builtins(&graph)
                 .expect_err("unmaterialized builtin must fail")
                 .to_string(),
-            "native Node execution does not yet materialize the `node:https` builtin"
+            "native Node execution does not yet materialize the `node:path` builtin"
         );
         assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
         assert!(!native_builtin_supports_export(
@@ -4081,7 +4226,8 @@ mod tests {
         );
         assert!(emitted.source.contains("exports[0] = constructor;"));
         assert!(emitted.source.contains("exports[1] = constructor;"));
-        assert!(native_builtin_body(NodeBuiltin::Https).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+        assert!(native_builtin_body(NodeBuiltin::Path).is_none());
     }
 
     #[test]
@@ -4093,7 +4239,30 @@ mod tests {
         assert!(body.contains("exports[0] = connect;"));
         assert!(body.contains("exports[1] = connect;"));
         assert!(body.contains("exports[2] = create_server;"));
-        assert!(native_builtin_body(NodeBuiltin::Https).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Https).is_some());
+        assert!(native_builtin_body(NodeBuiltin::Path).is_none());
+    }
+
+    #[test]
+    fn node_stream_and_perf_hooks_have_native_runtime_module_materializers() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        let stream = native_builtin_body(NodeBuiltin::Stream).expect("stream materializes");
+        assert!(stream.contains("KILN_C99_METHOD_NODE_READABLE"));
+        assert!(stream.contains("KILN_C99_METHOD_NODE_WRITABLE"));
+        assert!(stream.contains("KILN_C99_METHOD_NODE_STREAM_FINISHED"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::Stream,
+            "addAbortSignal"
+        ));
+
+        let performance =
+            native_builtin_body(NodeBuiltin::PerfHooks).expect("perf_hooks materializes");
+        assert!(performance.contains("KILN_C99_METHOD_NODE_PERFORMANCE_NOW"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::PerfHooks,
+            "performance"
+        ));
     }
 
     #[test]
