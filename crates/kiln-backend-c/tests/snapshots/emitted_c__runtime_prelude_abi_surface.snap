@@ -617,6 +617,7 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
@@ -837,6 +838,7 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
+static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }

@@ -1615,6 +1615,7 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int writing);
+static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
@@ -2223,6 +2224,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
     kiln_object *object;
     size_t index;
     int status;
+    /* Node resource pointers are represented by reserved values in the ordinary property store,
+     * but they are not JavaScript properties.  A program can spell the key as a string, so hide
+     * and ignore these protocol slots explicitly instead of exposing a C pointer as an object or
+     * allowing an assignment to replace it. */
+    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         /* Writing to a proxy is a call, exactly as reading one is. */
         return kiln_c99_proxy_set(host, target,
@@ -6721,6 +6729,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown) {
     int status;
+    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         /* Reading a proxy *is* a call, so it cannot go through the pure walk below. The trap
          * takes a key value; a name reached by this path was always an ordinary string. */
@@ -8371,14 +8383,28 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
                                             void *pointer) {
     kiln_property *slot;
-    int status = kiln_c99_put(NULL, object, key, key_len,
-                              kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer,
-                                             NULL, 0), 0, NULL);
+    int status = kiln_c99_own_slot(object, key, key_len, &slot);
     if (status != KILN_C99_OK) return status;
-    slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL) return KILN_C99_CONTROL_ERROR;
+    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL, 0);
     slot->enumerable = 0;
+    slot->writable = 0;
+    slot->configurable = 0;
+    slot->accessor = 0;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
+    static const char *const names[] = {
+        "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
+    };
+    size_t index;
+    for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+        size_t length = strlen(names[index]);
+        if (key_len == length && memcmp(key, names[index], length) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
@@ -8910,16 +8936,20 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (code == KILN_C99_METHOD_NODE_SERVER_LISTEN) {
             kiln_node_completion *work;
             kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value host_value = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
-                                        ? kiln_c99_text(args[1])
-                                        : kiln_c99_copy_text("0.0.0.0", 7);
+            size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
+            kiln_value host_value = callback_index == 1
+                                        ? kiln_c99_copy_text("0.0.0.0", 7)
+                                        : argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
+                                              ? kiln_c99_text(args[1])
+                                              : kiln_c99_copy_text("0.0.0.0", 7);
             double port = kiln_c99_as_number(port_value);
             int status;
             if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "Port should be >= 0 and < 65536");
-            if (argc > 2 && kiln_c99_is_callable(args[2])) {
-                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9), args[2]};
+            if (argc > callback_index && kiln_c99_is_callable(args[callback_index])) {
+                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9),
+                                           args[callback_index]};
                 kiln_value ignored;
                 status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE,
                                              receiver, once_args, 2, depth, thrown);
