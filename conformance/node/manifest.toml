@@ -139,6 +139,13 @@ features = ["node:events", "event-emitter", "module-graph"]
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/stream/readable-event"
+source = "upstream-adapted/stream-readable-event.mjs"
+status = "runnable"
+features = ["node:stream", "event-emitter", "readable-state", "next-tick", "timers"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/net/listen-close-server"
 source = "upstream-adapted/net-listen-close-server.mjs"
 status = "runnable"

@@ -78,9 +78,10 @@
       "features": ["node:net", "tokio-net", "resource-lifecycle"]
     },
     "parallel/test-stream-readable-event.js": {
-      "expectation": "expected-failure",
+      "expectation": "pass",
       "sha256": "72b1bcab948132734959152c08b6c1565bc8de84eaa56103a0d075863ef9b5a4",
-      "reason": "Node readable stream state and EventEmitter integration are not implemented yet",
+      "adapted_complete": true,
+      "adapted": ["upstream-adapted/stream-readable-event.mjs"],
       "features": ["node:stream", "event-emitter"]
     },
     "parallel/test-cluster-basic.js": {
