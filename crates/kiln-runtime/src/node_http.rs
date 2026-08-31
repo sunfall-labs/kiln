@@ -33,6 +33,10 @@ pub struct HttpConnectionError {
     pub actions: Vec<StreamAction>,
 }
 
+/// Node-facing events and transport work selected by one connection completion.
+pub type HttpConnectionTransition =
+    Result<(Vec<HttpConnectionEvent>, Vec<StreamAction>), HttpConnectionError>;
+
 /// One HTTP connection composed with Node's provider-neutral duplex stream driver.
 ///
 /// Host operations selected here run unchanged against `TokioHost` and `ScriptedHost`. The
@@ -83,10 +87,7 @@ impl HttpConnectionDriver {
     /// Apply one realm completion, returning Node-facing events separately from new transport
     /// actions. Protocol failure closes the resource through the same cancellation path as a
     /// socket destroy rather than leaking a parser-specific operation to the adapter.
-    pub fn completed(
-        &mut self,
-        completion: Completion,
-    ) -> Option<Result<(Vec<HttpConnectionEvent>, Vec<StreamAction>), HttpConnectionError>> {
+    pub fn completed(&mut self, completion: Completion) -> Option<HttpConnectionTransition> {
         let actions = self.stream.completed(completion)?;
         let mut events = Vec::new();
         let mut transport = Vec::new();
