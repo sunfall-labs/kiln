@@ -5,6 +5,8 @@
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
 
+mod http_transport;
+mod hyper_http;
 pub mod node_http;
 pub mod node_net;
 pub mod node_stream;
@@ -27,6 +29,8 @@ use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
 use tokio::sync::mpsc;
+
+use crate::http_transport::HttpTransportDriver;
 
 /// Default deterministic entropy seed from ADR 0026.
 pub const DEFAULT_ENTROPY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -306,6 +310,7 @@ pub struct RealmRuntime {
     time_paused: bool,
     host: TokioHost,
     capabilities: RealmCapabilities,
+    http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
     _not_send: PhantomData<Rc<()>>,
@@ -339,6 +344,7 @@ impl RealmRuntime {
             time_paused: false,
             host: TokioHost::new(),
             capabilities,
+            http_connections: BTreeMap::new(),
             _not_send: PhantomData,
         })
     }
@@ -481,6 +487,69 @@ impl RealmRuntime {
         &mut self.host
     }
 
+    /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
+    ///
+    /// This runtime-owned entry point is intentionally Kiln-shaped: callers receive HostOps
+    /// actions and never a Tokio task, Hyper service, or socket. The temporary response callback
+    /// is the migration seam; Node request events replace it before public compatibility is
+    /// advertised through this path.
+    #[doc(hidden)]
+    pub fn start_http1_connection<F>(
+        &mut self,
+        resource: ResourceId,
+        handler: F,
+    ) -> Vec<node_stream::StreamAction>
+    where
+        F: Fn(node_http::HttpRequest) -> node_http::HttpResponse + Clone + 'static,
+    {
+        let (io, mut transport) = HttpTransportDriver::new(resource);
+        let task = self
+            .local
+            .spawn_local(hyper_http::http1_connection(io, handler));
+        let actions = transport.start();
+        self.http_connections
+            .insert(resource, RuntimeHttpConnection { transport, task });
+        actions
+    }
+
+    #[doc(hidden)]
+    pub fn http_connection_started(
+        &mut self,
+        resource: ResourceId,
+        operation: &AsyncHostOp,
+        request: RequestId,
+    ) -> bool {
+        self.http_connections
+            .get_mut(&resource)
+            .is_some_and(|connection| connection.transport.started(operation, request))
+    }
+
+    #[doc(hidden)]
+    pub fn complete_http_connection(
+        &mut self,
+        resource: ResourceId,
+        completion: Completion,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.http_connections
+            .get_mut(&resource)?
+            .transport
+            .completed(completion)
+    }
+
+    /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.
+    #[doc(hidden)]
+    pub fn poll_http_connection(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.local.block_on(&self.runtime, async {
+            tokio::task::yield_now().await;
+        });
+        self.http_connections
+            .get_mut(&resource)
+            .map(|connection| connection.transport.pump_write())
+    }
+
     /// Drives `realm` until it has no microtasks or timers left.
     ///
     /// Tokio's paused clock is enabled lazily so a runtime can be constructed before any realm
@@ -526,6 +595,17 @@ impl RealmRuntime {
             self.time_paused = true;
         }
         self.local.block_on(&self.runtime, next_timer(realm))
+    }
+}
+
+struct RuntimeHttpConnection {
+    transport: HttpTransportDriver,
+    task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+}
+
+impl Drop for RuntimeHttpConnection {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -2876,6 +2956,136 @@ mod tests {
         );
 
         for resource in [server_stream.id, client_stream.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime.next_host_completion().expect("close completes");
+        }
+    }
+
+    #[test]
+    fn runtime_owned_hyper_connection_uses_live_hostops_transport() {
+        use crate::node_http::HttpResponse;
+        use crate::node_stream::StreamAction;
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("listener has a port"),
+            },
+            false,
+        );
+        let mut server = None;
+        let mut client = None;
+        for _ in 0..2 {
+            let completion = runtime.next_host_completion().expect("connect completes");
+            if completion.request == accept {
+                server = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(stream) => stream.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+        let server = server.expect("accepted stream exists");
+        let client = client.expect("client stream exists");
+        let start = runtime.start_http1_connection(server.id, |request| {
+            assert_eq!(request.target, "/health");
+            HttpResponse {
+                status: 200,
+                reason: Some("OK".into()),
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: b"kiln".to_vec(),
+            }
+        });
+        let [StreamAction::Start(read)] = start.as_slice() else {
+            panic!("HTTP connection starts one read")
+        };
+        let read_request = runtime.start_host_op(read.clone(), false);
+        assert!(runtime.http_connection_started(server.id, read, read_request));
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: client.id,
+                data: b"GET /health HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n".to_vec(),
+            },
+            false,
+        );
+        let mut read_completion = None;
+        for _ in 0..2 {
+            let completion = runtime.next_host_completion().expect("I/O completes");
+            if completion.request == read_request {
+                read_completion = Some(completion);
+            }
+        }
+        let actions = runtime
+            .complete_http_connection(server.id, read_completion.expect("server read completes"))
+            .expect("connection owns completion");
+        for action in actions {
+            if let StreamAction::Start(operation) = action {
+                let request = runtime.start_host_op(operation.clone(), false);
+                assert!(runtime.http_connection_started(server.id, &operation, request));
+            }
+        }
+        let writes = runtime
+            .poll_http_connection(server.id)
+            .expect("connection exists");
+        let [StreamAction::Start(write)] = writes.as_slice() else {
+            panic!("Hyper selected one response write: {writes:?}")
+        };
+        let write_request = runtime.start_host_op(write.clone(), false);
+        assert!(runtime.http_connection_started(server.id, write, write_request));
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: client.id,
+                max_bytes: 4096,
+            },
+            false,
+        );
+        let mut response = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("response I/O completes");
+            if completion.request == write_request {
+                runtime
+                    .complete_http_connection(server.id, completion)
+                    .expect("write completion belongs to connection");
+            } else if let Ok(AsyncHostValue::Bytes(bytes)) = completion.result {
+                response = Some(bytes);
+            }
+        }
+        let response = String::from_utf8(response.expect("client receives response"))
+            .expect("response is ASCII");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("\r\n\r\nkiln"));
+        assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
+
+        for resource in [server.id, client.id, listener.id] {
             runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
             runtime.next_host_completion().expect("close completes");
         }

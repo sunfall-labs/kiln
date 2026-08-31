@@ -147,6 +147,12 @@ rayon = { version = "1.12", default-features = false }
 # The one realm scheduler. `test-util` is required for deterministic paused-time execution;
 # keep Tokio's surface minimal because its types never cross `kiln-runtime`'s public seam.
 tokio = { version = "1.48", default-features = false, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time", "test-util"] }
+# HTTP protocol state machines. Tokio remains the sole runtime; Hyper never crosses the runtime
+# seam, and default features stay off so HTTP/2 and client pools arrive only with explicit work.
+hyper = { version = "1.7", default-features = false, features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = { version = "0.1", default-features = false }
+bytes = { version = "1.10", default-features = false }
 
 [profile.release]
 debug = 1
