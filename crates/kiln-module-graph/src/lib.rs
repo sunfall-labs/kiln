@@ -1468,9 +1468,12 @@ mod tests {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
             stream
                 .write_all(
-                    b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello tokio!",
+                    b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello ",
                 )
-                .expect("write request");
+                .expect("write request head and first body chunk");
+            stream
+                .write_all(b"tokio!")
+                .expect("write second body chunk");
             stream.shutdown(Shutdown::Write).expect("finish request");
             let mut response = String::new();
             stream.read_to_string(&mut response).expect("read response");
