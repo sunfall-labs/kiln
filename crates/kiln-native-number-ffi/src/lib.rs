@@ -871,6 +871,29 @@ mod realm {
         })
     }
 
+    /// Starts one portable operation on the realm currently executing generated code.
+    ///
+    /// This is the capability-shaped form used by runtime modules: being inside the active realm
+    /// is the authority to submit work, so generated code never needs to learn or retain its
+    /// provider-private handle.
+    ///
+    /// # Safety
+    ///
+    /// The operation and continuation arguments have the same contract as
+    /// [`kiln_realm_start_host_op`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_start_active_host_op(
+        operation: *const HostOpView,
+        run: Option<RunCompletion>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+        out_request: *mut u64,
+    ) -> i32 {
+        let handle = ACTIVE_REALM.with(Cell::get);
+        // SAFETY: this function preserves the pointed-to frame and continuation contracts.
+        unsafe { kiln_realm_start_host_op(handle, operation, run, drop, work, out_request) }
+    }
+
     /// Cancels one asynchronous request on the active Realm.
     ///
     /// Returns zero when the request was canceled and one when it was already complete or unknown.
@@ -895,6 +918,18 @@ mod realm {
                 1
             }
         })
+    }
+
+    /// Cancels a request owned by the currently executing realm.
+    ///
+    /// # Safety
+    ///
+    /// `request` must be an identity previously returned to this active realm.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_cancel_active_request(request: u64) -> i32 {
+        let handle = ACTIVE_REALM.with(Cell::get);
+        // SAFETY: the active-handle wrapper performs the same identity validation.
+        unsafe { kiln_realm_cancel_request(handle, request) }
     }
 
     fn set_timer(
@@ -1154,6 +1189,30 @@ mod realm {
             let status = unsafe {
                 kiln_realm_start_host_op(
                     handle,
+                    operation,
+                    Some(record_host_completion),
+                    Some(drop_host_work),
+                    work,
+                    request,
+                )
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_host_work(work) };
+            }
+            status
+        }
+
+        unsafe fn start_test_active_host_op(
+            operation: &HostOpView,
+            observation: *mut HostObservation,
+            request: *mut u64,
+        ) -> i32 {
+            let work = Box::into_raw(Box::new(HostWork { observation })).cast::<c_void>();
+            // SAFETY: the active entry copies the frame before returning and owns the continuation
+            // only when submission succeeds.
+            let status = unsafe {
+                kiln_realm_start_active_host_op(
                     operation,
                     Some(record_host_completion),
                     Some(drop_host_work),
@@ -1879,6 +1938,65 @@ mod realm {
             assert_eq!(exchange.close_listener.drops, 1);
             assert_eq!(exchange.close_client.drops, 1);
             assert_eq!(exchange.close_accepted.drops, 1);
+        }
+
+        #[test]
+        fn active_host_op_submission_needs_no_provider_handle() {
+            struct Submission {
+                observation: *mut HostObservation,
+                request: *mut u64,
+            }
+
+            unsafe extern "C" fn submit(context: *mut c_void) -> i32 {
+                if context.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: the test owns this context for the complete realm entry.
+                let submission = unsafe { &mut *context.cast::<Submission>() };
+                let path = b"definitely-missing-kiln-active-op";
+                let operation = HostOpView {
+                    operation: OP_STAT,
+                    flags: 1,
+                    resource: 0,
+                    argument: 0,
+                    text: path.as_ptr(),
+                    text_len: path.len() as u64,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                // SAFETY: the frame is copied synchronously and both targets outlive drive.
+                unsafe {
+                    start_test_active_host_op(
+                        &operation,
+                        submission.observation,
+                        submission.request,
+                    )
+                }
+            }
+
+            let mut handle = 0;
+            let mut observation = HostObservation::default();
+            let mut request = 0;
+            let mut submission = Submission {
+                observation: &raw mut observation,
+                request: &raw mut request,
+            };
+            // SAFETY: all callback storage remains live through realm drive.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(submit), (&raw mut submission).cast::<c_void>())
+                },
+                0
+            );
+            assert_ne!(request, 0);
+            assert_eq!(
+                unsafe { kiln_realm_drive(handle, ptr::null_mut(), ptr::null_mut()) },
+                0
+            );
+            assert_ne!(observation.status, 0);
+            assert_eq!(observation.drops, 1);
+            assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
         #[test]
