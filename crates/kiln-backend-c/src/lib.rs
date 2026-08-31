@@ -1033,6 +1033,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER, 408, Direct, NodeResponse),
     (KILN_C99_METHOD_SYMBOL_FOR, 409, Direct),
     (KILN_C99_METHOD_SYMBOL_KEY_FOR, 410, Direct),
+    (KILN_C99_METHOD_NODE_STAT_IS_FILE, 411, Direct),
+    (KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY, 412, Direct),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1611,6 +1613,8 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_SYMBOL_FOR),
     emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
+    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_FILE),
+    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
@@ -2412,6 +2416,15 @@ typedef struct kiln_node_completion {
     kiln_node_client_request *client_request;
 } kiln_node_completion;
 
+/* One Node fs/promises request. The Promise and conversion mode stay in generated C; the Realm
+ * owns this allocation from submission through completion/cancellation and invokes the adapter
+ * only on the realm task. */
+typedef struct kiln_node_fs_completion {
+    kiln_value promise;
+    uint32_t operation;
+    int utf8;
+} kiln_node_fs_completion;
+
 /* A cursor over JSON source, moved forward as text is consumed. */
 typedef struct kiln_json_reader {
     const char *bytes;
@@ -2447,6 +2460,9 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_ASYNC_RESOURCE 3
 #define KILN_REALM_ASYNC_RESOURCE_STATE 4
 #define KILN_REALM_ASYNC_ACCEPTED_STREAM 5
+#define KILN_REALM_OP_READ_FILE 1
+#define KILN_REALM_OP_WRITE_FILE 2
+#define KILN_REALM_OP_STAT 3
 #define KILN_REALM_OP_CLOSE_RESOURCE 4
 #define KILN_REALM_OP_TCP_LISTEN 7
 #define KILN_REALM_OP_TCP_ACCEPT 8
@@ -3057,6 +3073,9 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown);
+static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
+                            kiln_value receiver, const kiln_value *args, size_t argc,
+                            int depth, kiln_value *thrown);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -11117,6 +11136,7 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
+        "@@kiln:node:is-file", "@@kiln:node:is-directory",
     };
     size_t index;
     for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
@@ -11778,6 +11798,242 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
     }
     return KILN_C99_CONTROL_ERROR;
+}
+
+static void kiln_c99_node_drop_fs_completion(void *opaque) { free(opaque); }
+
+static int kiln_c99_node_fs_error_property(kiln_value error, const char *key, size_t key_len,
+                                           const uint8_t *bytes, uint64_t length) {
+    kiln_property *property;
+    size_t length_as_size;
+    kiln_value value;
+    int status;
+    if (length > SIZE_MAX) return KILN_C99_CONTROL_ERROR;
+    length_as_size = (size_t)length;
+    value = kiln_c99_copy_text((const char *)bytes, length_as_size);
+    if (value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_put(NULL, error, key, key_len, value, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_own_slot(error, key, key_len, &property);
+    if (status != KILN_C99_OK || property == NULL) return KILN_C99_CONTROL_ERROR;
+    property->enumerable = 0;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_node_fs_stat(kiln_value *out, const kiln_async_completion *completion) {
+    kiln_value stat;
+    kiln_property *property;
+    int status;
+    status = kiln_c99_new_object(&stat);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, stat, "size", 4,
+                          kiln_c99_number((double)completion->value_u64), 0, NULL);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_own_slot(stat, "@@kiln:node:is-file", 19, &property);
+        if (status == KILN_C99_OK && property != NULL) {
+            property->value = kiln_c99_boolean((completion->resource_flags &
+                                                (UINT32_C(1) << 3)) != 0);
+            property->enumerable = 0;
+            property->writable = 0;
+            property->configurable = 0;
+        }
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_own_slot(stat, "@@kiln:node:is-directory", 24, &property);
+        if (status == KILN_C99_OK && property != NULL) {
+            property->value = kiln_c99_boolean((completion->resource_flags &
+                                                (UINT32_C(1) << 4)) != 0);
+            property->enumerable = 0;
+            property->writable = 0;
+            property->configurable = 0;
+        }
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, stat, "isFile", 6,
+                              kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_FILE), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, stat, "isDirectory", 11,
+                              kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY), 0, NULL);
+    if (status == KILN_C99_OK) *out = stat;
+    return status;
+}
+
+static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *completion,
+                                     void *host, void *thrown) {
+    kiln_node_fs_completion *work = (kiln_node_fs_completion *)opaque;
+    kiln_value value;
+    int status;
+    size_t length;
+    (void)host;
+    (void)thrown;
+    if (work == NULL || completion == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (completion->status != KILN_REALM_ASYNC_OK) {
+        if (completion->error_message_len > SIZE_MAX || completion->error_code_len > SIZE_MAX ||
+            completion->error_syscall_len > SIZE_MAX || completion->error_path_len > SIZE_MAX)
+            return KILN_C99_CONTROL_ERROR;
+        if ((completion->error_message_len != 0 && completion->error_message == NULL) ||
+            (completion->error_code_len != 0 && completion->error_code == NULL) ||
+            (completion->error_syscall_len != 0 && completion->error_syscall == NULL) ||
+            (completion->error_path_len != 0 && completion->error_path == NULL))
+            return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_new_error(
+            &value, KILN_C99_BUILTIN_ERROR,
+            kiln_c99_copy_text((const char *)completion->error_message,
+                               (size_t)completion->error_message_len));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_fs_error_property(value, "code", 4, completion->error_code,
+                                                     completion->error_code_len);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_fs_error_property(value, "syscall", 7,
+                                                     completion->error_syscall,
+                                                     completion->error_syscall_len);
+        if (status == KILN_C99_OK && completion->error_path_len != 0)
+            status = kiln_c99_node_fs_error_property(value, "path", 4, completion->error_path,
+                                                     completion->error_path_len);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_settle(work->promise, value, 1);
+    }
+    if (work->operation == KILN_REALM_OP_WRITE_FILE) {
+        if (completion->value_kind != KILN_REALM_ASYNC_UNDEFINED)
+            return KILN_C99_CONTROL_ERROR;
+        return kiln_c99_settle(work->promise, kiln_c99_undefined(), 0);
+    }
+    if (work->operation == KILN_REALM_OP_STAT) {
+        if (completion->value_kind != KILN_REALM_ASYNC_FILE_STAT)
+            return KILN_C99_CONTROL_ERROR;
+        status = kiln_c99_node_fs_stat(&value, completion);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_settle(work->promise, value, 0);
+    }
+    if (completion->value_kind != KILN_REALM_ASYNC_BYTES || completion->bytes_len > SIZE_MAX)
+        return KILN_C99_CONTROL_ERROR;
+    length = (size_t)completion->bytes_len;
+    if (length != 0 && completion->bytes == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (work->utf8) {
+        value = kiln_c99_copy_text((const char *)completion->bytes, length);
+    } else {
+        status = kiln_c99_typed_alloc(&value, KILN_TYPED_UINT8, length);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_typed_array_of(value)->is_buffer = 1;
+        if (length != 0)
+            memcpy(kiln_c99_typed_array_of(value)->buffer->bytes, completion->bytes, length);
+    }
+    if (value.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+    return kiln_c99_settle(work->promise, value, 0);
+}
+
+static int kiln_c99_node_fs_encoding(kiln_host *host, kiln_value option, int *utf8,
+                                     int depth, kiln_value *thrown) {
+    kiln_value encoding;
+    if (option.tag == KILN_VALUE_UNDEFINED || option.tag == KILN_VALUE_NULL) {
+        *utf8 = 0;
+        return KILN_C99_OK;
+    }
+    if (option.tag == KILN_VALUE_OBJECT) {
+        int status = kiln_c99_get(host, option, "encoding", 8, &encoding, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (encoding.tag == KILN_VALUE_UNDEFINED || encoding.tag == KILN_VALUE_NULL) {
+            *utf8 = 0;
+            return KILN_C99_OK;
+        }
+    } else {
+        encoding = option;
+    }
+    if (encoding.tag != KILN_VALUE_STRING)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "encoding must be a string");
+    if ((encoding.len == 4 && tolower((unsigned char)encoding.ptr[0]) == 'u' &&
+         tolower((unsigned char)encoding.ptr[1]) == 't' &&
+         tolower((unsigned char)encoding.ptr[2]) == 'f' &&
+         encoding.ptr[3] == '8') ||
+        (encoding.len == 5 && tolower((unsigned char)encoding.ptr[0]) == 'u' &&
+         tolower((unsigned char)encoding.ptr[1]) == 't' &&
+         tolower((unsigned char)encoding.ptr[2]) == 'f' && encoding.ptr[3] == '-' &&
+         encoding.ptr[4] == '8')) {
+        *utf8 = 1;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                "unsupported file encoding");
+}
+
+static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
+                            kiln_value receiver, const kiln_value *args, size_t argc,
+                            int depth, kiln_value *thrown) {
+    kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
+    kiln_value promise;
+    kiln_value data;
+    kiln_node_fs_completion *work;
+    kiln_async_host_op operation;
+    uint64_t request = 0;
+    const uint8_t *bytes = NULL;
+    size_t bytes_len = 0;
+    size_t width;
+    int utf8 = 0;
+    int status;
+    (void)receiver;
+    if (code == KILN_C99_METHOD_NODE_STAT_IS_FILE ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
+        kiln_property *marker;
+        const char *key = code == KILN_C99_METHOD_NODE_STAT_IS_FILE
+                              ? "@@kiln:node:is-file"
+                              : "@@kiln:node:is-directory";
+        size_t key_len = code == KILN_C99_METHOD_NODE_STAT_IS_FILE ? 19 : 24;
+        if (receiver.tag != KILN_VALUE_OBJECT)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Stats method called on an incompatible receiver");
+        marker = kiln_c99_own_private(receiver, key, key_len);
+        *result = kiln_c99_boolean(marker != NULL && kiln_c99_truthy(marker->value));
+        return KILN_C99_OK;
+    }
+    if (path.tag != KILN_VALUE_STRING)
+        return kiln_c99_throw_not_a(thrown, path, "string path");
+    if (code == KILN_C99_METHOD_NODE_FS_READ_FILE) {
+        status = kiln_c99_node_fs_encoding(host,
+                                           argc > 1 ? args[1] : kiln_c99_undefined(), &utf8,
+                                           depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    } else if (code == KILN_C99_METHOD_NODE_FS_WRITE_FILE) {
+        data = argc > 1 ? args[1] : kiln_c99_undefined();
+        if (data.tag == KILN_VALUE_STRING) {
+            bytes = (const uint8_t *)data.ptr;
+            bytes_len = data.len;
+        } else if (data.tag == KILN_VALUE_TYPED_ARRAY) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(data);
+            width = kiln_c99_typed_width(view->kind);
+            if (view->length > SIZE_MAX / width) return KILN_C99_OUT_OF_MEMORY;
+            bytes = view->buffer->bytes + view->byte_offset;
+            bytes_len = view->length * width;
+        } else {
+            return kiln_c99_throw_not_a(thrown, data, "string or typed array data");
+        }
+    }
+    status = kiln_c99_new_promise(&promise);
+    if (status != KILN_C99_OK) return status;
+    work = (kiln_node_fs_completion *)calloc(1, sizeof *work);
+    if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+    work->promise = promise;
+    work->operation = code == KILN_C99_METHOD_NODE_FS_READ_FILE
+                          ? KILN_REALM_OP_READ_FILE
+                          : code == KILN_C99_METHOD_NODE_FS_WRITE_FILE
+                                ? KILN_REALM_OP_WRITE_FILE
+                                : KILN_REALM_OP_STAT;
+    work->utf8 = utf8;
+    memset(&operation, 0, sizeof operation);
+    operation.operation = work->operation;
+    operation.flags = 1;
+    operation.text = (const uint8_t *)path.ptr;
+    operation.text_len = path.len;
+    operation.bytes = bytes;
+    operation.bytes_len = bytes_len;
+    status = kiln_realm_start_active_host_op(&operation, kiln_c99_node_fs_complete,
+                                             kiln_c99_node_drop_fs_completion, work, &request);
+    if (status != KILN_C99_OK) {
+        free(work);
+        return status;
+    }
+    *result = promise;
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
@@ -13437,10 +13693,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_NODE_FS_READ_FILE ||
         code == KILN_C99_METHOD_NODE_FS_STAT ||
-        code == KILN_C99_METHOD_NODE_FS_WRITE_FILE) {
-        return kiln_c99_throw_error(
-            thrown, KILN_C99_BUILTIN_ERROR,
-            "node:fs promises require the native async filesystem adapter");
+        code == KILN_C99_METHOD_NODE_FS_WRITE_FILE ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_FILE ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
+        return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_PATH)) {
         return kiln_c99_node_path(result, code, args, argc, thrown);
@@ -18331,6 +18587,10 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     int existed = 0;
     int status;
     size_t at;
+    /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
+    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+        return KILN_C99_OK;
+    }
     if (descriptor.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Property description must be an object");

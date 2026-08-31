@@ -4981,6 +4981,84 @@ mod tests {
     }
 
     #[test]
+    fn native_node_fs_promises_read_write_stat_and_encoding() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:fs/promises integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-fs-promises");
+        let entry = project.path.join("main.mjs");
+        let data = project.path.join("data.txt");
+        let missing = project.path.join("missing.txt");
+        let path = data.to_string_lossy();
+        let missing_path = missing.to_string_lossy();
+        fs::write(
+            &entry,
+            format!(
+                r#"import {{ readFile, stat, writeFile }} from 'node:fs/promises';
+writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text) => {{
+  console.log(text);
+  return readFile({path:?});
+}}).then((bytes) => {{
+  console.log(Buffer.isBuffer(bytes));
+  console.log(bytes.length);
+  return stat({path:?});
+}}).then((info) => {{
+  console.log(info.size);
+  console.log(info.isFile());
+  console.log(info.isDirectory());
+  console.log(info['@@kiln:node:is-file'] === undefined);
+  Object.defineProperty(info, '@@kiln:node:is-file', {{ value: false }});
+  console.log(info.isFile());
+  return readFile({missing_path:?});
+}}).then(() => console.log('unexpected'), (error) => {{
+  console.log(error.code);
+  console.log(error.syscall);
+  console.log(error.path === {missing_path:?});
+}});
+"#,
+                path = path,
+                missing_path = missing_path
+            ),
+        )
+        .expect("write node:fs/promises fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native node:fs/promises graph builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native node:fs/promises fixture");
+        assert!(
+            output.status.success(),
+            "status={} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
+        );
+    }
+
+    #[test]
     fn node_http_native_materializer_matches_the_authoritative_export_order() {
         use kiln_module_resolver::NodeBuiltin;
 
