@@ -2,8 +2,8 @@
 source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
-/* Program hash: e3d4d3509b581912; bytecode version: 1. */
-int kiln_module_e3d4d3509b581912a864530dd5905251(kiln_host *host, kiln_value *result) {
+/* Program hash: 71a1212f50009ad7; bytecode version: 1. */
+int kiln_module_71a1212f50009ad7ded4bb68f3fd9e60(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
     kiln_value stack[2];
     kiln_value locals[2];
