@@ -338,6 +338,14 @@ const fn method_value(ids: &[MethodId], name: &str) -> u16 {
     panic!("method ID is missing from the registry");
 }
 
+const fn assert_method_immediately_after(ids: &[MethodId], previous: &str, next: &str) {
+    let previous = method_value(ids, previous);
+    assert!(
+        previous < u16::MAX && previous + 1 == method_value(ids, next),
+        "Temporal method blocks must be ordered and adjacent"
+    );
+}
+
 const fn validate_method_ids(ids: &[MethodId]) {
     let mut index = 0;
     while index < ids.len() {
@@ -349,13 +357,24 @@ const fn validate_method_ids(ids: &[MethodId]) {
                 "method names must be unique"
             );
             if ids[index].value == ids[other].value {
-                let alias = method_name_is_temporal_last(ids[index].name)
-                    || method_name_is_temporal_last(ids[other].name);
+                let alias = if method_name_is_temporal_last(ids[index].name) {
+                    method_name_is(
+                        ids[other].name,
+                        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                    )
+                } else if method_name_is_temporal_last(ids[other].name) {
+                    method_name_is(
+                        ids[index].name,
+                        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                    )
+                } else {
+                    false
+                };
                 assert!(
                     alias
                         && method_name_starts_with(ids[index].name, "KILN_C99_METHOD_TEMPORAL_")
                         && method_name_starts_with(ids[other].name, "KILN_C99_METHOD_TEMPORAL_"),
-                    "method IDs must be unique except for TEMPORAL_LAST"
+                    "method IDs must be unique except for the Instant nanoseconds alias"
                 );
             }
             other += 1;
@@ -390,6 +409,51 @@ const fn validate_method_ids(ids: &[MethodId]) {
             == 22,
         "Temporal operation range must contain 23 operations"
     );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_FROM_LAST",
+        "KILN_C99_METHOD_TEMPORAL_COMPARE",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_COMPARE_LAST",
+        "KILN_C99_METHOD_TEMPORAL_TO_STRING",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_TO_STRING",
+        "KILN_C99_METHOD_TEMPORAL_TO_JSON",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_TO_JSON",
+        "KILN_C99_METHOD_TEMPORAL_VALUE_OF",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_VALUE_OF",
+        "KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID",
+        "KILN_C99_METHOD_TEMPORAL_NOW_READ",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST",
+        "KILN_C99_METHOD_TEMPORAL_OP",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_OP_LAST",
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS",
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+    );
 
     let mut temporal_low = u16::MAX;
     let mut temporal_high = 0;
@@ -408,6 +472,15 @@ const fn validate_method_ids(ids: &[MethodId]) {
         index += 1;
     }
     assert!(temporal_low < temporal_high, "Temporal methods must exist");
+    assert!(
+        temporal_low == method_value(ids, "KILN_C99_METHOD_TEMPORAL_FROM")
+            && temporal_high
+                == method_value(
+                    ids,
+                    "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                ),
+        "Temporal range must begin at FROM and end at the final Instant constructor"
+    );
     assert!(
         method_value(ids, "KILN_C99_METHOD_TEMPORAL_LAST") == temporal_high,
         "TEMPORAL_LAST must alias the highest Temporal method"
