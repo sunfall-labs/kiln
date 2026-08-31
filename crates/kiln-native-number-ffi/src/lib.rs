@@ -1661,6 +1661,15 @@ mod realm {
             let Some(operation) = (unsafe { host_operation(operation_view) }) else {
                 return INVALID_ARGUMENT;
             };
+            if let AsyncHostOp::CloseResource { resource } = &operation
+                && realm.http_connections.borrow().contains_key(resource)
+            {
+                // Once the realm has attached Hyper, protocol shutdown owns this TCP resource.
+                // A raw HostOps close can discard bytes Hyper has selected but not yet submitted,
+                // which is exactly the authority split ADR 0032 forbids. Generated adapters must
+                // request graceful/abort HTTP close through the dedicated realm operation.
+                return INVALID_ARGUMENT;
+            }
             let Some(runtime) = active_runtime() else {
                 return INVALID_ARGUMENT;
             };
@@ -2554,6 +2563,92 @@ mod realm {
                 unsafe { drop_host_work(work) };
             }
             status
+        }
+
+        struct RegisteredHttpCloseAttempt {
+            status: i32,
+            request: u64,
+            observation: HostObservation,
+        }
+
+        unsafe extern "C" fn ignore_http_event(
+            _work: *mut c_void,
+            _event: *const HttpEventView,
+            _host: *mut c_void,
+            _thrown: *mut c_void,
+        ) -> i32 {
+            0
+        }
+
+        unsafe extern "C" fn retain_test_http_owner(_work: *mut c_void) {}
+
+        unsafe extern "C" fn try_raw_close_on_registered_http(context: *mut c_void) -> i32 {
+            if context.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the test keeps this state live until after realm destruction.
+            let attempt = unsafe { &mut *context.cast::<RegisteredHttpCloseAttempt>() };
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let resource = ResourceId::new(42);
+            realm.http_connections.borrow_mut().insert(
+                resource,
+                NativeHttpConnection {
+                    role: HttpRole::Server,
+                    events: Rc::new(HttpEventOwner {
+                        pointer: context,
+                        run: ignore_http_event,
+                        drop: retain_test_http_owner,
+                    }),
+                },
+            );
+            let operation = HostOpView {
+                operation: OP_CLOSE_RESOURCE,
+                flags: 0,
+                resource: resource.get(),
+                argument: 0,
+                text: ptr::null(),
+                text_len: 0,
+                bytes: ptr::null(),
+                bytes_len: 0,
+            };
+            // SAFETY: the operation is copied synchronously and all observation slots stay live.
+            attempt.status = unsafe {
+                start_test_active_host_op(
+                    &operation,
+                    &raw mut attempt.observation,
+                    &raw mut attempt.request,
+                )
+            };
+            0
+        }
+
+        #[test]
+        fn registered_http_connection_rejects_raw_hostops_close() {
+            let mut handle = 0;
+            let mut attempt = RegisteredHttpCloseAttempt {
+                status: 0,
+                request: 0,
+                observation: HostObservation::default(),
+            };
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(try_raw_close_on_registered_http),
+                        (&raw mut attempt).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(attempt.status, INVALID_ARGUMENT);
+            assert_eq!(attempt.request, 0);
+            assert_eq!(attempt.observation.drops, 1);
+            let registered = realm(handle).expect("realm remains registered through the test");
+            assert!(registered.continuations.borrow().is_empty());
+            assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
         unsafe extern "C" fn record_read_completion(
