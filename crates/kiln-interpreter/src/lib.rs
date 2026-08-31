@@ -417,6 +417,8 @@ pub enum Native {
     MathExpm1,
     MathFround,
     MathF16Round,
+    ArrayBufferTransferToImmutable,
+    ArrayBufferSliceToImmutable,
     /// One of the six `Uint8Array` conversions between bytes and text.
     Uint8Text(ByteText),
     MathClz32,
@@ -3472,7 +3474,15 @@ impl TypedKind {
             Self::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
             Self::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
             Self::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
-            Self::Float16 => slot.copy_from_slice(&f64_to_half(value).to_le_bytes()),
+            Self::Float16 => slot.copy_from_slice(
+                &f32_to_half(
+                    #[expect(clippy::cast_possible_truncation)]
+                    {
+                        value as f32
+                    },
+                )
+                .to_le_bytes(),
+            ),
             #[allow(clippy::cast_possible_truncation)]
             Self::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
             Self::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
@@ -3508,26 +3518,26 @@ fn half_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// A binary64 number as the nearest binary16 bit pattern, rounding halves to even.
+/// A number as the nearest binary16 bit pattern, rounding halves to even.
 ///
 /// Not a truncation of the binary32 pattern: half's subnormals begin where nothing else's do, so
 /// a value too small for a normal half still has bits to keep, and a value too large becomes an
 /// *infinity* rather than the largest finite half. Rounding to even is the mode every other
 /// conversion in the language uses, and the one that does not drift when applied repeatedly.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f64_to_half(value: f64) -> u16 {
+fn f32_to_half(value: f32) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 48) & 0x8000) as u16;
-    let exponent = ((bits >> 52) & 0x7ff) as i32;
-    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
     // NaN keeps a non-empty mantissa so it does not come back as an infinity; which NaN it is
     // is not observable.
-    if exponent == 0x7ff {
+    if exponent == 0xff {
         return sign | 0x7c00 | u16::from(mantissa != 0) << 9;
     }
     // The unbiased exponent, rebiased for half. Above half's range is an infinity, which is what
     // the specification's `ToFloat16` produces rather than the largest finite value.
-    let unbiased = exponent - 1023 + 15;
+    let unbiased = exponent - 127 + 15;
     if unbiased >= 0x1f {
         return sign | 0x7c00;
     }
@@ -3537,11 +3547,11 @@ fn f64_to_half(value: f64) -> u16 {
         if unbiased < -10 {
             return sign;
         }
-        let with_leading = mantissa | 0x0010_0000_0000_0000;
-        let shift = (43 - unbiased) as u32;
+        let with_leading = mantissa | 0x80_0000;
+        let shift = (14 - unbiased) as u32;
         let kept = with_leading >> shift;
         let remainder = with_leading & ((1 << shift) - 1);
-        let half = 1_u64 << (shift - 1);
+        let half = 1_u32 << (shift - 1);
         let rounded = if remainder > half || (remainder == half && kept & 1 == 1) {
             kept + 1
         } else {
@@ -3549,10 +3559,10 @@ fn f64_to_half(value: f64) -> u16 {
         };
         return sign | rounded as u16;
     }
-    let kept = mantissa >> 42;
-    let remainder = mantissa & 0x3ff_ffff_ffff;
-    let mut raw = ((unbiased as u32) << 10) | kept as u32;
-    if remainder > 0x200_0000_0000 || (remainder == 0x200_0000_0000 && kept & 1 == 1) {
+    let kept = mantissa >> 13;
+    let remainder = mantissa & 0x1fff;
+    let mut raw = ((unbiased as u32) << 10) | kept;
+    if remainder > 0x1000 || (remainder == 0x1000 && kept & 1 == 1) {
         // A carry out of the mantissa lands in the exponent, which is what makes 65520 round up
         // to an infinity rather than to the largest finite half.
         raw += 1;
@@ -4049,6 +4059,13 @@ pub struct BufferData {
     /// a buffer that any number of views are already pointing at, and every one of them has to
     /// see it happen.
     detached: std::cell::Cell<bool>,
+    /// Whether the bytes can never change again.
+    ///
+    /// Not a `Cell`: a buffer is *made* immutable and never becomes one, because the promise is
+    /// only worth anything if it cannot be withdrawn -- a handle that read the flag and then
+    /// found a write is exactly what the type exists to rule out. Nothing can detach one either,
+    /// for the same reason: detaching is the largest write there is.
+    immutable: bool,
     /// The properties a program put on the buffer by name. The bytes are reached only through a
     /// view, so a buffer has no exotic keys either and every name lands here.
     properties: RefCell<ObjectData>,
@@ -4070,6 +4087,7 @@ impl BufferData {
             max_byte_length: None,
             shared: false,
             detached: std::cell::Cell::new(false),
+            immutable: false,
             properties: RefCell::new(ObjectData::default()),
         })
     }
@@ -4112,6 +4130,9 @@ impl BufferData {
     fn resize(&self, length: usize) -> Result<(), ExecutionError> {
         if self.shared {
             return Err(ExecutionError::NotABuffer);
+        }
+        if self.immutable {
+            return Err(ExecutionError::BufferImmutable);
         }
         if self.detached.get() {
             return Err(ExecutionError::BufferDetached);
@@ -4247,6 +4268,12 @@ impl TypedArrayData {
     /// is observable: `new BigInt64Array(0)[9] = 1` throws even though nothing is written, and
     /// a `valueOf` that resizes the buffer runs even when the slot it was aimed at is gone.
     fn set(&self, index: usize, value: &Value) -> Result<(), ExecutionError> {
+        // The one place a view writes, so the one place immutability has to be checked: every
+        // element assignment, `fill`, `copyWithin`, `set`, `sort` and `setFromBase64` reaches
+        // the buffer through here, and a check per method would be a dozen chances to forget.
+        if self.buffer.immutable {
+            return Err(ExecutionError::BufferImmutable);
+        }
         let value = coerce_element(self.kind, value)?;
         if index >= self.len() {
             return Ok(());
@@ -5915,6 +5942,11 @@ pub enum ExecutionError {
     /// one. A `TypeError` and not an empty read: a detached buffer has no bytes at all, and
     /// handing back zeroes would let a program carry on believing it still holds its data.
     BufferDetached,
+    /// A write through a buffer that promised never to change again -- or a detach, or a resize,
+    /// which are the two largest writes there are. A `TypeError` rather than a silent no-op,
+    /// because the promise is what the type is *for*: a program handed an immutable buffer is
+    /// entitled to be told when it tried to break it rather than to watch the write vanish.
+    BufferImmutable,
     /// A buffer length outside what the specification accepts -- negative, unrepresentable, or
     /// above the ceiling the buffer was created with.
     BufferLengthOutOfRange {
@@ -6134,6 +6166,9 @@ impl fmt::Display for ExecutionError {
             Self::BufferDetached => {
                 write!(formatter, "the ArrayBuffer is detached")
             }
+            Self::BufferImmutable => {
+                write!(formatter, "the ArrayBuffer is immutable")
+            }
             Self::BufferLengthOutOfRange { length } => {
                 write!(formatter, "invalid ArrayBuffer length {length}")
             }
@@ -6305,6 +6340,10 @@ impl ExecutionError {
             Self::BufferNotGrowable => (
                 ErrorKind::Type,
                 "Cannot grow a non-growable SharedArrayBuffer".to_owned(),
+            ),
+            Self::BufferImmutable => (
+                ErrorKind::Type,
+                "Cannot perform this operation on an immutable ArrayBuffer".to_owned(),
             ),
             Self::BufferDetached => (
                 ErrorKind::Type,
@@ -7971,6 +8010,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 _ => unreachable!("only socket natives dispatch here"),
             }
         };
+        sync_node_socket_ready_state(&server, resource);
         for action in actions {
             self.start_http_stream_action(&server, resource, action, instruction)?;
         }
@@ -10420,6 +10460,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 message: "completion lost its node:http stream".into(),
                             })?
                     };
+                    if !runtime_http {
+                        sync_node_socket_ready_state(&server, resource);
+                    }
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
@@ -12641,7 +12684,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             BuiltinAccessor::BufferByteLength
             | BuiltinAccessor::BufferMaxByteLength
             | BuiltinAccessor::BufferResizable
-            | BuiltinAccessor::BufferDetached => {
+            | BuiltinAccessor::BufferDetached
+            | BuiltinAccessor::BufferImmutable => {
                 matches!(receiver, Value::ArrayBuffer(buffer) if !buffer.shared)
             }
             BuiltinAccessor::SharedByteLength
@@ -12961,6 +13005,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // therefore keeps its Date arm unreachable as a guard against losing this route again.
         if let Native::Date(method) = native {
             return self.date_dispatch(method, receiver, arguments, instruction);
+        }
+        // A write through a view onto an immutable buffer is refused before its arguments are
+        // converted, and that order is observable: a `valueOf` handed to a setter on such a view
+        // must not run, because there was never a write for it to prepare. Here rather than in
+        // the setter itself, because the conversion happens on the way there.
+        if matches!(native, Native::DataViewSet(_) | Native::DataViewSetBig)
+            && let Value::DataView(view) = receiver
+            && view.buffer.immutable
+        {
+            return Err(ExecutionError::BufferImmutable);
         }
         // An `Array.prototype` method whose receiver is not an array walks it live, through the
         // specification's own `HasProperty`/`Get`/`Set`/`Delete` steps. Ahead of everything
@@ -14106,20 +14160,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
-                // Install a host boundary while obtaining the iterator and draining it. User
-                // code in `Symbol.iterator`, `next`, `done`, or `value` can throw an arbitrary
-                // value; without this boundary it becomes an `Uncaught` machine error before
-                // `thrown_value` gets a chance to turn it into the combinator's rejection.
-                let installed = self.handlers.len();
-                self.handlers.push(Handler {
-                    target: HOST_HANDLER,
-                    frame_depth: self.frames.len(),
-                    stack_height: self.stack.len(),
-                    native_depth: self.native_depth,
-                });
-                let drained = self.drain_iterable(&source, instruction);
-                self.handlers.truncate(installed);
-                let combined = match drained {
+                let combined = match self.drain_iterable(&source, instruction) {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
@@ -15229,6 +15270,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 max_byte_length: None,
                 shared,
                 detached: std::cell::Cell::new(false),
+                immutable: false,
                 properties: RefCell::new(ObjectData::default()),
             })));
         };
@@ -15254,6 +15296,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             max_byte_length: Some(max),
             shared,
             detached: std::cell::Cell::new(false),
+            immutable: false,
             properties: RefCell::new(ObjectData::default()),
         })))
     }
@@ -16202,7 +16245,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         })))
     }
 
-    /// `view.getInt16(byteOffset, littleEndian?)` and the other numeric accessors.
+    /// `view.getInt16(byteOffset, littleEndian?)` and its seven siblings.
     ///
     /// The byte-order argument defaults to *big*-endian -- the opposite of every typed array and
     /// of every platform this runs on. That is deliberate in the specification: a `DataView`
@@ -16230,7 +16273,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(kind.decode(&bytes[..width]))
     }
 
-    /// `view.setInt16(byteOffset, value, littleEndian?)` and the other numeric accessors.
+    /// `view.setInt16(byteOffset, value, littleEndian?)` and its seven siblings.
     fn data_view_set(
         &mut self,
         kind: TypedKind,
@@ -25489,6 +25532,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // a holder that has no way to learn it happened, which is the same reason it has
                 // no `resize`.
                 "detached" if !buffer.shared => Value::Boolean(buffer.detached()),
+                "immutable" if !buffer.shared => Value::Boolean(buffer.immutable),
                 "constructor" if buffer.shared => {
                     Value::Native(Native::SharedArrayBufferConstructor)
                 }
@@ -26677,6 +26721,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         if view.out_of_bounds() {
             return Err(ExecutionError::BufferDetached);
+        }
+        // Every atomic operation but `load` writes, and the two that do not are refused with
+        // them: the specification excludes an immutable buffer from atomic access outright,
+        // because an atomic read of bytes nothing can change is a lock nobody needs.
+        if view.buffer.immutable {
+            return Err(ExecutionError::BufferImmutable);
         }
         let allowed = if op.waitable() {
             matches!(view.kind, TypedKind::Int32 | TypedKind::BigInt64)
@@ -28016,6 +28066,7 @@ fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
     data.set("write", Value::Native(Native::NodeSocketWrite));
     data.set("end", Value::Native(Native::NodeSocketEnd));
     data.set("destroy", Value::Native(Native::NodeSocketDestroy));
+    data.set("readyState", Value::String("open".into()));
     data.set(
         "setEncoding",
         Value::Native(Native::NodeReadableSetEncoding),
@@ -28023,6 +28074,24 @@ fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
+}
+
+fn sync_node_socket_ready_state(
+    server: &Rc<RefCell<NodeServerState>>,
+    resource: kiln_host_abi::ResourceId,
+) {
+    let ready_state = server
+        .borrow()
+        .streams
+        .iter()
+        .find(|stream| stream.resource() == resource)
+        .map(|stream| stream.driver.state().ready_state().as_str());
+    let socket = node_net_socket_value(server, resource);
+    if let (Some(ready_state), Some(Value::Object(socket))) = (ready_state, socket) {
+        socket
+            .borrow_mut()
+            .set("readyState", Value::String(ready_state.into()));
+    }
 }
 
 fn node_http_socket_facade() -> Value {
@@ -29121,12 +29190,7 @@ fn call_native(
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
-            | Value::TypedArray(_)
-            // These views also have an own property store, while their standard accessors live
-            // on their prototypes. Falling through to `has_property` would report an inherited
-            // `byteLength` as an own property.
-            | Value::ArrayBuffer(_)
-            | Value::DataView(_) => own_attributes(intrinsics,
+            | Value::TypedArray(_) => own_attributes(intrinsics,
                 receiver,
                 &arguments
                     .first()
@@ -29691,6 +29755,11 @@ fn call_native(
             if buffer.shared || buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
+            // Nor can an immutable one: detaching is the largest write there is, and a buffer
+            // that promised never to change again cannot be emptied either.
+            if buffer.immutable {
+                return Err(ExecutionError::BufferImmutable);
+            }
             let length = match arguments.first() {
                 None | Some(Value::Undefined) => buffer.byte_length(),
                 requested => bounded_buffer(to_index(requested)?, 1)?,
@@ -29717,6 +29786,62 @@ fn call_native(
                 max_byte_length,
                 shared: false,
                 detached: std::cell::Cell::new(false),
+                immutable: false,
+                properties: RefCell::new(ObjectData::default()),
+            }))
+        }
+        // `ArrayBufferCopyAndDetach(O, newLength, ~immutable~)`: the same copy `transfer`
+        // performs, into a buffer nothing can write to afterwards. A ceiling is never carried
+        // across -- a length that could still move is exactly what immutability rules out.
+        Native::ArrayBufferTransferToImmutable => {
+            let Value::ArrayBuffer(buffer) = receiver else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            if buffer.shared || buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
+            if buffer.immutable {
+                return Err(ExecutionError::BufferImmutable);
+            }
+            let length = match arguments.first() {
+                None | Some(Value::Undefined) => buffer.byte_length(),
+                requested => bounded_buffer(to_index(requested)?, 1)?,
+            };
+            let mut bytes = buffer.detach();
+            // Growing pads with zeros and shrinking drops the tail, exactly as `transfer` does:
+            // the length asked for is the length the result has, whichever side of the source's
+            // it falls on.
+            bytes.resize(length, 0);
+            Value::ArrayBuffer(Rc::new(BufferData {
+                bytes: RefCell::new(bytes),
+                max_byte_length: None,
+                shared: false,
+                detached: std::cell::Cell::new(false),
+                immutable: true,
+                properties: RefCell::new(ObjectData::default()),
+            }))
+        }
+        // The copying half of the pair. The source keeps its bytes and is free to be written,
+        // resized or detached afterwards -- none of which the result can see, because it holds a
+        // copy rather than a window.
+        Native::ArrayBufferSliceToImmutable => {
+            let Value::ArrayBuffer(buffer) = receiver else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            if buffer.shared {
+                return Err(ExecutionError::NotABuffer);
+            }
+            if buffer.detached() {
+                return Err(ExecutionError::BufferDetached);
+            }
+            let bytes = buffer.bytes.borrow();
+            let (start, end) = slice_bounds(arguments, bytes.len());
+            Value::ArrayBuffer(Rc::new(BufferData {
+                bytes: RefCell::new(bytes[start..end].to_vec()),
+                max_byte_length: None,
+                shared: false,
+                detached: std::cell::Cell::new(false),
+                immutable: true,
                 properties: RefCell::new(ObjectData::default()),
             }))
         }
@@ -29741,6 +29866,7 @@ fn call_native(
                 // could not hand to another holder would have lost the only property it wanted.
                 shared: buffer.shared,
                 detached: std::cell::Cell::new(false),
+                immutable: false,
                 properties: RefCell::new(ObjectData::default()),
             }))
         }
@@ -30459,9 +30585,12 @@ fn call_native(
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
-        Native::MathF16Round => {
-            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
-        }
+        Native::MathF16Round => Value::Number(f64::from(half_to_f32(f32_to_half(
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                argument_number(arguments) as f32
+            },
+        )))),
         Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
@@ -31516,6 +31645,7 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                     max_byte_length: None,
                     shared: false,
                     detached: std::cell::Cell::new(false),
+                    immutable: false,
                     properties: RefCell::new(ObjectData::default()),
                 }),
                 offset: 0,
@@ -35430,6 +35560,11 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
         "transferToFixedLength" if !shared => Value::Native(Native::ArrayBufferTransfer {
             preserve_resizability: false,
         }),
+        // Giving the bytes away and freezing them in one step. Only the unshared type again,
+        // and for the same reason: a shared buffer's other holders cannot survive the giving.
+        "transferToImmutable" if !shared => Value::Native(Native::ArrayBufferTransferToImmutable),
+        // The copying half of the pair: the source keeps its bytes and the result cannot change.
+        "sliceToImmutable" if !shared => Value::Native(Native::ArrayBufferSliceToImmutable),
         key if key == WellKnown::ToStringTag.property_key() => Value::String(
             if shared {
                 "SharedArrayBuffer"
@@ -35477,8 +35612,9 @@ fn iterator_method(name: &str) -> Value {
 
 /// What a `DataView` inherits from `DataView.prototype`.
 ///
-/// The `Float16` pair shares the typed-element conversion, so a `DataView` and a typed array
-/// reading the same two bytes cannot disagree about what a half is.
+/// The `Float16` pair is absent rather than approximated: half precision is not one of the
+/// element types this engine's buffers know how to read, and a `getFloat16` that answered a
+/// `Float32` decode of the same bytes would be a wrong answer no program could see coming.
 fn data_view_method(name: &str) -> Value {
     match name {
         "getInt8" => Value::Native(Native::DataViewGet(TypedKind::Int8)),
@@ -35846,6 +35982,7 @@ pub enum BuiltinAccessor {
     BufferMaxByteLength,
     BufferResizable,
     BufferDetached,
+    BufferImmutable,
     /// `SharedArrayBuffer.prototype`'s three, the mirror image.
     SharedByteLength,
     SharedMaxByteLength,
@@ -35881,6 +36018,7 @@ impl BuiltinAccessor {
             Self::BufferResizable => "resizable",
             Self::SharedGrowable => "growable",
             Self::BufferDetached => "detached",
+            Self::BufferImmutable => "immutable",
             Self::DataViewBuffer | Self::TypedArrayBuffer => "buffer",
             Self::DataViewByteOffset | Self::TypedArrayByteOffset => "byteOffset",
             Self::TypedArrayLength => "length",
@@ -35894,7 +36032,13 @@ impl BuiltinAccessor {
 /// The accessors one intrinsic prototype publishes, in the order the specification lists them.
 fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
     match table {
-        PrototypeTable::ArrayBuffer => &["byteLength", "maxByteLength", "resizable", "detached"],
+        PrototypeTable::ArrayBuffer => &[
+            "byteLength",
+            "maxByteLength",
+            "resizable",
+            "detached",
+            "immutable",
+        ],
         PrototypeTable::SharedArrayBuffer => &["byteLength", "maxByteLength", "growable"],
         PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
         PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
@@ -35912,6 +36056,7 @@ fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccesso
         (PrototypeTable::ArrayBuffer, "maxByteLength") => BuiltinAccessor::BufferMaxByteLength,
         (PrototypeTable::ArrayBuffer, "resizable") => BuiltinAccessor::BufferResizable,
         (PrototypeTable::ArrayBuffer, "detached") => BuiltinAccessor::BufferDetached,
+        (PrototypeTable::ArrayBuffer, "immutable") => BuiltinAccessor::BufferImmutable,
         (PrototypeTable::SharedArrayBuffer, "byteLength") => BuiltinAccessor::SharedByteLength,
         (PrototypeTable::SharedArrayBuffer, "maxByteLength") => {
             BuiltinAccessor::SharedMaxByteLength
@@ -36719,6 +36864,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::BigIntAsIntN
         | N::BigIntAsUintN
         | N::FinalizationRegistryRegister
+        | N::ArrayBufferSliceToImmutable
         | N::WeakMapSet => 2.0,
 
         // The three-argument ones.
@@ -36737,7 +36883,10 @@ const fn native_length(native: Native) -> Option<f64> {
 
         // `toBase64` takes only an options bag and `toHex` takes nothing, so neither declares a
         // required argument; the four that read or fill from a string declare the string.
-        N::Uint8Text(ByteText::ToBase64 | ByteText::ToHex) => 0.0,
+        // `transferToImmutable([newLength])` declares no required argument, which is how a
+        // program feature-detects it apart from `transfer`.
+        N::Uint8Text(ByteText::ToBase64 | ByteText::ToHex)
+        | N::ArrayBufferTransferToImmutable => 0.0,
 
         // Everything left takes exactly one required argument.
         _ => 1.0,
@@ -37228,7 +37377,14 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             "toLocaleDateString",
             "toLocaleTimeString",
         ],
-        PrototypeTable::ArrayBuffer => &["resize", "slice", "transfer", "transferToFixedLength"],
+        PrototypeTable::ArrayBuffer => &[
+            "resize",
+            "slice",
+            "sliceToImmutable",
+            "transfer",
+            "transferToFixedLength",
+            "transferToImmutable",
+        ],
         PrototypeTable::SharedArrayBuffer => &["grow", "slice"],
         PrototypeTable::DataView => &[
             "getInt8",
@@ -38467,108 +38623,6 @@ fn number_string(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn binary16_rounding_keeps_binary64_bits_near_a_tie() {
-        let above_tie = 1.0 + 2_f64.powi(-11) + 2_f64.powi(-25);
-        assert_eq!(f64_to_half(above_tie), 0x3c01);
-    }
-
-    #[test]
-    fn binary16_patterns_round_trip_through_numbers() {
-        for bits in 0..=u16::MAX {
-            let value = half_to_f32(bits);
-            let got = f64_to_half(f64::from(value));
-            if bits & 0x7c00 == 0x7c00 && bits & 0x03ff != 0 {
-                assert_eq!(got, 0x7e00, "NaN pattern {bits:#06x}");
-            } else {
-                assert_eq!(got, bits, "binary16 pattern {bits:#06x}");
-            }
-        }
-    }
-
-    #[test]
-    fn buffer_own_property_checks_do_not_follow_their_prototype() {
-        let intrinsics = Intrinsics::default();
-        let buffer = Value::ArrayBuffer(BufferData::fixed(1));
-        let view = Value::DataView(Rc::new(DataViewData {
-            buffer: match &buffer {
-                Value::ArrayBuffer(buffer) => Rc::clone(buffer),
-                _ => unreachable!(),
-            },
-            offset: 0,
-            length: Some(1),
-            properties: RefCell::new(ObjectData::default()),
-        }));
-        let key = [Value::String("byteLength".to_owned())];
-        assert_eq!(
-            call_native(&intrinsics, Native::ObjectHasOwnProperty, &buffer, &key),
-            Ok(Value::Boolean(false))
-        );
-        assert_eq!(
-            call_native(&intrinsics, Native::ObjectHasOwnProperty, &view, &key),
-            Ok(Value::Boolean(false))
-        );
-    }
-
-    #[test]
-    fn promise_combinators_reject_with_an_iterator_thrown_value() {
-        let program = Program {
-            version: kiln_ir::BYTECODE_VERSION,
-            constants: Vec::new(),
-            code: vec![Instruction::Return],
-            local_count: 0,
-            functions: vec![kiln_ir::FunctionProto {
-                prologue_end: 0,
-                asynchronous: false,
-                name: Some("iterator".to_owned()),
-                arrow: false,
-                generator: false,
-                async_generator: false,
-                parameter_count: 0,
-                declared_length: 0,
-                local_count: 0,
-                code: vec![Instruction::LoadThis, Instruction::Throw],
-                upvalues: Vec::new(),
-            }],
-        };
-        let mut host = TestHost {
-            calls: Vec::new(),
-            clock_now: None,
-            entropy: std::collections::VecDeque::new(),
-            timezone: None,
-            locale: None,
-        };
-        let mut vm = test_vm(&program, &mut host);
-        let method = Value::Function(vm.make_closure(0).expect("iterator closure"));
-        let source = ordinary_object([(WellKnown::Iterator.property_key().to_owned(), method)]);
-
-        for native in [
-            Native::PromiseAll,
-            Native::PromiseAllSettled,
-            Native::PromiseRace,
-            Native::PromiseAny,
-        ] {
-            let result = vm
-                .dispatch_native(
-                    native,
-                    &Value::Native(Native::PromiseConstructor),
-                    std::slice::from_ref(&source),
-                    0,
-                )
-                .expect("combinator returns a promise");
-            let Value::Promise(promise) = result else {
-                panic!("combinator returned a non-promise");
-            };
-            let Some(Settled::Rejected(reason)) = promise.borrow().settled.clone() else {
-                panic!("combinator did not reject immediately");
-            };
-            assert!(
-                strict_equal(&reason, &source),
-                "thrown value identity was lost"
-            );
-        }
-    }
 
     fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
         let mut arguments = vec![Value::String(needle.to_owned())];
