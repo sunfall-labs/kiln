@@ -49,8 +49,8 @@ var $262 = {
   evalScript: function () {
     throw new Error("kiln: host capability not provided: $262.evalScript");
   },
-  detachArrayBuffer: function () {
-    throw new Error("kiln: host capability not provided: $262.detachArrayBuffer");
+  detachArrayBuffer: function (buffer) {
+    ArrayBuffer.prototype.transfer.call(buffer);
   },
   gc: function () {
     throw new Error("kiln: host capability not provided: $262.gc");
@@ -201,5 +201,12 @@ mod tests {
             .prelude_for(&["propertyHelper.js".to_owned()])
             .expect_err("missing include is an error");
         assert!(missing.contains("propertyHelper.js"));
+    }
+
+    #[test]
+    fn host_prelude_detach_array_buffer_uses_the_language_transfer_operation() {
+        assert!(HOST_OBJECT_PRELUDE.contains(
+            "detachArrayBuffer: function (buffer) {\n    ArrayBuffer.prototype.transfer.call(buffer);"
+        ));
     }
 }
