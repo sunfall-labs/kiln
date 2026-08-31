@@ -815,6 +815,114 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
 }
 
 #[test]
+fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
+    let fixture = Fixture::empty();
+    let dependency = fixture.dir.join("snapshot-dependency.js");
+    let entry = fixture.dir.join("snapshot-entry.js");
+    std::fs::write(
+        &dependency,
+        "console.log('old'); export const answer = 42;\n",
+    )
+    .expect("write dependency");
+    std::fs::write(
+        &entry,
+        "import { answer } from './snapshot-dependency.js'; console.log(answer);\n",
+    )
+    .expect("write entry");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut setup = Client::connect(&fixture.socket).expect("connect");
+    setup.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let dependency = std::fs::canonicalize(dependency).expect("canonical dependency");
+    let entry = std::fs::canonicalize(entry).expect("canonical entry");
+    for path in [&dependency, &entry] {
+        setup
+            .request(&Request::SetSource {
+                source_view: SourceView(0),
+                path: path.to_string_lossy().into_owned(),
+                text: std::fs::read_to_string(path).expect("read source"),
+            })
+            .expect("set source");
+    }
+    let initial_view = setup.source_view();
+    let entry_path = entry.to_string_lossy().into_owned();
+    let dependency_path = dependency.to_string_lossy().into_owned();
+
+    // This gate is keyed by the old request's spelling. A later request uses the equivalent
+    // relative spelling, allowing it to prepare and execute a replacement graph while the old
+    // immutable Arc remains blocked in execution.
+    let (entered_rx, gate) = install_run_gate(&entry_path);
+    let socket = fixture.socket.clone();
+    let old_entry = entry_path.clone();
+    let old_root = root.clone();
+    let blocked = std::thread::spawn(move || {
+        let mut client = Client::connect(&socket).expect("connect run client");
+        client.source_view = initial_view;
+        client.handshake().expect("run handshake");
+        client
+            .request(&Request::Run {
+                node: false,
+                source_view: initial_view,
+                path: old_entry,
+                project_root: old_root,
+            })
+            .expect("blocked graph run")
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("old graph reached execution gate");
+
+    setup
+        .request(&Request::SetSource {
+            source_view: initial_view,
+            path: dependency_path,
+            text: "console.log('new'); export const answer = 7;\n".into(),
+        })
+        .expect("edit dependency while old graph is in flight");
+    let Response::Ran(new) = setup
+        .request(&Request::Run {
+            node: false,
+            source_view: setup.source_view(),
+            path: "./snapshot-entry.js".into(),
+            project_root: root.clone(),
+        })
+        .expect("run patched graph")
+    else {
+        panic!("expected patched graph run");
+    };
+    assert!(new.succeeded, "{:?}", new.diagnostics);
+    assert_eq!(new.stdout, "new\n7\n");
+
+    gate.release();
+    let response =
+        within(Duration::from_secs(5), move || blocked.join()).expect("old graph run must finish");
+    let Response::Ran(old) = response else {
+        panic!("expected old graph run response, got {response:?}");
+    };
+    assert!(old.succeeded, "{:?}", old.diagnostics);
+    assert_eq!(old.stdout, "old\n42\n");
+    assert_eq!(old.revision, 2, "old run reports its prepared snapshot");
+    assert_eq!(new.revision, 3, "patched run reports the edited snapshot");
+
+    let Response::Stats(stats) = setup.request(&Request::Stats).expect("graph stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(stats.graph_cache_hits, 1);
+    assert_eq!(stats.graph_cache_partial_hits, 1);
+    assert_eq!(stats.graph_cache_misses, 1);
+    assert_eq!(stats.graph_cache_entries, 1);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+#[test]
 fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
     let fixture = Fixture::empty();
     let path = "unsaved-buffer.js".to_owned();
