@@ -21,10 +21,12 @@ pub const C_ABI_VERSION: u32 = 1;
 ///
 /// The default deliberately preserves every pre-ADR-0031 artifact. Host-backed values are never
 /// captured here; only the policy participates in emission and identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EmissionPolicy {
     pub host_clock: bool,
     pub entropy: EmissionEntropyPolicy,
+    pub timezone: EmissionStringPolicy,
+    pub locale: EmissionStringPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,6 +34,14 @@ pub enum EmissionEntropyPolicy {
     #[default]
     Deterministic,
     Seeded(u64),
+    Host,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EmissionStringPolicy {
+    #[default]
+    Deterministic,
+    Named(String),
     Host,
 }
 
@@ -89,9 +99,9 @@ pub fn emit(program: &Program) -> Result<CModule, EmitError> {
 
 pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CModule, EmitError> {
     validate(program)?;
-    let (program_hash, symbol_hash) = hash_program_pair_with_policy(program, policy);
+    let (program_hash, symbol_hash) = hash_program_pair_with_policy(program, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render(program, program_hash, &symbol, policy);
+    let source = render(program, program_hash, &symbol, &policy);
     Ok(CModule {
         symbol,
         source,
@@ -127,9 +137,9 @@ pub fn emit_module_with_policy(
     policy: EmissionPolicy,
 ) -> Result<CModule, EmitError> {
     validate_module(module)?;
-    let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, policy);
+    let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, policy);
+    let source = render_module(module, program_hash, &symbol, &policy);
     Ok(CModule {
         symbol,
         source,
@@ -159,10 +169,10 @@ pub fn emit_module_with_logical_path_and_policy(
 ) -> Result<CModule, EmitError> {
     validate_logical_path(logical_path)?;
     validate_module(module)?;
-    let (program_hash, _) = hash_module_pair_with_policy(module, policy);
+    let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, policy);
+    let source = render_module(module, program_hash, &symbol, &policy);
     Ok(CModule {
         symbol,
         source,
@@ -20020,8 +20030,8 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     .unwrap();
 }
 
-fn render_emission_policy(output: &mut String, policy: EmissionPolicy) {
-    if policy == EmissionPolicy::default() {
+fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
+    if *policy == EmissionPolicy::default() {
         return;
     }
     writeln!(
@@ -20041,7 +20051,7 @@ fn render_emission_policy(output: &mut String, policy: EmissionPolicy) {
     }
 }
 
-fn render(program: &Program, program_hash: u64, symbol: &str, policy: EmissionPolicy) -> String {
+fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionPolicy) -> String {
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
     let entry_symbol = if callables {
@@ -20136,7 +20146,7 @@ fn render_module(
     module: &ModuleProgram,
     program_hash: u64,
     symbol: &str,
-    policy: EmissionPolicy,
+    policy: &EmissionPolicy,
 ) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
@@ -21220,16 +21230,16 @@ fn host_op_code(operation: HostOp) -> u16 {
     operation as u16
 }
 
-fn hash_program_pair_with_policy(program: &Program, policy: EmissionPolicy) -> (u64, u64) {
+fn hash_program_pair_with_policy(program: &Program, policy: &EmissionPolicy) -> (u64, u64) {
     (
         hash_program_with_policy_and_seed(program, policy, 0xcbf29ce484222325),
         hash_program_with_policy_and_seed(program, policy, 0x84222325cbf29ce4),
     )
 }
 
-fn hash_program_with_policy_and_seed(program: &Program, policy: EmissionPolicy, seed: u64) -> u64 {
+fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy, seed: u64) -> u64 {
     let mut hash = hash_program_with_seed(program, seed);
-    if policy == EmissionPolicy::default() {
+    if *policy == EmissionPolicy::default() {
         return hash;
     }
     let (entropy_tag, entropy_seed) = match policy.entropy {
@@ -21247,7 +21257,27 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: EmissionPolicy, 
             hash = hash.wrapping_mul(0x100000001b3);
         }
     }
+    hash_string_policy(&mut hash, &policy.timezone);
+    hash_string_policy(&mut hash, &policy.locale);
     hash
+}
+
+fn hash_string_policy(hash: &mut u64, policy: &EmissionStringPolicy) {
+    let (tag, named) = match policy {
+        EmissionStringPolicy::Deterministic => (0_u8, None),
+        EmissionStringPolicy::Named(value) => (1, Some(value.as_str())),
+        EmissionStringPolicy::Host => (2, None),
+    };
+    *hash ^= u64::from(tag);
+    *hash = hash.wrapping_mul(0x100000001b3);
+    if let Some(value) = named {
+        for byte in value.as_bytes() {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+        *hash ^= 0xff;
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
 }
 
 #[cfg(test)]
@@ -21589,10 +21619,10 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
 }
 
 fn hash_module_pair(module: &ModuleProgram) -> (u64, u64) {
-    hash_module_pair_with_policy(module, EmissionPolicy::default())
+    hash_module_pair_with_policy(module, &EmissionPolicy::default())
 }
 
-fn hash_module_pair_with_policy(module: &ModuleProgram, policy: EmissionPolicy) -> (u64, u64) {
+fn hash_module_pair_with_policy(module: &ModuleProgram, policy: &EmissionPolicy) -> (u64, u64) {
     (
         hash_module_with_policy_and_seed(module, policy, 0xcbf29ce484222325),
         hash_module_with_policy_and_seed(module, policy, 0x84222325cbf29ce4),
@@ -21601,11 +21631,11 @@ fn hash_module_pair_with_policy(module: &ModuleProgram, policy: EmissionPolicy) 
 
 fn hash_module_with_policy_and_seed(
     module: &ModuleProgram,
-    policy: EmissionPolicy,
+    policy: &EmissionPolicy,
     seed: u64,
 ) -> u64 {
     let mut hash = hash_module_with_seed(module, seed);
-    if policy == EmissionPolicy::default() {
+    if *policy == EmissionPolicy::default() {
         return hash;
     }
     let (entropy_tag, entropy_seed) = match policy.entropy {
@@ -21623,6 +21653,8 @@ fn hash_module_with_policy_and_seed(
             hash = hash.wrapping_mul(0x100000001b3);
         }
     }
+    hash_string_policy(&mut hash, &policy.timezone);
+    hash_string_policy(&mut hash, &policy.locale);
     hash
 }
 
@@ -21736,6 +21768,38 @@ mod tests {
             },
         )
         .expect("host entropy policy emits");
+        let named_timezone = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                timezone: EmissionStringPolicy::Named("America/Denver".into()),
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("named timezone policy emits");
+        let host_timezone = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                timezone: EmissionStringPolicy::Host,
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("host timezone policy emits");
+        let named_locale = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                locale: EmissionStringPolicy::Named("de-DE".into()),
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("named locale policy emits");
+        let host_locale = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                locale: EmissionStringPolicy::Host,
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("host locale policy emits");
 
         assert_eq!(legacy, explicit_default);
         assert_ne!(legacy.symbol, host_clock.symbol);
@@ -21760,6 +21824,11 @@ mod tests {
                 .contains("#define KILN_REALM_HOST_ENTROPY 1")
         );
         assert!(host_entropy.source.contains("UINT16_C(3)"));
+        assert_ne!(legacy.symbol, named_timezone.symbol);
+        assert_ne!(named_timezone.symbol, host_timezone.symbol);
+        assert_ne!(legacy.symbol, named_locale.symbol);
+        assert_ne!(named_locale.symbol, host_locale.symbol);
+        assert_ne!(named_timezone.symbol, named_locale.symbol);
     }
 
     #[test]

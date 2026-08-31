@@ -19,7 +19,7 @@ use fixed_decimal::{
 use icu_decimal::DecimalFormatter;
 use icu_decimal::options::{DecimalFormatterOptions, GroupingStrategy};
 
-use crate::locale::{RelevantKey, Resolution, resolve};
+use crate::locale::{DEFAULT, RelevantKey, Resolution, resolve_with_default};
 use crate::{Error, Setting};
 
 /// The accepted values of `style`. `currency` and `unit` are accepted by the constructor and
@@ -406,6 +406,15 @@ fn shortest_decimal(value: f64) -> String {
 impl NumberFormat {
     /// Build a formatter, resolving the locale and the digit options.
     pub fn new(requested: &[String], options: Options) -> Result<Self, Error> {
+        Self::new_with_default(requested, DEFAULT, options)
+    }
+
+    /// Build with the default locale selected by the containing realm.
+    pub fn new_with_default(
+        requested: &[String],
+        default: &str,
+        options: Options,
+    ) -> Result<Self, Error> {
         let digits = resolve_digits(&options)?;
         let increment = options.rounding_increment as u32;
         if !ROUNDING_INCREMENTS.contains(&increment) {
@@ -415,7 +424,7 @@ impl NumberFormat {
         }
 
         let keys = [RelevantKey::new("nu").with_option(options.numbering_system.clone())];
-        let resolution = resolve(requested, &keys, |key, value| {
+        let resolution = resolve_with_default(requested, default, &keys, |key, value| {
             key == "nu" && crate::number::numbering_system_is_supported(value)
         });
 

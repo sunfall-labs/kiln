@@ -13,7 +13,7 @@ use icu_collator::options::{AlternateHandling, CaseLevel, CollatorOptions, Stren
 use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
 use icu_collator::{Collator as IcuCollator, CollatorBorrowed, CollatorPreferences};
 
-use crate::locale::{RelevantKey, Resolution, resolve};
+use crate::locale::{DEFAULT, RelevantKey, Resolution, resolve_with_default};
 use crate::{Error, Setting};
 
 /// The accepted values of `usage`.
@@ -87,6 +87,15 @@ impl core::fmt::Debug for Collator {
 impl Collator {
     /// Build a collator.
     pub fn new(requested: &[String], options: Options) -> Result<Self, Error> {
+        Self::new_with_default(requested, DEFAULT, options)
+    }
+
+    /// Build with the default locale selected by the containing realm.
+    pub fn new_with_default(
+        requested: &[String],
+        default: &str,
+        options: Options,
+    ) -> Result<Self, Error> {
         let keys = [
             RelevantKey::new("co").with_option(options.collation.clone()),
             RelevantKey::new("kn").with_option(options.numeric.map(|n| n.to_string())),
@@ -95,7 +104,7 @@ impl Collator {
         // `standard` and `search` are the two collation types ECMA-402 refuses in the `-u-co-`
         // extension: `search` is selected by `usage` instead, and `standard` is the absence of a
         // tailoring rather than a tailoring you can ask for.
-        let resolution = resolve(requested, &keys, |key, value| match key {
+        let resolution = resolve_with_default(requested, default, &keys, |key, value| match key {
             "co" => !matches!(value, "standard" | "search"),
             "kn" => matches!(value, "true" | "false"),
             "kf" => CASE_FIRSTS.contains(&value),

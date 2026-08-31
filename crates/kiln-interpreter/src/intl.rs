@@ -624,8 +624,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         options.second = numeric();
                     }
                 }
-                let formatter =
-                    engine::datetime::DateTimeFormat::new(&locales, options).map_err(failure)?;
+                let formatter = engine::datetime::DateTimeFormat::new_with_default(
+                    &locales,
+                    &self.default_locale,
+                    options,
+                )
+                .map_err(failure)?;
                 Ok(Value::String(formatter.format(time).map_err(failure)?))
             }
         }
@@ -660,7 +664,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
                 let options = self.intl_number_options(arguments.get(1), instruction)?;
                 IntlValue::NumberFormat(
-                    engine::number::NumberFormat::new(&locales, options).map_err(failure)?,
+                    engine::number::NumberFormat::new_with_default(
+                        &locales,
+                        &self.default_locale,
+                        options,
+                    )
+                    .map_err(failure)?,
                 )
             }
             Service::PluralRules => {
@@ -718,8 +727,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let ignore_punctuation =
                     self.intl_boolean_option(&bag, "ignorePunctuation", instruction)?;
                 IntlValue::Collator(
-                    engine::collator::Collator::new(
+                    engine::collator::Collator::new_with_default(
                         &locales,
+                        &self.default_locale,
                         engine::collator::Options {
                             usage,
                             collation,
@@ -736,7 +746,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
                 let options = self.intl_date_time_options(arguments.get(1), instruction)?;
                 IntlValue::DateTimeFormat(Box::new(
-                    engine::datetime::DateTimeFormat::new(&locales, options).map_err(failure)?,
+                    engine::datetime::DateTimeFormat::new_with_default(
+                        &locales,
+                        &self.default_locale,
+                        options,
+                    )
+                    .map_err(failure)?,
                 ))
             }
             Service::RelativeTimeFormat => {
@@ -1841,8 +1856,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let time_zone = {
             let read = self.read_property(&bag, "timeZone", instruction)?;
             if matches!(read, Value::Undefined) {
-                // `DefaultTimeZone()`. ADR 0015 fixed it at UTC and nothing here asks the host.
-                dtf::canonical_time_zone("UTC")
+                // `DefaultTimeZone()`: resolved once when this realm was entered. Host-backed
+                // policy crossed HostOps there, never from this individual formatter.
+                dtf::canonical_time_zone(&self.timezone)
             } else {
                 let text = self.intl_string_argument(Some(&read), instruction)?;
                 match offset_time_zone(&text) {

@@ -268,6 +268,22 @@ pub fn resolve(
     keys: &[RelevantKey],
     supported: impl Fn(&str, &str) -> bool,
 ) -> Resolution {
+    resolve_with_default(requested, DEFAULT, keys, supported)
+}
+
+/// [`resolve`] with the realm's explicit default locale.
+///
+/// An explicit locale list still wins. This parameter is consulted only when the list is empty
+/// or none of its entries is available, which is exactly where ECMA-402 asks `DefaultLocale()`.
+/// Keeping it here, at the common resolution seam, prevents each formatter from learning about
+/// realm or host policy independently.
+pub fn resolve_with_default(
+    requested: &[String],
+    default: &str,
+    keys: &[RelevantKey],
+    supported: impl Fn(&str, &str) -> bool,
+) -> Resolution {
+    let default = canonicalize(default).expect("the realm's explicit default locale is valid");
     let mut matched: Option<(Locale, LanguageIdentifier)> = None;
     for tag in requested {
         let Ok(locale) = Locale::try_from_str(tag) else {
@@ -279,7 +295,9 @@ pub fn resolve(
         }
     }
     let (requested_locale, mut id) = matched.unwrap_or_else(|| {
-        let fallback: Locale = DEFAULT.parse().expect("the realm's default locale parses");
+        let fallback: Locale = default
+            .parse()
+            .expect("the realm's explicit default locale parses");
         let id = fallback.id.clone();
         (fallback, id)
     });
@@ -536,6 +554,18 @@ mod tests {
         assert_eq!(none.locale, DEFAULT);
         let empty = resolve(&[], &[], |_, _| true);
         assert_eq!(empty.locale, DEFAULT);
+    }
+
+    #[test]
+    fn an_explicit_realm_default_is_used_only_as_the_fallback() {
+        let empty = resolve_with_default(&[], "de-DE", &[], |_, _| true);
+        assert_eq!(empty.locale, "de-DE");
+
+        let explicit = resolve_with_default(&["fr-FR".into()], "de-DE", &[], |_, _| true);
+        assert_eq!(explicit.locale, "fr-FR");
+
+        let canonical = resolve_with_default(&[], "DE-de", &[], |_, _| true);
+        assert_eq!(canonical.locale, "de-DE");
     }
 
     #[test]

@@ -7,9 +7,14 @@ artifact-policy identity are implemented. Clock consumption is implemented on in
 native paths: civil-time APIs use explicit `HostOp::ClockNow` only for a host-clock realm, while
 Tokio's virtual clock remains the scheduler and monotonic source. Entropy consumption is also
 implemented on both paths: deterministic and seeded realms use realm-local SplitMix64 state,
-while host-backed draws cross `HostOp::EntropyU64`. Timezone and locale consumption plus scripted
-deterministic networking remain migration work; live interpreted Node networking already uses the
-production Tokio provider without weakening the default realm.
+while host-backed draws cross `HostOp::EntropyU64`. Timezone and locale are resolved once when an
+interpreted realm is entered: named values are validated directly and host values cross
+`HostOp::TimeZone` / `HostOp::Locale`; `Intl.DateTimeFormat` consumes the realm zone, while number,
+collation, and date-time formatters consume the realm locale. Their deterministic, named, and host
+policies also participate in native artifact identity. Full local-`Date` zone semantics, the rest
+of the Intl service constructors, native execution of those surfaces, and scripted deterministic
+networking remain migration work; live interpreted Node networking already uses the production
+Tokio provider without weakening the default realm.
 
 ## Context
 

@@ -14,9 +14,10 @@ use kiln_ir::{
     UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, Realm,
-    RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn,
-    TimerId, WorkItem, duration_from_milliseconds,
+    ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, LocaleCapability,
+    Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
+    RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
+    duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
@@ -5746,6 +5747,58 @@ fn realm_runtime() -> Result<RealmRuntime, ExecutionError> {
     })
 }
 
+fn realm_host_string<H: HostOps + ?Sized>(
+    host: &mut H,
+    operation: HostOp,
+    label: &str,
+) -> Result<String, ExecutionError> {
+    match host
+        .call(operation, &[])
+        .map_err(|error| ExecutionError::Host {
+            instruction: 0,
+            message: error.to_string(),
+        })? {
+        HostValue::String(value) if !value.is_empty() => Ok(value),
+        _ => Err(ExecutionError::Host {
+            instruction: 0,
+            message: format!("HostOp::{label} must return a non-empty string"),
+        }),
+    }
+}
+
+fn resolve_timezone<H: HostOps + ?Sized>(
+    host: &mut H,
+    capability: &TimeZoneCapability,
+) -> Result<String, ExecutionError> {
+    let value = match capability {
+        TimeZoneCapability::Utc => "UTC".to_owned(),
+        TimeZoneCapability::Named(value) => value.clone(),
+        TimeZoneCapability::Host => realm_host_string(host, HostOp::TimeZone, "TimeZone")?,
+    };
+    if kiln_intl::datetime::canonical_time_zone(&value).is_none() {
+        return Err(ExecutionError::Host {
+            instruction: 0,
+            message: format!("invalid realm timezone: {value}"),
+        });
+    }
+    Ok(value)
+}
+
+fn resolve_locale<H: HostOps + ?Sized>(
+    host: &mut H,
+    capability: &LocaleCapability,
+) -> Result<String, ExecutionError> {
+    let value = match capability {
+        LocaleCapability::Deterministic => kiln_intl::locale::DEFAULT.to_owned(),
+        LocaleCapability::Named(value) => value.clone(),
+        LocaleCapability::Host => realm_host_string(host, HostOp::Locale, "Locale")?,
+    };
+    kiln_intl::locale::canonicalize(&value).map_err(|error| ExecutionError::Host {
+        instruction: 0,
+        message: format!("invalid realm locale: {error}"),
+    })
+}
+
 /// Execute one IR program against a host implementation.
 pub fn execute<H: HostOps + ?Sized>(
     program: Rc<Program>,
@@ -6740,6 +6793,13 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
     /// clock regardless of this setting.
     clock_capability: ClockCapability,
+    /// Canonical environmental strings resolved once when the realm is entered.
+    ///
+    /// Host-backed policy crosses HostOps here, never from an individual builtin. This makes the
+    /// value realm state, gives every consumer one answer, and keeps host reads visible at the
+    /// versioned boundary.
+    timezone: String,
+    default_locale: String,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
@@ -6858,10 +6918,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         host: &'host mut H,
         locals: Vec<Value>,
         limits: ExecutionLimits,
-        entropy: EntropyCapability,
-        clock_capability: ClockCapability,
-    ) -> Self {
-        Self {
+        capabilities: &RealmCapabilities,
+    ) -> Result<Self, ExecutionError> {
+        let timezone = resolve_timezone(host, &capabilities.timezone)?;
+        let default_locale = resolve_locale(host, &capabilities.locale)?;
+        let entropy = capabilities.entropy;
+        Ok(Self {
             program,
             strict: strictness.body,
             strictness,
@@ -6886,7 +6948,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             steps: 0,
             symbol_serial: 0,
             realm: Realm::new(),
-            clock_capability,
+            clock_capability: capabilities.clock,
+            timezone,
+            default_locale,
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -36997,6 +37061,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
@@ -37010,9 +37076,9 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            EntropyCapability::Deterministic,
-            ClockCapability::Virtual,
-        );
+            &RealmCapabilities::default(),
+        )
+        .expect("realm capabilities resolve");
         assert_eq!(
             vm.dispatch_memory_readable(
                 Native::NodeReadablePush,
@@ -37067,6 +37133,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
@@ -37080,9 +37148,9 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            EntropyCapability::Deterministic,
-            ClockCapability::Virtual,
-        );
+            &RealmCapabilities::default(),
+        )
+        .expect("realm capabilities resolve");
         assert_eq!(
             vm.dispatch_memory_writable(
                 Native::NodeWritableWrite,
@@ -37108,6 +37176,8 @@ mod tests {
         calls: Vec<(HostOp, Vec<HostValue>)>,
         clock_now: Option<f64>,
         entropy: std::collections::VecDeque<u64>,
+        timezone: Option<String>,
+        locale: Option<String>,
     }
 
     impl HostOps for TestHost {
@@ -37127,6 +37197,16 @@ mod tests {
                     .pop_front()
                     .map(HostValue::Number)
                     .ok_or_else(|| HostError::new("no scripted entropy word")),
+                HostOp::TimeZone => self
+                    .timezone
+                    .clone()
+                    .map(HostValue::String)
+                    .ok_or_else(|| HostError::new("no scripted timezone")),
+                HostOp::Locale => self
+                    .locale
+                    .clone()
+                    .map(HostValue::String)
+                    .ok_or_else(|| HostError::new("no scripted locale")),
                 _ => Ok(HostValue::Undefined),
             }
         }
@@ -37178,6 +37258,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         execute(
             Rc::new(program.clone()),
@@ -37194,9 +37276,9 @@ mod tests {
             host,
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
-            EntropyCapability::Deterministic,
-            ClockCapability::Virtual,
+            &RealmCapabilities::default(),
         )
+        .expect("realm capabilities resolve")
     }
 
     #[test]
@@ -37212,6 +37294,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: Some(1_725_000_123_456.25),
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(program),
@@ -37219,9 +37303,12 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            EntropyCapability::Deterministic,
-            ClockCapability::Host,
-        );
+            &RealmCapabilities {
+                clock: ClockCapability::Host,
+                ..RealmCapabilities::default()
+            },
+        )
+        .expect("realm capabilities resolve");
 
         assert_eq!(
             vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 7),
@@ -37264,12 +37351,89 @@ mod tests {
             calls: Vec::new(),
             clock_now: Some(123.0),
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         assert_eq!(
             vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 0),
             Ok(Value::Number(0.0))
         );
+        drop(vm);
+        assert!(host.calls.is_empty());
+    }
+
+    #[test]
+    fn realm_timezone_and_locale_are_resolved_once_at_entry() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: Some("America/Denver".into()),
+            locale: Some("DE-de".into()),
+        };
+        let vm = Vm::with_entropy_seed(
+            Rc::new(program),
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities {
+                timezone: TimeZoneCapability::Host,
+                locale: LocaleCapability::Host,
+                ..RealmCapabilities::default()
+            },
+        )
+        .expect("host capabilities resolve");
+
+        assert_eq!(vm.timezone, "America/Denver");
+        assert_eq!(vm.default_locale, "de-DE");
+        drop(vm);
+        assert_eq!(
+            host.calls,
+            vec![(HostOp::TimeZone, Vec::new()), (HostOp::Locale, Vec::new())]
+        );
+    }
+
+    #[test]
+    fn named_timezone_and_locale_never_call_the_host() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let vm = Vm::with_entropy_seed(
+            Rc::new(program),
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities {
+                timezone: TimeZoneCapability::Named("America/New_York".into()),
+                locale: LocaleCapability::Named("fr-fr".into()),
+                ..RealmCapabilities::default()
+            },
+        )
+        .expect("named capabilities resolve");
+
+        assert_eq!(vm.timezone, "America/New_York");
+        assert_eq!(vm.default_locale, "fr-FR");
         drop(vm);
         assert!(host.calls.is_empty());
     }
@@ -37292,6 +37456,8 @@ mod tests {
                 0x8899_aabb_ccdd_eeff,
             ]
             .into(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(program),
@@ -37299,9 +37465,12 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            EntropyCapability::Host,
-            ClockCapability::Virtual,
-        );
+            &RealmCapabilities {
+                entropy: EntropyCapability::Host,
+                ..RealmCapabilities::default()
+            },
+        )
+        .expect("realm capabilities resolve");
 
         assert_eq!(
             vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 1),
@@ -37340,20 +37509,27 @@ mod tests {
                 host,
                 Vec::new(),
                 ExecutionLimits::default(),
-                EntropyCapability::Seeded(7),
-                ClockCapability::Virtual,
-            );
+                &RealmCapabilities {
+                    entropy: EntropyCapability::Seeded(7),
+                    ..RealmCapabilities::default()
+                },
+            )
+            .expect("realm capabilities resolve");
             vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 0)
         };
         let mut first = TestHost {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut second = TestHost {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         assert_eq!(draw(&mut first), draw(&mut second));
         assert!(first.calls.is_empty());
@@ -37373,6 +37549,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let date = Value::Date(Rc::new(std::cell::Cell::new(0.0)));
@@ -37396,6 +37574,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let target = ordinary_object(Vec::<(String, Value)>::new());
@@ -37427,6 +37607,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let original = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
@@ -37463,6 +37645,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         assert_eq!(
@@ -37510,6 +37694,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -37561,6 +37747,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -37606,6 +37794,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -38536,6 +38726,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let limits = ExecutionLimits {
             max_call_depth: 8,
@@ -38702,6 +38894,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38753,6 +38947,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38786,6 +38982,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38814,6 +39012,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         execute(
             Rc::new(program.clone()),
@@ -38834,6 +39034,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
         let error = execute(
             Rc::new(program.clone()),
@@ -38887,6 +39089,8 @@ mod tests {
             calls: Vec::new(),
             clock_now: None,
             entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
         };
 
         let result = execute_module(
