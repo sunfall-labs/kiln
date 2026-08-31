@@ -4185,7 +4185,7 @@ impl Value {
                 // object is its `toString` tag. `typeof Math` already answered `"object"`; this
                 // is the same fact reaching the other conversion.
                 Some(name) => format!("[object {name}]"),
-                None => format!("[Function: {}]", native_js_name(&native)),
+                None => format!("[Function: {}]", native_js_name(native)),
             },
             Self::Callback(method) => {
                 format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
@@ -11782,11 +11782,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // loop, because what it puts back is a Number.
         let numeric = numeric_arguments(native);
         if !numeric.is_empty()
-            && numeric.iter().any(|&index| {
-                arguments
-                    .get(index)
-                    .is_some_and(|argument| needs_number_conversion(argument))
-            })
+            && numeric
+                .iter()
+                .any(|&index| arguments.get(index).is_some_and(needs_number_conversion))
         {
             let mut converted = arguments.to_vec();
             for &index in numeric {
@@ -27115,7 +27113,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         },
         Value::Native(native) => match namespace_name(native) {
             Some(name) => format!("Object [{name}] {{}}"),
-            None => format!("[Function: {}]", native_js_name(&native)),
+            None => format!("[Function: {}]", native_js_name(native)),
         },
         Value::Callback(method) => {
             format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
