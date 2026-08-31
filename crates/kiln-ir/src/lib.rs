@@ -2343,16 +2343,6 @@ impl Compiler {
             self.error(Some(span), "destructuring bindings are not supported yet");
             return;
         }
-        if kind != VariableKind::Var
-            && initializer.is_some_and(|initializer| expression_references(initializer, name))
-        {
-            self.error(
-                Some(span),
-                format!("temporal-dead-zone access in initializer for `{name}` is not supported"),
-            );
-            return;
-        }
-
         let scope_index = if kind == VariableKind::Var {
             0
         } else {
@@ -2380,10 +2370,13 @@ impl Compiler {
                     format!("const local `{name}` requires an initializer"),
                 );
             }
-            self.initialize(name);
             if bound_from_stack {
+                self.initialize(name);
                 return;
             }
+            // The initializer is compiled *before* the name leaves its dead zone, because it is
+            // inside that zone: `let x = x` is a run-time `ReferenceError`, not a read of an
+            // undefined slot and not a refusal of the source.
             if let Some(initializer) = initializer {
                 self.expression(initializer);
             } else if kind != VariableKind::Var {
@@ -2391,8 +2384,10 @@ impl Compiler {
                 // which is what makes `var x = 1; var x;` leave 1 in place.
                 self.push_constant(Constant::Undefined);
             } else {
+                self.initialize(name);
                 return;
             }
+            self.initialize(name);
             self.code.push(if existing.celled {
                 Instruction::StoreCell(existing.slot)
             } else {
@@ -2414,18 +2409,28 @@ impl Compiler {
         // with them. `predeclare` applies the same rule to hoisted bindings, and keeping this
         // non-hoisted path weaker let hidden superclass bindings index the importer by slot.
         let celled = self.cell_everything || self.captured.contains(name);
+        // A `let` or `const` whose initializer has not run yet is in its dead zone, and the
+        // initializer is part of that zone. A `var` never is, and a binding the caller is about
+        // to store into from the stack has no initializer of its own to wait for.
+        let in_dead_zone = kind != VariableKind::Var && !bound_from_stack;
         self.scopes[scope_index].insert(
             name.to_owned(),
             Local {
                 slot,
                 kind,
                 imported: false,
-                initialized: true,
+                initialized: !in_dead_zone,
                 celled,
             },
         );
         if celled {
             self.code.push(Instruction::NewCell(slot));
+            // A captured binding can be read from a function called before the declaration runs,
+            // where the compiler cannot see the read. The marker is what makes that a
+            // `ReferenceError` rather than an undefined the program never wrote.
+            if in_dead_zone {
+                self.code.push(Instruction::MarkUninitialized(slot));
+            }
         }
         if bound_from_stack {
             // The value is already on the stack; the caller emits the store, because it may need
@@ -2437,6 +2442,7 @@ impl Compiler {
         } else {
             self.push_constant(Constant::Undefined);
         }
+        self.initialize(name);
         self.code.push(if celled {
             Instruction::StoreCell(slot)
         } else {
@@ -2549,7 +2555,7 @@ impl Compiler {
     ///
     /// The whole of Kiln's ordinary identifier resolution: a slot, a cell, an upvalue, a module
     /// slot, or -- when nothing bound it -- a built-in or a `ReferenceError` where the read is.
-    fn load_lexically(&mut self, name: &str, span: Span) {
+    fn load_lexically(&mut self, name: &str) {
         match self.resolve_or_capture(name) {
             // Reading a binding whose declaration has not run yet is the temporal dead zone.
             // Refused rather than read as undefined, which is what pre-declaring every name
@@ -2564,13 +2570,16 @@ impl Compiler {
             Resolution::Local(local) if !local.initialized && local.celled && self.eval_program => {
                 self.code.push(Instruction::LoadCell(local.slot))
             }
-            // A parameter read from another parameter's default, before the binding list has
-            // reached it: `function f(x = y, y) {}`. The refusal has to be a *run-time*
-            // `ReferenceError`, because the function is well formed and only a call fails --
-            // which is exactly what `assert.throws(ReferenceError, () => f())` asks for. A cell
-            // that is uninitialised by construction is that refusal, spelled with instructions
-            // that already exist rather than with an opcode of its own.
-            Resolution::Local(local) if !local.initialized && self.parameter_dead_zone => {
+            // Any read of a binding whose declaration has not run yet: `x; let x = 1`,
+            // `let x = x`, or a parameter read from another parameter's default in
+            // `function f(x = y, y) {}`. The refusal has to be a *run-time* `ReferenceError`,
+            // because the source is well formed and only reaching the read fails -- which is
+            // exactly what `assert.throws(ReferenceError, () => f())` asks for. A cell that is
+            // uninitialised by construction is that refusal, spelled with instructions that
+            // already exist rather than with an opcode of its own; a scratch one rather than the
+            // binding's own, because a plain local has no cell at this point in the code and an
+            // uncelled slot is not one to load from.
+            Resolution::Local(local) if !local.initialized => {
                 let _ = local;
                 let scratch = self.local_count;
                 self.local_count += 1;
@@ -2578,10 +2587,6 @@ impl Compiler {
                 self.code.push(Instruction::MarkUninitialized(scratch));
                 self.code.push(Instruction::LoadCell(scratch));
             }
-            Resolution::Local(local) if !local.initialized => self.error(
-                Some(span),
-                format!("cannot access `{name}` before its declaration"),
-            ),
             Resolution::Local(local) if local.celled => {
                 self.code.push(Instruction::LoadCell(local.slot))
             }
@@ -2963,7 +2968,7 @@ impl Compiler {
         scope.next += 1;
         debug_assert_eq!(slot.awaiting, awaiting);
 
-        self.load_lexically(name, span);
+        self.load_lexically(name);
         self.code.push(Instruction::Dup);
         let present = self.emit_jump(Instruction::JumpIfNotNullish(0));
         // `using x = null` binds and disposes of nothing, and never looks for a method: a
@@ -3884,8 +3889,7 @@ impl Compiler {
         match &expression.kind {
             ExpressionKind::Literal(literal) => self.push_literal(literal),
             ExpressionKind::Identifier(name) => {
-                let span = expression.span;
-                self.with_scoped_load(name, |compiler| compiler.load_lexically(name, span));
+                self.with_scoped_load(name, |compiler| compiler.load_lexically(name));
             }
             // `typeof x` inside a `with` has to ask the object first, and only then fall back
             // to the rule below -- the name may be absent from every binding around it and still
@@ -3901,7 +3905,6 @@ impl Compiler {
                 let ExpressionKind::Identifier(name) = &argument.kind else {
                     unreachable!("the guard above matched an identifier")
                 };
-                let span = argument.span;
                 let unbound = self.names_nothing(name)
                     && Builtin::from_name(name).is_none()
                     && name != "undefined"
@@ -3912,7 +3915,7 @@ impl Compiler {
                     if unbound {
                         compiler.push_constant(Constant::Undefined);
                     } else {
-                        compiler.load_lexically(name, span);
+                        compiler.load_lexically(name);
                     }
                 });
                 self.code.push(Instruction::Unary(UnaryOp::TypeOf));
@@ -7285,129 +7288,6 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
     }
 }
-
-fn expression_references(expression: &Expression, name: &str) -> bool {
-    match &expression.kind {
-        ExpressionKind::Identifier(identifier) => identifier == name,
-        ExpressionKind::Unary { argument, .. } => expression_references(argument, name),
-        ExpressionKind::Binary { left, right, .. }
-        | ExpressionKind::Logical { left, right, .. } => {
-            expression_references(left, name) || expression_references(right, name)
-        }
-        ExpressionKind::PatternAssignment { pattern, value } => {
-            let mut names = Vec::new();
-            pattern_names_in_order(pattern, &mut names);
-            names.iter().any(|bound| bound == name) || expression_references(value, name)
-        }
-        ExpressionKind::Assignment { target, value, .. } => {
-            target == name || expression_references(value, name)
-        }
-        ExpressionKind::ImportCall { specifier, options } => {
-            expression_references(specifier, name)
-                || options
-                    .as_deref()
-                    .is_some_and(|options| expression_references(options, name))
-        }
-        ExpressionKind::Conditional {
-            test,
-            consequent,
-            alternate,
-        } => {
-            expression_references(test, name)
-                || expression_references(consequent, name)
-                || expression_references(alternate, name)
-        }
-        ExpressionKind::Call {
-            callee, arguments, ..
-        }
-        | ExpressionKind::New { callee, arguments } => {
-            expression_references(callee, name)
-                || arguments.iter().any(|argument| match argument {
-                    ListElement::Item(value) | ListElement::Spread(value) => {
-                        expression_references(value, name)
-                    }
-                    ListElement::Hole => false,
-                })
-        }
-        ExpressionKind::Array { elements } => elements.iter().any(|element| match element {
-            ListElement::Item(value) | ListElement::Spread(value) => {
-                expression_references(value, name)
-            }
-            ListElement::Hole => false,
-        }),
-        ExpressionKind::Sequence { operands } => operands
-            .iter()
-            .any(|operand| expression_references(operand, name)),
-        ExpressionKind::ComputedMember { object, property, .. } => {
-            expression_references(object, name) || expression_references(property, name)
-        }
-        ExpressionKind::ComputedAssignment {
-            object,
-            property,
-            value,
-            ..
-        } => {
-            expression_references(object, name)
-                || expression_references(property, name)
-                || expression_references(value, name)
-        }
-        ExpressionKind::MemberAssignment { object, value, .. } => {
-            expression_references(object, name) || expression_references(value, name)
-        }
-        ExpressionKind::Yield { value, .. } => value
-            .as_ref()
-            .is_some_and(|value| expression_references(value, name)),
-        ExpressionKind::Class(_)
-        | ExpressionKind::This
-        | ExpressionKind::Function(_)
-        | ExpressionKind::SuperMember { .. }
-        | ExpressionKind::Unsupported { .. } => false,
-        ExpressionKind::SuperCall { arguments } => arguments.iter().any(|argument| match argument {
-            ListElement::Item(value) | ListElement::Spread(value) => {
-                expression_references(value, name)
-            }
-            ListElement::Hole => false,
-        }),
-        ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
-            expression_references(expression, name)
-        }
-        ExpressionKind::RegExp { .. } => false,
-        ExpressionKind::PrivateMember { object, .. } => expression_references(object, name),
-        ExpressionKind::PrivateAssignment { object, value, .. } => {
-            expression_references(object, name) || expression_references(value, name)
-        }
-        ExpressionKind::UpdateMember {
-            object, property, ..
-        } => {
-            expression_references(object, name)
-                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_references(key, name))
-        }
-        ExpressionKind::Template { expressions, .. } => expressions
-            .iter()
-            .any(|expression| expression_references(expression, name)),
-        ExpressionKind::Delete { object, property } => {
-            expression_references(object, name)
-                || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_references(key, name))
-        }
-        ExpressionKind::Object { members } => members.iter().any(|member| match member {
-            ObjectMember::Property(property) => {
-                expression_references(&property.value, name)
-                    || matches!(&property.key, ObjectKey::Computed(key) if expression_references(key, name))
-            }
-            ObjectMember::Spread(source) => expression_references(source, name),
-            ObjectMember::Accessor { key, .. } => {
-                matches!(key, ObjectKey::Computed(key) if expression_references(key, name))
-            }
-        }),
-        ExpressionKind::StaticMember { object, .. } => expression_references(object, name),
-        ExpressionKind::Update { target, .. } => target == name,
-        ExpressionKind::PrivateIn { object, .. } => expression_references(object, name),
-        ExpressionKind::Literal(_)
-        | ExpressionKind::TemplateStrings { .. }
-        | ExpressionKind::NewTarget => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
