@@ -3465,7 +3465,7 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-2"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-5"
+            "kiln-native-number-provider-6"
         );
     }
 
