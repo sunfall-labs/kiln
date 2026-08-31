@@ -1795,7 +1795,6 @@ struct NodeConnection {
     response: Option<Value>,
     client_requests: std::collections::BTreeMap<u64, Value>,
     client_responses: std::collections::BTreeMap<u64, Value>,
-    next_client_request_id: u64,
     http_responses: Vec<(u64, Value)>,
     close_after_finish: bool,
     closed: bool,
@@ -4813,6 +4812,7 @@ struct ModuleRealmShared {
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    next_http_client_request_id: u64,
     symbol_serial: u64,
     symbol_registry: Vec<(String, Value)>,
 }
@@ -4825,6 +4825,7 @@ impl Default for ModuleRealmSession {
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 node_servers: Vec::new(),
+                next_http_client_request_id: 1,
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
             })),
@@ -6498,6 +6499,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Monotonic request identity for standalone execution. Module graphs keep the same counter
+    /// in `ModuleRealmShared`, so every request in one realm has a distinct routing key.
+    next_http_client_request_id: u64,
     /// Stable graph-realm ownership for resources referenced by callbacks created in another VM.
     module_realm: Option<Rc<RefCell<ModuleRealmShared>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
@@ -6633,6 +6637,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
+            next_http_client_request_id: 1,
             module_realm: None,
             async_host: None,
             http_runtime: None,
@@ -6728,6 +6733,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             realm.borrow_mut().node_servers.push(Rc::clone(state));
         } else {
             self.node_servers.push(Rc::clone(state));
+        }
+    }
+
+    fn allocate_http_client_request_id(&mut self) -> u64 {
+        if let Some(realm) = &self.module_realm {
+            let mut realm = realm.borrow_mut();
+            let id = realm.next_http_client_request_id;
+            realm.next_http_client_request_id = id.wrapping_add(1).max(1);
+            id
+        } else {
+            let id = self.next_http_client_request_id;
+            self.next_http_client_request_id = id.wrapping_add(1).max(1);
+            id
         }
     }
 
@@ -7220,6 +7238,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeHttpRequest | Native::NodeHttpGet => {
                 let (host, port, method, path, headers, callback) =
                     node_http_request_arguments(arguments)?;
+                let request_id = self.allocate_http_client_request_id();
                 let state = Rc::new(RefCell::new(HttpClientRequestState {
                     host: host.clone(),
                     port,
@@ -7232,7 +7251,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                     ended: false,
                     started: false,
-                    request_id: 0,
+                    request_id,
                 }));
                 let request_object = node_http_client_request_object(&state);
                 let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
@@ -7478,7 +7497,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     response: None,
                     client_requests: std::collections::BTreeMap::new(),
                     client_responses: std::collections::BTreeMap::new(),
-                    next_client_request_id: 1,
                     http_responses: Vec::new(),
                     close_after_finish: false,
                     closed: false,
@@ -8009,14 +8027,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         HttpResponseEvent::End,
                         instruction,
                     )?;
-                    if let Some(stream) = owner
+                    owner
                         .borrow_mut()
                         .streams
                         .iter_mut()
                         .find(|stream| stream.resource() == resource)
-                    {
-                        stream.client_responses.remove(&id);
-                        stream.client_requests.remove(&id);
+                        .map(|stream| {
+                            stream.client_responses.remove(&id);
+                            stream.client_requests.remove(&id);
+                            stream.request = None;
+                            stream.response = None;
+                        });
+                    let actions =
+                        unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
+                            .unwrap_or_default();
+                    for action in actions {
+                        self.start_http_stream_action(owner, resource, action, instruction)?;
                     }
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
@@ -8040,16 +8066,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &[Value::String("error".into()), error],
                         instruction,
                     )?;
-                    if id != 0
-                        && let Some(stream) = owner
-                            .borrow_mut()
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.resource() == resource)
-                    {
-                        stream.client_responses.remove(&id);
-                        stream.client_requests.remove(&id);
-                    }
                 }
                 RuntimeHttpClientEvent::Closed => {
                     let actions = {
@@ -8058,11 +8074,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .streams
                             .iter_mut()
                             .find(|stream| stream.resource() == resource)
-                            .map(|stream| {
-                                stream.client_responses.clear();
-                                stream.client_requests.clear();
-                                stream.driver.close_actions()
-                            })
+                            .map(|stream| stream.driver.close_actions())
                             .unwrap_or_default()
                     };
                     for action in actions {
@@ -8611,7 +8623,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             Native::NodeClientRequestWrite => {
                 let bytes = node_body_bytes(arguments.first())?;
-                let (resource, started, request_id) = {
+                let (resource, started) = {
                     let mut state = state.borrow_mut();
                     if state.ended {
                         return Ok(Value::Boolean(false));
@@ -8623,13 +8635,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if resource.is_none() || !state.started {
                         state.body.extend(bytes.clone());
                     }
-                    (resource, state.started, state.request_id)
+                    (resource, state.started)
                 };
                 if let Some(resource) = resource.filter(|_| started) {
                     let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "node:http client requires the realm HTTP runtime".into(),
                     })?;
+                    let request_id = state.borrow().request_id;
                     let disposition = unsafe {
                         ActiveHttpRuntime::write_client_request(
                             &mut *runtime,
@@ -9159,16 +9172,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             response: None,
                             client_requests: std::collections::BTreeMap::new(),
                             client_responses: std::collections::BTreeMap::new(),
-                            next_client_request_id: 1,
                             http_responses: Vec::new(),
                             close_after_finish: false,
                             closed: false,
                             applying_read_completion: false,
                         };
                         if let PendingConnect::Http(state) = &target {
-                            let request_id = connection.next_client_request_id.max(1);
-                            connection.next_client_request_id = request_id.wrapping_add(1).max(1);
-                            state.borrow_mut().request_id = request_id;
+                            let request_id = state.borrow().request_id;
                             connection
                                 .client_requests
                                 .insert(request_id, request.clone());

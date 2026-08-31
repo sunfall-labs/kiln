@@ -55,3 +55,10 @@ resumed chunked response from `node:http` to `node:net`; the canonical server pr
 `node:http` for both server and client, including response decoding and `setEncoding`. Tokio owns
 both I/O paths and the scheduler/liveness decision. Cluster stays out of scope explicitly rather than
 letting an absent test look like compatibility.
+
+Sequential client requests are also an executable adaptation of the pinned HTTP server slice.
+They prove that response, body, finish, and error events route by a realm-scoped request identity
+instead of a connection-local constant. The inventory deliberately continues to name Agent
+connection reuse as missing until the interpreter and generated-native bindings both acquire an
+idle same-origin connection from the realm-owned Agent rather than opening one TCP resource per
+request.

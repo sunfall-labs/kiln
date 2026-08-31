@@ -346,6 +346,70 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn one_shot_node_routes_two_http_responses_by_request_identity() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-http-request-identity-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create HTTP request identity fixture");
+        let source = fixture.join("request-identities.mjs");
+        std::fs::write(
+            &source,
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  response.end(request.url);
+});
+server.listen(0, "127.0.0.1", () => {
+  const results = [];
+  const run = path => http.get({
+    host: "127.0.0.1",
+    port: server.address().port,
+    path,
+  }, response => {
+    let body = "";
+    response.setEncoding("utf8");
+    response.on("data", chunk => body += chunk);
+    response.on("end", () => {
+      results.push(body);
+      if (results.length === 1) run("/second");
+      else {
+        console.log(results.join(","));
+        server.close();
+      }
+    });
+  });
+  run("/first");
+});
+"#,
+        )
+        .expect("write HTTP request identity fixture");
+
+        let interpreted = {
+            let mut session = OneShot::start().expect("start interpreted engine");
+            commands::run(&mut session, &source, &fixture, true)
+                .expect("run interpreted Node request identity fixture")
+        };
+        assert_eq!(interpreted.text, "/first,/second\n");
+        assert_eq!(interpreted.exit_code, 0);
+
+        let native = {
+            let mut session = OneShot::start().expect("start native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                kiln_proto::NativeProfile::Dev,
+                true,
+            )
+            .expect("run native Node request identity fixture")
+        };
+        assert_eq!(native.text, "/first,/second\n");
+        assert_eq!(native.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_node_run_selects_dual_package_exports_by_request_kind() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-dual-package-fixture-{}",
