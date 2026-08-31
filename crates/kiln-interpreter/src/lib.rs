@@ -11561,6 +11561,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let Some(left) = self.catchable(reduced, current)? else {
                             continue;
                         };
+                        // `ToNumeric(lhs)` completes before the right operand is reduced at
+                        // all, for the operators that have no string reading to decide first.
+                        // A symbol has no number, so `Symbol() * f()` refuses *here* rather
+                        // than after calling `f`'s `valueOf` -- one observable call that the
+                        // language says does not happen. `+` and the relational operators are
+                        // deliberately absent: both choose between a string and a numeric
+                        // reading, which needs each side reduced before either is converted.
+                        if numeric_left_to_right(*operator) && matches!(left, Value::Symbol(_)) {
+                            self.catchable::<Value>(
+                                Err(ExecutionError::SymbolIsNotANumber),
+                                current,
+                            )?;
+                            continue;
+                        }
                         let reduced = self.as_primitive(&right, false, current);
                         let Some(right) = self.catchable(reduced, current)? else {
                             continue;
@@ -29836,6 +29850,30 @@ fn bigint_binary(
         BinaryOp::GreaterThanOrEqual => Value::Boolean(a >= b),
         _ => return None,
     }))
+}
+
+/// Whether this operator converts each operand as it reaches it, left to right.
+///
+/// These are the operators with no string reading to choose first: `ApplyStringOrNumericBinary`
+/// takes `ToNumeric(lval)` and then `ToNumeric(rval)`, so a refusal on the left is raised before
+/// the right operand is reduced at all. `+` is absent because a string on either side makes it
+/// concatenation, and the relational operators because two strings compare as text -- both have
+/// to reduce each side before they know which conversion they are performing.
+fn numeric_left_to_right(operator: BinaryOp) -> bool {
+    matches!(
+        operator,
+        BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Remainder
+            | BinaryOp::Exponentiate
+            | BinaryOp::BitwiseAnd
+            | BinaryOp::BitwiseOr
+            | BinaryOp::BitwiseXor
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight
+            | BinaryOp::UnsignedShiftRight
+    )
 }
 
 /// Whether this operator reduces its operands to numbers, which a symbol refuses to become.
