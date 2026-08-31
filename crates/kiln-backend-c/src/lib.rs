@@ -883,9 +883,19 @@ typedef struct kiln_closure {
 /* A property is a value, or a pair of functions.  Reading an accessor *calls* one, which is why
  * every program-visible read has to go through the runtime rather than being a struct field
  * access -- and why `kiln_c99_get` takes a host and a depth. */
+typedef enum kiln_property_kind {
+    KILN_PROPERTY_DATA = 0,
+    KILN_PROPERTY_NATIVE_POINTER = 1
+} kiln_property_kind;
+
 typedef struct kiln_property {
     const char *key;
     size_t key_len;
+    /* Native handles live in an internal slot rather than in `kiln_value`. Keeping the kind on
+     * the slot means ordinary property operations can treat the slot as absent and can never
+     * mistake a C pointer for a program object. */
+    kiln_property_kind kind;
+    void *native_pointer;
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
@@ -2078,6 +2088,10 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
            (key_len == 0 || memcmp(property->key, key, key_len) == 0);
 }
 
+static int kiln_c99_property_is_native_pointer(const kiln_property *property) {
+    return property->kind == KILN_PROPERTY_NATIVE_POINTER;
+}
+
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -2194,6 +2208,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
                     continue;
                 }
+                if (kiln_c99_property_is_native_pointer(&walked->properties[index])) {
+                    /* Native slots are not part of JavaScript's property space. In particular,
+                     * an assignment using the reserved spelling must not replace the slot or
+                     * turn a later native method call into a use-after-free/type confusion. */
+                    if (steps == 0) return KILN_C99_OK;
+                    continue;
+                }
                 if (!walked->properties[index].accessor) {
                     /* A data property on the *prototype* is shadowed by an own one, not
                      * written through, so only an own hit assigns here. */
@@ -2288,6 +2309,8 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
         }
         object->properties[position].key = key;
         object->properties[position].key_len = key_len;
+        object->properties[position].kind = KILN_PROPERTY_DATA;
+        object->properties[position].native_pointer = NULL;
         /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
          * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
          * marking it here is one place rather than at each of the seven walks. The program cannot
@@ -4982,6 +5005,9 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
                 if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
                     continue;
                 }
+                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+                    continue;
+                }
                 if (!object->properties[index].accessor) {
                     steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
                     break;
@@ -5407,6 +5433,9 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
                 continue;
             }
+            if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+                continue;
+            }
             *found = 1;
             if (!object->properties[index].accessor) {
                 *out = object->properties[index].value;
@@ -5450,6 +5479,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             object = kiln_c99_object_of(current);
             for (index = 0; index < object->count; ++index) {
                 if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                    continue;
+                }
+                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
                     continue;
                 }
                 if (!object->properties[index].accessor) {
@@ -6221,6 +6253,10 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     size_t slot;
                     for (slot = 0; slot < store->count; ++slot) {
                         if (kiln_c99_same_key(&store->properties[slot], name.ptr, name.len)) {
+                            if (kiln_c99_property_is_native_pointer(&store->properties[slot])) {
+                                *out = kiln_c99_undefined();
+                                return KILN_C99_OK;
+                            }
                             *out = store->properties[slot].value;
                             return KILN_C99_OK;
                         }
@@ -7802,21 +7838,22 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
                                             void *pointer) {
     kiln_property *slot;
-    int status = kiln_c99_put(NULL, object, key, key_len,
-                              kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer,
-                                             NULL, 0), 0, NULL);
+    int status = kiln_c99_own_slot(object, key, key_len, &slot);
     if (status != KILN_C99_OK) return status;
-    slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL) return KILN_C99_CONTROL_ERROR;
+    slot->kind = KILN_PROPERTY_NATIVE_POINTER;
+    slot->native_pointer = pointer;
+    slot->value = kiln_c99_undefined();
     slot->enumerable = 0;
+    slot->writable = 0;
+    slot->configurable = 0;
     return KILN_C99_OK;
 }
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT || slot->value.ptr != NULL)
+    if (slot == NULL || !kiln_c99_property_is_native_pointer(slot))
         return NULL;
-    return (void *)(uintptr_t)slot->value.bits;
+    return slot->native_pointer;
 }
 
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
@@ -10129,7 +10166,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             object = kiln_c99_object_of(receiver);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len) &&
+                        !kiln_c99_property_is_native_pointer(&object->properties[index]);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -10924,6 +10962,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             object = kiln_c99_object_of(receiver);
             for (slot = 0; slot < object->count; ++slot) {
                 if (kiln_c99_same_key(&object->properties[slot], name.ptr, name.len)) {
+                    if (kiln_c99_property_is_native_pointer(&object->properties[slot])) {
+                        break;
+                    }
                     *result = kiln_c99_boolean(object->properties[slot].enumerable);
                     break;
                 }
@@ -11055,7 +11096,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             object = kiln_c99_object_of(args[0]);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len) &&
+                        !kiln_c99_property_is_native_pointer(&object->properties[index]);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -12337,6 +12379,9 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         object = kiln_c99_object_of(current);
         for (index = 0; index < object->count; ++index) {
             if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+                    continue;
+                }
                 *answer = 1;
                 return KILN_C99_OK;
             }
@@ -12437,6 +12482,12 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
     for (index = 0; index < object->count; ++index) {
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
+        }
+        if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+            /* Internal slots are absent from the JavaScript object model. A delete therefore
+             * succeeds without removing the capability native methods use. */
+            *answer = 1;
+            return KILN_C99_OK;
         }
         if (!object->properties[index].configurable) {
             /* `delete` answers about the end state, and the property is still there. */
@@ -12765,6 +12816,9 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
         }
+        if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+            return KILN_C99_OK;
+        }
         if (!object->properties[index].accessor) {
             object->properties[index].accessor = 1;
             object->properties[index].getter = kiln_c99_undefined();
@@ -12928,6 +12982,10 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
         kiln_object *object = kiln_c99_object_of(store);
         for (at = 0; at < object->count; ++at) {
             if (kiln_c99_same_key(&object->properties[at], key, key_len)) {
+                if (kiln_c99_property_is_native_pointer(&object->properties[at])) {
+                    /* A native capability is not redefinable from JavaScript. */
+                    return KILN_C99_OK;
+                }
                 existed = 1;
                 break;
             }
@@ -13136,6 +13194,9 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             kiln_property property;
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
                 continue;
+            }
+            if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
+                return KILN_C99_OK;
             }
             property = object->properties[index];
             status = kiln_c99_new_object(&built);

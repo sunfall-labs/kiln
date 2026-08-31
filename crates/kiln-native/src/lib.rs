@@ -3630,6 +3630,12 @@ mod tests {
             r#"import { createServer } from "node:net";
 const server = createServer((socket) => {
   socket.on("data", (chunk) => {
+    console.log(typeof socket["@@node:socket"]);
+    socket["@@node:socket"] = {};
+    console.log(typeof socket["@@node:socket"]);
+    console.log(typeof server["@@node:server"]);
+    server["@@node:server"] = {};
+    console.log(typeof server["@@node:server"]);
     console.log(chunk);
     socket.end();
     server.close();
@@ -3705,7 +3711,10 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .read_to_string(&mut stderr)
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
-        assert_eq!(rest, "native loopback\n");
+        assert_eq!(
+            rest,
+            "undefined\nundefined\nundefined\nundefined\nnative loopback\n"
+        );
     }
 
     #[test]
