@@ -556,6 +556,8 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
 static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
+static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
@@ -723,6 +725,8 @@ static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_le
 static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_len) {
+static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {

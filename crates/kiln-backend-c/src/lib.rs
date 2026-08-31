@@ -1384,6 +1384,10 @@ static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size
                                         int *found, int *enumerable);
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
                              kiln_value *thrown);
+static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
+                                   int depth, kiln_value *thrown);
+static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+                                  kiln_value method);
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 /* The containers currently being written, innermost first.
@@ -4692,7 +4696,10 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        status = kiln_c99_put(NULL, closure->prototype, "constructor", 11, function, 0, NULL);
+        /* Defined rather than assigned: `constructor` is a real property and is never
+         * enumerated, so `for (const k in new C())` visits what the constructor assigned and not
+         * the link back to the class. */
+        status = kiln_c99_define_method(closure->prototype, "constructor", 11, function);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -11325,6 +11332,29 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
             *answer = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
             return KILN_C99_OK;
         }
+        /* A name an array carries beside its elements -- `a.total`, the `index` on a match
+         * result, a method of the class an array subclass was built from. The read answers these
+         * out of the same store, and `for...in` filters its keys through this operator, so an
+         * `in` that did not look here made an array's own named property invisible to the loop
+         * that had just listed it. */
+        {
+            kiln_array *array = kiln_c99_array_of(target);
+            if (array->properties.tag == KILN_VALUE_OBJECT) {
+                int carried = 0;
+                int status = kiln_c99_has_property(host, array->properties, key, key_len, &carried,
+                                                   depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (carried) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+                /* Not found there falls through to the method table rather than answering: the
+                 * store's own chain ends at `Object.prototype` and would otherwise decide what
+                 * `"map" in a` says, which is the array's question and not the store's. */
+            }
+        }
         /* `@@iterator` is not in the method table -- the read spells it out separately, because
          * `for...of` and spread reach it by different paths -- so `in` has to spell it out too
          * or `Symbol.iterator in []` answers false about a method the array demonstrably has. */
@@ -11520,6 +11550,101 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
                 return status;
             }
         }
+    }
+    *out = built;
+    return KILN_C99_OK;
+}
+
+/* Whether a list of key strings already holds this name. Linear, because the lists it searches
+ * are one object's properties and the cost of a hash is the hash. */
+static int kiln_c99_keys_contain(kiln_value keys, const char *key, size_t key_len) {
+    kiln_array *list = kiln_c99_array_of(keys);
+    size_t index;
+    for (index = 0; index < list->count; ++index) {
+        kiln_value name = list->elements[index];
+        if (name.tag == KILN_VALUE_STRING && name.len == key_len &&
+            (key_len == 0 || memcmp(name.ptr, key, key_len) == 0)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* What `for...in` walks: every *reachable* enumerable string key, own ones first and then the
+ * prototype chain's.
+ *
+ * This is the one enumeration in the language that is not about own properties, which is why it
+ * is a different function from `kiln_c99_own_keys` rather than a flag on it -- `Object.keys` and
+ * `JSON.stringify` must not follow the chain, and a shared implementation would eventually let
+ * one of them.
+ *
+ * Shadowing is by *name*, not by enumerability: a name already seen at a nearer link is skipped
+ * further out even when the nearer one is non-enumerable. That is what makes
+ * `Object.defineProperty(child, "k", { enumerable: false })` hide an enumerable `k` on the
+ * parent rather than merely losing its own turn, and it is the case a naive union gets wrong. */
+static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
+                                   int depth, kiln_value *thrown) {
+    kiln_value built;
+    kiln_value shadowed;
+    kiln_value current;
+    size_t steps;
+    size_t index;
+    int status = kiln_c99_own_keys(host, target, &built, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        /* Only an ordinary object carries a chain a program can put enumerable names on. An
+         * array's, a view's and a string's ends at a built-in prototype whose every member is
+         * non-enumerable, so walking it could only ever add nothing. */
+        *out = built;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_array(&shadowed);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(target);
+        for (index = 0; index < object->count; ++index) {
+            status = kiln_c99_array_push(shadowed,
+                                         kiln_c99_copy_text(object->properties[index].key,
+                                                            object->properties[index].key_len));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        current = object->prototype;
+    }
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *object;
+        if (current.tag != KILN_VALUE_OBJECT) {
+            break;
+        }
+        object = kiln_c99_object_of(current);
+        for (index = 0; index < object->count; ++index) {
+            const char *key = object->properties[index].key;
+            size_t key_len = object->properties[index].key_len;
+            int enumerable = object->properties[index].enumerable;
+            if (kiln_c99_keys_contain(shadowed, key, key_len)) {
+                continue;
+            }
+            status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(key, key_len));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (!enumerable) {
+                continue;
+            }
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(key, key_len));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* A push may have moved the list this loop is reading, so the object is found again
+             * rather than kept across the call. */
+            object = kiln_c99_object_of(current);
+        }
+        current = object->prototype;
     }
     *out = built;
     return KILN_C99_OK;
@@ -16903,7 +17028,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value keys; int status = kiln_c99_own_keys(host, stack[sp - 1], &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = keys; }}"
+                "    {{ kiln_value keys; int status = kiln_c99_enumerate_keys(host, stack[sp - 1], &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = keys; }}"
             )
             .unwrap();
         }
@@ -19377,6 +19502,110 @@ int main(void) {{
         assert!(
             run.status.success(),
             "for-in omitted named string properties"
+        );
+    }
+
+    #[test]
+    fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
+        let constants = vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::String("prototype".into()),
+            Constant::String("inherited".into()),
+            Constant::Number(0.0f64.to_bits()),
+            Constant::String("length".into()),
+            Constant::Boolean(false),
+        ];
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants,
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                // Touching `prototype` creates its ordinary object and its non-enumerable
+                // constructor link.
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(1),
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::Const(2),
+                Instruction::Const(0),
+                Instruction::SetComputed,
+                Instruction::Pop,
+                // `new C()` links the fresh instance to that prototype.
+                Instruction::LoadLocal(0),
+                Instruction::New { argc: 0 },
+                Instruction::EnumerateKeys,
+                Instruction::StoreLocal(2),
+                Instruction::LoadLocal(2),
+                Instruction::GetProperty(4),
+                Instruction::Const(0),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::JumpIfFalse(25),
+                Instruction::LoadLocal(2),
+                Instruction::Const(3),
+                Instruction::GetComputed,
+                Instruction::Const(2),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+                Instruction::Const(5),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: vec![function(vec![Instruction::Return])],
+        })
+        .expect("prototype enumeration probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value result;
+    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "prototype-enumeration");
+        assert!(
+            run.status.success(),
+            "for-in must include enumerable prototype properties and omit constructor (exit {:?})",
+            run.status.code()
+        );
+    }
+
+    #[test]
+    fn executable_array_named_property_is_visible_to_in() {
+        let generated = emit(&program(
+            vec![
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("total".into()),
+                Constant::Number(9.0f64.to_bits()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::NewArray { count: 1 },
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::Const(1),
+                Instruction::Const(2),
+                Instruction::SetComputed,
+                Instruction::Pop,
+                Instruction::Const(1),
+                Instruction::LoadLocal(0),
+                Instruction::Binary(BinaryOp::In),
+                Instruction::Return,
+            ],
+            1,
+        ))
+        .expect("array named-property probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "array-named-in");
+        assert!(
+            run.status.success(),
+            "the `in` operator must see an array's named property (exit {:?})",
+            run.status.code()
         );
     }
 
