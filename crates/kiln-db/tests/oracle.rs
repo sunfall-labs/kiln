@@ -65,6 +65,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
     Module {
         source_kind: SourceKind::JavaScript,
         source_goal: SourceGoal::Module,
+        strict: false,
         items: text
             .lines()
             .enumerate()
