@@ -51,7 +51,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 3;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 4;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -66,7 +66,6 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 13);
 };
 
 /// Native optimization and checking policy.
@@ -4585,10 +4584,10 @@ mod tests {
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         assert_eq!(module_abi_identity(), "host-2;c-1");
-        assert!(runtime_abi_identity().contains("async-3"));
+        assert!(runtime_abi_identity().contains("async-4"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-13"
+            "kiln-native-number-provider-14"
         );
     }
 
@@ -6271,6 +6270,57 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             run.stdout,
             b"entry body\ndependency microtask\ndependency timer\n"
         );
+    }
+
+    #[test]
+    fn native_process_next_tick_uses_the_realm_lane_before_microtasks() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native process.nextTick integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-process-next-tick");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"const order = [];
+const nextTick = process.nextTick;
+order.push(`${delete process.nextTick}:${process.nextTick === undefined}`);
+Promise.resolve().then(function () { order.push("promise"); });
+nextTick(function (first, second) {
+  order.push(`${first}:${second}:${this === undefined}`);
+  nextTick(function () { order.push("nested"); });
+  queueMicrotask(function () { order.push("micro-from-tick"); });
+}, "a", 2);
+queueMicrotask(function () { order.push("micro"); });
+setTimeout(function () { console.log(order.join(",")); }, 0);
+"#,
+        )
+        .expect("write process.nextTick fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("process.nextTick source compiles");
+        let run = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("process.nextTick graph runs natively");
+        assert_eq!(run.exit_code, Some(0));
+        assert_eq!(
+            run.stdout,
+            b"true:true,a:2:true,nested,promise,micro,micro-from-tick\n"
+        );
+        assert!(run.stderr.is_empty());
     }
 
     #[test]

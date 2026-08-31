@@ -782,12 +782,13 @@ fn module_symbol_under_a_logical_path() {
         by_path.program_hash, by_content.program_hash,
         "the logical path names the unit; it does not change what the bytecode hashes to"
     );
+    let expected_path_source = by_content
+        .source
+        .replace(&by_content.symbol, &by_path.symbol)
+        .replace(&format!("\"{}\"", by_path.symbol), "\"src/app/main.js\"");
     assert_eq!(
-        by_path.source,
-        by_content
-            .source
-            .replace(&by_content.symbol, &by_path.symbol),
-        "the two spellings must differ only in the exported symbol"
+        by_path.source, expected_path_source,
+        "the two spellings must differ only in the exported symbol and diagnostic site"
     );
 
     insta::assert_snapshot!(format!(
