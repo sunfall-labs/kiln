@@ -268,6 +268,15 @@ pub enum Native {
     NodeCrypto,
     NodeCryptoRandomUuid,
     NodeStream,
+    NodeReadable,
+    NodeReadablePush,
+    NodeReadableRead,
+    NodeReadableDestroy,
+    NodeStreamAddAbortSignal,
+    NodeWritable,
+    NodeWritableWrite,
+    NodeWritableEnd,
+    NodeWritableDestroy,
     NodeStreamFinished,
     NodeDns,
     NodeDnsLookup,
@@ -300,6 +309,7 @@ pub enum Native {
     NodeHttpCreateServer,
     NodeHttpRequest,
     NodeHttpGet,
+    NodeHttpServerResponse,
     NodeClientRequestWrite,
     NodeClientRequestEnd,
     NodeBuffer,
@@ -1024,7 +1034,21 @@ impl Native {
                 Some(Value::Native(Self::NodeAsyncResource))
             }
             (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
+            (Self::NodeStream, "Readable") => Some(Value::Native(Self::NodeReadable)),
+            (Self::NodeStream, "Writable") => Some(Value::Native(Self::NodeWritable)),
+            (Self::NodeStream, "addAbortSignal") => {
+                Some(Value::Native(Self::NodeStreamAddAbortSignal))
+            }
             (Self::NodeStream, "finished") => Some(Value::Native(Self::NodeStreamFinished)),
+            (Self::NodeReadable, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Readable)))
+            }
+            (Self::NodeWritable, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Writable)))
+            }
+            (Self::NodeHttpServerResponse, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Writable)))
+            }
             (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup)),
             (Self::NodeOs, "networkInterfaces") => {
                 Some(Value::Native(Self::NodeOsNetworkInterfaces))
@@ -1048,6 +1072,7 @@ impl Native {
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeHttp, "request") => Some(Value::Native(Self::NodeHttpRequest)),
             (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
+            (Self::NodeHttp, "ServerResponse") => Some(Value::Native(Self::NodeHttpServerResponse)),
             (Self::NodeBuffer, "from") => Some(Value::Native(Self::NodeBufferFrom)),
             (Self::NodeBuffer, "alloc") => Some(Value::Native(Self::NodeBufferAlloc)),
             (Self::NodeBuffer, "concat") => Some(Value::Native(Self::NodeBufferConcat)),
@@ -1074,6 +1099,39 @@ impl Native {
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "setMaxListeners") => {
                 Some(Value::Native(Self::NodeEventSetMaxListeners))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "constructor") => {
+                Some(Value::Native(Self::NodeReadable))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "push") => {
+                Some(Value::Native(Self::NodeReadablePush))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "read") => {
+                Some(Value::Native(Self::NodeReadableRead))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "destroy") => {
+                Some(Value::Native(Self::NodeReadableDestroy))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "pause") => {
+                Some(Value::Native(Self::NodeReadablePause))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "resume") => {
+                Some(Value::Native(Self::NodeReadableResume))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "setEncoding") => {
+                Some(Value::Native(Self::NodeReadableSetEncoding))
+            }
+            (Self::PrototypeOf(PrototypeTable::Writable), "constructor") => {
+                Some(Value::Native(Self::NodeWritable))
+            }
+            (Self::PrototypeOf(PrototypeTable::Writable), "write") => {
+                Some(Value::Native(Self::NodeWritableWrite))
+            }
+            (Self::PrototypeOf(PrototypeTable::Writable), "end") => {
+                Some(Value::Native(Self::NodeWritableEnd))
+            }
+            (Self::PrototypeOf(PrototypeTable::Writable), "destroy") => {
+                Some(Value::Native(Self::NodeWritableDestroy))
             }
             // Every `Temporal` namespace, constructor and prototype answers from one place, so
             // the eight types cannot drift on what they expose.
@@ -1269,6 +1327,8 @@ impl Native {
                 PrototypeTable::WeakRef => Self::WeakRefConstructor,
                 PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
                 PrototypeTable::EventEmitter => Self::NodeEventEmitter,
+                PrototypeTable::Readable => Self::NodeReadable,
+                PrototypeTable::Writable => Self::NodeWritable,
             })),
             (Self::PrototypeOf(table), _) => Some(inherit_from_object(
                 table,
@@ -1303,6 +1363,12 @@ impl Native {
                     PrototypeTable::WeakRef => weak_ref_method(name),
                     PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
                     PrototypeTable::EventEmitter => Value::Undefined,
+                    PrototypeTable::Readable => Self::PrototypeOf(PrototypeTable::EventEmitter)
+                        .property(name)
+                        .unwrap_or(Value::Undefined),
+                    PrototypeTable::Writable => Self::PrototypeOf(PrototypeTable::EventEmitter)
+                        .property(name)
+                        .unwrap_or(Value::Undefined),
                 },
                 name,
             )),
@@ -1561,8 +1627,31 @@ enum NodeObject {
     HttpIncoming(Rc<RefCell<HttpIncomingState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
     HttpClientRequest(Rc<RefCell<HttpClientRequestState>>),
+    Readable(Rc<RefCell<ReadableState>>),
+    Writable(Rc<RefCell<WritableState>>),
     Url(Rc<UrlState>),
     UrlSearchParams(Rc<UrlState>),
+}
+
+#[derive(Debug)]
+struct ReadableState {
+    buffer: Vec<Value>,
+    high_water_mark: usize,
+    ended: bool,
+    end_emitted: bool,
+    reading: bool,
+    flowing: bool,
+    destroyed: bool,
+    encoding: Option<String>,
+    public: Rc<RefCell<ObjectData>>,
+}
+
+#[derive(Debug)]
+struct WritableState {
+    ended: bool,
+    finished: bool,
+    destroyed: bool,
+    write: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -2439,6 +2528,12 @@ pub enum PrototypeTable {
     WeakRef,
     FinalizationRegistry,
     EventEmitter,
+    /// `node:stream`'s readable method table. It inherits EventEmitter and owns no transport:
+    /// HTTP, TCP and in-memory producers all feed the same state machine through `push`.
+    Readable,
+    /// `node:stream`'s writable method table. Like Readable, it owns lifecycle and callback
+    /// ordering while a transport adapter decides where accepted chunks ultimately go.
+    Writable,
 }
 
 /// Which of the lazy iterator helpers a helper object is running.
@@ -5974,6 +6069,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if matches!(
+            native,
+            Native::NodeReadablePush | Native::NodeReadableRead | Native::NodeReadableDestroy
+        ) || node_readable_state(receiver).is_ok()
+        {
+            return self.dispatch_memory_readable(native, receiver, arguments, instruction);
+        }
         let state = node_http_incoming(receiver)?;
         if matches!(native, Native::NodeReadableSetEncoding) {
             let encoding = arguments
@@ -6019,6 +6121,228 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.start_http_stream_action(&owner, resource, action, instruction)?;
         }
         Ok(receiver.clone())
+    }
+
+    fn dispatch_memory_readable(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_readable_state(receiver)?;
+        match native {
+            Native::NodeReadablePush => {
+                let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let (event, ready) = {
+                    let mut state = state.borrow_mut();
+                    if matches!(chunk, Value::Null) {
+                        state.ended = true;
+                        state.reading = false;
+                        ("readable", false)
+                    } else {
+                        let empty = matches!(&chunk, Value::String(text) if text.is_empty());
+                        if !empty {
+                            state.buffer.push(chunk);
+                        }
+                        state.reading = state.buffer.len() < state.high_water_mark && !state.ended;
+                        (
+                            if state.flowing { "data" } else { "readable" },
+                            state.buffer.len() < state.high_water_mark,
+                        )
+                    }
+                };
+                sync_readable_public_state(receiver, &state.borrow());
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    receiver,
+                    &[Value::String(event.into())],
+                    instruction,
+                )?;
+                return Ok(Value::Boolean(ready));
+            }
+            Native::NodeReadableRead => {
+                let (value, call_read, emit_end) = {
+                    let mut state = state.borrow_mut();
+                    let value = if state.buffer.is_empty() {
+                        Value::Null
+                    } else {
+                        state.buffer.remove(0)
+                    };
+                    let emit_end = state.ended && state.buffer.is_empty() && !state.end_emitted;
+                    if emit_end {
+                        state.end_emitted = true;
+                    }
+                    let call_read = matches!(value, Value::Null) && !state.ended && !state.reading;
+                    if call_read {
+                        state.reading = true;
+                    }
+                    (value, call_read, emit_end)
+                };
+                sync_readable_public_state(receiver, &state.borrow());
+                if call_read {
+                    let callback = self.read_property(receiver, "_read", instruction)?;
+                    if is_callable(&callback) {
+                        self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
+                    }
+                }
+                if emit_end {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("end".into())],
+                        instruction,
+                    )?;
+                }
+                return Ok(value);
+            }
+            Native::NodeReadableDestroy => {
+                state.borrow_mut().destroyed = true;
+                sync_readable_public_state(receiver, &state.borrow());
+                if let Some(error) = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined))
+                {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("error".into()), error.clone()],
+                        instruction,
+                    )?;
+                }
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    receiver,
+                    &[Value::String("close".into())],
+                    instruction,
+                )?;
+                return Ok(receiver.clone());
+            }
+            Native::NodeReadableSetEncoding => {
+                let encoding = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_else(|| "utf8".into())
+                    .to_ascii_lowercase();
+                if !matches!(encoding.as_str(), "utf8" | "utf-8") {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!("unsupported Node stream encoding: {encoding}"),
+                    });
+                }
+                state.borrow_mut().encoding = Some("utf8".into());
+                return Ok(receiver.clone());
+            }
+            Native::NodeReadablePause | Native::NodeReadableResume => {
+                state.borrow_mut().flowing = matches!(native, Native::NodeReadableResume);
+                sync_readable_public_state(receiver, &state.borrow());
+                return Ok(receiver.clone());
+            }
+            _ => {}
+        }
+        Err(ExecutionError::Host {
+            instruction,
+            message: "unknown Node readable operation".into(),
+        })
+    }
+
+    fn dispatch_memory_writable(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_writable_state(receiver)?;
+        match native {
+            Native::NodeWritableWrite => {
+                if state.borrow().ended {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "write after end".into(),
+                    });
+                }
+                let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let callback = arguments
+                    .iter()
+                    .rev()
+                    .find(|value| is_callable(value))
+                    .cloned();
+                let writer = state.borrow().write.clone().or_else(|| {
+                    self.read_property(receiver, "_write", instruction)
+                        .ok()
+                        .filter(is_callable)
+                });
+                if let Some(writer) = writer {
+                    let done = callback
+                        .clone()
+                        .unwrap_or(Value::Native(Native::NodeUtilDebugNoop));
+                    self.call_value(
+                        &writer,
+                        receiver.clone(),
+                        vec![chunk, Value::String("buffer".into()), done],
+                        instruction,
+                    )?;
+                } else if let Some(callback) = callback {
+                    self.call_value(&callback, Value::Undefined, Vec::new(), instruction)?;
+                }
+                Ok(Value::Boolean(true))
+            }
+            Native::NodeWritableEnd => {
+                if let Some(chunk) = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined) && !is_callable(value))
+                    .cloned()
+                {
+                    self.dispatch_memory_writable(
+                        Native::NodeWritableWrite,
+                        receiver,
+                        &[chunk],
+                        instruction,
+                    )?;
+                }
+                {
+                    let mut state = state.borrow_mut();
+                    state.ended = true;
+                    state.finished = true;
+                }
+                sync_writable_public_state(receiver, &state.borrow());
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    receiver,
+                    &[Value::String("finish".into())],
+                    instruction,
+                )?;
+                if let Some(callback) = arguments.iter().rev().find(|value| is_callable(value)) {
+                    self.call_value(callback, Value::Undefined, Vec::new(), instruction)?;
+                }
+                Ok(receiver.clone())
+            }
+            Native::NodeWritableDestroy => {
+                state.borrow_mut().destroyed = true;
+                sync_writable_public_state(receiver, &state.borrow());
+                if let Some(error) = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined))
+                {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("error".into()), error.clone()],
+                        instruction,
+                    )?;
+                }
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    receiver,
+                    &[Value::String("close".into())],
+                    instruction,
+                )?;
+                Ok(receiver.clone())
+            }
+            _ => Err(ExecutionError::Host {
+                instruction,
+                message: "unknown Node writable operation".into(),
+            }),
+        }
     }
 
     fn dispatch_node_http(
@@ -9549,6 +9873,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 return Ok(Value::Native(Native::NodeUtilDebugNoop));
             }
+            Native::NodeStreamAddAbortSignal => {
+                let stream = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                // AbortSignal is deliberately semantic rather than a Tokio cancellation token:
+                // the signal emits in the language realm and `destroy` decides what cancelling
+                // this particular stream means. Providers only see cancellation once an adapter
+                // translates the resulting resource action.
+                return Ok(stream);
+            }
             Native::NodeDnsLookup => {
                 let host = arguments
                     .first()
@@ -9656,6 +9988,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeSocketDestroy
         ) {
             return self.dispatch_node_net(native, receiver, arguments, instruction);
+        }
+        if matches!(
+            native,
+            Native::NodeWritableWrite | Native::NodeWritableEnd | Native::NodeWritableDestroy
+        ) {
+            return self.dispatch_memory_writable(native, receiver, arguments, instruction);
         }
         if matches!(
             native,
@@ -15871,6 +16209,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Some(match parent {
             Native::Error(kind) => self.construct_error(kind, arguments),
             Native::NodeEventEmitter => node_event_emitter(),
+            Native::NodeReadable => node_readable(arguments, None),
+            Native::NodeWritable => node_writable(arguments, None),
+            Native::NodeHttpServerResponse => node_writable(arguments, None),
             Native::ArrayConstructor => construct_array(arguments)?,
             Native::SetConstructor
             | Native::MapConstructor
@@ -15984,6 +16325,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::NodeEventEmitter) => {
                 self.stack.push(node_event_emitter());
+            }
+            Value::Native(Native::NodeReadable) => {
+                self.stack.push(node_readable(&arguments, None));
+            }
+            Value::Native(Native::NodeWritable) => {
+                self.stack.push(node_writable(&arguments, None));
+            }
+            Value::Native(Native::NodeHttpServerResponse) => {
+                self.stack.push(node_writable(&arguments, None));
             }
             Value::Native(Native::NodeAsyncResource) => {
                 self.stack.push(ordinary_object([
@@ -18875,6 +19225,128 @@ fn node_event_emitter() -> Value {
     )));
     data.node_events = Some(Vec::new());
     Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
+    let options = arguments.first().cloned().unwrap_or(Value::Undefined);
+    let high_water_mark = own_data_property(&options, "highWaterMark")
+        .map(|value| value.as_number().max(0.0) as usize)
+        .unwrap_or(16 * 1024);
+    let encoding = own_data_property(&options, "encoding")
+        .filter(|value| !matches!(value, Value::Undefined))
+        .map(|value| value.to_display_string().to_ascii_lowercase());
+    let public = Rc::new(RefCell::new(ObjectData::default()));
+    let state = Rc::new(RefCell::new(ReadableState {
+        buffer: Vec::new(),
+        high_water_mark,
+        ended: false,
+        end_emitted: false,
+        reading: false,
+        flowing: false,
+        destroyed: false,
+        encoding,
+        public: Rc::clone(&public),
+    }));
+    let initializes_existing = matches!(receiver, Some(Value::Object(_)));
+    let object = match receiver {
+        Some(Value::Object(object)) => Rc::clone(object),
+        _ => Rc::new(RefCell::new(ObjectData::default())),
+    };
+    {
+        let mut data = object.borrow_mut();
+        data.node_events.get_or_insert_with(Vec::new);
+        data.node_object = Some(NodeObject::Readable(Rc::clone(&state)));
+        if !initializes_existing {
+            data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
+        }
+        data.set_non_enumerable("_readableState", Value::Object(public));
+        data.set_non_enumerable("readableEnded", Value::Boolean(false));
+        data.set_non_enumerable("destroyed", Value::Boolean(false));
+    }
+    sync_readable_public_state(&Value::Object(Rc::clone(&object)), &state.borrow());
+    Value::Object(object)
+}
+
+fn node_readable_state(receiver: &Value) -> Result<Rc<RefCell<ReadableState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Readable method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::Readable(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "Readable method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn sync_readable_public_state(receiver: &Value, state: &ReadableState) {
+    {
+        let mut public = state.public.borrow_mut();
+        public.set("reading", Value::Boolean(state.reading));
+        public.set("ended", Value::Boolean(state.ended));
+        public.set("endEmitted", Value::Boolean(state.end_emitted));
+        public.set("flowing", Value::Boolean(state.flowing));
+        public.set("length", Value::Number(state.buffer.len() as f64));
+        public.set("highWaterMark", Value::Number(state.high_water_mark as f64));
+    }
+    if let Value::Object(object) = receiver {
+        let mut object = object.borrow_mut();
+        object.set_non_enumerable("readableEnded", Value::Boolean(state.end_emitted));
+        object.set_non_enumerable("destroyed", Value::Boolean(state.destroyed));
+    }
+}
+
+fn node_writable(arguments: &[Value], receiver: Option<&Value>) -> Value {
+    let options = arguments.first().cloned().unwrap_or(Value::Undefined);
+    let write = own_data_property(&options, "write").filter(is_callable);
+    let initializes_existing = matches!(receiver, Some(Value::Object(_)));
+    let object = match receiver {
+        Some(Value::Object(object)) => Rc::clone(object),
+        _ => Rc::new(RefCell::new(ObjectData::default())),
+    };
+    let state = Rc::new(RefCell::new(WritableState {
+        ended: false,
+        finished: false,
+        destroyed: false,
+        write,
+    }));
+    {
+        let mut data = object.borrow_mut();
+        data.node_events.get_or_insert_with(Vec::new);
+        data.node_object = Some(NodeObject::Writable(state));
+        if !initializes_existing {
+            data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Writable)));
+        }
+        data.set_non_enumerable("writableEnded", Value::Boolean(false));
+        data.set_non_enumerable("writableFinished", Value::Boolean(false));
+        data.set_non_enumerable("destroyed", Value::Boolean(false));
+    }
+    Value::Object(object)
+}
+
+fn node_writable_state(receiver: &Value) -> Result<Rc<RefCell<WritableState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Writable method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::Writable(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "Writable method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn sync_writable_public_state(receiver: &Value, state: &WritableState) {
+    if let Value::Object(object) = receiver {
+        let mut object = object.borrow_mut();
+        object.set_non_enumerable("writableEnded", Value::Boolean(state.ended));
+        object.set_non_enumerable("writableFinished", Value::Boolean(state.finished));
+        object.set_non_enumerable("destroyed", Value::Boolean(state.destroyed));
+    }
 }
 
 fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
@@ -21940,6 +22412,9 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
+        Native::NodeReadable => node_readable(arguments, Some(receiver)),
+        Native::NodeWritable => node_writable(arguments, Some(receiver)),
+        Native::NodeHttpServerResponse => node_writable(arguments, Some(receiver)),
         Native::NodeDiagnosticsChannel
         | Native::NodeDiagnosticsChannelCreate
         | Native::NodeDiagnosticsTracingChannel
@@ -21977,6 +22452,13 @@ fn call_native(
         | Native::NodeSocketWrite
         | Native::NodeSocketEnd
         | Native::NodeSocketDestroy
+        | Native::NodeReadablePush
+        | Native::NodeReadableRead
+        | Native::NodeReadableDestroy
+        | Native::NodeStreamAddAbortSignal
+        | Native::NodeWritableWrite
+        | Native::NodeWritableEnd
+        | Native::NodeWritableDestroy
         | Native::NodeReadablePause
         | Native::NodeReadableResume
         | Native::NodeReadableSetEncoding
@@ -26820,6 +27302,8 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             "removeAllListeners",
             "setMaxListeners",
         ],
+        PrototypeTable::Readable => &["push", "read", "destroy", "pause", "resume", "setEncoding"],
+        PrototypeTable::Writable => &["write", "end", "destroy"],
     }
 }
 
@@ -27633,6 +28117,121 @@ mod tests {
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
     use kiln_runtime::DEFAULT_ENTROPY_SEED;
+
+    #[test]
+    fn node_readable_is_a_transport_independent_buffered_event_source() {
+        let readable = node_readable(
+            &[ordinary_object([(
+                "highWaterMark".into(),
+                Value::Number(2.0),
+            )])],
+            None,
+        );
+        let state = node_readable_state(&readable).expect("Readable owns semantic state");
+        assert_eq!(state.borrow().high_water_mark, 2);
+        assert!(matches!(
+            Native::PrototypeOf(PrototypeTable::Readable).property("on"),
+            Some(Value::Native(Native::NodeEventOn))
+        ));
+
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(Program {
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 0,
+                functions: Vec::new(),
+            }),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            DEFAULT_ENTROPY_SEED,
+        );
+        assert_eq!(
+            vm.dispatch_memory_readable(
+                Native::NodeReadablePush,
+                &readable,
+                &[Value::String("one".into())],
+                0,
+            )
+            .unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            vm.dispatch_memory_readable(
+                Native::NodeReadablePush,
+                &readable,
+                &[Value::String("two".into())],
+                0,
+            )
+            .unwrap(),
+            Value::Boolean(false)
+        );
+        assert_eq!(
+            vm.dispatch_memory_readable(Native::NodeReadableRead, &readable, &[], 0)
+                .unwrap(),
+            Value::String("one".into())
+        );
+        assert!(vm.pending_node.is_empty());
+        assert!(vm.pending_host.is_empty());
+    }
+
+    #[test]
+    fn readable_call_initializes_an_existing_subclass_without_replacing_its_prototype() {
+        let custom_prototype = ordinary_object([("custom".into(), Value::Boolean(true))]);
+        let Value::Object(receiver) = ordinary_object([]) else {
+            unreachable!()
+        };
+        receiver
+            .borrow_mut()
+            .set_prototype(custom_prototype.clone());
+        let initialized = node_readable(&[], Some(&Value::Object(Rc::clone(&receiver))));
+        assert!(strict_equal(
+            receiver.borrow().prototype().expect("prototype remains"),
+            &custom_prototype
+        ));
+        assert!(node_readable_state(&initialized).is_ok());
+    }
+
+    #[test]
+    fn node_writable_owns_lifecycle_without_owning_a_transport() {
+        let writable = node_writable(&[], None);
+        let state = node_writable_state(&writable).expect("Writable owns semantic state");
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(Program {
+                version: kiln_ir::BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 0,
+                functions: Vec::new(),
+            }),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            DEFAULT_ENTROPY_SEED,
+        );
+        assert_eq!(
+            vm.dispatch_memory_writable(
+                Native::NodeWritableWrite,
+                &writable,
+                &[Value::String("chunk".into())],
+                0,
+            )
+            .unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            vm.dispatch_memory_writable(Native::NodeWritableEnd, &writable, &[], 0)
+                .unwrap(),
+            writable
+        );
+        assert!(state.borrow().ended);
+        assert!(state.borrow().finished);
+        assert!(vm.pending_node.is_empty());
+        assert!(vm.pending_host.is_empty());
+    }
 
     struct TestHost {
         calls: Vec<(HostOp, Vec<HostValue>)>,
