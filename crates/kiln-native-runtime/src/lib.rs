@@ -1362,7 +1362,8 @@ int main(void) {
         assert!(run.stdout.is_empty());
         assert_eq!(
             String::from_utf8(run.stderr).expect("UTF-8 stderr"),
-            "the native backend reached something it does not implement yet\n".to_owned()
+            "native backend refusal\n".to_owned()
+                + "native backend refusal: module=node:http instruction=7 method=240 receiver_tag=18\n"
                 + "out of memory\n"
                 + "call depth exceeded\n"
                 + "a binding was read before it was initialised\n"
@@ -1516,6 +1517,11 @@ extern void kiln_cli_report_failure(int status, kiln_value value);
 int main(void) {
     kiln_value value = { KILN_VALUE_UNDEFINED, 0, 0, 0, 0 };
     kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
+    value.tag = KILN_VALUE_STRING;
+    value.ptr = "module=node:http instruction=7 method=240 receiver_tag=18";
+    value.len = sizeof("module=node:http instruction=7 method=240 receiver_tag=18") - 1;
+    kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
+    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, 0, 0 };
     kiln_cli_report_failure(KILN_C99_OUT_OF_MEMORY, value);
     kiln_cli_report_failure(KILN_C99_CALL_DEPTH_ERROR, value);
     kiln_cli_report_failure(KILN_C99_UNINITIALIZED_ERROR, value);

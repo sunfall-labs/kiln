@@ -11,55 +11,107 @@ int kiln_module_c2c63246052d09f22e537e7ee092eef1(kiln_host *host, kiln_value *re
     locals[0] = kiln_c99_undefined();
     locals[1] = kiln_c99_undefined();
 kiln_label_0:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)0;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_1:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)1;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4615063718147915776));
 kiln_label_2:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)2;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(1, left, right); }
 kiln_label_3:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)3;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4921056587992461136));
 kiln_label_4:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)4;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(3, left, right); }
 kiln_label_5:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)5;
+    kiln_c99_diagnostic_has_method = 0;
     locals[0] = stack[--sp];
 kiln_label_6:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)6;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = locals[0];
 kiln_label_7:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)7;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp - 1] = kiln_c99_unary(2, stack[sp - 1]);
 kiln_label_8:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)8;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(9223372036854775808));
 kiln_label_9:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)9;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(2, left, right); }
 kiln_label_10:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)10;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(9221120237041090560));
 kiln_label_11:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)11;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(7, left, right); }
 kiln_label_12:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)12;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp - 1] = kiln_c99_unary(3, stack[sp - 1]);
 kiln_label_13:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)13;
+    kiln_c99_diagnostic_has_method = 0;
     locals[1] = stack[--sp];
 kiln_label_14:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)14;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = locals[0];
 kiln_label_15:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)15;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_16:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)16;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(5, left, right); }
 kiln_label_17:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)17;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_18:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)18;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(6, left, right); }
 kiln_label_19:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)19;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_20:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)20;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(19, left, right); }
 kiln_label_21:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)21;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_22:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)22;
+    kiln_c99_diagnostic_has_method = 0;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary(22, left, right); }
 kiln_label_23:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)23;
+    kiln_c99_diagnostic_has_method = 0;
     stack[sp - 1] = kiln_c99_unary(4, stack[sp - 1]);
 kiln_label_24:;
+    kiln_c99_diagnostic_site = "kiln_module_c2c63246052d09f22e537e7ee092eef1"; kiln_c99_diagnostic_instruction = (size_t)24;
+    kiln_c99_diagnostic_has_method = 0;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
-    *result = kiln_c99_undefined();
+    goto kiln_refusal;
+kiln_refusal:;
+    *result = kiln_c99_control_diagnostic();
     return KILN_C99_CONTROL_ERROR;
 }
