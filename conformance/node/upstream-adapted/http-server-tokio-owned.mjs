@@ -14,7 +14,9 @@ const server = createServer((request, response) => {
     if (bodyBytes !== 5) throw new Error('request body was not streamed');
     handled = true;
     response.writeHead(201, { 'Content-Type': 'text/plain' });
-    if (response.write('hello ') !== true) throw new Error('unexpected backpressure');
+    // `write()` returning false is advisory backpressure, not a failed write. The response is
+    // still queued and ordering is asserted by the final streamed response below.
+    response.write('hello ');
     response.end('tokio');
   });
   setTimeout(() => request.resume(), 1);

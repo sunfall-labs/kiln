@@ -22,7 +22,10 @@ use kiln_host_abi::{
     ResourceId, ResourceInfo, ResourceKind, ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{
+    TcpListener, TcpStream,
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
 use tokio::sync::mpsc;
 
 /// Default deterministic entropy seed from ADR 0026.
@@ -166,6 +169,109 @@ pub enum WorkItem<M = WorkId, T = WorkId> {
     Timer { id: TimerId, work: T },
 }
 
+/// The next externally-driven turn selected by a realm runtime.
+///
+/// Language code never observes Tokio's race winner directly: a ready host completion is
+/// returned as an owned value, while a timer is removed through the realm's deterministic
+/// `(deadline, sequence)` ordering.
+#[derive(Debug)]
+pub enum RuntimeTurn<M, T> {
+    Completion(Completion),
+    Timer(WorkItem<M, T>),
+}
+
+/// One expected request and its caller-owned deterministic completion.
+///
+/// Scripts sit at the same portable HostOps boundary as [`TokioHost`]. They therefore exercise
+/// the real stream, HTTP, module, and realm schedulers while replacing only external services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptedHostStep {
+    pub operation: AsyncHostOp,
+    pub result: Result<AsyncHostValue, AsyncHostError>,
+}
+
+/// Strict deterministic asynchronous provider for compatibility and conformance tests.
+///
+/// Requests must match the transcript in order. Completions are released only when the realm asks
+/// for one, use submission sequence as their tie-break, and retain the normal cancellation and
+/// referenced-work semantics. An unexpected request becomes an explicit host error rather than
+/// falling through to the machine.
+#[derive(Debug, Default)]
+pub struct ScriptedHost {
+    expected: VecDeque<ScriptedHostStep>,
+    pending: BTreeMap<RequestId, (u64, bool, Result<AsyncHostValue, AsyncHostError>)>,
+    next_request: u64,
+    next_sequence: u64,
+}
+
+impl ScriptedHost {
+    pub fn new(steps: impl IntoIterator<Item = ScriptedHostStep>) -> Self {
+        Self {
+            expected: steps.into_iter().collect(),
+            pending: BTreeMap::new(),
+            next_request: 1,
+            next_sequence: 0,
+        }
+    }
+
+    /// Returns whether every expected operation was submitted and every completion consumed.
+    pub fn is_exhausted(&self) -> bool {
+        self.expected.is_empty() && self.pending.is_empty()
+    }
+
+    /// Number of transcript operations not yet submitted.
+    pub fn remaining_steps(&self) -> usize {
+        self.expected.len()
+    }
+}
+
+impl AsyncHostOps for ScriptedHost {
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        let request = RequestId::new(self.next_request.max(1));
+        self.next_request = self.next_request.wrapping_add(1).max(1);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let result = match self.expected.pop_front() {
+            Some(step) if step.operation == operation => step.result,
+            Some(step) => Err(AsyncHostError::new(
+                "ERR_KILN_UNEXPECTED_HOST_OP",
+                "script",
+                None,
+                format!("expected {:?}, received {operation:?}", step.operation),
+            )),
+            None => Err(AsyncHostError::new(
+                "ERR_KILN_UNEXPECTED_HOST_OP",
+                "script",
+                None,
+                format!("no scripted operation remains for {operation:?}"),
+            )),
+        };
+        self.pending.insert(request, (sequence, referenced, result));
+        request
+    }
+
+    fn cancel(&mut self, request: RequestId) -> bool {
+        self.pending.remove(&request).is_some()
+    }
+
+    fn has_referenced_work(&self) -> bool {
+        self.pending.values().any(|(_, referenced, _)| *referenced)
+    }
+
+    fn next_completion(&mut self) -> Option<Completion> {
+        let (&request, _) = self
+            .pending
+            .iter()
+            .min_by_key(|(_, (sequence, _, _))| *sequence)?;
+        let (sequence, _, result) = self.pending.remove(&request)?;
+        Some(Completion {
+            request,
+            sequence,
+            result,
+        })
+    }
+}
+
 /// Failure while constructing the deterministic realm runtime.
 #[derive(Debug)]
 pub struct RuntimeBuildError(std::io::Error);
@@ -295,6 +401,54 @@ impl RealmRuntime {
     /// Cancels one asynchronous host request owned by this realm.
     pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
         AsyncHostOps::cancel(&mut self.host, request)
+    }
+
+    /// Wait for either the next host completion or the realm's next timer.
+    ///
+    /// This is the sole blocking ingress used by Node execution. Waiting on I/O first would
+    /// starve timeouts behind an open socket; running virtual timers first would make every
+    /// timeout beat already-ready I/O. Tokio polls both, and biased selection gives an already
+    /// queued completion the checkpoint priority before virtual time advances.
+    pub fn next_turn<M, T>(&mut self, realm: &mut Realm<M, T>) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if !self.time_paused {
+            self.local.block_on(&self.runtime, async {
+                tokio::time::pause();
+            });
+            self.time_paused = true;
+        }
+        if let Some(completion) = self.host.take_ready() {
+            return Some(RuntimeTurn::Completion(completion));
+        }
+        let deadline = realm.next_timer_deadline();
+        if self.host.pending.is_empty() {
+            return self.next_timer(realm).map(RuntimeTurn::Timer);
+        }
+        self.local.block_on(&self.runtime, async {
+            match deadline {
+                Some(deadline) => {
+                    let delay = deadline.saturating_sub(realm.now);
+                    tokio::select! {
+                        biased;
+                        completion = self.host.receiver.recv() => {
+                            let completion = completion?;
+                            self.host.collect_ready(completion);
+                            self.host.take_ready().map(RuntimeTurn::Completion)
+                        }
+                        _ = tokio::time::sleep(delay) => {
+                            realm.run_next_timer().map(RuntimeTurn::Timer)
+                        }
+                    }
+                }
+                None => {
+                    let completion = self.host.receiver.recv().await?;
+                    self.host.collect_ready(completion);
+                    self.host.take_ready().map(RuntimeTurn::Completion)
+                }
+            }
+        })
     }
 
     /// Runs one synchronous realm operation as the current Tokio task.
@@ -437,7 +591,8 @@ enum HostResource {
         referenced: bool,
     },
     TcpStream {
-        stream: Rc<tokio::sync::Mutex<TcpStream>>,
+        reader: Rc<tokio::sync::Mutex<OwnedReadHalf>>,
+        writer: Rc<tokio::sync::Mutex<OwnedWriteHalf>>,
         info: ResourceInfo,
         referenced: bool,
         read_closed: bool,
@@ -644,7 +799,7 @@ impl TokioHost {
             AsyncHostOp::TcpRead { stream, max_bytes } => {
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
-                    stream,
+                    reader,
                     read_closed,
                     ..
                 }) = self.resources.get(&stream)
@@ -666,13 +821,13 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let stream = Rc::clone(stream);
+                let reader = Rc::clone(reader);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
                     let mut bytes = vec![0; max_bytes];
                     let result = async {
-                        let mut stream = stream.lock().await;
-                        let length = stream.read(&mut bytes).await?;
+                        let mut reader = reader.lock().await;
+                        let length = reader.read(&mut bytes).await?;
                         bytes.truncate(length);
                         Ok(AsyncHostValue::Bytes(bytes))
                     }
@@ -702,7 +857,7 @@ impl TokioHost {
             AsyncHostOp::TcpWrite { stream, data } => {
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
-                    stream,
+                    writer,
                     write_closed,
                     ..
                 }) = self.resources.get(&stream)
@@ -724,11 +879,11 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let stream = Rc::clone(stream);
+                let writer = Rc::clone(writer);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
                     let result = async {
-                        stream.lock().await.write_all(&data).await?;
+                        writer.lock().await.write_all(&data).await?;
                         Ok(AsyncHostValue::Undefined)
                     }
                     .await
@@ -753,7 +908,7 @@ impl TokioHost {
             AsyncHostOp::TcpShutdown { stream } => {
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
-                    stream,
+                    writer,
                     write_closed,
                     ..
                 }) = self.resources.get(&stream)
@@ -775,10 +930,10 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let stream = Rc::clone(stream);
+                let writer = Rc::clone(writer);
                 let sender = self.sender.clone();
                 let task = tokio::task::spawn_local(async move {
-                    let result = stream
+                    let result = writer
                         .lock()
                         .await
                         .shutdown()
@@ -984,10 +1139,12 @@ impl TokioHost {
                     address: local.map(|address| address.ip().to_string()),
                     port: local.map(|address| address.port()),
                 };
+                let (reader, writer) = stream.into_split();
                 self.resources.insert(
                     id,
                     HostResource::TcpStream {
-                        stream: Rc::new(tokio::sync::Mutex::new(stream)),
+                        reader: Rc::new(tokio::sync::Mutex::new(reader)),
+                        writer: Rc::new(tokio::sync::Mutex::new(writer)),
                         info: resource.clone(),
                         referenced,
                         read_closed: false,
@@ -1173,6 +1330,7 @@ pub struct Realm<M = WorkId, T = WorkId> {
     next_sequence: u64,
     next_timer_id: u64,
     microtasks: VecDeque<M>,
+    next_ticks: VecDeque<M>,
     timers: BinaryHeap<TimerEntry<T>>,
     cancelled_timers: HashSet<TimerId>,
     active_timers: HashSet<TimerId>,
@@ -1205,6 +1363,7 @@ impl<M, T> Realm<M, T> {
             // JavaScript timer handles are positive numbers; zero remains an invalid identity.
             next_timer_id: 1,
             microtasks: VecDeque::new(),
+            next_ticks: VecDeque::new(),
             timers: BinaryHeap::new(),
             cancelled_timers: HashSet::new(),
             active_timers: HashSet::new(),
@@ -1220,6 +1379,20 @@ impl<M, T> Realm<M, T> {
     /// Adds one FIFO microtask. The caller retains ownership of the work represented by `work`.
     pub fn queue_microtask(&mut self, work: M) {
         self.microtasks.push_back(work);
+    }
+
+    /// Adds one FIFO Node next-tick callback.
+    ///
+    /// This is a language scheduling lane, not a Tokio task. The realm owner drains it ahead of
+    /// Promise jobs at each checkpoint, preserving Node ordering without introducing another
+    /// executor or allowing infrastructure scheduling to become observable.
+    pub fn queue_next_tick(&mut self, work: M) {
+        self.next_ticks.push_back(work);
+    }
+
+    /// Removes the oldest Node next-tick callback.
+    pub fn pop_next_tick(&mut self) -> Option<M> {
+        self.next_ticks.pop_front()
     }
 
     /// Removes the oldest queued microtask for execution by the realm owner.
@@ -1280,7 +1453,7 @@ impl<M, T> Realm<M, T> {
 
     /// Returns whether this realm still has language work waiting to run.
     pub fn has_pending_work(&self) -> bool {
-        !self.microtasks.is_empty() || !self.active_timers.is_empty()
+        !self.next_ticks.is_empty() || !self.microtasks.is_empty() || !self.active_timers.is_empty()
     }
 
     fn next_timer_deadline(&mut self) -> Option<Duration> {
@@ -1790,6 +1963,72 @@ mod tests {
     }
 
     #[test]
+    fn scripted_host_validates_requests_and_releases_in_submission_order() {
+        let first_op = AsyncHostOp::ReadFile {
+            path: "fixture/a.txt".into(),
+        };
+        let second_op = AsyncHostOp::WriteFile {
+            path: "fixture/b.txt".into(),
+            data: b"written".to_vec(),
+        };
+        let mut host = ScriptedHost::new([
+            ScriptedHostStep {
+                operation: first_op.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"first".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: second_op.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]);
+
+        let first = host.start(first_op, true);
+        let second = host.start(second_op, false);
+        assert!(host.has_referenced_work());
+        assert_eq!(host.remaining_steps(), 0);
+        assert_eq!(
+            host.next_completion().expect("first checkpoint").request,
+            first
+        );
+        assert!(!host.has_referenced_work());
+        assert_eq!(
+            host.next_completion().expect("second checkpoint").request,
+            second
+        );
+        assert!(host.is_exhausted());
+    }
+
+    #[test]
+    fn scripted_host_fails_closed_and_models_cancellation() {
+        let mut host = ScriptedHost::new([ScriptedHostStep {
+            operation: AsyncHostOp::ReadFile {
+                path: "expected.txt".into(),
+            },
+            result: Ok(AsyncHostValue::Bytes(Vec::new())),
+        }]);
+        let mismatch = host.start(
+            AsyncHostOp::ReadFile {
+                path: "ambient.txt".into(),
+            },
+            true,
+        );
+        let error = host
+            .next_completion()
+            .expect("mismatch is released")
+            .result
+            .expect_err("unexpected machine access is rejected");
+        assert_eq!(error.code, "ERR_KILN_UNEXPECTED_HOST_OP");
+        assert!(error.message.contains("expected.txt"));
+        assert!(error.message.contains("ambient.txt"));
+
+        let unexpected = host.start(AsyncHostOp::Stat { path: "x".into() }, true);
+        assert!(host.cancel(unexpected));
+        assert!(!host.cancel(unexpected));
+        assert!(host.next_completion().is_none());
+        assert_ne!(mismatch, unexpected);
+    }
+
+    #[test]
     fn tokio_tcp_resources_exchange_bytes_and_shutdown_cleanly() {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         runtime.start_host_op(
@@ -1910,6 +2149,101 @@ mod tests {
             );
         }
         assert!(!runtime.host().has_referenced_work());
+    }
+
+    #[test]
+    fn pending_socket_read_does_not_block_a_write_on_the_same_stream() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("ephemeral port assigned"),
+            },
+            false,
+        );
+        let mut server = None;
+        let mut client = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection completes");
+            if completion.request == accept {
+                server = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected connected stream, got {other:?}"),
+                });
+            }
+        }
+        let server = server.expect("accepted stream observed");
+        let client = client.expect("connected stream observed");
+
+        let pending_read = runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: server.id,
+                max_bytes: 64,
+            },
+            false,
+        );
+        let response_write = runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: server.id,
+                data: b"response while reading".to_vec(),
+            },
+            false,
+        );
+        let completion = runtime
+            .next_host_completion()
+            .expect("write completes without waiting for read EOF");
+        assert_eq!(completion.request, response_write);
+        assert_eq!(completion.result, Ok(AsyncHostValue::Undefined));
+
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: client.id,
+                max_bytes: 64,
+            },
+            false,
+        );
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("peer reads response")
+                .result,
+            Ok(AsyncHostValue::Bytes(b"response while reading".to_vec()))
+        );
+
+        assert!(runtime.cancel_host_op(pending_read));
+        for resource in [server.id, client.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime.next_host_completion().expect("close completes");
+        }
     }
 
     fn resource_state(runtime: &mut RealmRuntime, resource: ResourceId) -> ResourceState {
@@ -2622,6 +2956,74 @@ mod tests {
             .expect("realm drive succeeds");
 
         assert_eq!(seen, Some(Duration::from_secs(60 * 60)));
+    }
+
+    #[test]
+    fn a_virtual_timer_is_not_starved_by_a_pending_host_read() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("ephemeral port assigned"),
+            },
+            false,
+        );
+        let mut server = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection completes");
+            if completion.request == accept {
+                server = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else {
+                assert_eq!(completion.request, connect);
+            }
+        }
+        let server = server.expect("accepted stream observed");
+        let pending_read = runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: server.id,
+                max_bytes: 64,
+            },
+            false,
+        );
+        let mut realm: Realm = Realm::new();
+        realm.set_timeout(Duration::from_secs(60 * 60), WorkId::new(91));
+
+        let turn = runtime
+            .next_turn(&mut realm)
+            .expect("timer advances while read remains pending");
+        assert!(matches!(
+            turn,
+            RuntimeTurn::Timer(WorkItem::Timer { work, .. }) if work == WorkId::new(91)
+        ));
+        assert_eq!(realm.now(), Duration::from_secs(60 * 60));
+        assert!(runtime.cancel_host_op(pending_read));
     }
 
     #[test]

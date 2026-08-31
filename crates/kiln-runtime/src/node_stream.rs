@@ -97,6 +97,17 @@ impl StreamDriver {
         self.reading
     }
 
+    /// Whether a transport read is already registered for this stream.
+    ///
+    /// Adapters use this while applying a completion batch: a `data` listener may synchronously
+    /// call `resume()` while that same batch already contains the next read action. Registering
+    /// both would make one language transition own two concurrent socket reads.
+    pub fn has_pending_read(&self) -> bool {
+        self.requests
+            .iter()
+            .any(|(_, kind)| matches!(kind, PendingKind::Read))
+    }
+
     pub fn write(&mut self, data: Vec<u8>) -> (WriteDisposition, Vec<StreamAction>) {
         let disposition = self.state.enqueue_write(data.clone(), data.len());
         let actions = if disposition.submit_now {

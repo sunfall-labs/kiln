@@ -1017,15 +1017,15 @@ id = "server/s04-fastify"
 group = "server"
 source = "server/packages/s04-fastify.mjs"
 status = "needs-packages"
-features = ["modules", "builtin-modules", "node-http", "node-packages", "commonjs", "cjs-esm-interop", "promises", "async-await", "top-level-await", "classes", "prototype-chain", "getters-setters", "proxies", "regexp", "streams", "json"]
+features = ["modules", "builtin-modules", "node-http", "node-packages", "commonjs", "cjs-esm-interop", "promises", "async-await", "classes", "prototype-chain", "getters-setters", "proxies", "regexp", "streams", "json"]
 catches = """
-The ecosystem gate, and the only probe here that is not expected to be reachable in one step \
-from the one above it. Fastify is the smallest credible real framework - ESM-native, and a \
+The ecosystem gate, and the only probe here that was not reachable in one step from the one \
+above it. Fastify is the smallest credible real framework - ESM-native, and a \
 closure of 41 packages and 1,139 JavaScript files rather than the thousands a full application \
 pulls. Between them they exercise route-tree matching, schema compilation, hooks, content-type \
 parsing and a great deal of prototype and getter machinery that no hand-written probe would \
-think to cover. Expect it to refuse for a long list of reasons for a long time; it is a horizon \
-marker, not a milestone.\
+think to cover. It now passes through the same Tokio-owned HTTP and stream path as the smaller \
+probes; keeping it in the corpus makes that compatibility a maintained gate rather than a demo.\
 """
 notes = """
 `status = "needs-packages"` is to node_modules what "needs-bundle" is to effect/bundle: the \
@@ -1033,11 +1033,9 @@ probe imports `fastify` by bare specifier, so it runs only where `npm ci` has be
 conformance/server/packages/. The directory is gitignored for the same reason effect/bundle/ \
 is - it is reproducible from package-lock.json and is 41 packages of machine output.
 
-This is deliberately NOT bundled the way the Effect programs are. Bundling would answer a \
-question kiln has already answered: ADR 0027 gave bare specifiers a resolution policy, and a \
-by-hand check confirms `fastify` resolves to its real file in node_modules today. Bundling \
-would erase exactly the part still unproven - Node package resolution and CommonJS interop at \
-the scale a real dependency tree has - so the probe keeps its imports.\
+This is deliberately NOT bundled the way the Effect programs are. ADR 0027's bare-specifier \
+policy and the CommonJS graph now execute Fastify's real dependency tree. Bundling would erase \
+exactly that maintained compatibility boundary, so the probe keeps its imports.\
 """
 expected_stdout = """
 200 {"ok":true}

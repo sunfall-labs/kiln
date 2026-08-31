@@ -146,7 +146,7 @@ insta = { version = "1.48", default-features = false }
 rayon = { version = "1.12", default-features = false }
 # The one realm scheduler. `test-util` is required for deterministic paused-time execution;
 # keep Tokio's surface minimal because its types never cross `kiln-runtime`'s public seam.
-tokio = { version = "1.48", default-features = false, features = ["fs", "io-util", "net", "rt", "sync", "time", "test-util"] }
+tokio = { version = "1.48", default-features = false, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time", "test-util"] }
 
 [profile.release]
 debug = 1
