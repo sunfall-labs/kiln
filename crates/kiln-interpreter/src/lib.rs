@@ -14,7 +14,7 @@ use kiln_ir::{
 use kiln_runtime::{
     ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
     RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
-    node_http::{Http1Decoder, HttpRequestEvent, HttpResponseEvent},
+    node_http::HttpResponseEvent,
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -1749,7 +1749,6 @@ enum ServerProtocol {
 struct NodeConnection {
     driver: StreamDriver,
     runtime_http: bool,
-    decoder: Http1Decoder,
     request: Option<Value>,
     response: Option<Value>,
     http_responses: Vec<(u64, Value)>,
@@ -7158,7 +7157,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
-                    decoder: Http1Decoder::default(),
                     request: None,
                     response: None,
                     http_responses: Vec::new(),
@@ -7371,27 +7369,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "runtime-owned HTTP client leaked protocol bytes".into(),
                     });
                 }
-                let events = {
-                    let mut server_state = server.borrow_mut();
-                    let connection = server_state
-                        .streams
-                        .iter_mut()
-                        .find(|stream| stream.resource() == resource)
-                        .ok_or_else(|| ExecutionError::Host {
-                            instruction,
-                            message: "node:http received data for an unknown stream".into(),
-                        })?;
-                    connection.decoder.push_events(&bytes).map_err(|error| {
-                        ExecutionError::Host {
-                            instruction,
-                            message: format!("HTTP parse error: {error:?}"),
-                        }
-                    })?
-                };
-                for event in events {
-                    self.dispatch_http_request_event(server, resource, event, instruction)?;
-                }
-                Ok(())
+                Err(ExecutionError::Host {
+                    instruction,
+                    message: "runtime-owned HTTP server leaked protocol bytes".into(),
+                })
             }
             StreamAction::Event(StreamEvent::Finish) => {
                 if server.borrow().protocol == ServerProtocol::Net {
@@ -7518,54 +7499,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    fn dispatch_http_request_event(
-        &mut self,
-        server: &Rc<RefCell<NodeServerState>>,
-        resource: kiln_host_abi::ResourceId,
-        event: HttpRequestEvent,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        match event {
-            HttpRequestEvent::Head(request) => {
-                self.dispatch_http_request_head(server, resource, request, None, instruction)?;
-                Ok(())
-            }
-            HttpRequestEvent::Data(bytes) => {
-                let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
-                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
-                let body = match readable.borrow().encoding.as_deref() {
-                    Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
-                    _ => node_bytes_value(bytes),
-                };
-                self.dispatch_readable_state(
-                    Native::NodeReadablePush,
-                    &incoming,
-                    &[body],
-                    instruction,
-                    &readable,
-                    false,
-                )?;
-                Ok(())
-            }
-            HttpRequestEvent::End => {
-                // HTTP framing ended, but the socket may remain open for keep-alive. Deliver the
-                // message EOF now; transport EOF is a separate StreamEvent and must not own the
-                // request body's lifecycle.
-                let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
-                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
-                self.dispatch_readable_state(
-                    Native::NodeReadablePush,
-                    &incoming,
-                    &[Value::Null],
-                    instruction,
-                    &readable,
-                    false,
-                )?;
-                Ok(())
-            }
-        }
-    }
-
     fn dispatch_runtime_http_events(
         &mut self,
         server: &Rc<RefCell<NodeServerState>>,
@@ -7580,31 +7513,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
-                RuntimeHttpEvent::Request { id, request, body } => {
-                    let incoming = self.dispatch_http_request_head(
+                RuntimeHttpEvent::RequestHead { id, request } => {
+                    self.dispatch_http_request_head(
                         server,
                         resource,
                         request,
                         Some(id),
                         instruction,
                     )?;
-                    if !body.is_empty() {
-                        let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
-                        let body = match readable.borrow().encoding.as_deref() {
-                            Some("utf8") => {
-                                Value::String(String::from_utf8_lossy(&body).into_owned())
-                            }
-                            _ => node_bytes_value(body),
-                        };
-                        self.dispatch_readable_state(
-                            Native::NodeReadablePush,
-                            &incoming,
-                            &[body],
-                            instruction,
-                            &readable,
-                            false,
-                        )?;
-                    }
+                }
+                RuntimeHttpEvent::RequestData { id: _, data } => {
+                    let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
+                    let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                    let body = match readable.borrow().encoding.as_deref() {
+                        Some("utf8") => Value::String(String::from_utf8_lossy(&data).into_owned()),
+                        _ => node_bytes_value(data),
+                    };
+                    self.dispatch_readable_state(
+                        Native::NodeReadablePush,
+                        &incoming,
+                        &[body],
+                        instruction,
+                        &readable,
+                        false,
+                    )?;
+                }
+                RuntimeHttpEvent::RequestEnd { id: _ } => {
+                    let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
                     let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                     self.dispatch_readable_state(
                         Native::NodeReadablePush,
@@ -7698,11 +7633,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
-                RuntimeHttpClientEvent::Response {
+                RuntimeHttpClientEvent::ResponseHead {
                     status,
                     reason,
                     headers,
-                    body,
                 } => {
                     self.dispatch_http_response_event(
                         owner,
@@ -7715,14 +7649,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }),
                         instruction,
                     )?;
-                    if !body.is_empty() {
-                        self.dispatch_http_response_event(
-                            owner,
-                            resource,
-                            HttpResponseEvent::Data(body),
-                            instruction,
-                        )?;
-                    }
+                }
+                RuntimeHttpClientEvent::ResponseData(body) => {
+                    self.dispatch_http_response_event(
+                        owner,
+                        resource,
+                        HttpResponseEvent::Data(body),
+                        instruction,
+                    )?;
+                }
+                RuntimeHttpClientEvent::ResponseEnd => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -8737,7 +8673,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let mut connection = NodeConnection {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                             runtime_http: protocol == ServerProtocol::HttpClient,
-                            decoder: Http1Decoder::default(),
                             request: Some(request),
                             response: None,
                             http_responses: Vec::new(),

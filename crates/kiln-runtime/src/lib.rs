@@ -40,10 +40,16 @@ use crate::http_transport::HttpTransportDriver;
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpEvent {
-    Request {
+    RequestHead {
         id: u64,
         request: node_http::HttpRequest,
-        body: Vec<u8>,
+    },
+    RequestData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    RequestEnd {
+        id: u64,
     },
     Drain {
         id: u64,
@@ -65,12 +71,13 @@ pub struct RuntimeHttpClientRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpClientEvent {
-    Response {
+    ResponseHead {
         status: u16,
         reason: String,
         headers: Vec<(String, String)>,
-        body: Vec<u8>,
     },
+    ResponseData(Vec<u8>),
+    ResponseEnd,
     Error(String),
     Closed,
 }
@@ -751,9 +758,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         };
         while let Ok(event) = receiver.try_recv() {
             events.push(match event {
-                hyper_http::EngineEvent::Request { id, request, body } => {
-                    RuntimeHttpEvent::Request { id, request, body }
+                hyper_http::EngineEvent::RequestHead { id, request } => {
+                    RuntimeHttpEvent::RequestHead { id, request }
                 }
+                hyper_http::EngineEvent::RequestData { id, data } => {
+                    RuntimeHttpEvent::RequestData { id, data }
+                }
+                hyper_http::EngineEvent::RequestEnd { id } => RuntimeHttpEvent::RequestEnd { id },
                 hyper_http::EngineEvent::Error(message) => RuntimeHttpEvent::Error(message),
                 hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
             });
@@ -906,17 +917,19 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         let mut events = Vec::new();
         while let Ok(event) = receiver.try_recv() {
             events.push(match event {
-                hyper_http::ClientEvent::Response {
+                hyper_http::ClientEvent::ResponseHead {
                     status,
                     reason,
                     headers,
-                    body,
-                } => RuntimeHttpClientEvent::Response {
+                } => RuntimeHttpClientEvent::ResponseHead {
                     status,
                     reason,
                     headers,
-                    body,
                 },
+                hyper_http::ClientEvent::ResponseData(data) => {
+                    RuntimeHttpClientEvent::ResponseData(data)
+                }
+                hyper_http::ClientEvent::ResponseEnd => RuntimeHttpClientEvent::ResponseEnd,
                 hyper_http::ClientEvent::Error(message) => RuntimeHttpClientEvent::Error(message),
                 hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
             });
@@ -2228,6 +2241,27 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_events(events: &[RuntimeHttpEvent]) -> (u64, &node_http::HttpRequest, Vec<u8>) {
+        let [
+            RuntimeHttpEvent::RequestHead { id, request },
+            middle @ ..,
+            RuntimeHttpEvent::RequestEnd { id: end_id },
+        ] = events
+        else {
+            panic!("expected request head/data/end events: {events:?}")
+        };
+        assert_eq!(id, end_id);
+        let mut body = Vec::new();
+        for event in middle {
+            let RuntimeHttpEvent::RequestData { id: data_id, data } = event else {
+                panic!("unexpected event between request head and end: {event:?}")
+            };
+            assert_eq!(id, data_id);
+            body.extend_from_slice(data);
+        }
+        (*id, request, body)
+    }
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
@@ -3004,15 +3038,14 @@ mod tests {
         };
         assert_eq!(next_read, &read);
 
-        let event = (0..8)
+        let events = (0..8)
             .find_map(|_| {
                 runtime.poll_http_connection(resource);
-                runtime.take_http_events(resource).into_iter().next()
+                let events = runtime.take_http_events(resource);
+                (!events.is_empty()).then_some(events)
             })
             .unwrap_or_else(|| panic!("Hyper did not publish a request event"));
-        let crate::RuntimeHttpEvent::Request { id, request, body } = event else {
-            panic!("Hyper published an unexpected event: {event:?}");
-        };
+        let (id, request, body) = request_events(&events);
         assert_eq!(request.target, "/health");
         assert!(body.is_empty());
         assert!(runtime.respond_http1(
@@ -3873,15 +3906,13 @@ mod tests {
         }
         runtime.poll_http_connection(server.id);
         let events = runtime.take_http_events(server.id);
-        let [RuntimeHttpEvent::Request { id, request, body }] = events.as_slice() else {
-            panic!("Hyper emits one request event")
-        };
+        let (id, request, body) = request_events(&events);
         assert_eq!(request.method, "POST");
         assert_eq!(request.target, "/health");
         assert_eq!(body, b"ping");
         assert!(runtime.respond_http1(
             server.id,
-            *id,
+            id,
             HttpResponse {
                 status: 200,
                 reason: Some("OK".into()),
@@ -3960,14 +3991,12 @@ mod tests {
         )));
         runtime.poll_http_connection(resource);
         let events = runtime.take_http_events(resource);
-        let [RuntimeHttpEvent::Request { id, request, body }] = events.as_slice() else {
-            panic!("script emits one request event: {events:?}")
-        };
+        let (id, request, body) = request_events(&events);
         assert_eq!(request.target, "/echo");
         assert_eq!(body, b"ping");
         assert!(runtime.respond_http1(
             resource,
-            *id,
+            id,
             HttpResponse {
                 status: 201,
                 reason: None,
@@ -4015,10 +4044,8 @@ mod tests {
             .expect("scripted completion belongs to connection");
         runtime.poll_http_connection(resource);
         let events = runtime.take_http_events(resource);
-        let [RuntimeHttpEvent::Request { id, .. }] = events.as_slice() else {
-            panic!("request event arrives: {events:?}")
-        };
-        let id = *id;
+        let (id, _, body) = request_events(&events);
+        assert!(body.is_empty());
         assert!(runtime.start_http1_response(
             resource,
             id,
