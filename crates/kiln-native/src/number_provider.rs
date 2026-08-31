@@ -12,7 +12,7 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 8;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 9;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
@@ -24,14 +24,15 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// What a packaged archive has to define.
 ///
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
-/// 0025), and the temporal nine joined them when the calendar engine did (ADR 0029 §4). The list
-/// is part of the identity below, so an archive built before them is rejected rather than linked
-/// and found wanting.
+/// 0025), and the temporal twelve joined them when the calendar engine did (ADR 0029 §4). The
+/// list is part of the identity below, so an archive built before them is rejected rather than
+/// linked and found wanting.
 const REQUIRED_EXPORTS: [&str; 50] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
     "kiln_realm_now",
+    "kiln_realm_now_nanoseconds",
     "kiln_realm_queue_microtask",
     "kiln_realm_set_timeout",
     "kiln_realm_set_interval",
@@ -43,16 +44,12 @@ const REQUIRED_EXPORTS: [&str; 50] = [
     "kiln_realm_start_active_host_op",
     "kiln_realm_cancel_request",
     "kiln_realm_cancel_active_request",
-    "kiln_http1_decoder_create",
-    "kiln_http1_decoder_free",
-    "kiln_http1_decoder_push",
-    "kiln_http1_response_encode",
-    "kiln_http1_response_decoder_create",
-    "kiln_http1_response_decoder_free",
-    "kiln_http1_response_decoder_push",
-    "kiln_http1_response_events_len",
-    "kiln_http1_response_events_get",
-    "kiln_http1_response_events_free",
+    "kiln_realm_http_server_attach_active",
+    "kiln_realm_http_client_attach_active",
+    "kiln_realm_http_client_send_active",
+    "kiln_realm_http_response_start_active",
+    "kiln_realm_http_response_write_active",
+    "kiln_realm_http_response_end_active",
     "kiln_number_to_js_string",
     "kiln_string_to_number",
     "kiln_regexp_compile",
@@ -70,6 +67,7 @@ const REQUIRED_EXPORTS: [&str; 50] = [
     "kiln_bigint_compare",
     "kiln_bigint_is_zero",
     "kiln_temporal_from_fields",
+    "kiln_temporal_duration_from_fields",
     "kiln_temporal_parse",
     "kiln_temporal_now",
     "kiln_temporal_free",
@@ -77,6 +75,8 @@ const REQUIRED_EXPORTS: [&str; 50] = [
     "kiln_temporal_get",
     "kiln_temporal_to_string",
     "kiln_temporal_compare",
+    "kiln_temporal_invoke",
+    "kiln_temporal_to_kind",
     "kiln_temporal_last_error",
 ];
 
@@ -414,7 +414,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
         // runtime that now owns native entry as well as interpreted entry.
         OsString::from("--features"),
-        OsString::from("regexp,bigint,temporal"),
+        OsString::from("regexp,bigint,temporal,intl"),
         OsString::from("--release"),
         OsString::from("--target"),
         OsString::from(&rust_target),

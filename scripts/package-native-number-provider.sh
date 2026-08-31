@@ -82,7 +82,7 @@ env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --release --features regexp,bigint \
+	-p kiln-native-number-ffi --release --features regexp,bigint,temporal \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
@@ -116,6 +116,19 @@ KILN_PROVIDER_ABI_VERSION=$(
 )
 if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
 	printf 'could not determine number-provider ABI version\n' >&2
+	exit 1
+fi
+
+# The export list likewise, and for a sharper reason: the resolver rejects an archive whose
+# manifest does not name *exactly* the symbols it requires, so a list copied by hand here becomes a
+# packaged artifact nothing will link the first time either side of it grows a function.
+KILN_PROVIDER_EXPORTS=$(
+	sed -n '/^const REQUIRED_EXPORTS/,/^\];$/p' crates/kiln-native/src/number_provider.rs |
+		sed -n 's/^[[:space:]]*"\([A-Za-z0-9_]*\)",\{0,1\}$/"\1"/p' |
+		paste -sd, -
+)
+if [[ -z $KILN_PROVIDER_EXPORTS ]]; then
+	printf 'could not determine the number-provider export list\n' >&2
 	exit 1
 fi
 
@@ -171,7 +184,7 @@ printf '%s\n' \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
-	'  "exports": ["kiln_realm_create", "kiln_realm_enter", "kiln_realm_is_active", "kiln_realm_now", "kiln_realm_queue_microtask", "kiln_realm_set_timeout", "kiln_realm_set_interval", "kiln_realm_clear_timer", "kiln_realm_drive", "kiln_realm_destroy", "kiln_realm_read_file", "kiln_realm_start_host_op", "kiln_realm_start_active_host_op", "kiln_realm_cancel_request", "kiln_realm_cancel_active_request", "kiln_http1_decoder_create", "kiln_http1_decoder_free", "kiln_http1_decoder_push", "kiln_http1_response_encode", "kiln_http1_response_decoder_create", "kiln_http1_response_decoder_free", "kiln_http1_response_decoder_push", "kiln_http1_response_events_len", "kiln_http1_response_events_get", "kiln_http1_response_events_free", "kiln_number_to_js_string", "kiln_string_to_number", "kiln_regexp_compile", "kiln_regexp_free", "kiln_regexp_search", "kiln_regexp_group_count", "kiln_regexp_group_name", "kiln_bigint_parse", "kiln_bigint_from_double", "kiln_bigint_free", "kiln_bigint_to_double", "kiln_bigint_to_string", "kiln_bigint_binary", "kiln_bigint_negate", "kiln_bigint_compare", "kiln_bigint_is_zero"]' \
+	"  \"exports\": [$KILN_PROVIDER_EXPORTS]" \
 	'}' >"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"

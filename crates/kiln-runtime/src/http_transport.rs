@@ -233,6 +233,9 @@ pub(crate) struct HttpTransportDriver {
     stream: StreamDriver,
     transport: RealmTransport,
     write_in_flight: bool,
+    close_requested: bool,
+    close_started: bool,
+    wrote_bytes: bool,
 }
 
 impl HttpTransportDriver {
@@ -244,6 +247,9 @@ impl HttpTransportDriver {
                 stream: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                 transport,
                 write_in_flight: false,
+                close_requested: false,
+                close_started: false,
+                wrote_bytes: false,
             },
         )
     }
@@ -265,29 +271,37 @@ impl HttpTransportDriver {
             return Vec::new();
         }
         let Some(bytes) = self.transport.next_write() else {
-            return Vec::new();
+            return if self.close_requested && self.wrote_bytes && !self.close_started {
+                self.close_started = true;
+                self.stream.close_actions()
+            } else {
+                Vec::new()
+            };
         };
         let (_, actions) = self.stream.write(bytes);
         self.write_in_flight = !actions.is_empty();
+        self.wrote_bytes |= self.write_in_flight;
         actions
     }
 
     pub(crate) fn completed(&mut self, completion: Completion) -> Option<Vec<StreamAction>> {
         let write_completed = self.stream.is_write_completion(completion.request);
         let write_succeeded = write_completed && completion.result.is_ok();
-        let actions = self.stream.completed(completion)?;
         if write_succeeded {
             self.write_in_flight = false;
             debug_assert!(self.transport.acknowledge_write());
         }
+        let actions = self.stream.completed(completion)?;
         let mut outward = Vec::new();
         for action in actions {
             match action {
                 StreamAction::Data(bytes) => self.transport.feed_read(bytes),
                 StreamAction::Event(StreamEvent::End) => self.transport.finish_read(),
                 StreamAction::Error(error) => {
-                    self.fail_transport(&error);
-                    outward.push(StreamAction::Error(error));
+                    if !self.close_started {
+                        self.fail_transport(&error);
+                        outward.push(StreamAction::Error(error));
+                    }
                 }
                 StreamAction::Event(StreamEvent::Close) => {
                     self.transport.finish_read();
@@ -296,10 +310,30 @@ impl HttpTransportDriver {
                 action => outward.push(action),
             }
         }
+        if write_succeeded && self.close_requested && !self.close_started {
+            self.close_started = true;
+            outward.extend(self.stream.close_actions());
+            return Some(outward);
+        }
         // This catches output already produced before the completion. Output produced because
         // this completion woke Hyper is picked up by `pump_write` at the next realm checkpoint.
         outward.extend(self.pump_write());
         Some(outward)
+    }
+
+    /// Close the portable resource after Hyper's final buffered write is acknowledged.
+    pub(crate) fn close(&mut self) -> Vec<StreamAction> {
+        self.close_requested = true;
+        if self.write_in_flight || self.transport.next_write().is_some() || self.close_started {
+            Vec::new()
+        } else {
+            self.close_started = true;
+            self.stream.close_actions()
+        }
+    }
+
+    pub(crate) fn close_requested(&mut self) {
+        self.close_requested = true;
     }
 
     fn fail_transport(&mut self, error: &AsyncHostError) {

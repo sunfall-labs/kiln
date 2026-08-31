@@ -28,384 +28,6 @@ const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
 
-#[cfg(feature = "realm")]
-mod http {
-    use super::INVALID_ARGUMENT;
-    use kiln_runtime::node_http::{
-        Http1Decoder, Http1ResponseDecoder, HttpResponse, HttpResponseEvent,
-    };
-    use std::slice;
-
-    #[repr(C)]
-    pub struct RequestView {
-        pub method: *mut u8,
-        pub method_capacity: usize,
-        pub method_len: usize,
-        pub target: *mut u8,
-        pub target_capacity: usize,
-        pub target_len: usize,
-        pub version_minor: u8,
-        pub keep_alive: u8,
-    }
-
-    #[repr(C)]
-    pub struct ResponseEventView {
-        pub kind: u8,
-        pub reserved: u8,
-        pub status: u16,
-        pub reason: *mut u8,
-        pub reason_capacity: usize,
-        pub reason_len: usize,
-        pub data: *mut u8,
-        pub data_capacity: usize,
-        pub data_len: usize,
-        pub headers: *mut u8,
-        pub headers_capacity: usize,
-        pub headers_len: usize,
-    }
-
-    pub struct ResponseEvents(Vec<HttpResponseEvent>);
-
-    fn checked_header_field_len(name_len: usize, value_len: usize) -> Option<usize> {
-        name_len
-            .checked_add(1)?
-            .checked_add(value_len)?
-            .checked_add(1)
-    }
-
-    fn checked_advance(offset: &mut usize, amount: usize) -> bool {
-        let Some(next) = offset.checked_add(amount) else {
-            return false;
-        };
-        *offset = next;
-        true
-    }
-
-    /// Allocate an opaque incremental HTTP/1 decoder. The handle never exposes Rust layout.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_decoder_create(out: *mut *mut Http1Decoder) -> i32 {
-        if out.is_null() {
-            return INVALID_ARGUMENT;
-        }
-        // SAFETY: null was rejected and the caller promises a writable pointer slot.
-        unsafe { out.write(Box::into_raw(Box::new(Http1Decoder::default()))) };
-        0
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_decoder_free(decoder: *mut Http1Decoder) {
-        if !decoder.is_null() {
-            // SAFETY: the private ABI requires a live handle returned by create, exactly once.
-            drop(unsafe { Box::from_raw(decoder) });
-        }
-    }
-
-    /// Push one transport chunk and borrow the first complete request for this callback only.
-    ///
-    /// Returns 0 for a request, 1 when more bytes are needed, and a negative value for malformed
-    /// input. This initial native server slice intentionally accepts one request per connection;
-    /// the decoder itself remains pipelining-safe for the later keep-alive adapter.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_decoder_push(
-        decoder: *mut Http1Decoder,
-        bytes: *const u8,
-        bytes_len: usize,
-        out: *mut RequestView,
-    ) -> i32 {
-        if decoder.is_null() || out.is_null() || (bytes.is_null() && bytes_len != 0) {
-            return INVALID_ARGUMENT;
-        }
-        let chunk = if bytes_len == 0 {
-            &[]
-        } else {
-            // SAFETY: the caller supplies a readable span for this call.
-            unsafe { slice::from_raw_parts(bytes, bytes_len) }
-        };
-        // SAFETY: the handle contract guarantees exclusive access during this call.
-        let decoder = unsafe { &mut *decoder };
-        let Ok(requests) = decoder.push(chunk) else {
-            return -2;
-        };
-        let Some(request) = requests.first() else {
-            return 1;
-        };
-        // SAFETY: `out` is writable by contract and is initialized by the caller with its owned
-        // output spans. No pointer into a temporary Rust request crosses the boundary.
-        let view = unsafe { &mut *out };
-        if request.method.len() > view.method_capacity
-            || request.target.len() > view.target_capacity
-        {
-            return -3;
-        }
-        if (!view.method.is_null() || request.method.is_empty())
-            && (!view.target.is_null() || request.target.is_empty())
-        {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    request.method.as_ptr(),
-                    view.method,
-                    request.method.len(),
-                );
-                std::ptr::copy_nonoverlapping(
-                    request.target.as_ptr(),
-                    view.target,
-                    request.target.len(),
-                );
-            }
-        } else {
-            return INVALID_ARGUMENT;
-        }
-        view.method_len = request.method.len();
-        view.target_len = request.target.len();
-        view.version_minor = u8::from(matches!(
-            request.version,
-            kiln_runtime::node_http::HttpVersion::Http11
-        ));
-        view.keep_alive = u8::from(request.keep_alive);
-        0
-    }
-
-    /// Encode one complete response through the shared Rust HTTP implementation.
-    ///
-    /// A null output buffer queries the required length; a sufficiently large buffer receives the
-    /// bytes. Header pairs are passed as parallel borrowed spans to keep the ABI layout explicit.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_encode(
-        status: u16,
-        header_names: *const *const u8,
-        header_name_lens: *const usize,
-        header_values: *const *const u8,
-        header_value_lens: *const usize,
-        header_count: usize,
-        body: *const u8,
-        body_len: usize,
-        keep_alive: u8,
-        buffer: *mut u8,
-        capacity: usize,
-    ) -> isize {
-        if (body.is_null() && body_len != 0)
-            || (header_count != 0
-                && (header_names.is_null()
-                    || header_name_lens.is_null()
-                    || header_values.is_null()
-                    || header_value_lens.is_null()))
-        {
-            return INVALID_ARGUMENT as isize;
-        }
-        let names = unsafe { slice::from_raw_parts(header_names, header_count) };
-        let name_lens = unsafe { slice::from_raw_parts(header_name_lens, header_count) };
-        let values = unsafe { slice::from_raw_parts(header_values, header_count) };
-        let value_lens = unsafe { slice::from_raw_parts(header_value_lens, header_count) };
-        let mut headers = Vec::with_capacity(header_count);
-        for index in 0..header_count {
-            let Some((&name, &name_len)) = names.get(index).zip(name_lens.get(index)) else {
-                return INVALID_ARGUMENT as isize;
-            };
-            let Some((&value, &value_len)) = values.get(index).zip(value_lens.get(index)) else {
-                return INVALID_ARGUMENT as isize;
-            };
-            if (name.is_null() && name_len != 0) || (value.is_null() && value_len != 0) {
-                return INVALID_ARGUMENT as isize;
-            }
-            let name = unsafe { slice::from_raw_parts(name, name_len) };
-            let value = unsafe { slice::from_raw_parts(value, value_len) };
-            let (Ok(name), Ok(value)) = (str::from_utf8(name), str::from_utf8(value)) else {
-                return -2;
-            };
-            headers.push((name.to_owned(), value.to_owned()));
-        }
-        let body = unsafe { slice::from_raw_parts(body, body_len) }.to_vec();
-        let encoded = HttpResponse {
-            status,
-            reason: None,
-            headers,
-            body,
-        }
-        .encode(keep_alive != 0);
-        let Ok(length) = isize::try_from(encoded.len()) else {
-            return INVALID_ARGUMENT as isize;
-        };
-        if buffer.is_null() {
-            return length;
-        }
-        if capacity < encoded.len() {
-            return INVALID_ARGUMENT as isize;
-        }
-        // SAFETY: the caller provides writable storage for at least the encoded length.
-        unsafe { std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, encoded.len()) };
-        length
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_decoder_create(
-        out: *mut *mut Http1ResponseDecoder,
-    ) -> i32 {
-        if out.is_null() {
-            return INVALID_ARGUMENT;
-        }
-        unsafe { out.write(Box::into_raw(Box::new(Http1ResponseDecoder::default()))) };
-        0
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_decoder_free(decoder: *mut Http1ResponseDecoder) {
-        if !decoder.is_null() {
-            drop(unsafe { Box::from_raw(decoder) });
-        }
-    }
-
-    /// Decode one transport chunk into an ordered batch of head, data, and end events.
-    ///
-    /// The adapter drains every returned event before pushing another chunk. Event bytes are
-    /// copied into caller-owned buffers, so no Rust allocation or layout crosses the ABI.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_decoder_push(
-        decoder: *mut Http1ResponseDecoder,
-        bytes: *const u8,
-        bytes_len: usize,
-        out: *mut *mut ResponseEvents,
-    ) -> i32 {
-        if decoder.is_null() || out.is_null() || (bytes.is_null() && bytes_len != 0) {
-            return INVALID_ARGUMENT;
-        }
-        let chunk = if bytes_len == 0 {
-            &[]
-        } else {
-            unsafe { slice::from_raw_parts(bytes, bytes_len) }
-        };
-        let Ok(events) = (unsafe { &mut *decoder }).push_events(chunk) else {
-            return -2;
-        };
-        unsafe { out.write(Box::into_raw(Box::new(ResponseEvents(events)))) };
-        0
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_events_len(
-        events: *const ResponseEvents,
-    ) -> usize {
-        if events.is_null() {
-            return 0;
-        }
-        unsafe { &*events }.0.len()
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_events_get(
-        events: *const ResponseEvents,
-        index: usize,
-        out: *mut ResponseEventView,
-    ) -> i32 {
-        if events.is_null() || out.is_null() {
-            return INVALID_ARGUMENT;
-        }
-        let Some(event) = (unsafe { &*events }).0.get(index) else {
-            return INVALID_ARGUMENT;
-        };
-        let view = unsafe { &mut *out };
-        view.kind = match event {
-            HttpResponseEvent::Head(_) => 1,
-            HttpResponseEvent::Data(_) => 2,
-            HttpResponseEvent::End => 3,
-        };
-        match event {
-            HttpResponseEvent::Head(head) => {
-                let Some(header_len) =
-                    head.headers
-                        .iter()
-                        .try_fold(0usize, |total, (name, value)| {
-                            total.checked_add(checked_header_field_len(name.len(), value.len())?)
-                        })
-                else {
-                    return INVALID_ARGUMENT;
-                };
-                view.status = head.status;
-                view.reason_len = head.reason.len();
-                view.headers_len = header_len;
-                if head.reason.len() > view.reason_capacity
-                    || header_len > view.headers_capacity
-                    || (view.reason.is_null() && !head.reason.is_empty())
-                    || (view.headers.is_null() && header_len != 0)
-                {
-                    return -3;
-                }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        head.reason.as_ptr(),
-                        view.reason,
-                        head.reason.len(),
-                    )
-                };
-                let mut at = 0;
-                for (name, value) in &head.headers {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            name.as_ptr(),
-                            view.headers.add(at),
-                            name.len(),
-                        );
-                    }
-                    if !checked_advance(&mut at, name.len()) {
-                        return INVALID_ARGUMENT;
-                    }
-                    unsafe { view.headers.add(at).write(0) };
-                    if !checked_advance(&mut at, 1) {
-                        return INVALID_ARGUMENT;
-                    }
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            value.as_ptr(),
-                            view.headers.add(at),
-                            value.len(),
-                        );
-                    }
-                    if !checked_advance(&mut at, value.len()) {
-                        return INVALID_ARGUMENT;
-                    }
-                    unsafe { view.headers.add(at).write(0) };
-                    if !checked_advance(&mut at, 1) {
-                        return INVALID_ARGUMENT;
-                    }
-                }
-            }
-            HttpResponseEvent::Data(data) => {
-                view.data_len = data.len();
-                if data.len() > view.data_capacity || (view.data.is_null() && !data.is_empty()) {
-                    return -3;
-                }
-                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), view.data, data.len()) };
-            }
-            HttpResponseEvent::End => {}
-        };
-        0
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_http1_response_events_free(events: *mut ResponseEvents) {
-        if !events.is_null() {
-            drop(unsafe { Box::from_raw(events) });
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{checked_advance, checked_header_field_len};
-
-        #[test]
-        fn response_view_lengths_fail_closed_at_usize_boundary() {
-            assert_eq!(checked_header_field_len(0, 0), Some(2));
-            assert_eq!(checked_header_field_len(usize::MAX, 0), None);
-            assert_eq!(checked_header_field_len(0, usize::MAX), None);
-
-            let mut offset = usize::MAX - 1;
-            assert!(checked_advance(&mut offset, 1));
-            assert_eq!(offset, usize::MAX);
-            assert!(!checked_advance(&mut offset, 1));
-            assert_eq!(offset, usize::MAX);
-        }
-    }
-}
-
 /// The private native Realm ABI.
 ///
 /// Handles are process-unique integers rather than Rust pointers. The owning thread keeps the
@@ -419,7 +41,8 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+        Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent,
+        RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds, node_stream::StreamAction,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
@@ -432,6 +55,59 @@ mod realm {
     type DropWork = unsafe extern "C" fn(*mut c_void);
     type RunCompletion =
         unsafe extern "C" fn(*mut c_void, *const CompletionView, *mut c_void, *mut c_void) -> i32;
+    type RunHttpEvent =
+        unsafe extern "C" fn(*mut c_void, *const HttpEventView, *mut c_void, *mut c_void) -> i32;
+
+    const HTTP_EVENT_REQUEST_HEAD: u32 = 1;
+    const HTTP_EVENT_REQUEST_DATA: u32 = 2;
+    const HTTP_EVENT_REQUEST_END: u32 = 3;
+    const HTTP_EVENT_DRAIN: u32 = 4;
+    const HTTP_EVENT_FINISH: u32 = 5;
+    const HTTP_EVENT_RESPONSE_HEAD: u32 = 6;
+    const HTTP_EVENT_RESPONSE_DATA: u32 = 7;
+    const HTTP_EVENT_RESPONSE_END: u32 = 8;
+    const HTTP_EVENT_ERROR: u32 = 9;
+    const HTTP_EVENT_CLOSED: u32 = 10;
+
+    #[repr(C)]
+    pub struct HttpEventView {
+        pub kind: u32,
+        pub flags: u32,
+        pub id: u64,
+        pub status: u16,
+        pub version_minor: u8,
+        pub reserved: u8,
+        pub method: *const u8,
+        pub method_len: u64,
+        pub target: *const u8,
+        pub target_len: u64,
+        pub reason: *const u8,
+        pub reason_len: u64,
+        pub headers: *const u8,
+        pub headers_len: u64,
+        pub data: *const u8,
+        pub data_len: u64,
+    }
+
+    #[repr(C)]
+    pub struct HttpRequestView {
+        pub method: *const u8,
+        pub method_len: u64,
+        pub target: *const u8,
+        pub target_len: u64,
+        pub headers: *const u8,
+        pub headers_len: u64,
+        pub body: *const u8,
+        pub body_len: u64,
+    }
+
+    #[repr(C)]
+    pub struct HttpResponseView {
+        pub status: u16,
+        pub reserved: u16,
+        pub headers: *const u8,
+        pub headers_len: u64,
+    }
 
     /// One owned completion borrowed by a native continuation for the duration of its callback.
     ///
@@ -549,6 +225,101 @@ mod realm {
         pointer: *mut c_void,
         run: RunCompletion,
         drop: DropWork,
+    }
+
+    struct HttpEventOwner {
+        pointer: *mut c_void,
+        run: RunHttpEvent,
+        drop: DropWork,
+    }
+
+    impl Drop for HttpEventOwner {
+        fn drop(&mut self) {
+            // SAFETY: attach transfers one live adapter allocation and its matching disposer.
+            unsafe { (self.drop)(self.pointer) };
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum HttpRole {
+        Server,
+        Client,
+    }
+
+    struct NativeHttpConnection {
+        role: HttpRole,
+        events: Rc<HttpEventOwner>,
+    }
+
+    struct HttpEventPayload {
+        owner: Rc<HttpEventOwner>,
+        kind: u32,
+        flags: u32,
+        id: u64,
+        status: u16,
+        version_minor: u8,
+        method: Vec<u8>,
+        target: Vec<u8>,
+        reason: Vec<u8>,
+        headers: Vec<u8>,
+        data: Vec<u8>,
+    }
+
+    impl HttpEventPayload {
+        fn bytes(bytes: &[u8]) -> (*const u8, u64) {
+            (
+                bytes.as_ptr(),
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            )
+        }
+
+        fn view(&self) -> HttpEventView {
+            let (method, method_len) = Self::bytes(&self.method);
+            let (target, target_len) = Self::bytes(&self.target);
+            let (reason, reason_len) = Self::bytes(&self.reason);
+            let (headers, headers_len) = Self::bytes(&self.headers);
+            let (data, data_len) = Self::bytes(&self.data);
+            HttpEventView {
+                kind: self.kind,
+                flags: self.flags,
+                id: self.id,
+                status: self.status,
+                version_minor: self.version_minor,
+                reserved: 0,
+                method,
+                method_len,
+                target,
+                target_len,
+                reason,
+                reason_len,
+                headers,
+                headers_len,
+                data,
+                data_len,
+            }
+        }
+    }
+
+    unsafe extern "C" fn run_http_event(
+        pointer: *mut c_void,
+        host: *mut c_void,
+        thrown: *mut c_void,
+    ) -> i32 {
+        if pointer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: NativeWork owns this boxed payload until the callback returns.
+        let payload = unsafe { &*pointer.cast::<HttpEventPayload>() };
+        let view = payload.view();
+        // SAFETY: all borrowed spans remain owned by payload for this synchronous callback.
+        unsafe { (payload.owner.run)(payload.owner.pointer, &raw const view, host, thrown) }
+    }
+
+    unsafe extern "C" fn drop_http_event(pointer: *mut c_void) {
+        if !pointer.is_null() {
+            // SAFETY: NativeWork invokes this exactly once for Box::into_raw below.
+            unsafe { drop(Box::from_raw(pointer.cast::<HttpEventPayload>())) };
+        }
     }
 
     impl Drop for AsyncContinuation {
@@ -789,6 +560,8 @@ mod realm {
         runtime: RefCell<RealmRuntime>,
         work: RefCell<Realm<NativeWork, NativeWork>>,
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
+        http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
+        http_requests: RefCell<HashMap<RequestId, kiln_host_abi::ResourceId>>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
         entered: Cell<bool>,
@@ -800,6 +573,8 @@ mod realm {
                 runtime: RefCell::new(RealmRuntime::new()?),
                 work: RefCell::new(Realm::new()),
                 continuations: RefCell::new(HashMap::new()),
+                http_connections: RefCell::new(HashMap::new()),
+                http_requests: RefCell::new(HashMap::new()),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
                 entered: Cell::new(false),
@@ -968,11 +743,362 @@ mod realm {
         })
     }
 
+    fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
+        let capacity = headers.iter().fold(0usize, |total, (name, value)| {
+            total
+                .saturating_add(name.len())
+                .saturating_add(value.len())
+                .saturating_add(2)
+        });
+        let mut flattened = Vec::with_capacity(capacity);
+        for (name, value) in headers {
+            flattened.extend_from_slice(name.as_bytes());
+            flattened.push(0);
+            flattened.extend_from_slice(value.as_bytes());
+            flattened.push(0);
+        }
+        flattened
+    }
+
+    unsafe fn parse_headers(pointer: *const u8, length: u64) -> Option<Vec<(String, String)>> {
+        // SAFETY: callers keep this private ABI span live until the synchronous command returns.
+        let bytes = unsafe { borrowed_bytes(pointer, length) }?;
+        let mut fields = bytes.split(|byte| *byte == 0);
+        let mut headers = Vec::new();
+        while let Some(name) = fields.next() {
+            if name.is_empty() && fields.next().is_none() {
+                break;
+            }
+            let value = fields.next()?;
+            headers.push((
+                std::str::from_utf8(name).ok()?.to_owned(),
+                std::str::from_utf8(value).ok()?.to_owned(),
+            ));
+        }
+        Some(headers)
+    }
+
+    fn queue_http_event(realm: &NativeRealm, payload: HttpEventPayload) -> i32 {
+        let pointer = Box::into_raw(Box::new(payload)).cast::<c_void>();
+        let Some(work) = NativeWork::new(pointer, Some(run_http_event), Some(drop_http_event))
+        else {
+            // SAFETY: ownership was not transferred when construction failed.
+            unsafe { drop_http_event(pointer) };
+            return RUNTIME_ERROR;
+        };
+        realm.work.borrow_mut().queue_microtask(work);
+        0
+    }
+
+    fn apply_http_actions(
+        realm: &NativeRealm,
+        resource: kiln_host_abi::ResourceId,
+        actions: Vec<StreamAction>,
+        in_context: bool,
+    ) -> i32 {
+        for action in actions {
+            match action {
+                StreamAction::Start(operation) => {
+                    let request = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
+                        // SAFETY: callbacks execute synchronously inside this realm's runtime.
+                        unsafe { &mut *runtime }.start_host_op_in_context(operation.clone(), true)
+                    } else {
+                        realm
+                            .runtime
+                            .borrow_mut()
+                            .start_host_op(operation.clone(), true)
+                    };
+                    let started = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
+                        // SAFETY: the same active runtime exclusively owns the HTTP connection.
+                        unsafe { &mut *runtime }
+                            .http_connection_started(resource, &operation, request)
+                    } else {
+                        realm
+                            .runtime
+                            .borrow_mut()
+                            .http_connection_started(resource, &operation, request)
+                    };
+                    if !started {
+                        return RUNTIME_ERROR;
+                    }
+                    realm.http_requests.borrow_mut().insert(request, resource);
+                }
+                StreamAction::Cancel(request) => {
+                    realm.runtime.borrow_mut().cancel_host_op(request);
+                    realm.http_requests.borrow_mut().remove(&request);
+                }
+                StreamAction::Event(kiln_runtime::node_stream::StreamEvent::Close) => {
+                    realm.http_connections.borrow_mut().remove(&resource);
+                }
+                StreamAction::Event(_) => {}
+                StreamAction::Error(_) => return RUNTIME_ERROR,
+                StreamAction::Data(_) => {
+                    return RUNTIME_ERROR;
+                }
+            }
+        }
+        0
+    }
+
+    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> i32 {
+        let resources = realm
+            .http_connections
+            .borrow()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for resource in resources {
+            for _ in 0..1 {
+                let actions = if in_context {
+                    let Some(runtime) = active_runtime() else {
+                        return INVALID_ARGUMENT;
+                    };
+                    // SAFETY: this is the current realm runtime; this poll never nests block_on.
+                    unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
+                } else {
+                    realm.runtime.borrow_mut().poll_http_connection(resource)
+                };
+                let Some(actions) = actions else { break };
+                let had_actions = !actions.is_empty();
+                let status = apply_http_actions(realm, resource, actions, in_context);
+                if status != 0 {
+                    return status;
+                }
+                let (owner, role) = {
+                    let connections = realm.http_connections.borrow();
+                    let Some(connection) = connections.get(&resource) else {
+                        break;
+                    };
+                    (Rc::clone(&connection.events), connection.role)
+                };
+                let mut payloads = Vec::new();
+                let mut close_transport = false;
+                match role {
+                    HttpRole::Server => {
+                        let events = if in_context {
+                            let Some(runtime) = active_runtime() else {
+                                return INVALID_ARGUMENT;
+                            };
+                            // SAFETY: event extraction is synchronous on the active runtime.
+                            unsafe { &mut *runtime }.take_http_events(resource)
+                        } else {
+                            realm.runtime.borrow_mut().take_http_events(resource)
+                        };
+                        for event in events {
+                            let payload = match event {
+                                RuntimeHttpEvent::RequestHead { id, request } => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_REQUEST_HEAD,
+                                    flags: u32::from(request.keep_alive),
+                                    id,
+                                    status: 0,
+                                    version_minor: u8::from(matches!(
+                                        request.version,
+                                        kiln_runtime::node_http::HttpVersion::Http11
+                                    )),
+                                    method: request.method.into_bytes(),
+                                    target: request.target.into_bytes(),
+                                    reason: Vec::new(),
+                                    headers: flatten_headers(&request.headers),
+                                    data: Vec::new(),
+                                },
+                                RuntimeHttpEvent::RequestData { id, data } => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_REQUEST_DATA,
+                                    flags: 0,
+                                    id,
+                                    status: 0,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason: Vec::new(),
+                                    headers: Vec::new(),
+                                    data,
+                                },
+                                RuntimeHttpEvent::RequestEnd { id } => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_REQUEST_END,
+                                    flags: 0,
+                                    id,
+                                    status: 0,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason: Vec::new(),
+                                    headers: Vec::new(),
+                                    data: Vec::new(),
+                                },
+                                RuntimeHttpEvent::Drain { id } => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_DRAIN,
+                                    flags: 0,
+                                    id,
+                                    status: 0,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason: Vec::new(),
+                                    headers: Vec::new(),
+                                    data: Vec::new(),
+                                },
+                                RuntimeHttpEvent::Finish { id } => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_FINISH,
+                                    flags: 0,
+                                    id,
+                                    status: 0,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason: Vec::new(),
+                                    headers: Vec::new(),
+                                    data: Vec::new(),
+                                },
+                                RuntimeHttpEvent::Error(message) => HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind: HTTP_EVENT_ERROR,
+                                    flags: 0,
+                                    id: 0,
+                                    status: 0,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason: Vec::new(),
+                                    headers: Vec::new(),
+                                    data: message.into_bytes(),
+                                },
+                                RuntimeHttpEvent::Closed => {
+                                    close_transport = true;
+                                    HttpEventPayload {
+                                        owner: Rc::clone(&owner),
+                                        kind: HTTP_EVENT_CLOSED,
+                                        flags: 0,
+                                        id: 0,
+                                        status: 0,
+                                        version_minor: 0,
+                                        method: Vec::new(),
+                                        target: Vec::new(),
+                                        reason: Vec::new(),
+                                        headers: Vec::new(),
+                                        data: Vec::new(),
+                                    }
+                                }
+                            };
+                            payloads.push(payload);
+                        }
+                    }
+                    HttpRole::Client => {
+                        let events = if in_context {
+                            let Some(runtime) = active_runtime() else {
+                                return INVALID_ARGUMENT;
+                            };
+                            // SAFETY: event extraction is synchronous on the active runtime.
+                            unsafe { &mut *runtime }.take_http1_client_events(resource)
+                        } else {
+                            realm
+                                .runtime
+                                .borrow_mut()
+                                .take_http1_client_events(resource)
+                        };
+                        for event in events {
+                            let (kind, status, reason, headers, data) = match event {
+                                RuntimeHttpClientEvent::ResponseHead {
+                                    status,
+                                    reason,
+                                    headers,
+                                } => (
+                                    HTTP_EVENT_RESPONSE_HEAD,
+                                    status,
+                                    reason.into_bytes(),
+                                    flatten_headers(&headers),
+                                    Vec::new(),
+                                ),
+                                RuntimeHttpClientEvent::ResponseData(data) => {
+                                    (HTTP_EVENT_RESPONSE_DATA, 0, Vec::new(), Vec::new(), data)
+                                }
+                                RuntimeHttpClientEvent::ResponseEnd => (
+                                    HTTP_EVENT_RESPONSE_END,
+                                    0,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ),
+                                RuntimeHttpClientEvent::Error(message) => (
+                                    HTTP_EVENT_ERROR,
+                                    0,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    message.into_bytes(),
+                                ),
+                                RuntimeHttpClientEvent::Closed => {
+                                    close_transport = true;
+                                    (HTTP_EVENT_CLOSED, 0, Vec::new(), Vec::new(), Vec::new())
+                                }
+                            };
+                            payloads.push(HttpEventPayload {
+                                owner: Rc::clone(&owner),
+                                kind,
+                                flags: 0,
+                                id: 0,
+                                status,
+                                version_minor: 0,
+                                method: Vec::new(),
+                                target: Vec::new(),
+                                reason,
+                                headers,
+                                data,
+                            });
+                        }
+                    }
+                }
+                let had_events = !payloads.is_empty();
+                for payload in payloads {
+                    let status = queue_http_event(realm, payload);
+                    if status != 0 {
+                        return status;
+                    }
+                }
+                if close_transport {
+                    let actions = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
+                        // SAFETY: this is the current realm's exclusively active runtime.
+                        unsafe { &mut *runtime }.close_http_connection(resource)
+                    } else {
+                        realm.runtime.borrow_mut().close_http_connection(resource)
+                    };
+                    let Some(actions) = actions else {
+                        return RUNTIME_ERROR;
+                    };
+                    let status = apply_http_actions(realm, resource, actions, in_context);
+                    if status != 0 {
+                        return status;
+                    }
+                }
+                if !had_actions && !had_events {
+                    break;
+                }
+            }
+        }
+        0
+    }
+
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
             let microtask = realm.work.borrow_mut().pop_microtask();
             if let Some(work) = microtask {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
+                if status != 0 {
+                    return status;
+                }
+                let status = checkpoint_http(realm, false);
                 if status != 0 {
                     return status;
                 }
@@ -991,6 +1117,26 @@ mod realm {
             };
             match turn {
                 Some(RuntimeTurn::Completion(completion)) => {
+                    let http_resource =
+                        { realm.http_requests.borrow_mut().remove(&completion.request) };
+                    if let Some(resource) = http_resource {
+                        let Some(actions) = realm
+                            .runtime
+                            .borrow_mut()
+                            .complete_http_connection(resource, completion)
+                        else {
+                            return RUNTIME_ERROR;
+                        };
+                        let status = apply_http_actions(realm, resource, actions, false);
+                        if status != 0 {
+                            return status;
+                        }
+                        let status = checkpoint_http(realm, false);
+                        if status != 0 {
+                            return status;
+                        }
+                        continue;
+                    }
                     let continuation = realm.continuations.borrow_mut().remove(&completion.request);
                     let Some(continuation) = continuation else {
                         continue;
@@ -1128,6 +1274,43 @@ mod realm {
             let milliseconds = work.now().as_millis() as f64;
             // SAFETY: null was rejected and the caller supplies a writable slot.
             unsafe { out_milliseconds.write(milliseconds) };
+            0
+        })
+    }
+
+    /// Writes the active Realm's deterministic clock in whole epoch nanoseconds.
+    ///
+    /// Split in two because C99 has no portable 128-bit integer: `out_high` takes the signed top
+    /// half and `out_low` the unsigned bottom half of the count.
+    ///
+    /// `Temporal` measures instants in nanoseconds, and [`kiln_realm_now`] answers milliseconds --
+    /// so feeding one to the other would round the realm's clock and make the two engines disagree
+    /// below the millisecond. The realm has the resolution; this is the accessor that carries it.
+    /// The clock is still the realm's virtual one, which ADR 0015 starts at the epoch.
+    ///
+    /// # Safety
+    ///
+    /// `out_high` and `out_low` must be writable slots owned by the caller.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_now_nanoseconds(
+        out_high: *mut i64,
+        out_low: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_high.is_null() || out_low.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(work) = realm.work.try_borrow() else {
+                return RUNTIME_ERROR;
+            };
+            let nanoseconds = work.now().as_nanos() as i128;
+            // SAFETY: null was rejected and the caller supplies writable slots.
+            unsafe { out_high.write((nanoseconds >> 64) as i64) };
+            // SAFETY: as above.
+            unsafe { out_low.write(nanoseconds as u64) };
             0
         })
     }
@@ -1308,6 +1491,222 @@ mod realm {
         let handle = ACTIVE_REALM.with(Cell::get);
         // SAFETY: the active-handle wrapper performs the same identity validation.
         unsafe { kiln_realm_cancel_request(handle, request) }
+    }
+
+    fn attach_http(
+        resource: u64,
+        role: HttpRole,
+        run: Option<RunHttpEvent>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(realm), Some(runtime), Some(run), Some(drop)) =
+                (active_realm(), active_runtime(), run, drop)
+            else {
+                return INVALID_ARGUMENT;
+            };
+            if work.is_null() || resource == 0 {
+                return INVALID_ARGUMENT;
+            }
+            let resource = kiln_host_abi::ResourceId::new(resource);
+            if realm.http_connections.borrow().contains_key(&resource) {
+                return INVALID_ARGUMENT;
+            }
+            let owner = Rc::new(HttpEventOwner {
+                pointer: work,
+                run,
+                drop,
+            });
+            // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
+            let runtime = unsafe { &mut *runtime };
+            let actions = match role {
+                HttpRole::Server => runtime.start_http1_connection(resource),
+                HttpRole::Client => runtime.start_http1_client_connection(resource),
+            };
+            realm.http_connections.borrow_mut().insert(
+                resource,
+                NativeHttpConnection {
+                    role,
+                    events: owner,
+                },
+            );
+            apply_http_actions(&realm, resource, actions, true)
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_server_attach_active(
+        resource: u64,
+        run: Option<RunHttpEvent>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        attach_http(resource, HttpRole::Server, run, drop, work)
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_attach_active(
+        resource: u64,
+        run: Option<RunHttpEvent>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        attach_http(resource, HttpRole::Client, run, drop, work)
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_send_active(
+        resource: u64,
+        request: *const HttpRequestView,
+    ) -> i32 {
+        ffi(|| {
+            if request.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let (Some(realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            let resource = kiln_host_abi::ResourceId::new(resource);
+            if realm
+                .http_connections
+                .borrow()
+                .get(&resource)
+                .is_none_or(|connection| connection.role != HttpRole::Client)
+            {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the request frame and all spans are borrowed for this synchronous call.
+            let request = unsafe { &*request };
+            let Some(method) = (unsafe { borrowed_bytes(request.method, request.method_len) })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(target) = (unsafe { borrowed_bytes(request.target, request.target_len) })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(body) = (unsafe { borrowed_bytes(request.body, request.body_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(headers) = (unsafe { parse_headers(request.headers, request.headers_len) })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let (Ok(method), Ok(target)) =
+                (std::str::from_utf8(method), std::str::from_utf8(target))
+            else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: active_runtime is this active realm's exclusively-entered runtime.
+            if unsafe { &mut *runtime }.send_http1_client_request(
+                resource,
+                RuntimeHttpClientRequest {
+                    method: method.to_owned(),
+                    target: target.to_owned(),
+                    headers,
+                    body: body.to_vec(),
+                },
+            ) {
+                0
+            } else {
+                RUNTIME_ERROR
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_response_start_active(
+        resource: u64,
+        id: u64,
+        response: *const HttpResponseView,
+        high_water_mark: u64,
+    ) -> i32 {
+        ffi(|| {
+            if response.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: this private frame remains live for the synchronous call.
+            let response = unsafe { &*response };
+            let Some(headers) = (unsafe { parse_headers(response.headers, response.headers_len) })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(high_water_mark) = usize::try_from(high_water_mark) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: active_runtime is exclusively owned by the active realm callback.
+            if unsafe { &mut *runtime }.start_http1_response(
+                kiln_host_abi::ResourceId::new(resource),
+                id,
+                response.status,
+                headers,
+                high_water_mark,
+            ) {
+                0
+            } else {
+                RUNTIME_ERROR
+            }
+        })
+    }
+
+    fn write_http_response(
+        resource: u64,
+        id: u64,
+        data: *const u8,
+        data_len: u64,
+        end: bool,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: the adapter keeps this borrowed span live until the command copies it.
+            let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: active_runtime is exclusively owned by this active realm callback.
+            let disposition = if end {
+                unsafe { &mut *runtime }.end_http1_response(
+                    kiln_host_abi::ResourceId::new(resource),
+                    id,
+                    data.to_vec(),
+                )
+            } else {
+                unsafe { &mut *runtime }.write_http1_response(
+                    kiln_host_abi::ResourceId::new(resource),
+                    id,
+                    data.to_vec(),
+                )
+            };
+            match disposition {
+                Some(disposition) => i32::from(!disposition.ready),
+                None => RUNTIME_ERROR,
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_response_write_active(
+        resource: u64,
+        id: u64,
+        data: *const u8,
+        data_len: u64,
+    ) -> i32 {
+        write_http_response(resource, id, data, data_len, false)
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_response_end_active(
+        resource: u64,
+        id: u64,
+        data: *const u8,
+        data_len: u64,
+    ) -> i32 {
+        write_http_response(resource, id, data, data_len, true)
     }
 
     fn set_timer(
@@ -3468,12 +3867,17 @@ mod temporal {
     /// The ten `Duration` components, in the order [`kiln_temporal::DurationFields`] declares them.
     const DURATION_SLOTS: usize = 10;
 
-    /// The string slots, in order: era, monthCode, offset, timeZone, calendar, overflow.
+    /// The field string slots, in order: era, monthCode, offset, timeZone, calendar.
     ///
-    /// They arrive as one concatenated buffer plus a length per slot, because six pointer/length
+    /// They arrive as one concatenated buffer plus a length per slot, because five pointer/length
     /// pairs in a C signature is a shape nobody can call correctly twice. A length of -1 means the
     /// program did not supply the field at all, which is not the same as supplying `""`.
-    const TEXT_SLOTS: usize = 6;
+    ///
+    /// Options are *not* here: they travel in [`OPTION_TEXT_SLOTS`], because `overflow` is not the
+    /// only one a constructor reads -- a `ZonedDateTime` built from a bag also decides what a
+    /// wall-clock time that exists twice means -- and one array an option can be read from is
+    /// better than two.
+    const TEXT_SLOTS: usize = 5;
 
     thread_local! {
         /// The message and class of the last failure on this thread.
@@ -3492,6 +3896,27 @@ mod temporal {
         };
         LAST_ERROR.with(|slot| *slot.borrow_mut() = (code, error.message.clone()));
         code
+    }
+
+    /// Remember a TypeError this side raised, rather than one the engine did.
+    ///
+    /// The engine's own constructors are private, and rightly so: the two cases this needs are
+    /// argument-arity failures that never reach it, and inventing an error *class* here would be
+    /// exactly the flattening `remember` exists to prevent. The class is the one the language
+    /// gives a method called with too few arguments.
+    fn reject_type(message: &str) -> i32 {
+        LAST_ERROR.with(|slot| *slot.borrow_mut() = (TYPE_ERROR, message.to_owned()));
+        TYPE_ERROR
+    }
+
+    /// An operation that needs a second `Temporal` value and did not get one.
+    fn missing_operand() -> i32 {
+        reject_type("this Temporal operation needs another Temporal value")
+    }
+
+    /// An operation that needs a property bag or a string argument and did not get one.
+    fn missing_argument() -> i32 {
+        reject_type("this Temporal operation needs an argument")
     }
 
     fn kind_of(code: u32) -> Option<Kind> {
@@ -3581,17 +4006,17 @@ mod temporal {
     ///
     /// `text` must be readable for the sum of the non-negative lengths, and `lengths` for `count`
     /// values.
-    unsafe fn unpack<'a>(
+    unsafe fn unpack<'a, const N: usize>(
         text: *const u8,
         lengths: *const i64,
         count: usize,
-    ) -> Option<[Option<&'a str>; TEXT_SLOTS]> {
-        if count != TEXT_SLOTS || lengths.is_null() {
+    ) -> Option<[Option<&'a str>; N]> {
+        if count != N || lengths.is_null() {
             return None;
         }
         // SAFETY: the caller contract guarantees `lengths` is readable for `count` values.
         let lengths = unsafe { core::slice::from_raw_parts(lengths, count) };
-        let mut out: [Option<&str>; TEXT_SLOTS] = [None; TEXT_SLOTS];
+        let mut out: [Option<&str>; N] = [None; N];
         let mut offset = 0usize;
         for (slot, &length) in lengths.iter().enumerate() {
             if length < 0 {
@@ -3606,6 +4031,50 @@ mod temporal {
             offset = offset.checked_add(length)?;
         }
         Some(out)
+    }
+
+    /// The calendar and wall-clock bag, out of the numeric slots and the packed strings.
+    ///
+    /// Shared by [`kiln_temporal_from_fields`] and by `with`, which merges exactly the same bag
+    /// into an existing value -- one reader, so the two cannot come to disagree about which slot
+    /// carries `monthCode`.
+    fn field_bag(slots: &[f64], strings: &[Option<&str>; TEXT_SLOTS]) -> Fields {
+        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
+        let owned = |index: usize| strings.get(index).copied().flatten().map(str::to_owned);
+        Fields {
+            era: owned(0),
+            era_year: present(0),
+            year: present(1),
+            month: present(2),
+            month_code: owned(1),
+            day: present(3),
+            hour: present(4),
+            minute: present(5),
+            second: present(6),
+            millisecond: present(7),
+            microsecond: present(8),
+            nanosecond: present(9),
+            offset: owned(2),
+            time_zone: owned(3),
+            calendar: owned(4),
+        }
+    }
+
+    /// The ten duration components out of their numeric slots.
+    fn duration_bag(slots: &[f64]) -> kiln_temporal::DurationFields {
+        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
+        kiln_temporal::DurationFields {
+            years: present(0),
+            months: present(1),
+            weeks: present(2),
+            days: present(3),
+            hours: present(4),
+            minutes: present(5),
+            seconds: present(6),
+            milliseconds: present(7),
+            microseconds: present(8),
+            nanoseconds: present(9),
+        }
     }
 
     /// Build one of the eight types from a field bag the caller has already read.
@@ -3631,6 +4100,9 @@ mod temporal {
         text: *const u8,
         text_lengths: *const i64,
         text_count: usize,
+        option_text: *const u8,
+        option_text_lengths: *const i64,
+        option_text_count: usize,
         out_handle: *mut *mut TemporalValue,
     ) -> i32 {
         if out_handle.is_null() || fields.is_null() || field_count != FIELD_SLOTS {
@@ -3642,31 +4114,16 @@ mod temporal {
         // SAFETY: the caller contract guarantees `fields` is readable for `field_count` doubles.
         let slots = unsafe { core::slice::from_raw_parts(fields, field_count) };
         // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
-        let Some(strings) = (unsafe { unpack(text, text_lengths, text_count) }) else {
+        let Some(strings) = (unsafe { unpack::<TEXT_SLOTS>(text, text_lengths, text_count) })
+        else {
             return INVALID_ARGUMENT;
         };
-        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
-        let owned = |index: usize| strings.get(index).copied().flatten().map(str::to_owned);
-        let bag = Fields {
-            era: owned(0),
-            era_year: present(0),
-            year: present(1),
-            month: present(2),
-            month_code: owned(1),
-            day: present(3),
-            hour: present(4),
-            minute: present(5),
-            second: present(6),
-            millisecond: present(7),
-            microsecond: present(8),
-            nanosecond: present(9),
-            offset: owned(2),
-            time_zone: owned(3),
-            calendar: owned(4),
-        };
-        let options = Options {
-            overflow: owned(5),
-            ..Default::default()
+        let bag = field_bag(slots, &strings);
+        // SAFETY: the caller contract guarantees the packed options satisfy `unpack`.
+        let Some(options) =
+            (unsafe { option_strings(option_text, option_text_lengths, option_text_count) })
+        else {
+            return INVALID_ARGUMENT;
         };
         match kiln_temporal::from_fields(kind, &bag, &options) {
             Ok(value) => {
@@ -3697,19 +4154,7 @@ mod temporal {
         }
         // SAFETY: the caller contract guarantees `fields` is readable for `field_count` doubles.
         let slots = unsafe { core::slice::from_raw_parts(fields, field_count) };
-        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
-        let bag = kiln_temporal::DurationFields {
-            years: present(0),
-            months: present(1),
-            weeks: present(2),
-            days: present(3),
-            hours: present(4),
-            minutes: present(5),
-            seconds: present(6),
-            milliseconds: present(7),
-            microseconds: present(8),
-            nanoseconds: present(9),
-        };
+        let bag = duration_bag(slots);
         match kiln_temporal::duration_from_fields(&bag) {
             Ok(value) => {
                 // SAFETY: `out_handle` is a writable slot by the caller contract.
@@ -3730,6 +4175,9 @@ mod temporal {
         kind: u32,
         bytes: *const u8,
         len: usize,
+        option_text: *const u8,
+        option_text_lengths: *const i64,
+        option_text_count: usize,
         out_handle: *mut *mut TemporalValue,
     ) -> i32 {
         if out_handle.is_null() {
@@ -3742,7 +4190,20 @@ mod temporal {
         let Ok(Some(source)) = (unsafe { text(bytes, len) }) else {
             return INVALID_ARGUMENT;
         };
-        match kiln_temporal::parse(kind, source) {
+        // SAFETY: the caller contract guarantees the packed options satisfy `unpack`.
+        let Some(options) =
+            (unsafe { option_strings(option_text, option_text_lengths, option_text_count) })
+        else {
+            return INVALID_ARGUMENT;
+        };
+        // A `ZonedDateTime` string is the one `from` that has to decide what a wall-clock time
+        // which does not exist, or exists twice, means -- so it reads the options the rest ignore.
+        let parsed = if matches!(kind, Kind::ZonedDateTime) {
+            kiln_temporal::parse_zoned_date_time(source, &options)
+        } else {
+            kiln_temporal::parse(kind, source)
+        };
+        match parsed {
             Ok(value) => {
                 // SAFETY: `out_handle` is a writable slot by the caller contract.
                 unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
@@ -3758,14 +4219,19 @@ mod temporal {
     /// signed top half and `low` the unsigned bottom half of the epoch nanosecond count. ADR 0015
     /// makes that count the realm's virtual clock, which starts at the epoch.
     ///
+    /// `zone` is the optional argument `Temporal.Now.zonedDateTimeISO(zone)` takes; null means the
+    /// realm's own, which ADR 0015 fixes at UTC.
+    ///
     /// # Safety
     ///
-    /// `out_handle` must be a writable slot.
+    /// `out_handle` must be a writable slot, and a non-null `zone` readable for `zone_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_temporal_now(
         kind: u32,
         high: i64,
         low: u64,
+        zone: *const u8,
+        zone_len: usize,
         out_handle: *mut *mut TemporalValue,
     ) -> i32 {
         if out_handle.is_null() {
@@ -3774,8 +4240,12 @@ mod temporal {
         let Some(kind) = kind_of(kind) else {
             return INVALID_ARGUMENT;
         };
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Ok(zone) = (unsafe { text(zone, zone_len) }) else {
+            return INVALID_ARGUMENT;
+        };
         let epoch_nanoseconds = (i128::from(high) << 64) | i128::from(low);
-        match kiln_temporal::now::read(kind, epoch_nanoseconds, None) {
+        match kiln_temporal::now::read(kind, epoch_nanoseconds, zone) {
             Ok(value) => {
                 // SAFETY: `out_handle` is a writable slot by the caller contract.
                 unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
@@ -3914,6 +4384,394 @@ mod temporal {
             Ok(order) => {
                 // SAFETY: `out_order` is a writable slot by the caller contract.
                 unsafe { out_order.write(order) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// The option-string slots, in the order the language reads them: calendarName,
+    /// disambiguation, largestUnit, offset, overflow, roundingMode, smallestUnit, timeZoneName,
+    /// unit.
+    ///
+    /// The reads themselves happen on the caller's side, because a getter on an options bag runs
+    /// and the order it runs in is observable. What crosses is the strings that came back.
+    const OPTION_TEXT_SLOTS: usize = 9;
+
+    /// `[roundingIncrement, fractionalSecondDigits]`. NaN is absent; a negative digit count is the
+    /// `"auto"` spelling, which is not the same as absent.
+    const OPTION_NUMBER_SLOTS: usize = 2;
+
+    /// Everything one operation needs, in one struct.
+    ///
+    /// A struct rather than twenty parameters: the arithmetic and conversion surface is
+    /// name-keyed, so a single entry point serves all of it, and the alternative shape is a C
+    /// signature nobody can call correctly twice.
+    #[repr(C)]
+    pub struct TemporalCall {
+        /// The value the method was reached through.
+        pub receiver: *const TemporalValue,
+        /// The operation, by the name the language spells it with.
+        pub name: *const u8,
+        pub name_len: usize,
+        /// The first argument when it is another `Temporal` value -- `add`'s duration, `until`'s
+        /// endpoint, `withPlainTime`'s time. Null when the operation takes none.
+        pub operand: *const TemporalValue,
+        /// `relativeTo`, which decides whether a day is twenty-four hours.
+        pub relative_to: *const TemporalValue,
+        /// The first argument when it is text -- `withCalendar`'s calendar, `withTimeZone`'s zone.
+        pub argument: *const u8,
+        pub argument_len: usize,
+        /// A field bag in the [`kiln_temporal_from_fields`] layout, or null for none. `with`
+        /// merges it; `toPlainDate` on a year-month completes with it.
+        pub fields: *const f64,
+        pub field_count: usize,
+        pub field_text: *const u8,
+        pub field_text_lengths: *const i64,
+        pub field_text_count: usize,
+        /// The option numbers, [`OPTION_NUMBER_SLOTS`] of them, or null for none.
+        pub option_numbers: *const f64,
+        pub option_number_count: usize,
+        /// The option strings, [`OPTION_TEXT_SLOTS`] of them packed as [`unpack`] takes them, or
+        /// null for none.
+        pub option_text: *const u8,
+        pub option_text_lengths: *const i64,
+        pub option_text_count: usize,
+        /// Where a new value lands, when the answer is one.
+        pub out_handle: *mut *mut TemporalValue,
+        /// Where a number or a flag lands.
+        pub out_number: *mut f64,
+        /// Where text lands, under the [`emit`] retry protocol.
+        pub out_buffer: *mut u8,
+        pub out_capacity: usize,
+        pub out_length: *mut i32,
+    }
+
+    /// The answer is a new value in `out_handle`.
+    const ANSWER_HANDLE: i32 = 0;
+    /// The answer is a number in `out_number`.
+    const ANSWER_NUMBER: i32 = 1;
+    /// The answer is text, written under the [`emit`] protocol with its length in `out_length`.
+    const ANSWER_TEXT: i32 = 2;
+    /// The answer is a flag in `out_number`.
+    const ANSWER_FLAG: i32 = 3;
+    /// This type has no such operation, and the caller refuses by name rather than answering.
+    const ANSWER_UNKNOWN: i32 = 6;
+
+    /// The nine option strings, out of the packed buffer the caller supplies.
+    ///
+    /// # Safety
+    ///
+    /// `text` and `lengths` must satisfy [`unpack`] for `count` slots.
+    unsafe fn option_strings(
+        text: *const u8,
+        lengths: *const i64,
+        count: usize,
+    ) -> Option<Options> {
+        let mut options = Options::default();
+        if text.is_null() && count == 0 {
+            return Some(options);
+        }
+        // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
+        let strings = unsafe { unpack::<OPTION_TEXT_SLOTS>(text, lengths, count) }?;
+        let owned = |index: usize| strings[index].map(str::to_owned);
+        options.calendar_name = owned(0);
+        options.disambiguation = owned(1);
+        options.largest_unit = owned(2);
+        // `offset` on an options bag is the conflict policy, not the field of the same name.
+        options.offset_conflict = owned(3);
+        options.overflow = owned(4);
+        options.rounding_mode = owned(5);
+        options.smallest_unit = owned(6);
+        options.time_zone_name = owned(7);
+        options.unit = owned(8);
+        Some(options)
+    }
+
+    /// The whole option bag a call carries: the strings, the two numbers, and `relativeTo`.
+    ///
+    /// # Safety
+    ///
+    /// The call's option pointers must satisfy the contract [`kiln_temporal_invoke`] states.
+    unsafe fn options_of(call: &TemporalCall) -> Option<Options> {
+        // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
+        let mut options = unsafe {
+            option_strings(
+                call.option_text,
+                call.option_text_lengths,
+                call.option_text_count,
+            )
+        }?;
+        if !call.option_numbers.is_null() {
+            if call.option_number_count != OPTION_NUMBER_SLOTS {
+                return None;
+            }
+            // SAFETY: the caller contract guarantees the array is readable for its count.
+            let numbers =
+                unsafe { core::slice::from_raw_parts(call.option_numbers, OPTION_NUMBER_SLOTS) };
+            if !numbers[0].is_nan() {
+                options.rounding_increment = Some(numbers[0]);
+            }
+            if !numbers[1].is_nan() {
+                options.fractional_second_digits = Some(if numbers[1] < 0.0 {
+                    None
+                } else {
+                    Some(numbers[1].trunc() as u8)
+                });
+            }
+        }
+        if !call.relative_to.is_null() {
+            // SAFETY: the caller contract guarantees a non-null handle is live.
+            options.relative_to = Some(unsafe { &*call.relative_to }.clone());
+        }
+        Some(options)
+    }
+
+    /// The field bag the call carries, or `None` when it carries none.
+    ///
+    /// # Safety
+    ///
+    /// The call's field pointers must satisfy the contract [`kiln_temporal_invoke`] states.
+    unsafe fn call_fields(call: &TemporalCall) -> Option<Option<Fields>> {
+        if call.fields.is_null() {
+            return Some(None);
+        }
+        if call.field_count != FIELD_SLOTS {
+            return None;
+        }
+        // SAFETY: the caller contract guarantees the array is readable for its count.
+        let slots = unsafe { core::slice::from_raw_parts(call.fields, FIELD_SLOTS) };
+        // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
+        let strings = unsafe {
+            unpack::<TEXT_SLOTS>(
+                call.field_text,
+                call.field_text_lengths,
+                call.field_text_count,
+            )
+        }?;
+        Some(Some(field_bag(slots, &strings)))
+    }
+
+    /// The wall-clock half of a `PlainTime`, as the bag `toPlainDateTime` supplements with.
+    ///
+    /// Read through the same name-keyed reader the caller uses, so there is no second copy of the
+    /// component list to drift from the first.
+    fn time_supplement(time: &TemporalValue) -> Fields {
+        let mut fields = Fields::default();
+        let read = |name: &str| match time.get(name) {
+            Some(kiln_temporal::Field::Number(number)) => Some(number),
+            _ => None,
+        };
+        fields.hour = read("hour");
+        fields.minute = read("minute");
+        fields.second = read("second");
+        fields.millisecond = read("millisecond");
+        fields.microsecond = read("microsecond");
+        fields.nanosecond = read("nanosecond");
+        fields
+    }
+
+    /// One arithmetic or conversion operation, by the name the language spells it with.
+    ///
+    /// This is the other half of what [`kiln_temporal_get`] does for the readers: `kiln-temporal`
+    /// already exposes the whole surface behind names and scalars, so one entry point carries
+    /// `add`, `until`, `round`, `with`, `equals`, `total` and the eleven conversions without a
+    /// line of per-method code on either side of the boundary.
+    ///
+    /// Answers [`ANSWER_HANDLE`], [`ANSWER_NUMBER`], [`ANSWER_TEXT`], [`ANSWER_FLAG`] or
+    /// [`ANSWER_UNKNOWN`] -- the last of which is not a failure, but the signal that this type
+    /// does not have this operation and the caller should refuse by name. A negative answer is
+    /// [`INVALID_ARGUMENT`] or an error class whose message [`kiln_temporal_last_error`] carries.
+    ///
+    /// # Safety
+    ///
+    /// `call` must point at a live [`TemporalCall`] whose `receiver` is live, whose `name` is
+    /// readable for `name_len`, whose non-null handles are live, whose non-null `argument` is
+    /// readable for `argument_len`, whose non-null `fields`/`option_numbers` are readable for
+    /// their counts, whose packed option and field text satisfies [`unpack`], and whose `out_*`
+    /// slots are writable. A handle written to `out_handle` belongs to the caller.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_invoke(call: *const TemporalCall) -> i32 {
+        if call.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the struct is live.
+        let call = unsafe { &*call };
+        if call.receiver.is_null()
+            || call.out_handle.is_null()
+            || call.out_number.is_null()
+            || call.out_length.is_null()
+        {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Ok(Some(name)) = (unsafe { text(call.name, call.name_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the handle is live.
+        let receiver = unsafe { &*call.receiver };
+        // SAFETY: the caller contract guarantees a non-null handle is live.
+        let operand = if call.operand.is_null() {
+            None
+        } else {
+            Some(unsafe { &*call.operand })
+        };
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Ok(argument) = (unsafe { text(call.argument, call.argument_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the option pointers satisfy `options_of`.
+        let Some(options) = (unsafe { options_of(call) }) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the field pointers satisfy `call_fields`.
+        let Some(fields) = (unsafe { call_fields(call) }) else {
+            return INVALID_ARGUMENT;
+        };
+
+        let produced: Result<TemporalValue, kiln_temporal::Error> = match name {
+            "add" | "subtract" => match operand {
+                None => return missing_operand(),
+                Some(operand) if name == "add" => receiver.add(operand, &options),
+                Some(operand) => receiver.subtract(operand, &options),
+            },
+            "until" | "since" => match operand {
+                None => return missing_operand(),
+                Some(operand) if name == "until" => receiver.until(operand, &options),
+                Some(operand) => receiver.since(operand, &options),
+            },
+            "round" => receiver.round(&options),
+            "with" => {
+                let Some(bag) = fields else {
+                    return missing_argument();
+                };
+                if receiver.kind() == Kind::Duration {
+                    // A duration's bag is the *other* bag -- weeks and no month code -- and the
+                    // caller packs it into the same numeric slots
+                    // `kiln_temporal_duration_from_fields` reads.
+                    // SAFETY: `call_fields` established the array is non-null and readable for
+                    // `FIELD_SLOTS`, which is `DURATION_SLOTS`.
+                    let slots = unsafe { core::slice::from_raw_parts(call.fields, FIELD_SLOTS) };
+                    receiver.duration_with(&duration_bag(slots))
+                } else {
+                    receiver.with(&bag, &options)
+                }
+            }
+            "negated" => receiver.negated(),
+            "abs" => receiver.abs(),
+            "startOfDay" => receiver.start_of_day(),
+            "withCalendar" => match argument {
+                None => return missing_argument(),
+                Some(calendar) => receiver.with_calendar(calendar),
+            },
+            "withTimeZone" => match argument {
+                None => return missing_argument(),
+                Some(zone) => receiver.with_time_zone(zone),
+            },
+            "withPlainTime" => receiver.with_plain_time(operand),
+            "toZonedDateTime" | "toZonedDateTimeISO" => match argument {
+                None => return missing_argument(),
+                Some(zone) => receiver.to_zoned_date_time(zone, operand, &options),
+            },
+            // `toPlainDate` means two different things: on a date-and-time it drops the time, and
+            // on a year-month or a month-day it supplies the component that was missing.
+            "toPlainDate"
+                if matches!(receiver.kind(), Kind::PlainYearMonth | Kind::PlainMonthDay) =>
+            {
+                match fields {
+                    None => return missing_argument(),
+                    Some(fields) => receiver.to_plain_date_with(&fields),
+                }
+            }
+            "toPlainDate" => receiver.to_kind(Kind::PlainDate, None),
+            "toPlainTime" => receiver.to_kind(Kind::PlainTime, None),
+            "toPlainDateTime" => {
+                let supplement = match (operand, fields) {
+                    (Some(time), _) if time.kind() == Kind::PlainTime => {
+                        Some(time_supplement(time))
+                    }
+                    (_, Some(fields)) => Some(fields),
+                    _ => None,
+                };
+                receiver.to_kind(Kind::PlainDateTime, supplement.as_ref())
+            }
+            "toPlainYearMonth" => receiver.to_kind(Kind::PlainYearMonth, None),
+            "toPlainMonthDay" => receiver.to_kind(Kind::PlainMonthDay, None),
+            "toInstant" => receiver.to_kind(Kind::Instant, None),
+            "total" => {
+                return match receiver.total(&options) {
+                    Ok(number) => {
+                        // SAFETY: `out_number` is a writable slot by the caller contract.
+                        unsafe { call.out_number.write(number) };
+                        ANSWER_NUMBER
+                    }
+                    Err(error) => remember(&error),
+                };
+            }
+            "equals" => {
+                let Some(operand) = operand else {
+                    return missing_operand();
+                };
+                return match receiver.equals(operand) {
+                    Ok(flag) => {
+                        // SAFETY: `out_number` is a writable slot by the caller contract.
+                        unsafe { call.out_number.write(if flag { 1.0 } else { 0.0 }) };
+                        ANSWER_FLAG
+                    }
+                    Err(error) => remember(&error),
+                };
+            }
+            "toString" => {
+                return match receiver.to_temporal_string(&options) {
+                    Ok(value) => {
+                        // SAFETY: `out_buffer` is writable for `out_capacity` by the contract.
+                        let written = unsafe { emit(&value, call.out_buffer, call.out_capacity) };
+                        // SAFETY: `out_length` is a writable slot by the caller contract.
+                        unsafe { call.out_length.write(written) };
+                        ANSWER_TEXT
+                    }
+                    Err(error) => remember(&error),
+                };
+            }
+            _ => return ANSWER_UNKNOWN,
+        };
+        match produced {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { call.out_handle.write(Box::into_raw(Box::new(value))) };
+                ANSWER_HANDLE
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// `ToTemporalDate` and its siblings: narrow a value to another of the eight types.
+    ///
+    /// Not a method -- it is the abstract operation `Temporal.PlainDate.from(zonedDateTime)` runs,
+    /// which is why it is its own entry point rather than a name through [`kiln_temporal_invoke`].
+    /// A pair the language does not define is a TypeError, which the engine raises rather than
+    /// this side guessing at the table.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and `out_handle` a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_to_kind(
+        handle: *const TemporalValue,
+        kind: u32,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if handle.is_null() || out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(kind) = kind_of(kind) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the handle is live.
+        match unsafe { &*handle }.to_kind(kind, None) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
                 0
             }
             Err(error) => remember(&error),

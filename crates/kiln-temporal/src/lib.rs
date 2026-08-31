@@ -98,7 +98,7 @@ impl Error {
         }
     }
 
-    fn type_error(message: impl Into<String>) -> Self {
+    pub fn type_error(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Type,
             message: message.into(),

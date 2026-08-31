@@ -794,7 +794,17 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_TEMPORAL_TO_JSON 302
 #define KILN_C99_METHOD_TEMPORAL_VALUE_OF 303
 #define KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID 304
-#define KILN_C99_METHOD_TEMPORAL_LAST 304
+/* `Temporal.Now`'s five readers, contiguous so the kind rides in the code the way it does for
+ * `from` and `compare`. The clock they read is the realm's, which ADR 0015 makes virtual and UTC.
+ * The order is the eight-type order, restricted to the five the namespace offers. */
+#define KILN_C99_METHOD_TEMPORAL_NOW_READ 305
+#define KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST 312
+/* The arithmetic and conversion surface. One code per name, contiguous, because the call path
+ * carries only the code -- and the provider is keyed by the name, so the two are the same table
+ * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
+#define KILN_C99_METHOD_TEMPORAL_OP 313
+#define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
+#define KILN_C99_METHOD_TEMPORAL_LAST 335
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1214,9 +1224,8 @@ struct kiln_node_socket {
     uint64_t close_request;
     kiln_node_server *server;
     struct kiln_node_client_request *client_request;
-    void *http_decoder;
+    struct kiln_node_response *responses;
     int close_after_write;
-    int http_dispatched;
     int closing;
 };
 
@@ -1226,7 +1235,6 @@ typedef struct kiln_node_client_request {
     kiln_value callback;
     kiln_value response;
     kiln_node_socket *socket;
-    void *response_decoder;
     char *host_name;
     size_t host_name_len;
     char *path;
@@ -1241,14 +1249,29 @@ typedef struct kiln_node_client_request {
 
 typedef struct kiln_node_response {
     kiln_node_socket *socket;
+    uint64_t request_id;
+    kiln_value request;
     kiln_value object;
     kiln_value headers;
-    char *body;
-    size_t body_len;
-    size_t body_capacity;
     uint16_t status;
+    int started;
     int ended;
+    struct kiln_node_response *next;
 } kiln_node_response;
+
+static void kiln_c99_node_unlink_response(kiln_node_response *response) {
+    kiln_node_response **cursor;
+    if (response == NULL || response->socket == NULL) return;
+    cursor = &response->socket->responses;
+    while (*cursor != NULL) {
+        if (*cursor == response) {
+            *cursor = response->next;
+            response->next = NULL;
+            return;
+        }
+        cursor = &(*cursor)->next;
+    }
+}
 
 typedef struct kiln_node_completion {
     uint32_t kind;
@@ -1343,6 +1366,11 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
 int kiln_realm_now(double *out_milliseconds);
+/* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
+ * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
+ * clock through the millisecond accessor above would make the two engines disagree below the
+ * millisecond rather than refuse. */
+int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                            void *work, uint64_t *out_id);
@@ -1360,48 +1388,55 @@ int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
                                     void *work, uint64_t *out_request);
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int kiln_realm_cancel_active_request(uint64_t request);
-typedef struct kiln_http1_request_view {
-    uint8_t *method;
-    size_t method_capacity;
-    size_t method_len;
-    uint8_t *target;
-    size_t target_capacity;
-    size_t target_len;
-    uint8_t version_minor;
-    uint8_t keep_alive;
-} kiln_http1_request_view;
-int32_t kiln_http1_decoder_create(void **out_decoder);
-void kiln_http1_decoder_free(void *decoder);
-int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-                                kiln_http1_request_view *out_request);
-int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
-                                   const size_t *header_name_lens,
-                                   const uint8_t *const *header_values,
-                                   const size_t *header_value_lens, size_t header_count,
-                                   const uint8_t *body, size_t body_len, uint8_t keep_alive,
-                                   uint8_t *buffer, size_t capacity);
-typedef struct kiln_http1_response_event_view {
-    uint8_t kind;
-    uint8_t reserved;
+typedef struct kiln_realm_http_event {
+    uint32_t kind;
+    uint32_t flags;
+    uint64_t id;
     uint16_t status;
-    uint8_t *reason;
-    size_t reason_capacity;
-    size_t reason_len;
-    uint8_t *data;
-    size_t data_capacity;
-    size_t data_len;
-    uint8_t *headers;
-    size_t headers_capacity;
-    size_t headers_len;
-} kiln_http1_response_event_view;
-int32_t kiln_http1_response_decoder_create(void **out_decoder);
-void kiln_http1_response_decoder_free(void *decoder);
-int32_t kiln_http1_response_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-                                         void **out_events);
-size_t kiln_http1_response_events_len(const void *events);
-int32_t kiln_http1_response_events_get(const void *events, size_t index,
-                                       kiln_http1_response_event_view *out_event);
-void kiln_http1_response_events_free(void *events);
+    uint8_t version_minor;
+    uint8_t reserved;
+    const uint8_t *method;
+    uint64_t method_len;
+    const uint8_t *target;
+    uint64_t target_len;
+    const uint8_t *reason;
+    uint64_t reason_len;
+    const uint8_t *headers;
+    uint64_t headers_len;
+    const uint8_t *data;
+    uint64_t data_len;
+} kiln_realm_http_event;
+typedef struct kiln_realm_http_request {
+    const uint8_t *method;
+    uint64_t method_len;
+    const uint8_t *target;
+    uint64_t target_len;
+    const uint8_t *headers;
+    uint64_t headers_len;
+    const uint8_t *body;
+    uint64_t body_len;
+} kiln_realm_http_request;
+typedef struct kiln_realm_http_response {
+    uint16_t status;
+    uint16_t reserved;
+    const uint8_t *headers;
+    uint64_t headers_len;
+} kiln_realm_http_response;
+typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
+                                       void *host, void *thrown);
+int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+                                         kiln_realm_drop_fn drop, void *work);
+int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+                                         kiln_realm_drop_fn drop, void *work);
+int kiln_realm_http_client_send_active(uint64_t resource,
+                                       const kiln_realm_http_request *request);
+int kiln_realm_http_response_start_active(uint64_t resource, uint64_t id,
+                                          const kiln_realm_http_response *response,
+                                          uint64_t high_water_mark);
+int kiln_realm_http_response_write_active(uint64_t resource, uint64_t id,
+                                          const uint8_t *data, uint64_t data_len);
+int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
+                                        const uint8_t *data, uint64_t data_len);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
@@ -1429,12 +1464,17 @@ int32_t kiln_bigint_is_zero(const void *handle);
  * `daysInMonth` and `blank` alike, for all eight types, so there is no per-field C at all. */
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
                                   const unsigned char *text, const int64_t *text_lengths,
-                                  size_t text_count, void **out_handle);
+                                  size_t text_count, const unsigned char *option_text,
+                                  const int64_t *option_text_lengths, size_t option_text_count,
+                                  void **out_handle);
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
                                            void **out_handle);
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
+                            const unsigned char *option_text,
+                            const int64_t *option_text_lengths, size_t option_text_count,
                             void **out_handle);
-int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle);
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
+                          size_t zone_len, void **out_handle);
 void kiln_temporal_free(void *handle);
 int32_t kiln_temporal_kind(const void *handle);
 int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
@@ -1442,6 +1482,40 @@ int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t 
                           int32_t *out_length);
 int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity);
 int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order);
+/* Everything one arithmetic or conversion operation needs, in one struct.
+ *
+ * The whole surface is name-keyed for the same reason the readers are: `kiln-temporal` answers
+ * `add`, `until`, `round`, `with`, `equals` and the eleven conversions through names and scalars,
+ * so one entry point carries all of it. A struct rather than twenty parameters, because the
+ * alternative is a signature nobody can call correctly twice. */
+typedef struct kiln_temporal_call {
+    const void *receiver;
+    const unsigned char *name;
+    size_t name_len;
+    const void *operand;
+    const void *relative_to;
+    const unsigned char *argument;
+    size_t argument_len;
+    const double *fields;
+    size_t field_count;
+    const unsigned char *field_text;
+    const int64_t *field_text_lengths;
+    size_t field_text_count;
+    const double *option_numbers;
+    size_t option_number_count;
+    const unsigned char *option_text;
+    const int64_t *option_text_lengths;
+    size_t option_text_count;
+    void **out_handle;
+    double *out_number;
+    unsigned char *out_buffer;
+    size_t out_capacity;
+    int32_t *out_length;
+} kiln_temporal_call;
+/* 0 a new handle, 1 a number, 2 text under the retry protocol, 3 a flag, 6 no such operation on
+ * this type -- which is a refusal by name here, not a failure. Negative is an error class. */
+int32_t kiln_temporal_invoke(const kiln_temporal_call *call);
+int32_t kiln_temporal_to_kind(const void *handle, uint32_t kind, void **out_handle);
 int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity);
 
 
@@ -1470,6 +1544,9 @@ static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
 static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
 static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
                                          size_t member_len);
+static const char *kiln_c99_temporal_op_name(uint64_t code);
+static const char *kiln_c99_temporal_now_name(uint64_t code);
+static uint64_t kiln_c99_temporal_op_code(const char *key, size_t key_len);
 static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
                                     kiln_value receiver, const kiln_value *args, size_t argc,
                                     int depth, kiln_value *thrown);
@@ -2597,6 +2674,13 @@ static kiln_value kiln_c99_method(uint64_t code) {
 /* The name a console shows, which is the JavaScript name rather than the implementation's --
  * `[Function: push]`, the same text the interpreter produces. */
 static const char *kiln_c99_method_name(uint64_t code) {
+    if (code >= KILN_C99_METHOD_TEMPORAL_OP && code <= KILN_C99_METHOD_TEMPORAL_OP_LAST) {
+        return kiln_c99_temporal_op_name(code);
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_NOW_READ &&
+        code <= KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST) {
+        return kiln_c99_temporal_now_name(code);
+    }
     switch (code) {
     case KILN_C99_METHOD_PUSH: return "push";
     case KILN_C99_METHOD_POP: return "pop";
@@ -5977,8 +6061,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         default:
             break;
         }
-        if (kiln_c99_same_name(key, key_len, "toString") ||
-            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            /* `toString` is in the operation table below instead, because it takes options --
+             * `{ smallestUnit: "minute" }` really does shorten the text. `toLocaleString` takes
+             * locale arguments this realm does not have, and answers the plain form. */
             *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_TO_STRING);
             return KILN_C99_OK;
         }
@@ -6000,8 +6086,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         /* The arithmetic and conversion surface -- `add`, `until`, `round`, `with`, `equals`,
-         * `toPlainDate` and their siblings. Every one exists in the language, so each refuses by
-         * name; reading `undefined` would surface three frames away as "not a function". */
+         * `toPlainDate` and their siblings -- through the one name-keyed call into the engine that
+         * the readers above already use. */
+        {
+            uint64_t operation = kiln_c99_temporal_op_code(key, key_len);
+            if (operation != 0) {
+                *out = kiln_c99_method(operation);
+                return KILN_C99_OK;
+            }
+        }
+        /* A name that exists in the language and is not wired says which. Reading `undefined`
+         * would surface three frames away as "not a function". */
         return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key, key_len);
     }
     case KILN_VALUE_REGEXP: {
@@ -6405,22 +6500,28 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL_NOW) {
-            /* `Temporal.Now` reads the realm's clock, which ADR 0015 makes virtual and UTC. The
-             * timezone is answerable without one; the five readers are not, because the clock this
-             * backend can reach carries milliseconds and the interpreter feeds the engine
-             * nanoseconds -- so wiring them from it would make the two engines disagree below the
-             * millisecond rather than refuse. */
+            /* `Temporal.Now` reads the realm's clock, which ADR 0015 makes virtual, UTC, and
+             * started at the epoch. Every one of these is a function the program calls rather than
+             * a value it reads, and the kind rides in the code. */
+            static const struct {
+                const char *name;
+                uint64_t kind;
+            } readers[] = {{"instant", 6},
+                           {"plainDateISO", 0},
+                           {"plainTimeISO", 1},
+                           {"plainDateTimeISO", 2},
+                           {"zonedDateTimeISO", 7}};
+            size_t index;
             if (kiln_c99_same_name(key, key_len, "timeZoneId")) {
-                /* A function the program calls, not a string it reads. */
                 *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_same_name(key, key_len, "instant") ||
-                kiln_c99_same_name(key, key_len, "plainDateISO") ||
-                kiln_c99_same_name(key, key_len, "plainTimeISO") ||
-                kiln_c99_same_name(key, key_len, "plainDateTimeISO") ||
-                kiln_c99_same_name(key, key_len, "zonedDateTimeISO")) {
-                return kiln_c99_temporal_unsupported(thrown, "Temporal.Now", key, key_len);
+            for (index = 0; index < sizeof readers / sizeof *readers; ++index) {
+                if (kiln_c99_same_name(key, key_len, readers[index].name)) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_NOW_READ +
+                                           readers[index].kind);
+                    return KILN_C99_OK;
+                }
             }
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
@@ -8426,6 +8527,7 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
 }
 
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
                                   void *host, void *thrown);
@@ -8498,154 +8600,120 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
     return status;
 }
 
-static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *bytes,
-                                      size_t bytes_len, kiln_value *thrown) {
-    kiln_http1_request_view parsed;
-    uint8_t method[64];
-    uint8_t target[8192];
+static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
+                                    void *host, void *thrown) {
+    kiln_node_socket *socket = (kiln_node_socket *)opaque;
+    kiln_value *exception = (kiln_value *)thrown;
+    kiln_node_client_request *client;
     kiln_node_response *response;
     kiln_value request;
     kiln_value ignored;
     int status;
-    if (socket->http_dispatched) return KILN_C99_OK;
-    if (socket->http_decoder == NULL) {
-        status = kiln_http1_decoder_create(&socket->http_decoder);
+    (void)host;
+    if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
+    client = socket->client_request;
+    if (event->kind == 1) {
+        response = (kiln_node_response *)calloc(1, sizeof *response);
+        if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
+        response->socket = socket;
+        response->request_id = event->id;
+        response->status = 200;
+        status = kiln_c99_new_object(&request);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_event(socket->host, &ignored,
+                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                         request, NULL, 0, 0, exception);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "method", 6,
+                                  kiln_c99_copy_text((const char *)event->method,
+                                                     (size_t)event->method_len), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "url", 3,
+                                  kiln_c99_copy_text((const char *)event->target,
+                                                     (size_t)event->target_len), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "httpVersion", 11,
+                                  event->version_minor ? kiln_c99_copy_text("1.1", 3)
+                                                       : kiln_c99_copy_text("1.0", 3), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
+        if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_event(socket->host, &ignored,
+                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                         response->object, NULL, 0, 0, exception);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(response->object, "setHeader", 9,
+                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(response->object, "writeHead", 9,
+                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(response->object, "write", 5,
+                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(response->object, "end", 3,
+                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_END));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
+                                                      response);
         if (status != KILN_C99_OK) return status;
-    }
-    memset(&parsed, 0, sizeof parsed);
-    parsed.method = method;
-    parsed.method_capacity = sizeof method;
-    parsed.target = target;
-    parsed.target_capacity = sizeof target;
-    status = kiln_http1_decoder_push(socket->http_decoder, bytes, bytes_len, &parsed);
-    if (status == 1) return KILN_C99_OK;
-    if (status != KILN_C99_OK) return KILN_C99_CONTROL_ERROR;
-    socket->http_dispatched = 1;
-    response = (kiln_node_response *)calloc(1, sizeof *response);
-    if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
-    response->socket = socket;
-    response->status = 200;
-    status = kiln_c99_new_object(&request);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                     request, NULL, 0, 0, thrown);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, request, "method", 6,
-                              kiln_c99_copy_text((const char *)parsed.method,
-                                                 parsed.method_len), 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, request, "url", 3,
-                              kiln_c99_copy_text((const char *)parsed.target,
-                                                 parsed.target_len), 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, request, "httpVersion", 11,
-                              parsed.version_minor ? kiln_c99_copy_text("1.1", 3)
-                                                   : kiln_c99_copy_text("1.0", 3), 0, NULL);
-    if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
-    if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                     response->object, NULL, 0, 0, thrown);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(
-            response->object, "setHeader", 9,
-            kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(
-            response->object, "writeHead", 9,
-            kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(response->object, "write", 5,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(response->object, "end", 3,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_END));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
-                                                  response);
-    if (status != KILN_C99_OK) return status;
-    {
-        kiln_value arguments[2] = {request, response->object};
-        return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
-                             socket->server->object, arguments, 2, 0, thrown);
-    }
-}
-
-static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
-                                            const uint8_t *bytes, size_t bytes_len,
-                                            kiln_value *thrown) {
-    void *events = NULL;
-    size_t count;
-    size_t index;
-    int status = kiln_http1_response_decoder_push(request->response_decoder, bytes, bytes_len,
-                                                  &events);
-    if (status != KILN_C99_OK) return status;
-    count = kiln_http1_response_events_len(events);
-    for (index = 0; index < count; ++index) {
-        kiln_http1_response_event_view event;
-        uint8_t *reason = NULL;
-        uint8_t *data = NULL;
-        uint8_t *headers_buffer = NULL;
-        memset(&event, 0, sizeof event);
-        status = kiln_http1_response_events_get(events, index, &event);
-        if (status == -3) {
-            size_t reason_len = event.reason_len;
-            size_t data_len = event.data_len;
-            size_t headers_len = event.headers_len;
-            if (event.reason_len != 0) reason = (uint8_t *)malloc(event.reason_len);
-            if (event.data_len != 0) data = (uint8_t *)malloc(event.data_len);
-            if (event.headers_len != 0) headers_buffer = (uint8_t *)malloc(event.headers_len);
-            if ((event.reason_len != 0 && reason == NULL) ||
-                (event.data_len != 0 && data == NULL) ||
-                (event.headers_len != 0 && headers_buffer == NULL)) {
-                free(reason); free(data); free(headers_buffer);
-                status = KILN_C99_OUT_OF_MEMORY;
-                break;
-            }
-            event.reason = reason;
-            event.reason_capacity = reason_len;
-            event.data = data;
-            event.data_capacity = data_len;
-            event.headers = headers_buffer;
-            event.headers_capacity = headers_len;
-            event.reason_capacity = reason_len;
-            status = kiln_http1_response_events_get(events, index, &event);
+        response->request = request;
+        response->next = socket->responses;
+        socket->responses = response;
+        {
+            kiln_value arguments[2] = {request, response->object};
+            return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
+                                 socket->server->object, arguments, 2, 0, exception);
         }
-        if (status != KILN_C99_OK) break;
-        if (event.kind == 1) {
-            kiln_value ignored;
-            status = kiln_c99_new_object(&request->response);
+    }
+    if (event->kind == 2 || event->kind == 3) {
+        for (response = socket->responses; response != NULL; response = response->next) {
+            if (response->request_id == event->id) {
+                if (event->kind == 2) {
+                    kiln_value data = kiln_c99_copy_text((const char *)event->data,
+                                                         (size_t)event->data_len);
+                    return kiln_c99_node_emit(socket->host, response->request, "data", data, 1,
+                                              0, exception);
+                }
+                return kiln_c99_node_emit(socket->host, response->request, "end",
+                                          kiln_c99_undefined(), 0, 0, exception);
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (client != NULL && event->kind == 6) {
+        status = kiln_c99_new_object(&client->response);
             if (status == KILN_C99_OK)
-                status = kiln_c99_node_event(request->host, &ignored,
+                status = kiln_c99_node_event(client->host, &ignored,
                                              KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                             request->response, NULL, 0, 0, thrown);
+                                             client->response, NULL, 0, 0, exception);
             if (status == KILN_C99_OK)
-                status = kiln_c99_put(NULL, request->response, "statusCode", 10,
-                                      kiln_c99_number((double)event.status), 0, NULL);
+                status = kiln_c99_put(NULL, client->response, "statusCode", 10,
+                                      kiln_c99_number((double)event->status), 0, NULL);
             if (status == KILN_C99_OK)
-                status = kiln_c99_put(NULL, request->response, "statusMessage", 13,
-                                      kiln_c99_copy_text((const char *)event.reason,
-                                                         event.reason_len), 0, NULL);
+                status = kiln_c99_put(NULL, client->response, "statusMessage", 13,
+                                      kiln_c99_copy_text((const char *)event->reason,
+                                                         (size_t)event->reason_len), 0, NULL);
             if (status == KILN_C99_OK)
                 status = kiln_c99_define_method(
-                    request->response, "setEncoding", 11,
+                    client->response, "setEncoding", 11,
                     kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
             if (status == KILN_C99_OK) {
                 kiln_value headers;
                 size_t at = 0;
                 status = kiln_c99_new_object(&headers);
-                while (status == KILN_C99_OK && at < event.headers_len) {
-                    const char *name = (const char *)event.headers + at;
+                while (status == KILN_C99_OK && at < event->headers_len) {
+                    const char *name = (const char *)event->headers + at;
                     size_t name_len = strlen(name);
                     char *owned_name;
                     const char *value;
                     size_t value_len;
                     at += name_len + 1;
-                    if (at > event.headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                    value = (const char *)event.headers + at;
+                    if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
+                    value = (const char *)event->headers + at;
                     value_len = strlen(value);
                     at += value_len + 1;
-                    if (at > event.headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
+                    if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
                     owned_name = name_len == 0 ? NULL : (char *)malloc(name_len);
                     if (name_len != 0 && owned_name == NULL) {
                         status = KILN_C99_OUT_OF_MEMORY;
@@ -8657,41 +8725,42 @@ static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
                     if (status != KILN_C99_OK) free(owned_name);
                 }
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_put(NULL, request->response, "headers", 7, headers, 0,
+                    status = kiln_c99_put(NULL, client->response, "headers", 7, headers, 0,
                                           NULL);
             }
             if (status == KILN_C99_OK)
-                status = kiln_c99_node_set_hidden_pointer(request->response, "@@node:client", 13,
-                                                          request);
+                status = kiln_c99_node_set_hidden_pointer(client->response, "@@node:client", 13,
+                                                          client);
             if (status == KILN_C99_OK) {
-                request->response_started = 1;
-                status = kiln_c99_call(request->host, &ignored, request->callback,
-                                       kiln_c99_undefined(), &request->response, 1, 0, thrown);
+                client->response_started = 1;
+                status = kiln_c99_call(client->host, &ignored, client->callback,
+                                       kiln_c99_undefined(), &client->response, 1, 0, exception);
             }
-        } else if (event.kind == 2) {
-            kiln_value data_value = request->utf8
-                                        ? kiln_c99_copy_text((const char *)event.data,
-                                                             event.data_len)
-                                        : kiln_c99_copy_text((const char *)event.data,
-                                                             event.data_len);
-            status = kiln_c99_node_emit(request->host, request->response, "data", data_value, 1,
-                                        0, thrown);
-        } else if (event.kind == 3) {
-            status = kiln_c99_node_emit(request->host, request->response, "end",
-                                        kiln_c99_undefined(), 0, 0, thrown);
-            request->response_ended = 1;
-            request->socket->closing = 1;
-        }
-        free(reason);
-        free(data);
-        free(headers_buffer);
-        if (status != KILN_C99_OK) break;
+        return status;
     }
-    kiln_http1_response_events_free(events);
-    if (status == KILN_C99_OK && request->response_ended) {
-        status = kiln_c99_node_close_socket(request->socket, 1);
+    if (client != NULL && event->kind == 7) {
+        kiln_value data_value = kiln_c99_copy_text((const char *)event->data,
+                                                   (size_t)event->data_len);
+        return kiln_c99_node_emit(client->host, client->response, "data", data_value, 1,
+                                  0, exception);
     }
-    return status;
+    if (client != NULL && event->kind == 8) {
+        client->response_ended = 1;
+        return kiln_c99_node_emit(client->host, client->response, "end",
+                                  kiln_c99_undefined(), 0, 0, exception);
+    }
+    if (event->kind == 9) {
+        kiln_value message = kiln_c99_copy_text((const char *)event->data,
+                                                (size_t)event->data_len);
+        kiln_value object = client != NULL ? client->object : socket->object;
+        return kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
+    }
+    if (event->kind == 10) {
+        socket->closing = 1;
+        return kiln_c99_node_emit(socket->host, socket->object, "close",
+                                  kiln_c99_undefined(), 0, 0, exception);
+    }
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
@@ -8712,9 +8781,9 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
     if (work->client_request != NULL) {
         kiln_node_client_request *request = work->client_request;
         if (work->kind == KILN_REALM_OP_TCP_CONNECT) {
-            kiln_node_completion *write;
             kiln_node_socket *socket = (kiln_node_socket *)calloc(1, sizeof *socket);
-            kiln_text wire = {NULL, 0, 0};
+            kiln_realm_http_request framed;
+            kiln_text headers = {NULL, 0, 0};
             int status;
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = request->host;
@@ -8723,20 +8792,26 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             request->socket = socket;
             status = kiln_c99_node_socket_object(socket, exception);
             if (status != KILN_C99_OK) return status;
-            if (kiln_c99_text_append(&wire, "GET ", 4) != KILN_C99_OK ||
-                kiln_c99_text_append(&wire, request->path, request->path_len) != KILN_C99_OK ||
-                kiln_c99_text_append(&wire, " HTTP/1.1\r\nHost: ", 17) != KILN_C99_OK ||
-                kiln_c99_text_append(&wire, request->host_name, request->host_name_len) != KILN_C99_OK ||
-                kiln_c99_text_append(&wire, "\r\nConnection: close\r\n\r\n", 23) != KILN_C99_OK)
+            status = kiln_realm_http_client_attach_active(socket->resource,
+                                                          kiln_c99_node_http_event,
+                                                          kiln_c99_node_drop_http_connection,
+                                                          socket);
+            if (status != KILN_C99_OK) return status;
+            if (kiln_c99_text_append(&headers, "host", 4) != KILN_C99_OK ||
+                kiln_c99_text_append(&headers, "\0", 1) != KILN_C99_OK ||
+                kiln_c99_text_append(&headers, request->host_name,
+                                     request->host_name_len) != KILN_C99_OK ||
+                kiln_c99_text_append(&headers, "\0connection\0close\0", 18) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            write = (kiln_node_completion *)calloc(1, sizeof *write);
-            if (write == NULL) return KILN_C99_OUT_OF_MEMORY;
-            write->kind = KILN_REALM_OP_TCP_WRITE;
-            write->socket = socket;
-            status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
-                                         (const uint8_t *)wire.bytes, wire.len, write,
-                                         &socket->write_request);
-            free(wire.bytes);
+            memset(&framed, 0, sizeof framed);
+            framed.method = (const uint8_t *)"GET";
+            framed.method_len = 3;
+            framed.target = (const uint8_t *)request->path;
+            framed.target_len = request->path_len;
+            framed.headers = (const uint8_t *)headers.bytes;
+            framed.headers_len = headers.len;
+            status = kiln_realm_http_client_send_active(socket->resource, &framed);
+            free(headers.bytes);
             return status;
         }
     }
@@ -8768,7 +8843,6 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (work->kind == KILN_REALM_OP_TCP_ACCEPT) {
             kiln_node_socket *socket;
-            kiln_node_completion *read;
             kiln_node_completion *accept;
             kiln_value ignored;
             int status;
@@ -8788,13 +8862,24 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                                          server->object, &socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
             if (server->closing || socket->closing) return KILN_C99_OK;
-            read = (kiln_node_completion *)calloc(1, sizeof *read);
-            if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
-            read->kind = KILN_REALM_OP_TCP_READ;
-            read->socket = socket;
-            status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384, NULL, 0,
-                                         NULL, 0, read, &socket->read_request);
+            status = server->protocol_http
+                         ? kiln_realm_http_server_attach_active(socket->resource,
+                                                               kiln_c99_node_http_event,
+                                                               kiln_c99_node_drop_http_connection,
+                                                               socket)
+                         : KILN_C99_OK;
             if (status != KILN_C99_OK || server->closing) return status;
+            if (!server->protocol_http) {
+                kiln_node_completion *read =
+                    (kiln_node_completion *)calloc(1, sizeof *read);
+                if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+                read->kind = KILN_REALM_OP_TCP_READ;
+                read->socket = socket;
+                status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                                             NULL, 0, NULL, 0, read,
+                                             &socket->read_request);
+                if (status != KILN_C99_OK) return status;
+            }
             accept = (kiln_node_completion *)calloc(1, sizeof *accept);
             if (accept == NULL) return KILN_C99_OUT_OF_MEMORY;
             accept->kind = KILN_REALM_OP_TCP_ACCEPT;
@@ -8820,17 +8905,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 kiln_value data = kiln_c99_copy_text((const char *)completion->bytes,
                                                      (size_t)completion->bytes_len);
                 int status;
-                if (socket->client_request != NULL) {
-                    status = kiln_c99_node_http_client_events(
-                        socket->client_request, completion->bytes,
-                        (size_t)completion->bytes_len, exception);
-                } else if (socket->server != NULL && socket->server->protocol_http) {
-                    status = kiln_c99_node_http_request(socket, completion->bytes,
-                                                        (size_t)completion->bytes_len, exception);
-                } else {
-                    status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
-                                                exception);
-                }
+                status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
+                                            exception);
                 if (status != KILN_C99_OK || socket->closing) return status;
                 read = (kiln_node_completion *)calloc(1, sizeof *read);
                 if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -8843,15 +8919,6 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         if (work->kind == KILN_REALM_OP_TCP_WRITE) {
             kiln_node_completion *close;
             socket->write_request = 0;
-            if (socket->client_request != NULL) {
-                kiln_node_completion *read =
-                    (kiln_node_completion *)calloc(1, sizeof *read);
-                if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
-                read->kind = KILN_REALM_OP_TCP_READ;
-                read->socket = socket;
-                return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
-                                           NULL, 0, NULL, 0, read, &socket->read_request);
-            }
             if (socket->close_after_write) {
                 close = (kiln_node_completion *)calloc(1, sizeof *close);
                 if (close == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -8871,12 +8938,6 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
             socket->close_request = 0;
-            kiln_http1_decoder_free(socket->http_decoder);
-            socket->http_decoder = NULL;
-            if (socket->client_request != NULL) {
-                kiln_http1_response_decoder_free(socket->client_request->response_decoder);
-                socket->client_request->response_decoder = NULL;
-            }
             return kiln_c99_node_emit(socket->host, socket->object, "close",
                                       kiln_c99_undefined(), 0, 0, exception);
         }
@@ -8985,9 +9046,11 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (server->accept_request != 0) {
                 kiln_c99_node_cancel_request(&server->accept_request);
             }
-            for (socket = server->sockets; socket != NULL; socket = socket->next) {
-                status = kiln_c99_node_close_socket(socket, !server->protocol_http);
-                if (status != KILN_C99_OK) return status;
+            if (!server->protocol_http) {
+                for (socket = server->sockets; socket != NULL; socket = socket->next) {
+                    status = kiln_c99_node_close_socket(socket, 1);
+                    if (status != KILN_C99_OK) return status;
+                }
             }
             if (server->listener != 0) {
                 work = (kiln_node_completion *)calloc(1, sizeof *work);
@@ -9105,8 +9168,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         request->host_name_len = host_value.len;
         request->path_len = path_value.len;
         request->port = (uint16_t)kiln_c99_as_number(port_value);
-        status = kiln_http1_response_decoder_create(&request->response_decoder);
-        if (status != KILN_C99_OK) return status;
         status = kiln_c99_new_object(&request->object);
         if (status == KILN_C99_OK) {
             kiln_value ignored;
@@ -9177,97 +9238,84 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
         kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-        if (kiln_c99_reserve((void **)&response->body, &response->body_capacity,
-                             response->body_len + text.len, 1) != KILN_C99_OK)
-            return KILN_C99_OUT_OF_MEMORY;
-        memcpy(response->body + response->body_len, text.ptr, text.len);
-        response->body_len += text.len;
-        *result = kiln_c99_boolean(1);
+        int status;
+        if (response->ended)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                        "write after end");
+        if (!response->started) {
+            kiln_object *headers = kiln_c99_object_of(response->headers);
+            kiln_text flattened = {NULL, 0, 0};
+            kiln_realm_http_response framed;
+            size_t index;
+            for (index = 0; index < headers->count; ++index) {
+                kiln_value value = kiln_c99_text(headers->properties[index].value);
+                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
+                                         headers->properties[index].key_len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
+                    free(flattened.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            memset(&framed, 0, sizeof framed);
+            framed.status = response->status;
+            framed.headers = (const uint8_t *)flattened.bytes;
+            framed.headers_len = flattened.len;
+            status = kiln_realm_http_response_start_active(response->socket->resource,
+                                                           response->request_id, &framed, 16384);
+            free(flattened.bytes);
+            if (status != KILN_C99_OK) return status;
+            response->started = 1;
+        }
+        status = kiln_realm_http_response_write_active(response->socket->resource,
+                                                       response->request_id,
+                                                       (const uint8_t *)text.ptr, text.len);
+        if (status < KILN_C99_OK) return status;
+        *result = kiln_c99_boolean(status == KILN_C99_OK);
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
-        kiln_node_completion *write;
         kiln_object *headers;
-        const uint8_t **names;
-        const uint8_t **values;
-        size_t *name_lens;
-        size_t *value_lens;
-        uint8_t *encoded;
-        int64_t encoded_len;
+        kiln_text flattened = {NULL, 0, 0};
+        kiln_realm_http_response framed;
         size_t index;
         int status;
         if (response->ended) { *result = receiver; return KILN_C99_OK; }
-        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
-            kiln_value text = kiln_c99_text(args[0]);
-            if (kiln_c99_reserve((void **)&response->body, &response->body_capacity,
-                                 response->body_len + text.len, 1) != KILN_C99_OK)
-                return KILN_C99_OUT_OF_MEMORY;
-            memcpy(response->body + response->body_len, text.ptr, text.len);
-            response->body_len += text.len;
+        if (!response->started) {
+            headers = kiln_c99_object_of(response->headers);
+            for (index = 0; index < headers->count; ++index) {
+                kiln_value value = kiln_c99_text(headers->properties[index].value);
+                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
+                                         headers->properties[index].key_len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
+                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
+                    free(flattened.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            memset(&framed, 0, sizeof framed);
+            framed.status = response->status;
+            framed.headers = (const uint8_t *)flattened.bytes;
+            framed.headers_len = flattened.len;
+            status = kiln_realm_http_response_start_active(response->socket->resource,
+                                                           response->request_id, &framed, 16384);
+            free(flattened.bytes);
+            if (status != KILN_C99_OK) return status;
+            response->started = 1;
         }
-        headers = kiln_c99_object_of(response->headers);
-        names = (const uint8_t **)calloc(headers->count, sizeof *names);
-        name_lens = (size_t *)calloc(headers->count, sizeof *name_lens);
-        values = (const uint8_t **)calloc(headers->count, sizeof *values);
-        value_lens = (size_t *)calloc(headers->count, sizeof *value_lens);
-        if (headers->count != 0 &&
-            (names == NULL || name_lens == NULL || values == NULL || value_lens == NULL)) {
-            free(names);
-            free(name_lens);
-            free(values);
-            free(value_lens);
-            return KILN_C99_OUT_OF_MEMORY;
+        {
+            kiln_value text = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED
+                                  ? kiln_c99_text(args[0])
+                                  : kiln_c99_copy_text(NULL, 0);
+        status = kiln_realm_http_response_end_active(response->socket->resource,
+                                                     response->request_id,
+                                                     (const uint8_t *)text.ptr, text.len);
         }
-        for (index = 0; index < headers->count; ++index) {
-            kiln_value value = kiln_c99_text(headers->properties[index].value);
-            names[index] = (const uint8_t *)headers->properties[index].key;
-            name_lens[index] = headers->properties[index].key_len;
-            values[index] = (const uint8_t *)value.ptr;
-            value_lens[index] = value.len;
-        }
-        encoded_len = kiln_http1_response_encode(
-            response->status, names, name_lens, values, value_lens, headers->count,
-            (const uint8_t *)response->body, response->body_len, 0, NULL, 0);
-        if (encoded_len < 0) {
-            free(names);
-            free(name_lens);
-            free(values);
-            free(value_lens);
-            return KILN_C99_CONTROL_ERROR;
-        }
-        encoded = (uint8_t *)malloc((size_t)encoded_len);
-        if (encoded == NULL) {
-            free(names);
-            free(name_lens);
-            free(values);
-            free(value_lens);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        encoded_len = kiln_http1_response_encode(
-            response->status, names, name_lens, values, value_lens, headers->count,
-            (const uint8_t *)response->body, response->body_len, 0, encoded,
-            (size_t)encoded_len);
-        free(names);
-        free(name_lens);
-        free(values);
-        free(value_lens);
-        if (encoded_len < 0) { free(encoded); return KILN_C99_CONTROL_ERROR; }
-        write = (kiln_node_completion *)calloc(1, sizeof *write);
-        if (write == NULL) { free(encoded); return KILN_C99_OUT_OF_MEMORY; }
-        write->kind = KILN_REALM_OP_TCP_WRITE;
-        write->socket = response->socket;
-        response->socket->closing = 1;
-        response->socket->close_after_write = 1;
-        status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, response->socket->resource, 0,
-                                     NULL, 0, encoded, (size_t)encoded_len, write,
-                                     &response->socket->write_request);
-        free(encoded);
-        if (status != KILN_C99_OK) return status;
-        free(response->body);
-        response->body = NULL;
-        response->body_len = 0;
-        response->body_capacity = 0;
+        if (status < KILN_C99_OK) return status;
         response->ended = 1;
+        kiln_c99_node_unlink_response(response);
         *result = receiver;
         return KILN_C99_OK;
     }
@@ -9301,11 +9349,215 @@ static const kiln_temporal_key KILN_C99_TEMPORAL_DURATION_KEYS[10] = {
     {"nanoseconds", 9, -1},  {"seconds", 6, -1},     {"weeks", 2, -1},
     {"years", 0, -1}};
 
+/* The arithmetic and conversion operations, in the order their method codes run.
+ *
+ * One table read from both ends: by name when the property is read off a value, and by code when
+ * the call arrives. The string it holds is also the string the provider dispatches on, so there is
+ * no second spelling of `toPlainYearMonth` anywhere for the two to drift apart on. */
+#define KILN_C99_TEMPORAL_OP_COUNT 23
+static const char *const KILN_C99_TEMPORAL_OPS[KILN_C99_TEMPORAL_OP_COUNT] = {
+    "add",           "subtract",          "until",        "since",
+    "round",         "total",             "with",         "equals",
+    "negated",       "abs",               "startOfDay",   "withCalendar",
+    "withTimeZone",  "withPlainTime",     "toZonedDateTime", "toZonedDateTimeISO",
+    "toPlainDate",   "toPlainTime",       "toPlainDateTime", "toPlainYearMonth",
+    "toPlainMonthDay", "toInstant",       "toString"};
+
+static const char *kiln_c99_temporal_op_name(uint64_t code) {
+    if (code < KILN_C99_METHOD_TEMPORAL_OP || code > KILN_C99_METHOD_TEMPORAL_OP_LAST) {
+        return NULL;
+    }
+    return KILN_C99_TEMPORAL_OPS[code - KILN_C99_METHOD_TEMPORAL_OP];
+}
+
+/* The method code an operation name reaches, or zero for a name that is not one of them. */
+static uint64_t kiln_c99_temporal_op_code(const char *key, size_t key_len) {
+    size_t index;
+    for (index = 0; index < KILN_C99_TEMPORAL_OP_COUNT; ++index) {
+        if (kiln_c99_same_name(key, key_len, KILN_C99_TEMPORAL_OPS[index])) {
+            return KILN_C99_METHOD_TEMPORAL_OP + (uint64_t)index;
+        }
+    }
+    return 0;
+}
+
+/* `Temporal.Now`'s five readers, by the kind their code carries. */
+static const char *kiln_c99_temporal_now_name(uint64_t code) {
+    switch (code - KILN_C99_METHOD_TEMPORAL_NOW_READ) {
+    case 0: return "plainDateISO";
+    case 1: return "plainTimeISO";
+    case 2: return "plainDateTimeISO";
+    case 6: return "instant";
+    case 7: return "zonedDateTimeISO";
+    default: return NULL;
+    }
+}
+
+/* The option names, in the order the language reads them off an options bag.
+ *
+ * The reads are observable and the specification runs them all, whichever options the operation
+ * actually uses -- so reading fewer would hide a getter a test is counting. `slot` is where the
+ * string lands in the provider's option array; the two numeric options are named here and handled
+ * apart, because one of them has a spelling (`"auto"`) that is not a number. */
+#define KILN_C99_TEMPORAL_OPTION_COUNT 11
+#define KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS 9
+#define KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS 2
+static const kiln_temporal_key KILN_C99_TEMPORAL_OPTION_KEYS[KILN_C99_TEMPORAL_OPTION_COUNT] = {
+    {"calendarName", -1, 0},          {"disambiguation", -1, 1},
+    {"fractionalSecondDigits", 1, -1},{"largestUnit", -1, 2},
+    {"offset", -1, 3},                {"overflow", -1, 4},
+    {"relativeTo", -2, -1},           {"roundingIncrement", 0, -1},
+    {"roundingMode", -1, 5},          {"smallestUnit", -1, 6},
+    {"timeZoneName", -1, 7}};
+
+/* The field string slots: era, monthCode, offset, timeZone, calendar. `overflow` is not among
+ * them any more -- it is an option, and options travel in their own array. */
+#define KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS 5
+
 /* One text slot: the bytes a field carried, owned by the packing buffer below. */
 typedef struct kiln_temporal_text {
     const char *bytes;
     int64_t length;
 } kiln_temporal_text;
+
+/* Pack text slots into the one buffer plus one length per slot the provider takes.
+ *
+ * Answers a buffer the caller frees, or NULL when the allocation failed. A length of -1 marks a
+ * slot the program did not supply at all, which is not the same as supplying `""`. */
+static char *kiln_c99_temporal_pack(const kiln_temporal_text *texts, size_t count,
+                                    int64_t *lengths) {
+    size_t total = 0;
+    size_t at = 0;
+    size_t slot;
+    char *packed;
+    for (slot = 0; slot < count; ++slot) {
+        lengths[slot] = texts[slot].bytes == NULL ? -1 : texts[slot].length;
+        if (lengths[slot] > 0) {
+            total += (size_t)lengths[slot];
+        }
+    }
+    packed = (char *)malloc(total == 0 ? 1 : total);
+    if (packed == NULL) {
+        return NULL;
+    }
+    for (slot = 0; slot < count; ++slot) {
+        if (lengths[slot] > 0) {
+            memcpy(packed + at, texts[slot].bytes, (size_t)lengths[slot]);
+            at += (size_t)lengths[slot];
+        }
+    }
+    return packed;
+}
+
+/* `Temporal.X.from(item)`, declared here because reading an options bag can reach it: a
+ * `relativeTo` is itself a date, and coercing it is the same operation. */
+static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
+                                    kiln_value options, kiln_value *out, int depth,
+                                    kiln_value *thrown);
+
+/* One options bag, read into the shape the provider takes. */
+typedef struct kiln_temporal_options {
+    double numbers[KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS];
+    kiln_temporal_text texts[KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS];
+    /* `relativeTo`, already coerced, or an undefined value when the bag carried none. */
+    kiln_value relative_to;
+} kiln_temporal_options;
+
+static void kiln_c99_temporal_options_init(kiln_temporal_options *options) {
+    size_t index;
+    for (index = 0; index < KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS; ++index) {
+        options->numbers[index] = 0.0 / 0.0;
+    }
+    for (index = 0; index < KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS; ++index) {
+        options->texts[index].bytes = NULL;
+        options->texts[index].length = -1;
+    }
+    options->relative_to = kiln_c99_undefined();
+}
+
+/* Read every option this realm knows about, in the order the specification reads them.
+ *
+ * All of them, rather than only the ones this operation uses: the reads are observable, a getter
+ * on an options bag runs, and the specification's own option steps run for every option the
+ * operation could take. Reading fewer would hide a getter a test is counting. */
+static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag,
+                                          kiln_temporal_options *options, int depth,
+                                          kiln_value *thrown) {
+    size_t index;
+    if (bag.tag == KILN_VALUE_UNDEFINED) {
+        return KILN_C99_OK;
+    }
+    if (bag.tag != KILN_VALUE_OBJECT && bag.tag != KILN_VALUE_ARRAY &&
+        bag.tag != KILN_VALUE_FUNCTION) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Temporal options must be an object");
+    }
+    for (index = 0; index < KILN_C99_TEMPORAL_OPTION_COUNT; ++index) {
+        const kiln_temporal_key *key = &KILN_C99_TEMPORAL_OPTION_KEYS[index];
+        kiln_value read;
+        int status = kiln_c99_get(host, bag, key->name, strlen(key->name), &read, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (read.tag == KILN_VALUE_UNDEFINED) {
+            continue;
+        }
+        if (key->text_slot >= 0) {
+            kiln_value text = kiln_c99_text(read);
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            options->texts[key->text_slot].bytes = text.ptr;
+            options->texts[key->text_slot].length = (int64_t)text.len;
+            continue;
+        }
+        if (key->slot == -2) {
+            /* A `relativeTo` is a date or a zoned date, and which one decides whether a day is
+             * always twenty-four hours -- so it is coerced here rather than guessed at. */
+            if (read.tag == KILN_VALUE_TEMPORAL) {
+                options->relative_to = read;
+                continue;
+            }
+            status = kiln_c99_temporal_coerce(host, 0, read, kiln_c99_undefined(),
+                                              &options->relative_to, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            continue;
+        }
+        if (kiln_c99_same_name(key->name, strlen(key->name), "fractionalSecondDigits")) {
+            /* `"auto"` is a legal spelling and is not a digit count, so it travels as a negative
+             * one rather than as a number that would round to zero digits. */
+            if (read.tag == KILN_VALUE_STRING && kiln_c99_same_name(read.ptr, read.len, "auto")) {
+                options->numbers[key->slot] = -1.0;
+                continue;
+            }
+            {
+                double digits;
+                status = kiln_c99_to_number_checked(host, read, &digits, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                digits = trunc(digits);
+                if (!(digits >= 0.0 && digits <= 9.0)) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "fractionalSecondDigits must be between 0 and 9");
+                }
+                options->numbers[key->slot] = digits;
+            }
+            continue;
+        }
+        {
+            double number;
+            status = kiln_c99_to_number_checked(host, read, &number, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            options->numbers[key->slot] = number;
+        }
+    }
+    return KILN_C99_OK;
+}
 
 /* Read a bag into the provider's two arrays, in the specified order.
  *
@@ -9361,42 +9613,37 @@ static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int durat
     return KILN_C99_OK;
 }
 
-/* Pack the six text slots into the one buffer the provider takes, and build the value. */
+/* Pack the field and option slots into the buffers the provider takes, and build the value. */
 static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
-                                   const kiln_temporal_text *texts, kiln_value *out,
+                                   const kiln_temporal_text *texts,
+                                   const kiln_temporal_options *options, kiln_value *out,
                                    kiln_value *thrown) {
-    int64_t lengths[6];
-    size_t total = 0;
-    size_t slot;
-    char *packed;
+    int64_t lengths[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    int64_t option_lengths[KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS];
+    char *packed = kiln_c99_temporal_pack(texts, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, lengths);
+    char *packed_options;
     void *handle = NULL;
     int32_t answered;
-    for (slot = 0; slot < 6; ++slot) {
-        lengths[slot] = texts[slot].bytes == NULL ? -1 : texts[slot].length;
-        if (lengths[slot] > 0) {
-            total += (size_t)lengths[slot];
-        }
-    }
-    packed = (char *)malloc(total == 0 ? 1 : total);
     if (packed == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    {
-        size_t at = 0;
-        for (slot = 0; slot < 6; ++slot) {
-            if (lengths[slot] > 0) {
-                memcpy(packed + at, texts[slot].bytes, (size_t)lengths[slot]);
-                at += (size_t)lengths[slot];
-            }
-        }
+    packed_options = kiln_c99_temporal_pack(options->texts, KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS,
+                                            option_lengths);
+    if (packed_options == NULL) {
+        free(packed);
+        return KILN_C99_OUT_OF_MEMORY;
     }
     if (kind == 5) {
+        /* A duration takes no options at all, and rejects a fractional component. */
         answered = kiln_temporal_duration_from_fields(numbers, 10, &handle);
     } else {
-        answered = kiln_temporal_from_fields((uint32_t)kind, numbers, 10,
-                                             (const unsigned char *)packed, lengths, 6, &handle);
+        answered = kiln_temporal_from_fields(
+            (uint32_t)kind, numbers, 10, (const unsigned char *)packed, lengths,
+            KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, (const unsigned char *)packed_options,
+            option_lengths, KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS, &handle);
     }
     free(packed);
+    free(packed_options);
     if (answered != 0) {
         return kiln_c99_temporal_raise(thrown, answered);
     }
@@ -9404,35 +9651,64 @@ static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
     return KILN_C99_OK;
 }
 
-/* `Temporal.X.from(item)`: a value of the same type, ISO text, or a bag of fields. */
+/* `Temporal.X.from(item)`: a value of the same type, ISO text, or a bag of fields.
+ *
+ * The options are read whichever shape `item` has, and before the value is built, because the
+ * reads are observable and the specification runs them. */
 static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
                                     kiln_value options, kiln_value *out, int depth,
                                     kiln_value *thrown) {
     double numbers[10];
-    kiln_temporal_text texts[6];
+    kiln_temporal_text texts[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    kiln_temporal_options settings;
     size_t index;
     int status;
     for (index = 0; index < 10; ++index) {
         numbers[index] = 0.0 / 0.0;
     }
-    for (index = 0; index < 6; ++index) {
+    for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
         texts[index].bytes = NULL;
         texts[index].length = -1;
     }
+    kiln_c99_temporal_options_init(&settings);
     if (item.tag == KILN_VALUE_TEMPORAL) {
         /* Same type in, same value out: every one of them is immutable, so there is nothing to
-         * copy. A *different* type is a TypeError, which the engine reports when asked. */
+         * copy. A *wider* type narrows -- a `PlainDateTime` is a `PlainDate` with a time attached,
+         * and asking for the date is a projection rather than a conversion that can be wrong. A
+         * pair the language does not define is the engine's TypeError, not one invented here. */
+        void *narrowed = NULL;
+        int32_t answered;
         if (kiln_temporal_kind(kiln_c99_temporal_of(item)) == kind) {
             *out = item;
             return KILN_C99_OK;
         }
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Temporal.from received a different Temporal type");
+        answered = kiln_temporal_to_kind(kiln_c99_temporal_of(item), (uint32_t)kind, &narrowed);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *out = kiln_c99_temporal_value(narrowed);
+        return KILN_C99_OK;
     }
     if (item.tag == KILN_VALUE_STRING) {
+        int64_t option_lengths[KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS];
+        char *packed_options;
         void *handle = NULL;
-        int32_t answered = kiln_temporal_parse((uint32_t)kind, (const unsigned char *)item.ptr,
-                                               item.len, &handle);
+        int32_t answered;
+        status = kiln_c99_temporal_read_options(host, options, &settings, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        packed_options = kiln_c99_temporal_pack(
+            settings.texts, KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS, option_lengths);
+        if (packed_options == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        /* A `ZonedDateTime` string is the one `from` whose options change the answer, because it
+         * has to decide what a wall-clock time that does not exist, or exists twice, means. */
+        answered = kiln_temporal_parse((uint32_t)kind, (const unsigned char *)item.ptr, item.len,
+                                       (const unsigned char *)packed_options, option_lengths,
+                                       KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS, &handle);
+        free(packed_options);
         if (answered != 0) {
             return kiln_c99_temporal_raise(thrown, answered);
         }
@@ -9447,23 +9723,284 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
     if (status != KILN_C99_OK) {
         return status;
     }
-    /* `overflow` is read after the fields, which is the order the specification puts it in. */
-    if (options.tag == KILN_VALUE_OBJECT) {
-        kiln_value read;
-        status = kiln_c99_get(host, options, "overflow", 8, &read, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
+    /* The options are read after the fields, which is the order the specification puts them in. */
+    status = kiln_c99_temporal_read_options(host, options, &settings, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    return kiln_c99_temporal_build(kind, numbers, texts, &settings, out, thrown);
+}
+
+/* Turn the provider's answer into a value, or into the throw its error class asks for. */
+static int kiln_c99_temporal_answer(int32_t answered, void *handle, double number,
+                                    int32_t length, const char *inline_buffer,
+                                    kiln_value *result, kiln_value *thrown) {
+    switch (answered) {
+    case 0:
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    case 1:
+        *result = kiln_c99_number(number);
+        return KILN_C99_OK;
+    case 3:
+        *result = kiln_c99_boolean(number != 0.0);
+        return KILN_C99_OK;
+    case 2:
+        if (length < 0) {
+            /* The retry protocol is handled by the caller, which owns the buffer. */
+            return KILN_C99_CONTROL_ERROR;
         }
-        if (read.tag != KILN_VALUE_UNDEFINED) {
-            kiln_value text = kiln_c99_text(read);
-            if (text.tag != KILN_VALUE_STRING) {
+        *result = kiln_c99_copy_text(inline_buffer, (size_t)length);
+        return KILN_C99_OK;
+    default:
+        return kiln_c99_temporal_raise(thrown, answered);
+    }
+}
+
+/* One arithmetic or conversion operation, from the arguments the program passed.
+ *
+ * Every argument the language specifies is read here, in the specified order, and what crosses the
+ * boundary is scalars: a handle, a field bag, an option bag flattened into two arrays. The engine
+ * on the other side is the same `kiln-temporal` the interpreter calls directly (ADR 0025), so a
+ * disagreement between the two engines about a calendar is not reachable from here. */
+static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint64_t code,
+                                       kiln_value receiver, const kiln_value *args, size_t argc,
+                                       int depth, kiln_value *thrown) {
+    const char *name = kiln_c99_temporal_op_name(code);
+    int32_t kind = kiln_temporal_kind(kiln_c99_temporal_of(receiver));
+    kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+    kiln_value second = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_temporal_options options;
+    double fields[10];
+    kiln_temporal_text field_texts[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    int64_t field_lengths[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    int64_t option_lengths[KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS];
+    char *packed_fields = NULL;
+    char *packed_options = NULL;
+    char inline_buffer[64];
+    double number = 0.0;
+    int32_t length = 0;
+    void *handle = NULL;
+    kiln_value operand = kiln_c99_undefined();
+    kiln_value zone = kiln_c99_undefined();
+    int carries_fields = 0;
+    int status = KILN_C99_OK;
+    int32_t answered;
+    kiln_temporal_call call;
+    size_t index;
+    if (name == NULL || kind < 0) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    kiln_c99_temporal_options_init(&options);
+    for (index = 0; index < 10; ++index) {
+        fields[index] = 0.0 / 0.0;
+    }
+    for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
+        field_texts[index].bytes = NULL;
+        field_texts[index].length = -1;
+    }
+
+    /* The arguments, by the shape each operation takes them in. */
+    if (kiln_c99_same_name(name, strlen(name), "add") ||
+        kiln_c99_same_name(name, strlen(name), "subtract")) {
+        /* Every type but `Duration` adds a duration; a `Duration` adds another duration. Either
+         * way the operand is a duration, and reaching one that is not is the engine's TypeError. */
+        status = kiln_c99_temporal_coerce(host, 5, first, kiln_c99_undefined(), &operand, depth,
+                                          thrown);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "until") ||
+               kiln_c99_same_name(name, strlen(name), "since") ||
+               kiln_c99_same_name(name, strlen(name), "equals")) {
+        status = kiln_c99_temporal_coerce(host, kind, first, kiln_c99_undefined(), &operand, depth,
+                                          thrown);
+        if (status == KILN_C99_OK && !kiln_c99_same_name(name, strlen(name), "equals")) {
+            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "round") ||
+               kiln_c99_same_name(name, strlen(name), "total")) {
+        /* A bare unit string is shorthand for `{ smallestUnit: it }` -- or `{ unit: it }` for
+         * `total` -- which is how nearly every call in the wild spells it. */
+        int totalling = kiln_c99_same_name(name, strlen(name), "total");
+        if (first.tag == KILN_VALUE_STRING) {
+            options.texts[totalling ? 8 : 6].bytes = first.ptr;
+            options.texts[totalling ? 8 : 6].length = (int64_t)first.len;
+        } else if (first.tag == KILN_VALUE_UNDEFINED) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        totalling ? "total needs a unit" : "round needs a unit");
+        } else {
+            status = kiln_c99_temporal_read_options(host, first, &options, depth, thrown);
+            if (status == KILN_C99_OK && totalling) {
+                /* `unit` is not in the shared option list, because only `total` takes it. */
+                kiln_value read;
+                status = kiln_c99_get(host, first, "unit", 4, &read, depth, thrown);
+                if (status == KILN_C99_OK && read.tag != KILN_VALUE_UNDEFINED) {
+                    kiln_value text = kiln_c99_text(read);
+                    if (text.tag != KILN_VALUE_STRING) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    options.texts[8].bytes = text.ptr;
+                    options.texts[8].length = (int64_t)text.len;
+                }
+            }
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "with")) {
+        if (first.tag != KILN_VALUE_OBJECT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "with needs a property bag");
+        }
+        status = kiln_c99_temporal_read_bag(host, first, kind == 5, fields, field_texts, depth,
+                                            thrown);
+        carries_fields = 1;
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "withCalendar") ||
+               kiln_c99_same_name(name, strlen(name), "withTimeZone")) {
+        if (first.tag == KILN_VALUE_UNDEFINED) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        kiln_c99_same_name(name, strlen(name), "withCalendar")
+                                            ? "withCalendar needs a calendar"
+                                            : "withTimeZone needs a time zone");
+        }
+        zone = kiln_c99_text(first);
+        if (zone.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "withPlainTime")) {
+        /* An absent argument means midnight rather than "leave it alone". */
+        if (first.tag != KILN_VALUE_UNDEFINED) {
+            status = kiln_c99_temporal_coerce(host, 1, first, kiln_c99_undefined(), &operand, depth,
+                                              thrown);
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "toZonedDateTime") ||
+               kiln_c99_same_name(name, strlen(name), "toZonedDateTimeISO")) {
+        if (first.tag == KILN_VALUE_OBJECT) {
+            kiln_value read;
+            status = kiln_c99_get(host, first, "timeZone", 8, &read, depth, thrown);
+            if (status == KILN_C99_OK && read.tag != KILN_VALUE_UNDEFINED) {
+                zone = kiln_c99_text(read);
+                if (zone.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_get(host, first, "plainTime", 9, &read, depth, thrown);
+                if (status == KILN_C99_OK && read.tag != KILN_VALUE_UNDEFINED) {
+                    status = kiln_c99_temporal_coerce(host, 1, read, kiln_c99_undefined(), &operand,
+                                                      depth, thrown);
+                }
+            }
+        } else if (first.tag != KILN_VALUE_UNDEFINED) {
+            zone = kiln_c99_text(first);
+            if (zone.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            texts[5].bytes = text.ptr;
-            texts[5].length = (int64_t)text.len;
         }
+        if (status == KILN_C99_OK && zone.tag != KILN_VALUE_STRING) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "toZonedDateTime needs a time zone");
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "toPlainDate") && (kind == 3 || kind == 4)) {
+        /* On a year-month or a month-day, `toPlainDate` supplies the component that was missing
+         * rather than dropping one that was there. */
+        if (first.tag != KILN_VALUE_OBJECT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "toPlainDate needs a property bag");
+        }
+        status = kiln_c99_temporal_read_bag(host, first, 0, fields, field_texts, depth, thrown);
+        carries_fields = 1;
+    } else if (kiln_c99_same_name(name, strlen(name), "toPlainDateTime") && kind == 0) {
+        if (first.tag == KILN_VALUE_TEMPORAL) {
+            operand = first;
+        } else if (first.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_temporal_read_bag(host, first, 0, fields, field_texts, depth, thrown);
+            carries_fields = 1;
+        }
+    } else if (kiln_c99_same_name(name, strlen(name), "toString")) {
+        status = kiln_c99_temporal_read_options(host, first, &options, depth, thrown);
     }
-    return kiln_c99_temporal_build(kind, numbers, texts, out, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+
+    packed_fields = kiln_c99_temporal_pack(field_texts, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS,
+                                           field_lengths);
+    if (packed_fields == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    packed_options = kiln_c99_temporal_pack(options.texts, KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS,
+                                            option_lengths);
+    if (packed_options == NULL) {
+        free(packed_fields);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+
+    call.receiver = kiln_c99_temporal_of(receiver);
+    call.name = (const unsigned char *)name;
+    call.name_len = strlen(name);
+    call.operand = operand.tag == KILN_VALUE_TEMPORAL ? kiln_c99_temporal_of(operand) : NULL;
+    call.relative_to = options.relative_to.tag == KILN_VALUE_TEMPORAL
+                           ? kiln_c99_temporal_of(options.relative_to)
+                           : NULL;
+    call.argument = zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL;
+    call.argument_len = zone.tag == KILN_VALUE_STRING ? zone.len : 0;
+    call.fields = carries_fields ? fields : NULL;
+    call.field_count = carries_fields ? 10u : 0u;
+    call.field_text = (const unsigned char *)packed_fields;
+    call.field_text_lengths = field_lengths;
+    call.field_text_count = KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS;
+    call.option_numbers = options.numbers;
+    call.option_number_count = KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS;
+    call.option_text = (const unsigned char *)packed_options;
+    call.option_text_lengths = option_lengths;
+    call.option_text_count = KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS;
+    call.out_handle = &handle;
+    call.out_number = &number;
+    call.out_buffer = (unsigned char *)inline_buffer;
+    call.out_capacity = sizeof inline_buffer;
+    call.out_length = &length;
+    answered = kiln_temporal_invoke(&call);
+    if (answered == 2 && length < 0) {
+        /* The retry protocol: one negative answer says exactly how much to allocate. */
+        size_t wanted = (size_t)(-length);
+        char *spilled = (char *)malloc(wanted);
+        if (spilled == NULL) {
+            free(packed_fields);
+            free(packed_options);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        call.out_buffer = (unsigned char *)spilled;
+        call.out_capacity = wanted;
+        answered = kiln_temporal_invoke(&call);
+        if (answered != 2 || length < 0) {
+            free(spilled);
+            free(packed_fields);
+            free(packed_options);
+            return KILN_C99_CONTROL_ERROR;
+        }
+        *result = kiln_c99_copy_text(spilled, (size_t)length);
+        free(spilled);
+        free(packed_fields);
+        free(packed_options);
+        return KILN_C99_OK;
+    }
+    free(packed_fields);
+    free(packed_options);
+    if (answered == 6) {
+        /* The engine has no such operation on this type -- `startOfDay` on a `PlainDate`. That is
+         * a TypeError in the language, which the engine reports when the operation is attempted;
+         * reaching here means the name is one this backend routes and the type is not one that
+         * carries it. */
+        return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(receiver), name,
+                                             strlen(name));
+    }
+    return kiln_c99_temporal_answer(answered, handle, number, length, inline_buffer, result,
+                                    thrown);
 }
 
 /* The `Temporal` methods this backend answers. Everything else refuses by name where it is read. */
@@ -9506,6 +10043,37 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
         *result = kiln_c99_copy_text("UTC", 3);
         return KILN_C99_OK;
     }
+    if (code >= KILN_C99_METHOD_TEMPORAL_NOW_READ &&
+        code <= KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST) {
+        /* The realm's clock, not the host's -- the same virtual instant `Date.now()` reads, so
+         * two reads with no timer between them agree (ADR 0015). It arrives in whole nanoseconds
+         * because that is the unit `Temporal` measures instants in; reading it through the
+         * millisecond accessor would round the clock and put the two engines a fraction apart. */
+        int32_t kind = (int32_t)(code - KILN_C99_METHOD_TEMPORAL_NOW_READ);
+        kiln_value zone = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED
+                              ? kiln_c99_text(args[0])
+                              : kiln_c99_undefined();
+        int64_t high = 0;
+        uint64_t low = 0;
+        void *handle = NULL;
+        int32_t answered;
+        if (zone.tag != KILN_VALUE_UNDEFINED && zone.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (kiln_realm_now_nanoseconds(&high, &low) != KILN_C99_OK) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "the realm clock is not readable here");
+        }
+        answered = kiln_temporal_now(
+            (uint32_t)kind, high, low,
+            zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL,
+            zone.tag == KILN_VALUE_STRING ? zone.len : 0, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
     if (receiver.tag != KILN_VALUE_TEMPORAL) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "a Temporal method needs a Temporal receiver");
@@ -9518,6 +10086,9 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
          * which is exactly the silent wrong answer the language added this refusal to prevent. */
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Temporal values have no primitive conversion; use compare()");
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_OP && code <= KILN_C99_METHOD_TEMPORAL_OP_LAST) {
+        return kiln_c99_temporal_operation(host, result, code, receiver, args, argc, depth, thrown);
     }
     return KILN_C99_CONTROL_ERROR;
 }
@@ -20439,9 +21010,12 @@ int32_t kiln_bigint_compare(const void *left, const void *right) {
 int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
                                   const unsigned char *text, const int64_t *text_lengths,
-                                  size_t text_count, void **out_handle) {
+                                  size_t text_count, const unsigned char *option_text,
+                                  const int64_t *option_text_lengths, size_t option_text_count,
+                                  void **out_handle) {
     (void)kind; (void)fields; (void)field_count; (void)text; (void)text_lengths;
-    (void)text_count; (void)out_handle;
+    (void)text_count; (void)option_text; (void)option_text_lengths; (void)option_text_count;
+    (void)out_handle;
     return -1;
 }
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
@@ -20450,12 +21024,16 @@ int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_co
     return -1;
 }
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
+                            const unsigned char *option_text,
+                            const int64_t *option_text_lengths, size_t option_text_count,
                             void **out_handle) {
-    (void)kind; (void)bytes; (void)len; (void)out_handle;
+    (void)kind; (void)bytes; (void)len; (void)option_text; (void)option_text_lengths;
+    (void)option_text_count; (void)out_handle;
     return -1;
 }
-int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle) {
-    (void)kind; (void)high; (void)low; (void)out_handle;
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
+                          size_t zone_len, void **out_handle) {
+    (void)kind; (void)high; (void)low; (void)zone; (void)zone_len; (void)out_handle;
     return -1;
 }
 void kiln_temporal_free(void *handle) { (void)handle; }
@@ -20473,6 +21051,10 @@ int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_
 }
 int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order) {
     (void)left; (void)right; (void)out_order;
+    return -1;
+}
+int32_t kiln_temporal_to_kind(const void *handle, uint32_t kind, void **out_handle) {
+    (void)handle; (void)kind; (void)out_handle;
     return -1;
 }
 int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity) {
@@ -20513,12 +21095,23 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
 int kiln_realm_destroy(uint64_t realm) {
     return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
 }
+/* Here rather than beside the other provider stubs, because its argument is a struct the runtime
+ * prelude declares and this fixture is the first text that follows the prelude. */
+int32_t kiln_temporal_invoke(const kiln_temporal_call *call) { (void)call; return -1; }
 int kiln_realm_is_active(void) { return kiln_test_realm_active; }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
     }
     *out_milliseconds = 0.0;
+    return KILN_C99_OK;
+}
+int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low) {
+    if (!kiln_test_realm_active || out_high == NULL || out_low == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    *out_high = 0;
+    *out_low = 0;
     return KILN_C99_OK;
 }
 int kiln_realm_queue_microtask(kiln_realm_work_fn run,
@@ -20574,67 +21167,34 @@ int kiln_realm_cancel_active_request(uint64_t request) {
     return KILN_REALM_ASYNC_NOT_FOUND;
 }
 
-/* The generated prelude declares the HTTP provider ABI for every unit. Backend tests link
- * generated scalar C directly and do not exercise Node HTTP, so these symbols deliberately
- * refuse every HTTP operation. The real Rust adapter is linked by native/runtime integration
- * tests and production artifacts. */
-int32_t kiln_http1_decoder_create(void **out_decoder) {
-    if (out_decoder != NULL) *out_decoder = NULL;
+/* Scalar backend fixtures never exercise Node HTTP; production artifacts link these symbols
+ * from the Rust realm provider. */
+int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+                                         kiln_realm_drop_fn drop, void *work) {
+    (void)resource; (void)run; if (drop != NULL) drop(work); return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+                                         kiln_realm_drop_fn drop, void *work) {
+    (void)resource; (void)run; if (drop != NULL) drop(work); return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_client_send_active(uint64_t resource,
+                                       const kiln_realm_http_request *request) {
+    (void)resource; (void)request; return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_response_start_active(uint64_t resource, uint64_t id,
+                                          const kiln_realm_http_response *response,
+                                          uint64_t high_water_mark) {
+    (void)resource; (void)id; (void)response; (void)high_water_mark;
     return KILN_C99_INVALID_ARGUMENT;
 }
-void kiln_http1_decoder_free(void *decoder) { (void)decoder; }
-int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-                                kiln_http1_request_view *out_request) {
-    (void)decoder;
-    (void)bytes;
-    (void)bytes_len;
-    (void)out_request;
-    return KILN_C99_INVALID_ARGUMENT;
+int kiln_realm_http_response_write_active(uint64_t resource, uint64_t id,
+                                          const uint8_t *data, uint64_t data_len) {
+    (void)resource; (void)id; (void)data; (void)data_len; return KILN_C99_INVALID_ARGUMENT;
 }
-int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
-                                   const size_t *header_name_lens,
-                                   const uint8_t *const *header_values,
-                                   const size_t *header_value_lens, size_t header_count,
-                                   const uint8_t *body, size_t body_len, uint8_t keep_alive,
-                                   uint8_t *buffer, size_t capacity) {
-    (void)status;
-    (void)header_names;
-    (void)header_name_lens;
-    (void)header_values;
-    (void)header_value_lens;
-    (void)header_count;
-    (void)body;
-    (void)body_len;
-    (void)keep_alive;
-    (void)buffer;
-    (void)capacity;
-    return KILN_C99_INVALID_ARGUMENT;
+int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
+                                        const uint8_t *data, uint64_t data_len) {
+    (void)resource; (void)id; (void)data; (void)data_len; return KILN_C99_INVALID_ARGUMENT;
 }
-int32_t kiln_http1_response_decoder_create(void **out_decoder) {
-    if (out_decoder != NULL) *out_decoder = NULL;
-    return KILN_C99_INVALID_ARGUMENT;
-}
-void kiln_http1_response_decoder_free(void *decoder) { (void)decoder; }
-int32_t kiln_http1_response_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-                                         void **out_events) {
-    (void)decoder;
-    (void)bytes;
-    (void)bytes_len;
-    if (out_events != NULL) *out_events = NULL;
-    return KILN_C99_INVALID_ARGUMENT;
-}
-size_t kiln_http1_response_events_len(const void *events) {
-    (void)events;
-    return 0;
-}
-int32_t kiln_http1_response_events_get(const void *events, size_t index,
-                                       kiln_http1_response_event_view *out_event) {
-    (void)events;
-    (void)index;
-    (void)out_event;
-    return KILN_C99_INVALID_ARGUMENT;
-}
-void kiln_http1_response_events_free(void *events) { (void)events; }
 "#;
 
     fn linked_source(module_source: &str, wrapper: &str) -> String {
