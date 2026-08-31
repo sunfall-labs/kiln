@@ -185,6 +185,29 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_node_run_executes_a_builtin_module() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-cli-node-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create Node fixture");
+        let source = fixture.join("main.mjs");
+        std::fs::write(
+            &source,
+            "import { createServer } from 'node:http'; console.log(typeof createServer);\n",
+        )
+        .expect("write Node entry");
+
+        let output = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::run(&mut session, &source, &fixture, true).expect("run Node graph")
+        };
+
+        assert_eq!(output.text, "function\n");
+        assert_eq!(output.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn daemon_replays_the_pinned_package_target_after_the_manifest_disappears() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-pinned-package-fixture-{}",

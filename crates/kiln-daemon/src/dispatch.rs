@@ -559,7 +559,8 @@ fn build_graph<E: QueryEngine>(
                 entry.specifier.clone(),
                 PathBuf::from(&entry.target),
             )
-        });
+        })
+        .collect::<Vec<_>>();
     let provider = |module_path: &Path| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
             kiln_module_graph::ModuleGraphError::FrontendPath {
@@ -580,25 +581,17 @@ fn build_graph<E: QueryEngine>(
             }
         })
     };
-    if node {
-        let resolver =
-            kiln_module_resolver::NodeRuntimeResolver::new(project_root).map_err(|error| {
-                kiln_module_graph::ModuleGraphError::Resolve {
-                    importer: PathBuf::new(),
-                    specifier: String::new(),
-                    error,
-                }
-            })?;
-        ModuleGraph::build_with_policy(entry, resolver, provider)
+    let resolver = if node {
+        kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins(project_root, entries)
     } else {
-        let resolver = kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
-            .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
-                importer: PathBuf::new(),
-                specifier: String::new(),
-                error,
-            })?;
-        ModuleGraph::build_with_policy(entry, resolver, provider)
+        kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
     }
+    .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
+        importer: PathBuf::new(),
+        specifier: String::new(),
+        error,
+    })?;
+    ModuleGraph::build_with_policy(entry, resolver, provider)
 }
 
 /// Return one immutable graph snapshot for the exact committed daemon state.  The caller holds
