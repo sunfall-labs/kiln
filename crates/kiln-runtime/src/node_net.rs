@@ -88,10 +88,14 @@ impl TcpServerDriver {
     }
 
     pub fn close(&mut self) -> Vec<ServerAction> {
-        let Some(listener) = self.listener.as_ref() else {
-            return Vec::new();
-        };
         if self.closing || self.closed {
+            return Vec::new();
+        }
+        let has_pending_listen = self
+            .pending
+            .iter()
+            .any(|(_, kind)| matches!(kind, PendingKind::Listen));
+        if self.listener.is_none() && !has_pending_listen {
             return Vec::new();
         }
         self.closing = true;
@@ -99,14 +103,23 @@ impl TcpServerDriver {
         let mut actions: Vec<ServerAction> = self
             .pending
             .iter()
-            .filter(|(_, kind)| matches!(kind, PendingKind::Accept))
+            .filter(|(_, kind)| matches!(kind, PendingKind::Listen | PendingKind::Accept))
             .map(|(request, _)| ServerAction::Cancel(*request))
             .collect();
         self.pending
-            .retain(|(_, kind)| !matches!(kind, PendingKind::Accept));
-        actions.push(ServerAction::Start(AsyncHostOp::CloseResource {
-            resource: listener.id,
-        }));
+            .retain(|(_, kind)| !matches!(kind, PendingKind::Listen | PendingKind::Accept));
+        if let Some(listener) = self.listener.as_ref() {
+            actions.push(ServerAction::Start(AsyncHostOp::CloseResource {
+                resource: listener.id,
+            }));
+        } else {
+            // A cancelled listen cannot publish a resource through the provider boundary. The
+            // server therefore reaches its terminal state synchronously, matching Node's
+            // close-before-listening contract without inventing a transient listener.
+            self.closed = true;
+            self.closing = false;
+            actions.push(ServerAction::Close);
+        }
         actions
     }
 
@@ -358,5 +371,23 @@ mod tests {
         ));
         // The adapter must now discard `actions[1]`: it was computed before the synchronous
         // listening callback closed the server.
+    }
+
+    #[test]
+    fn close_cancels_a_listen_before_it_completes() {
+        let mut server = TcpServerDriver::default();
+        let listen = AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        };
+        assert!(server.started(&listen, RequestId::new(1)));
+
+        assert_eq!(
+            server.close(),
+            vec![ServerAction::Cancel(RequestId::new(1)), ServerAction::Close,]
+        );
+        assert!(server.closed());
+        assert!(!server.accepts_connections());
+        assert!(server.close().is_empty());
     }
 }
