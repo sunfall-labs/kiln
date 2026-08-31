@@ -36,6 +36,12 @@ pub const HOST_CAPABILITY_MARKER: &str = "kiln: host capability not provided:";
 /// giving a buffer's bytes away, and it leaves the receiver detached as its whole purpose.  A
 /// second, host-only path to the same state would be a second thing to keep correct, and the
 /// engine would then have a way to detach a buffer that no program could reach.
+///
+/// `$262.agent` is an object of throwing methods rather than `undefined` for the same reason.
+/// Kiln has no second agent to start, but a test that reads `$262.agent.start` and gets a
+/// `TypeError` about reading a property of `undefined` reports a *language* failure for a
+/// *host* gap -- two hundred of them, every one of them a lie about the engine. Refusing by
+/// name is honest and costs nothing: the classifier reads the marker and answers `Unsupported`.
 /// The harness file Test262 requires for every `async` test, per INTERPRETING.md.
 pub const ASYNC_INCLUDE: &str = "doneprintHandle.js";
 
@@ -48,7 +54,32 @@ pub const ASYNC_FAILURE: &str = "Test262:AsyncTestFailure:";
 pub const HOST_OBJECT_PRELUDE: &str = r#"var print = function (message) { console.log(message); };
 var $262 = {
   global: globalThis,
-  agent: undefined,
+  agent: {
+    start: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.start");
+    },
+    broadcast: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.broadcast");
+    },
+    getReport: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.getReport");
+    },
+    sleep: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.sleep");
+    },
+    monotonicNow: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.monotonicNow");
+    },
+    receiveBroadcast: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.receiveBroadcast");
+    },
+    report: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.report");
+    },
+    leaving: function () {
+      throw new Error("kiln: host capability not provided: $262.agent.leaving");
+    }
+  },
   createRealm: function () {
     throw new Error("kiln: host capability not provided: $262.createRealm");
   },
@@ -207,6 +238,26 @@ mod tests {
             .prelude_for(&["propertyHelper.js".to_owned()])
             .expect_err("missing include is an error");
         assert!(missing.contains("propertyHelper.js"));
+    }
+
+    #[test]
+    fn host_prelude_refuses_agent_by_name_rather_than_leaving_it_undefined() {
+        assert!(!HOST_OBJECT_PRELUDE.contains("agent: undefined"));
+        for method in [
+            "start",
+            "broadcast",
+            "getReport",
+            "sleep",
+            "monotonicNow",
+            "receiveBroadcast",
+            "report",
+            "leaving",
+        ] {
+            assert!(
+                HOST_OBJECT_PRELUDE.contains(&format!("$262.agent.{method}")),
+                "`$262.agent.{method}` must refuse with the host-capability marker"
+            );
+        }
     }
 
     #[test]

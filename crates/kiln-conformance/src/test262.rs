@@ -175,13 +175,18 @@ fn run_variant_uncaught(
         && let Some(harness) = harness
         && let Ok(sources) = harness.prelude_for(&case_includes(case))
     {
+        // Before the harness, because the harness *builds on* it: `atomicsHelper.js` assigns
+        // `$262.agent.safeBroadcast` and six siblings at its own top level, so a `$262` that
+        // arrives afterwards is too late -- every one of those files threw
+        // "Cannot read properties of undefined (reading 'agent')" and took the test's real
+        // subject down with it. INTERPRETING.md agrees: the host object is the host's statement
+        // about the realm, and it is there before any test source runs. A test that wants its
+        // own `$262` still wins, because the test itself comes last of all.
+        prefix.push_str(HOST_OBJECT_PRELUDE);
         for harness_source in sources {
             prefix.push_str(harness_source);
             prefix.push('\n');
         }
-        // After the harness, so that a test overriding `$262` still wins, and so the stubs can
-        // rely on nothing but the language.
-        prefix.push_str(HOST_OBJECT_PRELUDE);
         // `doneprintHandle.js` declares `function $DONE`, and in a Script a top-level function
         // declaration *is* a property of the global object. Kiln keeps top-level bindings in
         // module slots, so `asyncHelpers.js`'s own guard -- `hasOwnProperty(globalThis, "$DONE")`

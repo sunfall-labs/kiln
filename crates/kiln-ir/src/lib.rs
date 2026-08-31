@@ -1061,6 +1061,20 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     })
 }
 
+/// One parameter's share of `FunctionDeclarationInstantiation`, in declaration order.
+///
+/// The list is built while the parameters are being declared and emitted afterwards, because
+/// the two need different information and the order between them is the same: left to right,
+/// which is the order a default expression can observe.
+enum ParameterStep<'a> {
+    /// A pattern, destructured out of its positional slot.
+    Destructure(u32, &'a Pattern, Span),
+    /// An identifier with a default, assigned from its positional slot.
+    Defaulted(u32, bool, &'a Pattern, Span, &'a str),
+    /// A plain identifier: the call already put it in its slot, and nothing needs emitting.
+    Plain(&'a str),
+}
+
 /// Compile a CommonJS body with Node's wrapper bindings installed as module-scope cells.
 ///
 /// The graph supplies the five values in this exact order. They are ordinary mutable bindings:
@@ -1273,6 +1287,15 @@ struct Compiler {
     /// suspension, and `await` there is a plain identifier or a syntax error depending on the
     /// context, never a suspension.
     module_body: bool,
+    /// Whether the code being compiled is one parameter's default, with later parameters still
+    /// unbound.
+    ///
+    /// The parameter list is its own scope, and every name in it exists -- uninitialised --
+    /// from the moment the call begins. So `function f(x = x) {}` compiles and only *calling*
+    /// it fails, and the failure is a `ReferenceError`, not a rejection of the source. The flag
+    /// is what tells a dead-zone read here apart from one in a body, where refusing at compile
+    /// time is both allowed and better.
+    parameter_dead_zone: bool,
     /// Names of the calling frame's bindings borrowed into scope 0 of an eval program.
     ///
     /// Tracked apart from the scope itself because a declaration in the eval'd source has to
@@ -1374,6 +1397,7 @@ impl Compiler {
             strict: false,
             eval_program: false,
             module_body: false,
+            parameter_dead_zone: false,
             outer_names: HashSet::new(),
             // Module scope is boxed too when the module contains a direct eval: a script's
             // top-level bindings are exactly the ones an eval written there can see.
@@ -2398,6 +2422,20 @@ impl Compiler {
             // is entitled to see.
             Resolution::Local(local) if !local.initialized && local.celled && self.eval_program => {
                 self.code.push(Instruction::LoadCell(local.slot))
+            }
+            // A parameter read from another parameter's default, before the binding list has
+            // reached it: `function f(x = y, y) {}`. The refusal has to be a *run-time*
+            // `ReferenceError`, because the function is well formed and only a call fails --
+            // which is exactly what `assert.throws(ReferenceError, () => f())` asks for. A cell
+            // that is uninitialised by construction is that refusal, spelled with instructions
+            // that already exist rather than with an opcode of its own.
+            Resolution::Local(local) if !local.initialized && self.parameter_dead_zone => {
+                let _ = local;
+                let scratch = self.local_count;
+                self.local_count += 1;
+                self.code.push(Instruction::NewCell(scratch));
+                self.code.push(Instruction::MarkUninitialized(scratch));
+                self.code.push(Instruction::LoadCell(scratch));
             }
             Resolution::Local(local) if !local.initialized => self.error(
                 Some(span),
@@ -4892,8 +4930,14 @@ impl Compiler {
         // locals that behave like any other binding.
         let mut parameters = HashMap::with_capacity(function.parameters.len());
         let mut celled_parameters = Vec::new();
-        let mut destructured = Vec::new();
-        let mut defaulted_identifiers = Vec::new();
+        let mut binding_steps = Vec::new();
+        // Whether this list has a dead zone to keep at all. Without a default there is nothing
+        // that can run while a parameter is unbound, so a function with none pays nothing and
+        // behaves exactly as it did.
+        let parameters_have_defaults = function
+            .parameters
+            .iter()
+            .any(|parameter| matches!(parameter.pattern, Pattern::WithDefault { .. }));
         for (slot, parameter) in function.parameters.iter().enumerate() {
             let slot = slot as u32;
             let identifier = match &parameter.pattern {
@@ -4905,7 +4949,11 @@ impl Compiler {
                 _ => None,
             };
             let Some(name) = identifier else {
-                destructured.push((slot, &parameter.pattern, parameter.span));
+                binding_steps.push(ParameterStep::Destructure(
+                    slot,
+                    &parameter.pattern,
+                    parameter.span,
+                ));
                 continue;
             };
             if parameters.contains_key(name) {
@@ -4925,13 +4973,19 @@ impl Compiler {
                     slot,
                     kind: VariableKind::Let,
                     imported: false,
-                    initialized: true,
+                    // Uninitialised until the binding list reaches it, which is what puts the
+                    // parameters to a default's right in a dead zone.
+                    initialized: !parameters_have_defaults,
                     celled,
                 },
             );
-            if matches!(parameter.pattern, Pattern::WithDefault { .. }) {
-                defaulted_identifiers.push((slot, celled, &parameter.pattern, parameter.span));
-            }
+            binding_steps.push(
+                if matches!(parameter.pattern, Pattern::WithDefault { .. }) {
+                    ParameterStep::Defaulted(slot, celled, &parameter.pattern, parameter.span, name)
+                } else {
+                    ParameterStep::Plain(name)
+                },
+            );
         }
 
         let parameter_count = function.parameters.len() as u32;
@@ -4972,21 +5026,35 @@ impl Compiler {
             self.code.push(Instruction::StoreCell(slot));
         }
 
-        // Destructure the parameters that bind a pattern, in declaration order, before anything
-        // in the body can read them. `bind_pattern` is the same code a `const { a } = x` uses, so
-        // defaults, renaming, nesting and rest behave identically wherever they are written.
-        for (slot, pattern, span) in destructured {
-            self.code.push(Instruction::LoadLocal(slot));
-            self.bind_pattern(VariableKind::Let, pattern, span);
+        // Bind the parameters in declaration order, before anything in the body can read them.
+        // In *declaration* order rather than patterns-then-defaults, because the order is
+        // observable: a default is an expression, and it runs after everything to its left has
+        // been bound and before anything to its right has. `bind_pattern` is the same code a
+        // `const { a } = x` uses, so defaults, renaming, nesting and rest behave identically
+        // wherever they are written.
+        let outer_dead_zone =
+            std::mem::replace(&mut self.parameter_dead_zone, parameters_have_defaults);
+        for step in binding_steps {
+            match step {
+                ParameterStep::Destructure(slot, pattern, span) => {
+                    self.code.push(Instruction::LoadLocal(slot));
+                    self.bind_pattern(VariableKind::Let, pattern, span);
+                }
+                ParameterStep::Defaulted(slot, celled, pattern, span, name) => {
+                    self.code.push(if celled {
+                        Instruction::LoadCell(slot)
+                    } else {
+                        Instruction::LoadLocal(slot)
+                    });
+                    self.assign_pattern(pattern, span);
+                    // Past its own default, and so out of the dead zone for everything after it.
+                    self.initialize(name);
+                }
+                // Already in its slot: the call put it there, and there is nothing to emit.
+                ParameterStep::Plain(name) => self.initialize(name),
+            }
         }
-        for (slot, celled, pattern, span) in defaulted_identifiers {
-            self.code.push(if celled {
-                Instruction::LoadCell(slot)
-            } else {
-                Instruction::LoadLocal(slot)
-            });
-            self.assign_pattern(pattern, span);
-        }
+        self.parameter_dead_zone = outer_dead_zone;
 
         // `...rest` is the arguments beyond the declared parameters. Taken from the call rather
         // than from slots, because its length is decided by the caller.
