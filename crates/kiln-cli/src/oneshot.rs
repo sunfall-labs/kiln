@@ -211,6 +211,44 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_native_node_run_uses_the_typed_builtin_graph() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-node-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native Node fixture");
+        let source = fixture.join("main.mjs");
+        std::fs::write(
+            &source,
+            r#"import { createServer } from "node:http";
+const server = createServer(() => {});
+server.listen(0, "127.0.0.1", () => {
+  console.log(server.address().port > 0);
+  server.close();
+});
+"#,
+        )
+        .expect("write native Node entry");
+
+        let output = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                kiln_proto::NativeProfile::Dev,
+                true,
+            )
+            .expect("run native Node graph")
+        };
+
+        assert_eq!(output.text, "true\n");
+        assert_eq!(output.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_node_run_selects_dual_package_exports_by_request_kind() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-dual-package-fixture-{}",

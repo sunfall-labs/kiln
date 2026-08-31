@@ -930,6 +930,7 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         path,
         project_root,
         profile: NativeProfile::Dev,
+        node: false,
     };
     let first = client.request(&request).expect("first native request");
     let Response::NativeRan(first) = first else {
@@ -2732,6 +2733,7 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         path: canonical_entry.to_string_lossy().into_owned(),
         project_root: root,
         profile: NativeProfile::Dev,
+        node: false,
     };
     let first = client.request(&request).expect("native graph run");
     let Response::NativeRan(first) = first else {
