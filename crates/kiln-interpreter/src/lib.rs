@@ -8106,6 +8106,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
                 message: "node:http request lost its connection".into(),
             })?;
+        // HTTP connections are driven by Hyper through the realm runtime. Their transport read
+        // is already registered there, so applying the generic StreamDriver pause/resume path
+        // would create a second raw TcpRead (or mutate a driver that does not own the read).
+        if owner
+            .borrow()
+            .streams
+            .iter()
+            .find(|stream| stream.resource() == resource)
+            .is_some_and(|stream| stream.runtime_http)
+        {
+            return Ok(result);
+        }
         let actions = {
             let mut owner = owner.borrow_mut();
             let connection = owner
@@ -10798,7 +10810,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks(runtime)?;
-            self.checkpoint_runtime_http(runtime)?;
+            // HTTP event dispatch can settle a promise (for example, a response `end`
+            // listener resolving the next keep-alive request). The next fixed-point iteration
+            // drains that reaction before checking HTTP progress again; only a quiescent HTTP
+            // checkpoint reaches the liveness-aware host wait below.
+            if self.checkpoint_runtime_http(runtime)? {
+                continue;
+            }
             runtime.enter(|| self.check_unhandled_rejection())?;
             if until_module && self.module_outcome().is_some() {
                 return Ok(());
@@ -10836,12 +10854,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn checkpoint_runtime_http(
         &mut self,
         runtime: &mut RealmRuntime,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<bool, ExecutionError> {
         // Response commands and body wakeups can make Hyper runnable without another HostOps
         // completion. Let Tokio advance those tasks before inspecting their per-connection
         // outputs; otherwise a pipelined request already buffered by Hyper can sit behind an
         // unrelated pending socket read forever.
-        runtime.poll_http_tasks();
+        runtime.poll_http_tasks_after_wake();
+        let mut progressed = false;
         let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
         let servers = shared
             .as_ref()
@@ -10871,6 +10890,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             message: "runtime HTTP connection disappeared at checkpoint".into(),
                         })?;
                 let had_actions = !actions.is_empty();
+                progressed |= had_actions;
                 let had_events = runtime.enter(|| {
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
@@ -10886,12 +10906,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     Ok::<_, ExecutionError>(event_count != 0)
                 })?;
+                progressed |= had_events;
                 if !had_actions && !had_events {
                     break;
                 }
             }
         }
-        Ok(())
+        Ok(progressed)
     }
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
