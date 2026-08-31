@@ -61,6 +61,8 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
 		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-native-number-abi/Cargo.toml \
+		crates/kiln-native-number-abi/src/lib.rs \
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \

@@ -3922,8 +3922,26 @@ mod realm {
         (realm, $name:ident, realm_http_attach) => {
             const _: unsafe extern "C" fn(u64, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = $name;
         };
+        (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options) => {
+            const _: unsafe extern "C" fn(u64, i32, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_http_server_attach_with_options_active;
+        };
         (realm, kiln_realm_http_server_close_active, realm_http_close) => {
             const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_http_server_close_active;
+        };
+        (realm, kiln_realm_http_client_request_id_active, realm_http_request_id) => {
+            const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_http_client_request_id_active;
+        };
+        (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, *mut u64) -> i32 = kiln_realm_http_agent_acquire_active;
+        };
+        (realm, kiln_realm_http_client_owner_active, realm_http_client_owner) => {
+            const _: unsafe extern "C" fn(u64, *mut *mut c_void) -> i32 = kiln_realm_http_client_owner_active;
+        };
+        (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, u64) -> i32 = kiln_realm_http_agent_connected_active;
+        };
+        (realm, kiln_realm_http_agent_release_active, realm_http_agent_release) => {
+            const _: unsafe extern "C" fn(u64, i32, *mut u64) -> i32 = kiln_realm_http_agent_release_active;
         };
         (realm, kiln_realm_http_client_start_active, realm_http_client_start) => {
             const _: unsafe extern "C" fn(u64, u64, *const HttpRequestView, u64) -> i32 = kiln_realm_http_client_start_active;

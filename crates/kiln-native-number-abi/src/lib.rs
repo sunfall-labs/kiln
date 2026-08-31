@@ -34,8 +34,14 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_cancel_request, realm_cancel_request);
             (realm, kiln_realm_cancel_active_request, realm_cancel_active_request);
             (realm, kiln_realm_http_server_attach_active, realm_http_attach);
+            (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options);
             (realm, kiln_realm_http_server_close_active, realm_http_close);
             (realm, kiln_realm_http_client_attach_active, realm_http_attach);
+            (realm, kiln_realm_http_client_request_id_active, realm_http_request_id);
+            (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire);
+            (realm, kiln_realm_http_client_owner_active, realm_http_client_owner);
+            (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected);
+            (realm, kiln_realm_http_agent_release_active, realm_http_agent_release);
             (realm, kiln_realm_http_client_start_active, realm_http_client_start);
             (realm, kiln_realm_http_client_write_active, realm_http_client_write);
             (realm, kiln_realm_http_client_end_active, realm_http_client_end);
@@ -96,7 +102,7 @@ mod tests {
     #[test]
     fn registry_has_the_packaged_contract_shape() {
         assert_eq!(PROVIDER_ABI_VERSION, 14);
-        assert_eq!(PROVIDER_EXPORTS.len(), 57);
+        assert_eq!(PROVIDER_EXPORTS.len(), 63);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }
