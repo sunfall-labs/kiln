@@ -339,27 +339,22 @@ fn run_variant_uncaught(
         }
         Err(error) => {
             diagnostics.push(runtime_diagnostic(&error));
-            // This scalar interpreter does not yet expose JavaScript Error constructors at the
-            // host boundary.  A runtime failure therefore cannot verify a declared Test262 error
-            // type; classifying it Unsupported is safer than claiming a conformance pass.
-            if runtime_error_type_matches(negative.type_name.as_str(), &error) {
-                CaseResult::new(Outcome::Pass, diagnostics, host.into_stdout(), started)
-            } else {
+            // The interpreter carries Error prototype identity for genuine JS throws. Fatal
+            // runtime failures and host refusals remain Unsupported rather than conformance
+            // passes, and a known mismatched JS error is a real test failure.
+            let outcome = match runtime_error_type_verdict(negative.type_name.as_str(), &error) {
+                RuntimeErrorTypeVerdict::Match => Outcome::Pass,
+                RuntimeErrorTypeVerdict::Mismatch => Outcome::Fail,
+                RuntimeErrorTypeVerdict::Unsupported => Outcome::Unsupported,
+            };
+            if matches!(outcome, Outcome::Fail | Outcome::Unsupported) {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticPhase::Runtime,
-                    format!(
-                        "runtime error could not verify expected error type `{}`",
-                        negative.type_name
-                    ),
+                    runtime_type_diagnostic(outcome, &negative.type_name),
                     None,
                 ));
-                CaseResult::new(
-                    Outcome::Unsupported,
-                    diagnostics,
-                    host.into_stdout(),
-                    started,
-                )
             }
+            CaseResult::new(outcome, diagnostics, host.into_stdout(), started)
         }
     }
 }
@@ -487,27 +482,21 @@ fn execute_module_case(
         }
         Err(error) => {
             diagnostics.push(runtime_diagnostic(&error));
-            // Same reasoning as the script path: a thrown value here has no JavaScript
-            // constructor identity yet, so the declared type cannot be checked and claiming a
-            // pass would assert something the runner never verified.
-            if runtime_error_type_matches(negative.type_name.as_str(), &error) {
-                CaseResult::new(Outcome::Pass, diagnostics, host.into_stdout(), started)
-            } else {
+            // The graph forwards the interpreter's thrown-value identity, while link/host
+            // failures are handled before this branch and cannot earn a runtime-negative pass.
+            let outcome = match runtime_error_type_verdict(negative.type_name.as_str(), &error) {
+                RuntimeErrorTypeVerdict::Match => Outcome::Pass,
+                RuntimeErrorTypeVerdict::Mismatch => Outcome::Fail,
+                RuntimeErrorTypeVerdict::Unsupported => Outcome::Unsupported,
+            };
+            if matches!(outcome, Outcome::Fail | Outcome::Unsupported) {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticPhase::Runtime,
-                    format!(
-                        "runtime error could not verify expected error type `{}`",
-                        negative.type_name
-                    ),
+                    runtime_type_diagnostic(outcome, &negative.type_name),
                     None,
                 ));
-                CaseResult::new(
-                    Outcome::Unsupported,
-                    diagnostics,
-                    host.into_stdout(),
-                    started,
-                )
             }
+            CaseResult::new(outcome, diagnostics, host.into_stdout(), started)
         }
     }
 }
@@ -922,43 +911,82 @@ fn parse_error_type_matches(
     negative.type_name == "SyntaxError"
 }
 
-/// Runtime errors currently have no JavaScript constructor identity.  Keep this helper separate
-/// so a future interpreter Error value can add a real matcher without changing classification.
 /// Whether the exception that reached the top of the program is the one a runtime-negative case
 /// promised.
 ///
 /// Test262 asks only for the *type*: a case declaring `negative: {phase: runtime, type:
 /// ReferenceError}` is satisfied by a `ReferenceError` reaching the top, whatever it says. The
-/// type is read back off the thrown object's own `name` -- which is exactly what an uncaught
-/// exception is described by -- so a host refusal, a step-budget exhaustion or an unsupported
-/// construct can never satisfy one: none of them is a JavaScript throw, and none of them arrives
-/// as [`ExecutionError::Uncaught`].
+/// interpreter carries the thrown value's constructor name alongside the display text, so a
+/// primitive or a spoofed `name` property cannot satisfy one. A host refusal, a step-budget
+/// exhaustion or an unsupported construct can never satisfy one: none of them is the JavaScript
+/// error the case promised.
 ///
 /// One shape does arrive as a throw and is still not a language answer. ADR 0017 makes every
 /// unresolved identifier a `ReferenceError`, so a case promising one would otherwise be satisfied
-/// by `DataView is not defined` -- a built-in this engine has not implemented, reported as a
+/// by `AggregateError is not defined` -- a built-in this engine has not implemented, reported as a
 /// conformance pass. That is refused here as it is everywhere else.
-fn runtime_error_type_matches(expected: &str, error: &ExecutionError) -> bool {
-    let ExecutionError::Uncaught { message, .. } = error else {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeErrorTypeVerdict {
+    Match,
+    Mismatch,
+    Unsupported,
+}
+
+fn runtime_error_type_verdict(expected: &str, error: &ExecutionError) -> RuntimeErrorTypeVerdict {
+    let ExecutionError::Uncaught {
+        message,
+        error_constructor,
+        ..
+    } = error
+    else {
+        return RuntimeErrorTypeVerdict::Unsupported;
     };
     // `(in promise)` records where the exception surfaced, not what it was.
     let described = message
         .strip_prefix("(in promise) ")
         .unwrap_or(message.as_str());
-    if unresolved_intrinsic(described).is_some() {
-        return false;
+    if message.contains(HOST_CAPABILITY_MARKER) || unresolved_intrinsic(described).is_some() {
+        return RuntimeErrorTypeVerdict::Unsupported;
     }
-    // `Error.prototype.toString`: `name`, then `": "` and the message when there is one.
-    let name = described
-        .split_once(": ")
-        .map_or(described, |(name, _)| name);
-    name == expected
+    // A type outside the constructors this interpreter exposes cannot be checked, even though a
+    // thrown primitive or a different built-in would prove the test wrong if the constructor were
+    // known. Keep those cases visible as Unsupported until that constructor exists in the realm.
+    if !matches!(
+        expected,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "URIError"
+            | "EvalError"
+            | "SuppressedError"
+    ) {
+        return RuntimeErrorTypeVerdict::Unsupported;
+    }
+    let Some(actual) = error_constructor else {
+        return RuntimeErrorTypeVerdict::Mismatch;
+    };
+    // Test262 compares the constructor's name exactly. In particular, `TypeError` is not
+    // interchangeable with its `Error` superclass, and a user subclass keeps its own name.
+    if actual == expected {
+        RuntimeErrorTypeVerdict::Match
+    } else {
+        RuntimeErrorTypeVerdict::Mismatch
+    }
+}
+
+fn runtime_type_diagnostic(outcome: Outcome, expected: &str) -> String {
+    match outcome {
+        Outcome::Fail => format!("runtime error did not match expected error type `{expected}`"),
+        _ => format!("runtime error could not verify expected error type `{expected}`"),
+    }
 }
 
 /// The intrinsic a runtime error says is missing, when that is what it says.
 ///
-/// A test that reaches for `DataView` and is told it is not defined has not found a wrong answer;
+/// A test that reaches for `AggregateError` and is told it is not defined has not found a wrong
+/// answer;
 /// it has found a built-in Kiln does not implement yet. ADR 0017 makes every unresolved identifier
 /// a runtime throw, so a missing intrinsic and a genuine scoping bug arrive in the same shape, and
 /// the only thing separating them is what the name looks like: an intrinsic is capitalised and
@@ -973,7 +1001,7 @@ fn missing_intrinsic(message: &str) -> Option<&str> {
 }
 
 /// The same question asked of an uncaught exception's *description* rather than of the rendered
-/// diagnostic, which is the form [`runtime_error_type_matches`] has.
+/// diagnostic, which is the form [`runtime_error_type_verdict`] has.
 fn unresolved_intrinsic(described: &str) -> Option<&str> {
     let rest = described.strip_prefix("ReferenceError: ")?;
     let name = rest.split(" is not defined").next()?;
@@ -1346,6 +1374,123 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("unsupported statement"))
+        );
+    }
+
+    #[test]
+    fn runtime_negative_type_uses_thrown_identity_across_boundaries() {
+        fn runtime_negative(source: &str, type_name: &str) -> TestCase {
+            let mut negative = case(source);
+            negative.metadata.flags.push("raw".to_owned());
+            negative.metadata.negative = Some(NegativeExpectation {
+                phase: Phase::Runtime,
+                type_name: type_name.to_owned(),
+            });
+            negative
+        }
+
+        // A primitive can render exactly like an Error, but it is not an instance of its
+        // constructor. Parsing the uncaught display text would incorrectly count this as a pass.
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw 'TypeError: primitive';", "TypeError"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Fail
+        );
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw new TypeError();", "TypeError"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Pass
+        );
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw new EvalError();", "EvalError"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Pass
+        );
+        // Test262 compares constructor names exactly: a built-in subtype does not satisfy its
+        // `Error` superclass expectation, and the wrong specific kind does not either.
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw new TypeError();", "Error"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Fail
+        );
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw new Error();", "TypeError"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Fail
+        );
+        assert_eq!(
+            run_case(
+                &runtime_negative(
+                    "class Derived extends TypeError {}\nthrow new Derived();",
+                    "TypeError",
+                ),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Fail
+        );
+
+        // An unhandled async rejection is still a JS throw and retains its error identity.
+        let harness = async_harness("negative-runtime");
+        let mut async_negative = async_case("Promise.reject(new TypeError());");
+        async_negative.metadata.negative = Some(NegativeExpectation {
+            phase: Phase::Runtime,
+            type_name: "TypeError".to_owned(),
+        });
+        assert_eq!(
+            run_case_with_harness(&async_negative, RunMode::Interpreter, Some(&harness),).outcome,
+            Outcome::Pass
+        );
+
+        // The host prelude deliberately throws an Error-shaped value for unavailable facilities;
+        // this must remain Unsupported rather than satisfying a runtime-negative `Error` case.
+        let mut host_refusal = case("$262.agent.start();");
+        host_refusal.metadata.negative = Some(NegativeExpectation {
+            phase: Phase::Runtime,
+            type_name: "Error".to_owned(),
+        });
+        assert_eq!(
+            run_case_with_harness(&host_refusal, RunMode::Interpreter, Some(&harness)).outcome,
+            Outcome::Unsupported
+        );
+
+        // An absent intrinsic is surfaced as a ReferenceError by the language, but remains an
+        // implementation gap rather than a conformance success.
+        assert_eq!(
+            run_case(
+                &runtime_negative("throw AggregateError;", "ReferenceError"),
+                RunMode::Interpreter,
+            )
+            .outcome,
+            Outcome::Unsupported
+        );
+
+        // Module graph execution forwards the same thrown value to the entry case.
+        let corpus = TempCorpus::new("negative-runtime-module");
+        corpus.write("dep_FIXTURE.js", "throw new TypeError();\n");
+        let mut module = corpus.module_case("entry.js", "", "import './dep_FIXTURE.js';\n");
+        module.metadata.negative = Some(NegativeExpectation {
+            phase: Phase::Runtime,
+            type_name: "TypeError".to_owned(),
+        });
+        assert_eq!(
+            run_case_with_harness(&module, RunMode::Interpreter, Some(&harness)).outcome,
+            Outcome::Pass
         );
     }
 
