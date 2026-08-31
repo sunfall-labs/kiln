@@ -16,6 +16,7 @@ use kiln_runtime::{
     ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
     RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     node_http::HttpResponseEvent,
+    node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -200,17 +201,23 @@ pub enum ErrorKind {
     Reference,
     Syntax,
     Uri,
+    /// `SuppressedError`, which explicit resource management raises when disposing one resource
+    /// throws while another throw is already travelling. It is an error kind rather than a type
+    /// of its own because that is exactly what it is: an `Error` with two extra fields naming
+    /// the two throws, and a prototype chaining to `Error.prototype` like every other.
+    Suppressed,
 }
 
 impl ErrorKind {
     /// Every kind, in declaration order, so the realm can build all their prototypes.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Error,
         Self::Type,
         Self::Range,
         Self::Reference,
         Self::Syntax,
         Self::Uri,
+        Self::Suppressed,
     ];
 
     pub fn name(self) -> &'static str {
@@ -221,6 +228,7 @@ impl ErrorKind {
             Self::Reference => "ReferenceError",
             Self::Syntax => "SyntaxError",
             Self::Uri => "URIError",
+            Self::Suppressed => "SuppressedError",
         }
     }
 
@@ -535,6 +543,20 @@ pub enum Native {
     /// tell it apart from one that has simply not collected yet.
     WeakRefConstructor,
     WeakRefDeref,
+    /// `DisposableStack` and everything it can do.
+    ///
+    /// A stack is an ordinary object carrying two reserved slots: the disposers it has been
+    /// given, and whether it has run them. That is the whole of its state, and the brand check
+    /// every method starts with is "does this object have the first slot" -- the same shape
+    /// `WeakRef` and a collection use, and for the same reason.
+    DisposableStackConstructor,
+    DisposableStackUse,
+    DisposableStackAdopt,
+    DisposableStackDefer,
+    DisposableStackMove,
+    /// `dispose()` and `[Symbol.dispose]`, which are one function: the specification says the
+    /// two properties hold the same object, and a program compares them.
+    DisposableStackDispose,
     /// `FinalizationRegistry` and its two methods, for the same reason: nothing is ever
     /// collected, so no cleanup callback ever becomes due. What the registry still has to get
     /// right is everything a program can observe synchronously -- which targets it accepts, what
@@ -1381,6 +1403,9 @@ impl Native {
             (Self::WeakRefConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakRef)))
             }
+            (Self::DisposableStackConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::DisposableStack),
+            )),
             (Self::FinalizationRegistryConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::FinalizationRegistry),
             )),
@@ -1434,6 +1459,7 @@ impl Native {
                 PrototypeTable::WeakMap => Self::WeakMapConstructor,
                 PrototypeTable::WeakSet => Self::WeakSetConstructor,
                 PrototypeTable::WeakRef => Self::WeakRefConstructor,
+                PrototypeTable::DisposableStack => Self::DisposableStackConstructor,
                 PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
                 PrototypeTable::EventEmitter => Self::NodeEventEmitter,
                 PrototypeTable::Readable => Self::NodeReadable,
@@ -1470,6 +1496,7 @@ impl Native {
                     PrototypeTable::WeakMap => collection_property(true, true, name),
                     PrototypeTable::WeakSet => collection_property(false, true, name),
                     PrototypeTable::WeakRef => weak_ref_method(name),
+                    PrototypeTable::DisposableStack => disposable_stack_method(name),
                     PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
                     PrototypeTable::EventEmitter => Value::Undefined,
                     PrototypeTable::Readable => Self::PrototypeOf(PrototypeTable::EventEmitter)
@@ -2805,6 +2832,7 @@ pub enum PrototypeTable {
     /// deliberately cannot, and a registry holds a value it is *not* weak about at all.
     WeakRef,
     FinalizationRegistry,
+    DisposableStack,
     EventEmitter,
     /// `node:stream`'s readable method table. It inherits EventEmitter and owns no transport:
     /// HTTP, TCP and in-memory producers all feed the same state machine through `push`.
@@ -4812,6 +4840,7 @@ struct ModuleRealmShared {
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
     symbol_serial: u64,
     symbol_registry: Vec<(String, Value)>,
@@ -4825,6 +4854,7 @@ impl Default for ModuleRealmSession {
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 node_servers: Vec::new(),
+                http_client_requests: std::collections::BTreeMap::new(),
                 next_http_client_request_id: 1,
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
@@ -6499,6 +6529,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Interpreter-owned ClientRequest values keyed exactly like the runtime Agent queue.
+    http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     /// Monotonic request identity for standalone execution. Module graphs keep the same counter
     /// in `ModuleRealmShared`, so every request in one realm has a distinct routing key.
     next_http_client_request_id: u64,
@@ -6637,6 +6669,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
+            http_client_requests: std::collections::BTreeMap::new(),
             next_http_client_request_id: 1,
             module_realm: None,
             async_host: None,
@@ -6746,6 +6779,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let id = self.next_http_client_request_id;
             self.next_http_client_request_id = id.wrapping_add(1).max(1);
             id
+        }
+    }
+
+    fn register_http_client_request(
+        &mut self,
+        id: u64,
+        state: &Rc<RefCell<HttpClientRequestState>>,
+    ) {
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow_mut()
+                .http_client_requests
+                .insert(id, Rc::clone(state));
+        } else {
+            self.http_client_requests.insert(id, Rc::clone(state));
+        }
+    }
+
+    fn http_client_request(&self, id: u64) -> Option<Rc<RefCell<HttpClientRequestState>>> {
+        self.module_realm
+            .as_ref()
+            .and_then(|realm| realm.borrow().http_client_requests.get(&id).cloned())
+            .or_else(|| self.http_client_requests.get(&id).cloned())
+    }
+
+    fn remove_http_client_request(&mut self, id: u64) {
+        if let Some(realm) = &self.module_realm {
+            realm.borrow_mut().http_client_requests.remove(&id);
+        } else {
+            self.http_client_requests.remove(&id);
         }
     }
 
@@ -7254,23 +7317,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     request_id,
                 }));
                 let request_object = node_http_client_request_object(&state);
-                let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "node:http client requires the Node execution Adapter".into(),
-                })?;
-                let request = unsafe {
-                    ActiveAsyncHostOps::start(
-                        &mut *host_ops,
-                        AsyncHostOp::TcpConnect { host, port },
-                        true,
-                    )
-                };
-                self.push_pending_node(PendingNodeRequest::Connect {
-                    request,
-                    target: PendingConnect::Http(Rc::clone(&state)),
-                });
+                self.register_http_client_request(request_id, &state);
                 if matches!(native, Native::NodeHttpGet) {
                     state.borrow_mut().ended = true;
+                }
+                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http client requires the realm HTTP runtime".into(),
+                })?;
+                match unsafe {
+                    ActiveHttpRuntime::acquire_client_connection(
+                        &mut *runtime,
+                        HttpOrigin::http(&host, port),
+                        request_id,
+                    )
+                } {
+                    AgentDecision::Connect => {
+                        let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "node:http client requires the Node execution Adapter".into(),
+                        })?;
+                        let request = unsafe {
+                            ActiveAsyncHostOps::start(
+                                &mut *host_ops,
+                                AsyncHostOp::TcpConnect { host, port },
+                                true,
+                            )
+                        };
+                        self.push_pending_node(PendingNodeRequest::Connect {
+                            request,
+                            target: PendingConnect::Http(Rc::clone(&state)),
+                        });
+                    }
+                    AgentDecision::Reuse(resource) => {
+                        self.attach_http_client_request_to_resource(&state, resource, instruction)?;
+                    }
+                    AgentDecision::Queued => {}
                 }
                 Ok(request_object)
             }
@@ -8020,6 +8102,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseEnd { id } => {
+                    let release = unsafe {
+                        ActiveHttpRuntime::release_client_connection(&mut *runtime, resource, true)
+                    };
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -8038,11 +8123,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         stream.request = None;
                         stream.response = None;
                     }
-                    let actions =
-                        unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
+                    self.remove_http_client_request(id);
+                    match release {
+                        AgentRelease::Idle => {
+                            self.set_http_resource_referenced(owner, resource, false, instruction)?;
+                        }
+                        AgentRelease::Dispatch { request } => {
+                            let queued = self.http_client_request(request).ok_or_else(|| {
+                                ExecutionError::Host {
+                                    instruction,
+                                    message: "HTTP Agent lost its queued ClientRequest".into(),
+                                }
+                            })?;
+                            self.attach_http_client_request_to_resource(
+                                &queued,
+                                resource,
+                                instruction,
+                            )?;
+                        }
+                        AgentRelease::Retire => {
+                            let actions = unsafe {
+                                ActiveHttpRuntime::close_connection(&mut *runtime, resource)
+                            }
                             .unwrap_or_default();
-                    for action in actions {
-                        self.start_http_stream_action(owner, resource, action, instruction)?;
+                            for action in actions {
+                                self.start_http_stream_action(
+                                    owner,
+                                    resource,
+                                    action,
+                                    instruction,
+                                )?;
+                            }
+                        }
                     }
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
@@ -8687,6 +8799,80 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    fn attach_http_client_request_to_resource(
+        &mut self,
+        state: &Rc<RefCell<HttpClientRequestState>>,
+        resource: kiln_host_abi::ResourceId,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let owner = self
+            .http_server_for_stream(resource)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP Agent selected a connection without an adapter owner".into(),
+            })?;
+        let socket = owner
+            .borrow()
+            .streams
+            .iter()
+            .find(|stream| stream.resource() == resource)
+            .and_then(|stream| {
+                stream
+                    .client_requests
+                    .values()
+                    .find_map(|request| node_http_client_request(request).ok())
+                    .and_then(|request| request.borrow().socket.clone())
+            })
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP Agent connection lost its JavaScript socket".into(),
+            })?;
+        let request_id = state.borrow().request_id;
+        let request = state
+            .borrow()
+            .object
+            .as_ref()
+            .map(|object| Value::Object(Rc::clone(object)))
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP client request lost its JavaScript object".into(),
+            })?;
+        state.borrow_mut().socket = Some(Rc::clone(&socket));
+        let inserted = owner
+            .borrow_mut()
+            .streams
+            .iter_mut()
+            .find(|stream| stream.resource() == resource)
+            .map(|stream| stream.client_requests.insert(request_id, request))
+            .is_some();
+        if !inserted {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "HTTP Agent connection disappeared during attachment".into(),
+            });
+        }
+        self.set_http_resource_referenced(&owner, resource, true, instruction)?;
+        self.flush_http_client_request(state, &socket, instruction)
+    }
+
+    fn set_http_resource_referenced(
+        &mut self,
+        owner: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        referenced: bool,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        self.start_http_stream_action(
+            owner,
+            resource,
+            StreamAction::Start(AsyncHostOp::SetResourceReferenced {
+                resource,
+                referenced,
+            }),
+            instruction,
+        )
+    }
+
     fn flush_http_client_request(
         &mut self,
         state: &Rc<RefCell<HttpClientRequestState>>,
@@ -9162,6 +9348,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                     .map(|object| Value::Object(Rc::clone(object)))
                                     .unwrap_or(Value::Undefined);
                                 state.borrow_mut().socket = Some(Rc::clone(&socket_state));
+                                let runtime =
+                                    self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                                        instruction: self.instruction,
+                                        message: "node:http client requires the realm HTTP runtime"
+                                            .into(),
+                                    })?;
+                                let request_state = state.borrow();
+                                if !unsafe {
+                                    ActiveHttpRuntime::client_connection_connected(
+                                        &mut *runtime,
+                                        HttpOrigin::http(&request_state.host, request_state.port),
+                                        resource,
+                                        request_state.request_id,
+                                    )
+                                } {
+                                    return Err(ExecutionError::Host {
+                                        instruction: self.instruction,
+                                        message: "HTTP Agent rejected the connected transport"
+                                            .into(),
+                                    });
+                                }
+                                drop(request_state);
                                 (socket_state, socket, ServerProtocol::HttpClient, request)
                             }
                         };
@@ -10163,6 +10371,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Function => Native::FunctionConstructor,
                         kiln_ir::Builtin::Eval => Native::Eval,
                         kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
+                        kiln_ir::Builtin::DisposableStack => Native::DisposableStackConstructor,
+                        kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
                             Native::TypedArrayConstructor(TypedKind::Int8)
@@ -11239,6 +11449,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | BuiltinAccessor::SharedGrowable => {
                 matches!(receiver, Value::ArrayBuffer(buffer) if buffer.shared)
             }
+            BuiltinAccessor::DisposableStackDisposed => {
+                return match receiver {
+                    Value::Object(object) if object.borrow().get_own(DISPOSE_ENTRIES).is_some() => {
+                        Ok(Value::Boolean(Self::disposable_is_disposed(receiver)))
+                    }
+                    _ => Err(ExecutionError::TypeErrorMessage {
+                        message: "DisposableStack.prototype.disposed called on an incompatible \
+                                  receiver"
+                            .to_owned(),
+                    }),
+                };
+            }
             BuiltinAccessor::DataViewBuffer
             | BuiltinAccessor::DataViewByteLength
             | BuiltinAccessor::DataViewByteOffset => matches!(receiver, Value::DataView(_)),
@@ -11616,6 +11838,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Both of these need the machine for `CanBeHeldWeakly`, which asks the realm's
             // symbol registry whether a symbol is one a program could look up again.
             Native::WeakRefDeref => return self.weak_ref_deref(receiver, instruction),
+            Native::DisposableStackUse => {
+                return self.disposable_use(receiver, arguments, instruction);
+            }
+            Native::DisposableStackAdopt => return self.disposable_adopt(receiver, arguments),
+            Native::DisposableStackDefer => return self.disposable_defer(receiver, arguments),
+            Native::DisposableStackMove => return self.disposable_move(receiver),
+            Native::DisposableStackDispose => {
+                return self.disposable_dispose(receiver, instruction);
+            }
             Native::FinalizationRegistryRegister => {
                 return self.finalization_registry_register(receiver, arguments, instruction);
             }
@@ -11639,6 +11870,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::WeakMapConstructor
             | Native::WeakSetConstructor
             | Native::ProxyConstructor
+            | Native::DisposableStackConstructor
             | Native::ArrayBufferConstructor
             | Native::SharedArrayBufferConstructor
             | Native::DataViewConstructor
@@ -19962,6 +20194,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor));
         globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor));
         globals.set_non_enumerable(
+            "DisposableStack",
+            Value::Native(Native::DisposableStackConstructor),
+        );
+        globals.set_non_enumerable(
             "FinalizationRegistry",
             Value::Native(Native::FinalizationRegistryConstructor),
         );
@@ -20267,6 +20503,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.construct_collection(parent, arguments, current)?
             }
             Native::WeakRefConstructor => self.construct_weak_ref(arguments, current)?,
+            Native::DisposableStackConstructor => new_disposable_stack(),
             Native::FinalizationRegistryConstructor => {
                 self.construct_finalization_registry(arguments, current)?
             }
@@ -20588,6 +20825,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let collection = self.construct_collection(kind, &arguments, current)?;
                 self.stack.push(collection);
             }
+            Value::Native(Native::DisposableStackConstructor) => {
+                self.stack.push(new_disposable_stack());
+            }
             Value::Native(Native::WeakRefConstructor) => {
                 let built = self.construct_weak_ref(&arguments, current)?;
                 self.stack.push(built);
@@ -20638,6 +20878,219 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .iter()
                 .any(|(_, registered)| strict_equal(registered, value)),
             other => is_reflect_target(other),
+        }
+    }
+
+    /// The disposers this stack is holding, innermost last -- and whether it has run them.
+    ///
+    /// Each entry is `[method, receiver, arguments]`: one call, recorded rather than performed.
+    /// `use` records the value's own `[Symbol.dispose]` against the value; `adopt` and `defer`
+    /// record the callback the program handed over. Keeping all three as the same shape means
+    /// `dispose` has one thing to do with each and no idea which spelling produced it.
+    fn disposable_entries(&self, receiver: &Value, what: &str) -> Result<Value, ExecutionError> {
+        if let Value::Object(object) = receiver
+            && let Some(found) = object.borrow().get_own(DISPOSE_ENTRIES)
+        {
+            return Ok(found.clone());
+        }
+        Err(ExecutionError::TypeErrorMessage {
+            message: format!("{what} called on an incompatible receiver"),
+        })
+    }
+
+    /// Whether this stack has already run its disposers.
+    fn disposable_is_disposed(receiver: &Value) -> bool {
+        matches!(receiver, Value::Object(object)
+            if object.borrow().get_own(DISPOSE_DONE).is_some_and(Value::is_truthy))
+    }
+
+    /// The brand check plus the state check every method but `dispose` starts with: a stack that
+    /// has been disposed accepts nothing more, because there is no longer anything that would
+    /// run what it was given.
+    fn live_disposable_entries(
+        &self,
+        receiver: &Value,
+        what: &str,
+    ) -> Result<Rc<ArrayData>, ExecutionError> {
+        let entries = self.disposable_entries(receiver, what)?;
+        if Self::disposable_is_disposed(receiver) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{what} called on an already-disposed stack"),
+            });
+        }
+        let Value::Array(entries) = entries else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{what} called on an incompatible receiver"),
+            });
+        };
+        Ok(entries)
+    }
+
+    /// `DisposableStack.prototype.use(value)`.
+    fn disposable_use(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.use")?;
+        let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+        // `null` and `undefined` are nothing to dispose rather than a broken resource, which is
+        // what lets `using x = maybe()` be written without a guard.
+        if value.is_nullish() {
+            return Ok(value);
+        }
+        let method = self.read_computed(
+            &value,
+            &Value::Symbol(Symbol::WellKnown(WellKnown::Dispose)),
+            instruction,
+        )?;
+        if !is_callable(&method) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "DisposableStack.prototype.use: the value has no callable \
+                          [Symbol.dispose]"
+                    .to_owned(),
+            });
+        }
+        entries
+            .borrow_mut()
+            .push(disposal(method, value.clone(), Vec::new()));
+        Ok(value)
+    }
+
+    /// `DisposableStack.prototype.adopt(value, onDispose)`.
+    fn disposable_adopt(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+    ) -> Result<Value, ExecutionError> {
+        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.adopt")?;
+        let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let on_dispose = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        if !is_callable(&on_dispose) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "DisposableStack.prototype.adopt: onDispose must be a function".to_owned(),
+            });
+        }
+        entries
+            .borrow_mut()
+            .push(disposal(on_dispose, Value::Undefined, vec![value.clone()]));
+        Ok(value)
+    }
+
+    /// `DisposableStack.prototype.defer(onDispose)`.
+    fn disposable_defer(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+    ) -> Result<Value, ExecutionError> {
+        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.defer")?;
+        let on_dispose = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !is_callable(&on_dispose) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "DisposableStack.prototype.defer: onDispose must be a function".to_owned(),
+            });
+        }
+        entries
+            .borrow_mut()
+            .push(disposal(on_dispose, Value::Undefined, Vec::new()));
+        Ok(Value::Undefined)
+    }
+
+    /// `DisposableStack.prototype.move()`: hand the disposers to a fresh stack.
+    ///
+    /// The original is left *disposed* rather than empty, which is the point: moving is how a
+    /// function that built resources transfers responsibility for them to its caller, and the
+    /// stack it built must not run them on the way out.
+    fn disposable_move(&mut self, receiver: &Value) -> Result<Value, ExecutionError> {
+        let entries = self.live_disposable_entries(receiver, "DisposableStack.prototype.move")?;
+        let moved = new_disposable_stack();
+        let taken = std::mem::take(&mut *entries.borrow_mut());
+        if let Value::Object(object) = &moved {
+            object
+                .borrow_mut()
+                .set_non_enumerable(DISPOSE_ENTRIES, Value::Array(ArrayData::new(taken)));
+        }
+        if let Value::Object(object) = receiver {
+            object
+                .borrow_mut()
+                .set_non_enumerable(DISPOSE_DONE, Value::Boolean(true));
+        }
+        Ok(moved)
+    }
+
+    /// `DisposableStack.prototype.dispose()`, which is `[Symbol.dispose]` too.
+    ///
+    /// Every disposer runs, in reverse order, whatever the ones before it did -- a resource that
+    /// cannot be released must not strand the ones underneath it. What is left over is what the
+    /// throws add up to: one of them travels as itself, and several fold into a chain of
+    /// `SuppressedError`s, each naming the throw it displaced.
+    fn disposable_dispose(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let entries = self.disposable_entries(receiver, "DisposableStack.prototype.dispose")?;
+        if Self::disposable_is_disposed(receiver) {
+            return Ok(Value::Undefined);
+        }
+        if let Value::Object(object) = receiver {
+            object
+                .borrow_mut()
+                .set_non_enumerable(DISPOSE_DONE, Value::Boolean(true));
+        }
+        let Value::Array(entries) = entries else {
+            return Ok(Value::Undefined);
+        };
+        let pending: Vec<Value> = std::mem::take(&mut *entries.borrow_mut());
+        let mut thrown: Option<Value> = None;
+        for entry in pending.into_iter().rev() {
+            let Value::Array(entry) = entry else { continue };
+            let (method, this_value, list) = {
+                let entry = entry.borrow();
+                let list = match entry.get(2) {
+                    Some(Value::Array(list)) => list.borrow().clone(),
+                    _ => Vec::new(),
+                };
+                (
+                    entry.first().cloned().unwrap_or(Value::Undefined),
+                    entry.get(1).cloned().unwrap_or(Value::Undefined),
+                    list,
+                )
+            };
+            let outcome = self.call_value(&method, this_value, list, instruction);
+            if let Err(error) = outcome {
+                let raised = self.thrown_value(error)?;
+                thrown = Some(match thrown {
+                    None => raised,
+                    Some(earlier) => {
+                        self.construct_error(ErrorKind::Suppressed, &[raised, earlier])
+                    }
+                });
+            }
+        }
+        match thrown {
+            None => Ok(Value::Undefined),
+            Some(value) => {
+                self.caught = Some(value);
+                Err(ExecutionError::ThrownAcrossNative)
+            }
+        }
+    }
+
+    /// The value a failed call threw, for a built-in that has to keep going and report later.
+    ///
+    /// An error the machine raised carries a kind and a sentence rather than an object, so one
+    /// is built here -- which is what a `catch` around the same call would have seen.
+    fn thrown_value(&mut self, error: ExecutionError) -> Result<Value, ExecutionError> {
+        match error {
+            ExecutionError::ThrownAcrossNative | ExecutionError::CaughtByHost => {
+                Ok(self.caught.take().unwrap_or(Value::Undefined))
+            }
+            other => match other.as_javascript_error() {
+                Some((kind, message)) => Ok(self.construct_error(kind, &[Value::String(message)])),
+                None => Err(other),
+            },
         }
     }
 
@@ -22531,6 +22984,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // which of the eight types this is.
             Value::Temporal(value) => {
                 temporal::instance_property(value, name).unwrap_or(Value::Undefined)
+            }
+            // A `DisposableStack` is an object carrying reserved state too, and `disposed` is
+            // read straight off it. The accessor on the prototype is what
+            // `getOwnPropertyDescriptor` reports; this is what the read answers, for the same
+            // reason a collection's `size` is answered here -- an instance is an ordinary object
+            // and the chain walk below would find the getter rather than run it.
+            Value::Object(object)
+                if name == "disposed" && object.borrow().get_own(DISPOSE_ENTRIES).is_some() =>
+            {
+                Value::Boolean(
+                    object
+                        .borrow()
+                        .get_own(DISPOSE_DONE)
+                        .is_some_and(Value::is_truthy),
+                )
             }
             // A Set or Map instance is an object whose reserved state marks it. Its methods come
             // from one table shared with `in`, so the two cannot disagree -- and this arm has to
@@ -25361,7 +25829,11 @@ fn binary(
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
 /// the whole point of that step in the specification.
 fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
-    let message = match arguments.first() {
+    // `new SuppressedError(error, suppressed, message)`: the message comes *third*, because the
+    // two throws it is reporting are what the type is for and the sentence is an afterthought.
+    let suppressed = matches!(kind, ErrorKind::Suppressed);
+    let message_at = usize::from(suppressed) * 2;
+    let message = match arguments.get(message_at) {
         None | Some(Value::Undefined) => String::new(),
         Some(value) => value.to_display_string(),
     };
@@ -25381,7 +25853,19 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
             format!("{name}: {message}")
         }),
     );
-    if let Some(Value::Object(options)) = arguments.get(1)
+    if suppressed {
+        // Both are own properties whatever was passed, `undefined` included: a program that
+        // catches one of these reads `.error` and `.suppressed` without checking first.
+        data.set_non_enumerable(
+            "error",
+            arguments.first().cloned().unwrap_or(Value::Undefined),
+        );
+        data.set_non_enumerable(
+            "suppressed",
+            arguments.get(1).cloned().unwrap_or(Value::Undefined),
+        );
+    }
+    if let Some(Value::Object(options)) = arguments.get(message_at + 1)
         && let Some(cause) = options.borrow().get("cause")
     {
         data.set_non_enumerable("cause", cause.clone());
@@ -26598,6 +27082,12 @@ fn call_native(
         | Native::JsonIsRawJson
         | Native::WeakRefConstructor
         | Native::WeakRefDeref
+        | Native::DisposableStackConstructor
+        | Native::DisposableStackUse
+        | Native::DisposableStackAdopt
+        | Native::DisposableStackDefer
+        | Native::DisposableStackMove
+        | Native::DisposableStackDispose
         | Native::FinalizationRegistryConstructor
         | Native::FinalizationRegistryRegister
         | Native::FinalizationRegistryUnregister
@@ -28684,6 +29174,52 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
 }
 
 /// What a `WeakRef` inherits from `WeakRef.prototype`.
+/// What a `DisposableStack` inherits from `DisposableStack.prototype`.
+///
+/// `dispose` and `[Symbol.dispose]` answer with the *same* value, which is what the
+/// specification says they are -- a program that stores one and compares it with the other has
+/// to find them equal, and that is the whole of how `using` reaches a stack.
+/// The reserved slots a `DisposableStack` carries.
+const DISPOSE_ENTRIES: &str = "@@disposeEntries";
+const DISPOSE_DONE: &str = "@@disposeDone";
+
+/// One recorded call: what to invoke, against what, with what.
+fn disposal(method: Value, this_value: Value, arguments: Vec<Value>) -> Value {
+    Value::Array(ArrayData::new(vec![
+        method,
+        this_value,
+        Value::Array(ArrayData::new(arguments)),
+    ]))
+}
+
+/// `new DisposableStack()`: empty, and not yet disposed.
+fn new_disposable_stack() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable(DISPOSE_ENTRIES, Value::Array(ArrayData::new(Vec::new())));
+    data.set_non_enumerable(DISPOSE_DONE, Value::Boolean(false));
+    data.set_prototype(Value::Native(Native::PrototypeOf(
+        PrototypeTable::DisposableStack,
+    )));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn disposable_stack_method(name: &str) -> Value {
+    match name {
+        "use" => Value::Native(Native::DisposableStackUse),
+        "adopt" => Value::Native(Native::DisposableStackAdopt),
+        "defer" => Value::Native(Native::DisposableStackDefer),
+        "move" => Value::Native(Native::DisposableStackMove),
+        "dispose" => Value::Native(Native::DisposableStackDispose),
+        key if key == WellKnown::Dispose.property_key() => {
+            Value::Native(Native::DisposableStackDispose)
+        }
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("DisposableStack".to_owned())
+        }
+        _ => Value::Undefined,
+    }
+}
+
 fn weak_ref_method(name: &str) -> Value {
     match name {
         "deref" => Value::Native(Native::WeakRefDeref),
@@ -31983,6 +32519,8 @@ pub enum BuiltinAccessor {
     /// `get [Symbol.species]`, which every one of them defines identically: it answers its own
     /// receiver, so a subclass's derived operations build the subclass.
     Species,
+    /// `DisposableStack.prototype.disposed`.
+    DisposableStackDisposed,
 }
 
 impl BuiltinAccessor {
@@ -32001,6 +32539,7 @@ impl BuiltinAccessor {
             Self::DataViewByteOffset | Self::TypedArrayByteOffset => "byteOffset",
             Self::TypedArrayLength => "length",
             Self::CollectionSize(_) => "size",
+            Self::DisposableStackDisposed => "disposed",
             Self::Species => WellKnown::Species.property_key(),
         }
     }
@@ -32014,6 +32553,7 @@ fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
         PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
         PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
         PrototypeTable::Map | PrototypeTable::Set => &["size"],
+        PrototypeTable::DisposableStack => &["disposed"],
         _ => &[],
     }
 }
@@ -32040,6 +32580,7 @@ fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccesso
         (PrototypeTable::TypedArray, "length") => BuiltinAccessor::TypedArrayLength,
         (PrototypeTable::Map, "size") => BuiltinAccessor::CollectionSize(true),
         (PrototypeTable::Set, "size") => BuiltinAccessor::CollectionSize(false),
+        (PrototypeTable::DisposableStack, "disposed") => BuiltinAccessor::DisposableStackDisposed,
         _ => return None,
     })
 }
@@ -32736,6 +33277,9 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::IteratorZipNext
         | N::IteratorZipReturn
         | N::WeakRefDeref
+        | N::DisposableStackConstructor
+        | N::DisposableStackMove
+        | N::DisposableStackDispose
         | N::ProxyRevoke => 0.0,
 
         // The two-argument ones. `Object.assign` is 2 because the specification counts the
@@ -33322,6 +33866,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::WeakMap => &["set", "get", "has", "delete"],
         PrototypeTable::WeakSet => &["add", "has", "delete"],
         PrototypeTable::WeakRef => &["deref"],
+        PrototypeTable::DisposableStack => &["use", "adopt", "defer", "move", "dispose"],
         PrototypeTable::FinalizationRegistry => &["register", "unregister"],
         PrototypeTable::EventEmitter => &[
             "on",
@@ -33860,6 +34405,11 @@ fn native_js_name(native: &Native) -> String {
         // The derivation strips a leading type name, which for these three takes a word that is
         // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
         Native::WeakRefDeref => "deref".to_owned(),
+        Native::DisposableStackUse => "use".to_owned(),
+        Native::DisposableStackAdopt => "adopt".to_owned(),
+        Native::DisposableStackDefer => "defer".to_owned(),
+        Native::DisposableStackMove => "move".to_owned(),
+        Native::DisposableStackDispose => "dispose".to_owned(),
         // The derivation lowers a trailing acronym as an ordinary word: `JsonRawJson` becomes
         // `rawJson`, and the language spells the second half in capitals.
         Native::JsonRawJson => "rawJSON".to_owned(),
