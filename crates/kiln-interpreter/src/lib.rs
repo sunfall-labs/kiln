@@ -19243,12 +19243,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         array: &Value,
         index: u64,
         value: Value,
+        instruction: usize,
     ) -> Result<(), ExecutionError> {
         let Value::Array(items) = array else {
             // Whatever the species built. `CreateDataPropertyOrThrow` rather than an assignment:
             // a definition bypasses an inherited setter, which is what "create" means, and it
             // raises rather than dropping the element when the object refuses.
-            return self.define_element(array, index, value);
+            return self.define_element(array, index, value, instruction);
         };
         // An array the species handed back may already have something recorded at this position
         // -- `Object.defineProperty(q, 0, {writable: false})` on a fresh one is exactly what the
@@ -19260,7 +19261,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             || items.properties.borrow().is_frozen()
             || !items.properties.borrow().is_extensible()
         {
-            return self.define_element(array, index, value);
+            return self.define_element(array, index, value, instruction);
         }
         if index >= MAX_DENSE_ARRAY as u64 {
             return Err(ExecutionError::ArrayTooLarge {
@@ -19287,36 +19288,52 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         target: &Value,
         index: u64,
         value: Value,
+        instruction: usize,
     ) -> Result<(), ExecutionError> {
         let key = Self::element_key(index).property_key();
-        let descriptor = Descriptor {
-            value: Some(value),
-            writable: Some(true),
-            enumerable: Some(true),
-            configurable: Some(true),
-            get: None,
-            set: None,
-        };
-        if define_own_property(&self.intrinsics, target, &key, &descriptor)? {
+        // Integer-indexed typed arrays implement [[DefineOwnProperty]] by writing their
+        // element, rather than by adding a normal property. An out-of-bounds index is a
+        // refusal (CreateDataPropertyOrThrow turns that into a TypeError), while conversion
+        // still precedes the bounds check as it does for every typed-array write.
+        if let Value::TypedArray(view) = target {
+            let _ = coerce_element(view.kind, &value)?;
+            #[expect(clippy::cast_possible_truncation)]
+            let at = index as usize;
+            if at >= view.len() {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("Cannot define property '{key}' of object"),
+                });
+            }
+            view.set(at, &value)?;
             return Ok(());
         }
-        Err(ExecutionError::TypeErrorMessage {
-            message: format!("Cannot define property '{key}' of object"),
-        })
+        // Use the public DefineProperty operation so a species constructor returning a Proxy
+        // observes its defineProperty trap and its target invariants. Calling the storage helper
+        // directly would silently drop the definition because Proxy has no local property store.
+        let mut data = ObjectData::default();
+        data.set("value", value);
+        data.set("writable", Value::Boolean(true));
+        data.set("enumerable", Value::Boolean(true));
+        data.set("configurable", Value::Boolean(true));
+        self.dispatch_native(
+            Native::ObjectDefineProperty,
+            &Value::Undefined,
+            &[
+                target.clone(),
+                Value::String(key),
+                Value::Object(Rc::new(RefCell::new(data))),
+            ],
+            instruction,
+        )?;
+        Ok(())
     }
 
     /// Set the finished length of what a method built, whatever kind of object that is.
-    fn finish_created_array(
-        &mut self,
-        array: &Value,
-        length: u64,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
+    fn finish_created_array(&mut self, array: &Value, length: u64) -> Result<(), ExecutionError> {
         if matches!(array, Value::Array(_)) {
             Self::truncate_created_array(array, length);
-            return Ok(());
         }
-        self.set_array_like_length(array, length, instruction)
+        Ok(())
     }
 
     fn truncate_created_array(array: &Value, length: u64) {
@@ -19534,12 +19551,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 while index < end {
                     Self::walk_step(&mut steps)?;
                     if let Some(value) = self.element_read(receiver, index, instruction)? {
-                        self.create_element(&created, written, value)?;
+                        self.create_element(&created, written, value, instruction)?;
                     }
                     index += 1;
                     written += 1;
                 }
-                self.finish_created_array(&created, written, instruction)?;
+                self.finish_created_array(&created, written)?;
                 Ok(created)
             }
             Native::ArraySplice => {
@@ -19572,10 +19589,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Self::walk_step(&mut steps)?;
                     if self.element_has(receiver, start + offset, instruction)? {
                         let value = self.element_get(receiver, start + offset, instruction)?;
-                        self.create_element(&removed, offset, value)?;
+                        self.create_element(&removed, offset, value, instruction)?;
                     }
                 }
-                self.finish_created_array(&removed, removed_count, instruction)?;
+                self.finish_created_array(&removed, removed_count)?;
                 if inserted < removed_count {
                     let mut index = start;
                     while index < length - removed_count {
@@ -19634,17 +19651,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         for index in 0..length {
                             Self::walk_step(&mut steps)?;
                             if let Some(value) = self.element_read(&source, index, instruction)? {
-                                self.create_element(&created, written, value)?;
+                                self.create_element(&created, written, value, instruction)?;
                             }
                             written += 1;
                         }
                     } else {
                         Self::walk_step(&mut steps)?;
-                        self.create_element(&created, written, source)?;
+                        self.create_element(&created, written, source, instruction)?;
                         written += 1;
                     }
                 }
-                self.finish_created_array(&created, written, instruction)?;
+                self.finish_created_array(&created, written)?;
                 Ok(created)
             }
             Native::ArrayJoin => {
@@ -19798,7 +19815,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &mut steps,
                     instruction,
                 )?;
-                self.finish_created_array(&created, written, instruction)?;
+                self.finish_created_array(&created, written)?;
                 Ok(created)
             }
             // `join` with `ToString` replaced by a *call* to each element's own
@@ -19927,7 +19944,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                 )?;
             } else {
-                self.create_element(into, *written, value)?;
+                self.create_element(into, *written, value, instruction)?;
                 *written += 1;
             }
         }
@@ -19972,7 +19989,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         self.element_get(receiver, at, instruction)?
                     };
-                    self.create_element(&created, at, value)?;
+                    self.create_element(&created, at, value, instruction)?;
                 }
                 Ok(created)
             }
@@ -19981,7 +19998,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, length - at - 1, instruction)?;
-                    self.create_element(&created, at, value)?;
+                    self.create_element(&created, at, value, instruction)?;
                 }
                 Ok(created)
             }
@@ -19994,7 +20011,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    self.create_element(&created, at, value)?;
+                    self.create_element(&created, at, value, instruction)?;
                 }
                 self.array_sort(&created, arguments, instruction)
             }
@@ -20025,18 +20042,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..start {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    self.create_element(&created, written, value)?;
+                    self.create_element(&created, written, value, instruction)?;
                     written += 1;
                 }
                 for argument in arguments.iter().skip(2) {
-                    self.create_element(&created, written, argument.clone())?;
+                    self.create_element(&created, written, argument.clone(), instruction)?;
                     written += 1;
                 }
                 let mut at = start + removed;
                 while at < length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    self.create_element(&created, written, value)?;
+                    self.create_element(&created, written, value, instruction)?;
                     written += 1;
                     at += 1;
                 }
@@ -20168,6 +20185,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         created.as_ref().unwrap_or(&Value::Undefined),
                         index,
                         produced,
+                        instruction,
                     )?;
                 }
                 CallbackMethod::Filter => {
@@ -20176,6 +20194,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             created.as_ref().unwrap_or(&Value::Undefined),
                             written,
                             value,
+                            instruction,
                         )?;
                         written += 1;
                     }
@@ -20190,12 +20209,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Self::walk_step(&mut steps)?;
                             if self.element_has(&produced, at, instruction)? {
                                 let nested = self.element_get(&produced, at, instruction)?;
-                                self.create_element(into, written, nested)?;
+                                self.create_element(into, written, nested, instruction)?;
                             }
                             written += 1;
                         }
                     } else {
-                        self.create_element(into, written, produced)?;
+                        self.create_element(into, written, produced, instruction)?;
                         written += 1;
                     }
                 }
@@ -20224,7 +20243,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             CallbackMethod::Map => created.unwrap_or(Value::Undefined),
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
                 let created = created.unwrap_or(Value::Undefined);
-                self.finish_created_array(&created, written, instruction)?;
+                self.finish_created_array(&created, written)?;
                 created
             }
             CallbackMethod::FindIndex | CallbackMethod::FindLastIndex => Value::Number(-1.0),
@@ -33105,6 +33124,14 @@ fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
         Value::Native(native) if defines_species(*native) => {
             (key == WellKnown::Species.property_key()).then_some(BuiltinAccessor::Species)
         }
+        // Each concrete typed-array constructor inherits `%TypedArray%[@@species]`; unlike the
+        // ordinary function case below, native constructors do not expose that inheritance via
+        // a stored Function object, so answer the inherited accessor directly here.
+        Value::Native(Native::TypedArrayConstructor(_))
+            if key == WellKnown::Species.property_key() =>
+        {
+            Some(BuiltinAccessor::Species)
+        }
         // A subclass constructor *inherits* the accessor: `class MyArray extends Array {}` puts
         // `Array` in `MyArray`'s own prototype chain, so `MyArray[Symbol.species]` is the same
         // getter answering a different receiver -- which is the whole mechanism by which
@@ -33114,7 +33141,10 @@ fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
             let mut current = prototype_of(target);
             for _ in 0..MAX_PROTOTYPE_DEPTH {
                 match current {
-                    Value::Native(native) if defines_species(native) => {
+                    Value::Native(native)
+                        if defines_species(native)
+                            || matches!(native, Native::TypedArrayConstructor(_)) =>
+                    {
                         return Some(BuiltinAccessor::Species);
                     }
                     Value::Function(_) | Value::Bound(_) => current = prototype_of(&current),
@@ -35850,6 +35880,65 @@ mod tests {
             vm.dispatch_native(Native::Date(DateMethod::ToIsoString), &date, &[], 0),
             Ok(Value::String("1970-01-01T00:00:00.000Z".to_owned()))
         );
+    }
+
+    #[test]
+    fn array_species_definition_observes_a_proxy_define_property_trap() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = test_vm(&program, &mut host);
+        let target = ordinary_object(Vec::<(String, Value)>::new());
+        let handler = ordinary_object([(
+            "defineProperty".to_owned(),
+            Value::Native(Native::ObjectDefineProperty),
+        )]);
+        let proxy = Value::Proxy(Rc::new(ProxyData {
+            target: target.clone(),
+            handler,
+            revoked: std::cell::Cell::new(false),
+        }));
+
+        vm.define_element(&proxy, 0, Value::Number(7.0), 0)
+            .expect("proxy trap accepts the definition");
+        assert_eq!(vm.read_property(&proxy, "0", 0), Ok(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn array_species_definition_writes_typed_array_elements() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = test_vm(&program, &mut host);
+        let original = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
+        if let Value::Array(items) = &original {
+            items.properties.borrow_mut().set(
+                "constructor",
+                Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8)),
+            );
+        }
+        let typed = vm
+            .array_species_create(&original, 2, 0)
+            .expect("typed-array species result");
+        assert!(matches!(typed, Value::TypedArray(_)));
+
+        vm.define_element(&typed, 0, Value::Number(7.0), 0)
+            .expect("in-range typed-array definition");
+        vm.define_element(&typed, 1, Value::Number(9.0), 0)
+            .expect("second in-range typed-array definition");
+        assert_eq!(vm.read_property(&typed, "0", 0), Ok(Value::Number(7.0)));
+        assert_eq!(vm.read_property(&typed, "1", 0), Ok(Value::Number(9.0)));
+        assert!(vm.define_element(&typed, 2, Value::Number(1.0), 0).is_err());
     }
 
     #[test]
