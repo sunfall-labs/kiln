@@ -371,6 +371,55 @@ impl ErrorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BrandOnly(bool);
 
+/// Which slice of a path one of `node:path`'s pure decompositions answers with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathPart {
+    /// `dirname`: everything before the last separator.
+    Dir,
+    /// `basename`: everything after it, optionally with a suffix removed.
+    Base,
+    /// `extname`: the last dot and what follows, or "".
+    Ext,
+    /// `normalize`: the same path with `.`, `..` and repeated separators resolved.
+    Normalize,
+}
+
+/// One fact `node:os` reports about the machine.
+///
+/// They divide into two kinds, and the division is the whole design here.
+///
+/// **A property of this build** -- `platform`, `arch`, `type`, `endianness`, `machine` -- is a
+/// compile-time constant of the kiln binary rather than an ambient read, so answering it truly
+/// costs nothing and reads nothing. `os.platform()` is what the TypeScript compiler's
+/// `getNodeSystem` asks first, and it is the honest answer.
+///
+/// **A property of the host** -- `tmpdir`, `homedir`, `cpus`, `totalmem`, `uptime` -- is exactly
+/// what ADRs 0015, 0026 and 0031 keep out of the realm: a program that reads one is not
+/// reproducible. Each answers a fixed, defensible value instead, which is the convention
+/// `os.hostname()` already set by answering `"kiln"`. They are here rather than absent because a
+/// missing member is a `TypeError` in the middle of a library's start-up, where a plausible
+/// constant lets it get on with what it was doing -- and because none of them is a number a
+/// program can act on wrongly without also being a program that needed a real machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsFact {
+    Platform,
+    Arch,
+    Type,
+    Endianness,
+    Machine,
+    TmpDir,
+    HomeDir,
+    Release,
+    Version,
+    Parallelism,
+    Cpus,
+    TotalMem,
+    FreeMem,
+    Uptime,
+    LoadAvg,
+    UserInfo,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
     /// A `Temporal` namespace, constructor, prototype or method; the payload says which.
@@ -405,6 +454,30 @@ pub enum Native {
     NodeFsPromises,
     NodeFs,
     NodeFsExistsSync,
+    /// `AbortController`, and the `AbortSignal` namespace its statics hang off.
+    AbortControllerConstructor,
+    AbortSignalConstructor,
+    /// `controller.abort(reason)`, and the two statics that build an already-settled signal.
+    AbortControllerAbort,
+    AbortSignalAbort,
+    AbortSignalTimeout,
+    AbortSignalAny,
+    /// `signal.addEventListener` / `removeEventListener` / `throwIfAborted`.
+    AbortSignalListen {
+        remove: bool,
+    },
+    AbortSignalThrowIfAborted,
+    /// Settle a particular signal later: the receiver is the signal, bound into a timer.
+    AbortSignalSettle,
+    /// Mirror another signal's abort onto this one, for `AbortSignal.any`.
+    AbortSignalFollow,
+    /// `new TextEncoder().encode(text)`.
+    TextEncoderConstructor,
+    TextEncoderEncode,
+    /// Any of `node:fs`'s synchronous entry points. One variant because they all end the same
+    /// way: this realm's filesystem is Tokio-owned and asynchronous, so none of them can answer,
+    /// and which one was asked for adds nothing to that.
+    NodeFsSync,
     NodeFsReadFile,
     NodeFsWriteFile,
     NodeFsStat,
@@ -456,6 +529,11 @@ pub enum Native {
     NodeOs,
     NodeOsNetworkInterfaces,
     NodeOsHostname,
+    /// One fact about the machine this realm runs on; the payload says which.
+    ///
+    /// One variant because the interesting part is not the arithmetic, it is *where the answer
+    /// comes from*, and that is the same question for all of them. See [`OsFact`].
+    NodeOsFact(OsFact),
     NodeTty,
     NodeTtyIsatty,
     NodeZlib,
@@ -472,6 +550,13 @@ pub enum Native {
     NodePathJoin,
     NodePathResolve,
     NodePathIsAbsolute,
+    /// One of the four pure decompositions of a path: `dirname`, `basename`, `extname` and
+    /// `normalize`. One variant because they are one scan read four ways -- find the last
+    /// separator and the last dot, and answer with a different slice.
+    NodePathPart(PathPart),
+    NodePathRelative,
+    NodePathParse,
+    NodePathFormat,
     NodeWorkerThreads,
     NodeWorkerConstructor,
     NodeQueryString,
@@ -523,6 +608,8 @@ pub enum Native {
     ProcessCwd,
     UrlConstructor,
     UrlSearchParamsGet,
+    /// `URL.prototype.toString` and `toJSON`, which are one method under two names.
+    UrlToString,
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
@@ -1360,10 +1447,31 @@ impl Native {
 
     fn property(self, name: &str) -> Option<Value> {
         match (self, name) {
+            // `realpathSync.native` is the only member any of these publishes, and it is the
+            // same refusal reached one level down.
+            (Self::NodeFsSync, "native") => Some(Value::Native(Self::NodeFsSync)),
             (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
             (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
             (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
+            (Self::AbortSignalConstructor, "abort") => Some(Value::Native(Self::AbortSignalAbort)),
+            (Self::AbortSignalConstructor, "timeout") => {
+                Some(Value::Native(Self::AbortSignalTimeout))
+            }
+            (Self::AbortSignalConstructor, "any") => Some(Value::Native(Self::AbortSignalAny)),
             (Self::NodeFs, "existsSync") => Some(Value::Native(Self::NodeFsExistsSync)),
+            // The synchronous readers exist and refuse when *called*, which is the shape
+            // `existsSync` already had. A library that merely reaches for one during start-up --
+            // the TypeScript compiler's `getNodeSystem` reads `fs.realpathSync.native` to pick
+            // an implementation before it does any I/O -- gets past it; one that actually wants
+            // the bytes is told why it cannot have them. The alternative, leaving the member
+            // absent, turns a feature check into a `TypeError` in the middle of a module body.
+            (
+                Self::NodeFs,
+                "readFileSync" | "writeFileSync" | "statSync" | "lstatSync" | "readdirSync"
+                | "mkdirSync" | "realpathSync" | "openSync" | "readSync" | "closeSync"
+                | "appendFileSync" | "unlinkSync" | "rmSync" | "renameSync" | "readlinkSync"
+                | "accessSync" | "copyFileSync",
+            ) => Some(Value::Native(Self::NodeFsSync)),
             (Self::NodeFs, "promises") => Some(Value::Native(Self::NodeFsPromises)),
             (Self::NodeDiagnosticsChannel, "channel") => {
                 Some(Value::Native(Self::NodeDiagnosticsChannelCreate))
@@ -1415,6 +1523,28 @@ impl Native {
                 Some(Value::Native(Self::NodeOsNetworkInterfaces))
             }
             (Self::NodeOs, "hostname") => Some(Value::Native(Self::NodeOsHostname)),
+            (Self::NodeOs, "platform") => Some(Value::Native(Self::NodeOsFact(OsFact::Platform))),
+            (Self::NodeOs, "arch") => Some(Value::Native(Self::NodeOsFact(OsFact::Arch))),
+            (Self::NodeOs, "type") => Some(Value::Native(Self::NodeOsFact(OsFact::Type))),
+            (Self::NodeOs, "endianness") => {
+                Some(Value::Native(Self::NodeOsFact(OsFact::Endianness)))
+            }
+            (Self::NodeOs, "tmpdir") => Some(Value::Native(Self::NodeOsFact(OsFact::TmpDir))),
+            (Self::NodeOs, "homedir") => Some(Value::Native(Self::NodeOsFact(OsFact::HomeDir))),
+            (Self::NodeOs, "release") => Some(Value::Native(Self::NodeOsFact(OsFact::Release))),
+            (Self::NodeOs, "version") => Some(Value::Native(Self::NodeOsFact(OsFact::Version))),
+            (Self::NodeOs, "machine") => Some(Value::Native(Self::NodeOsFact(OsFact::Machine))),
+            (Self::NodeOs, "availableParallelism") => {
+                Some(Value::Native(Self::NodeOsFact(OsFact::Parallelism)))
+            }
+            (Self::NodeOs, "cpus") => Some(Value::Native(Self::NodeOsFact(OsFact::Cpus))),
+            (Self::NodeOs, "totalmem") => Some(Value::Native(Self::NodeOsFact(OsFact::TotalMem))),
+            (Self::NodeOs, "freemem") => Some(Value::Native(Self::NodeOsFact(OsFact::FreeMem))),
+            (Self::NodeOs, "uptime") => Some(Value::Native(Self::NodeOsFact(OsFact::Uptime))),
+            (Self::NodeOs, "loadavg") => Some(Value::Native(Self::NodeOsFact(OsFact::LoadAvg))),
+            (Self::NodeOs, "userInfo") => Some(Value::Native(Self::NodeOsFact(OsFact::UserInfo))),
+            (Self::NodeOs, "EOL") => Some(Value::String("\n".to_owned())),
+            (Self::NodeOs, "devNull") => Some(Value::String("/dev/null".to_owned())),
             (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty)),
             (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => {
                 Some(Value::Native(Self::NodeZlibCreateDecompress))
@@ -1429,6 +1559,20 @@ impl Native {
                 Some(Value::Native(Self::NodeModuleCreateRequire))
             }
             (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin)),
+            (Self::NodePath, "dirname") => Some(Value::Native(Self::NodePathPart(PathPart::Dir))),
+            (Self::NodePath, "basename") => Some(Value::Native(Self::NodePathPart(PathPart::Base))),
+            (Self::NodePath, "extname") => Some(Value::Native(Self::NodePathPart(PathPart::Ext))),
+            (Self::NodePath, "normalize") => {
+                Some(Value::Native(Self::NodePathPart(PathPart::Normalize)))
+            }
+            (Self::NodePath, "relative") => Some(Value::Native(Self::NodePathRelative)),
+            (Self::NodePath, "parse") => Some(Value::Native(Self::NodePathParse)),
+            (Self::NodePath, "format") => Some(Value::Native(Self::NodePathFormat)),
+            (Self::NodePath, "delimiter") => Some(Value::String(":".to_owned())),
+            // `path.posix` is this module: the realm's paths are POSIX paths, and `path.win32`
+            // is deliberately absent rather than answered with them -- a `win32.sep` of "/" is
+            // the kind of confident wrong answer a bundler's platform check acts on.
+            (Self::NodePath, "posix") => Some(Value::Native(Self::NodePath)),
             (Self::NodePath, "resolve") => Some(Value::Native(Self::NodePathResolve)),
             (Self::NodePath, "isAbsolute") => Some(Value::Native(Self::NodePathIsAbsolute)),
             (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
@@ -4829,6 +4973,16 @@ pub struct GeneratorState {
     /// which only ever awaits. An async generator does both, and its driver has to know whether
     /// the consumer's step is finished or whether it is still waiting on something.
     awaiting: bool,
+    /// The value a `.return()` is unwinding towards, while that unwind is *suspended*.
+    ///
+    /// `.return()` unwinds by throwing a marker, and the marker is recognised by the resumption
+    /// that threw it. An async generator can suspend part-way through that unwind -- a `finally`
+    /// block is ordinary code and may `await` -- and it is then resumed by the driver with an
+    /// ordinary `Send`, which knows nothing about a return in flight. Without this the marker
+    /// reached the driver as though it were a thrown value, and the consumer got a promise
+    /// rejected with `[Function: returnSignal]`: not a JavaScript value at all, from a program
+    /// that had merely written `break` inside `for await`.
+    returning: Option<Value>,
 }
 
 impl PartialEq for GeneratorState {
@@ -5407,6 +5561,41 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             _ => return None,
         },
     ))
+}
+
+/// The specifier a Node builtin namespace value stands for.
+///
+/// The inverse of [`node_builtin_namespace`], and the only thing that lets a `Native` reach its
+/// own entry in the shared ABI table -- which is where the list of names it publishes lives.
+fn node_builtin_specifier(native: Native) -> Option<&'static str> {
+    Some(match native {
+        Native::NodeAssert => "node:assert",
+        Native::NodeAsyncHooks => "node:async_hooks",
+        Native::NodeBuffer => "node:buffer",
+        Native::NodeCrypto => "node:crypto",
+        Native::NodeDiagnosticsChannel => "node:diagnostics_channel",
+        Native::NodeDns => "node:dns",
+        Native::NodeEvents => "node:events",
+        Native::NodeFs => "node:fs",
+        Native::NodeFsPromises => "node:fs/promises",
+        Native::NodeHttp => "node:http",
+        Native::NodeHttps => "node:https",
+        Native::NodeHttp2 => "node:http2",
+        Native::NodeModule => "node:module",
+        Native::NodeNet => "node:net",
+        Native::NodeOs => "node:os",
+        Native::NodePath => "node:path",
+        Native::NodePerfHooks => "node:perf_hooks",
+        Native::NodeQueryString => "node:querystring",
+        Native::NodeStream => "node:stream",
+        Native::NodeStringDecoder => "node:string_decoder",
+        Native::NodeTty => "node:tty",
+        Native::NodeUrl => "node:url",
+        Native::NodeUtil => "node:util",
+        Native::NodeWorkerThreads => "node:worker_threads",
+        Native::NodeZlib => "node:zlib",
+        _ => return None,
+    })
 }
 
 pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
@@ -12594,6 +12783,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
                         kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
+                        kiln_ir::Builtin::AbortController => Native::AbortControllerConstructor,
+                        kiln_ir::Builtin::AbortSignal => Native::AbortSignalConstructor,
+                        kiln_ir::Builtin::TextEncoder => Native::TextEncoderConstructor,
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
                             Native::TypedArrayConstructor(TypedKind::Int8)
@@ -13527,6 +13719,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             running: false,
             done: false,
             awaiting: false,
+            returning: None,
         }))))
     }
 
@@ -14802,6 +14995,148 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .to_owned(),
                 });
             }
+            // Thrown as a JavaScript error rather than reported as a host failure, because node
+            // throws from these too -- `ENOENT` and friends are ordinary catchable errors -- and
+            // every library that touches the filesystem wraps the call in a `try`. A host
+            // failure stops the process instead, which turns "this file is not readable" into
+            // "this program cannot run".
+            Native::NodeFsSync => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "node:fs synchronous I/O is unavailable: filesystem I/O is \
+                              Tokio-owned and asynchronous"
+                        .to_owned(),
+                });
+            }
+            Native::AbortControllerAbort | Native::AbortSignalAbort => {
+                let reason = arguments.first().cloned();
+                let signal = if matches!(native, Native::AbortSignalAbort) {
+                    let signal = abort_signal();
+                    self.run_abort(&signal, reason, instruction)?;
+                    signal
+                } else {
+                    let signal = self.read_property(receiver, "signal", instruction)?;
+                    self.run_abort(&signal, reason, instruction)?;
+                    return Ok(Value::Undefined);
+                };
+                return Ok(signal);
+            }
+            // A signal that aborts itself after a delay. The timer carries the signal as the
+            // receiver of a bound `abort`, which is what lets a `Native` with no state of its
+            // own settle a particular signal later.
+            Native::AbortSignalTimeout => {
+                let signal = abort_signal();
+                let milliseconds = self.as_number_argument(arguments.first(), instruction)?;
+                let reason = self.construct_error(
+                    ErrorKind::Error,
+                    &[Value::String(
+                        "The operation was aborted due to timeout".to_owned(),
+                    )],
+                );
+                if let Value::Object(object) = &reason {
+                    object
+                        .borrow_mut()
+                        .set_non_enumerable("name", Value::String("TimeoutError".to_owned()));
+                }
+                let timer = Timer {
+                    callback: Value::Bound(Rc::new(BoundFunction {
+                        target: Value::Native(Native::AbortSignalSettle),
+                        this_value: signal.clone(),
+                        arguments: vec![reason],
+                        properties: RefCell::new(ObjectData::default()),
+                    })),
+                    arguments: Vec::new(),
+                };
+                let delay = duration_from_milliseconds(milliseconds.max(0.0));
+                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                return Ok(signal);
+            }
+            // `AbortSignal.any(signals)`: one signal that follows whichever of them settles
+            // first, and is already aborted if any of them already is.
+            Native::AbortSignalAny => {
+                let signal = abort_signal();
+                let sources = self
+                    .drain_iterable(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                for source in sources {
+                    if self
+                        .read_property(&source, "aborted", instruction)?
+                        .is_truthy()
+                    {
+                        let reason = self.read_property(&source, "reason", instruction)?;
+                        self.run_abort(&signal, Some(reason), instruction)?;
+                        return Ok(signal);
+                    }
+                    let follower = Value::Bound(Rc::new(BoundFunction {
+                        target: Value::Native(Native::AbortSignalFollow),
+                        this_value: signal.clone(),
+                        arguments: vec![source.clone()],
+                        properties: RefCell::new(ObjectData::default()),
+                    }));
+                    self.dispatch_native(
+                        Native::AbortSignalListen { remove: false },
+                        &source,
+                        &[Value::String("abort".to_owned()), follower],
+                        instruction,
+                    )?;
+                }
+                return Ok(signal);
+            }
+            Native::AbortSignalSettle => {
+                let reason = arguments.first().cloned();
+                self.run_abort(receiver, reason, instruction)?;
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalFollow => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let reason = self.read_property(&source, "reason", instruction)?;
+                self.run_abort(receiver, Some(reason), instruction)?;
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalListen { remove } => {
+                // Only the "abort" type exists on a signal, so a listener for anything else is
+                // registered nowhere rather than never called: there is no second event.
+                if !matches!(arguments.first(), Some(Value::String(kind)) if kind == "abort") {
+                    return Ok(Value::Undefined);
+                }
+                let listener = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let Value::Object(object) = receiver else {
+                    return Ok(Value::Undefined);
+                };
+                let held = object.borrow().get_own(ABORT_LISTENERS).cloned();
+                let Some(Value::Array(listeners)) = held else {
+                    return Ok(Value::Undefined);
+                };
+                if remove {
+                    listeners
+                        .borrow_mut()
+                        .retain(|held| !same_value(held, &listener));
+                } else if is_callable(&listener)
+                    && !listeners
+                        .borrow()
+                        .iter()
+                        .any(|held| same_value(held, &listener))
+                {
+                    listeners.borrow_mut().push(listener);
+                }
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalThrowIfAborted => {
+                if self
+                    .read_property(receiver, "aborted", instruction)?
+                    .is_truthy()
+                {
+                    self.caught = Some(self.read_property(receiver, "reason", instruction)?);
+                    return Err(ExecutionError::ThrownAcrossNative);
+                }
+                return Ok(Value::Undefined);
+            }
+            // Rust strings are already UTF-8, so the encoder is the identity on the bytes --
+            // which is the whole of what `TextEncoder` is defined to do.
+            Native::TextEncoderEncode => {
+                let text = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                return Ok(node_bytes_value(text.into_bytes()));
+            }
             Native::NodeFsExistsSync => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -14834,6 +15169,81 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 return Ok(Value::String(normalize_posix_path(&resolved)));
             }
+            Native::NodePathPart(part) => {
+                let path = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                let suffix = arguments.get(1).map(Value::to_display_string);
+                return Ok(Value::String(posix_path_part(
+                    part,
+                    &path,
+                    suffix.as_deref(),
+                )));
+            }
+            Native::NodePathRelative => {
+                let from = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                let to = arguments
+                    .get(1)
+                    .map_or_else(String::new, Value::to_display_string);
+                return Ok(Value::String(posix_path_relative(&from, &to)));
+            }
+            Native::NodePathParse => {
+                let path = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                let base = posix_path_part(PathPart::Base, &path, None);
+                let ext = posix_path_part(PathPart::Ext, &path, None);
+                let name = base
+                    .strip_suffix(&ext)
+                    .filter(|_| !ext.is_empty())
+                    .unwrap_or(&base)
+                    .to_owned();
+                return Ok(ordinary_object([
+                    (
+                        "root".to_owned(),
+                        Value::String(if path.starts_with('/') { "/" } else { "" }.to_owned()),
+                    ),
+                    (
+                        "dir".to_owned(),
+                        Value::String(posix_path_part(PathPart::Dir, &path, None)),
+                    ),
+                    ("base".to_owned(), Value::String(base)),
+                    ("ext".to_owned(), Value::String(ext)),
+                    ("name".to_owned(), Value::String(name)),
+                ]));
+            }
+            // `format` is `parse` read backwards, and it prefers `base` over `name`+`ext`
+            // exactly as node does -- a program that edits one field of a parsed path and hands
+            // the object straight back relies on that precedence.
+            Native::NodePathFormat => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let field = |vm: &mut Self, key: &str| -> Result<String, ExecutionError> {
+                    Ok(match vm.read_property(&source, key, instruction)? {
+                        Value::Undefined | Value::Null => String::new(),
+                        other => other.to_display_string(),
+                    })
+                };
+                let directory = match field(self, "dir")? {
+                    empty if empty.is_empty() => field(self, "root")?,
+                    dir => dir,
+                };
+                let base = match field(self, "base")? {
+                    empty if empty.is_empty() => {
+                        format!("{}{}", field(self, "name")?, field(self, "ext")?)
+                    }
+                    base => base,
+                };
+                return Ok(Value::String(if directory.is_empty() {
+                    base
+                } else if directory == "/" {
+                    format!("/{base}")
+                } else {
+                    format!("{directory}/{base}")
+                }));
+            }
+            Native::NodeOsFact(fact) => return Ok(os_fact(fact)),
             Native::NodePathIsAbsolute => {
                 return Ok(Value::Boolean(
                     arguments
@@ -15321,6 +15731,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Value::to_display_string)
                     .unwrap_or_default(),
             )),
+            Native::UrlToString => {
+                let Value::Object(object) = receiver else {
+                    return Ok(Value::Undefined);
+                };
+                let href = match &object.borrow().node_object {
+                    Some(NodeObject::Url(state)) => state.href.clone(),
+                    _ => String::new(),
+                };
+                Ok(Value::String(href))
+            }
             Native::UrlSearchParamsGet => {
                 let Value::Object(object) = receiver else {
                     return Err(ExecutionError::TypeErrorMessage {
@@ -20780,7 +21200,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         let instruction = self.instruction;
         match self.resume_catching(generator, resume, instruction)? {
-            // The body threw and nothing in it caught: that is the function's rejection.
+            // The body threw and nothing in it caught: that is the function's rejection -- with
+            // the one exception that is not a thrown value at all. See the same guard in
+            // `drive_async_generator`.
+            Err(Value::Native(Native::ReturnSignal)) => {
+                self.resolve_promise(promise, Value::Undefined);
+            }
             Err(thrown) => self.settle(promise, &Settled::Rejected(thrown)),
             Ok((value, true)) => self.resolve_promise(promise, value),
             Ok((awaited, false)) => {
@@ -21013,7 +21438,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // rather than resuming it and throwing the same thing again -- which is what it
                 // did, and what turned a caught rejection into an uncaught one two lines later.
                 generator.borrow_mut().done = true;
-                self.settle(step, &Settled::Rejected(thrown));
+                // The `.return()` marker is not a thrown value and must never become one. It
+                // reaches here when the unwind it started crossed a suspension this driver did
+                // not recognise, and rejecting with it hands the program a rejection whose
+                // reason is not a JavaScript value at all -- `[Function: returnSignal]`, from
+                // code that had merely written `break` inside `for await`. Ending the step is
+                // what the marker means, so that is what it does.
+                if matches!(thrown, Value::Native(Native::ReturnSignal)) {
+                    let result = iteration_result(Value::Undefined, true);
+                    self.resolve_promise(step, result);
+                } else {
+                    self.settle(step, &Settled::Rejected(thrown));
+                }
             }
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
@@ -21074,7 +21510,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // asked to return, so the value has to be kept here to answer with.
         let returning = match &resume {
             Resume::Return(value) => Some(value.clone()),
-            Resume::Send(_) | Resume::Throw(_) => None,
+            // A `Send` that resumes an unwind already in flight is still that unwind: what is
+            // finishing is the `finally` block which awaited, not the body.
+            Resume::Send(_) | Resume::Throw(_) => generator.borrow().returning.clone(),
         };
         let installed = self.handlers.len();
         self.handlers.push(Handler {
@@ -21086,17 +21524,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let outcome = self.resume_generator_with(generator, resume, instruction);
         self.handlers.truncate(installed);
         match outcome {
-            Ok(value) => Ok(Ok(value)),
+            // Suspended again with the unwind still travelling: remember it, so the resumption
+            // that finishes the `finally` recognises the marker as this return rather than as a
+            // thrown value.
+            Ok(value @ (_, false)) => {
+                generator.borrow_mut().returning = returning;
+                Ok(Ok(value))
+            }
+            Ok(value) => {
+                generator.borrow_mut().returning = None;
+                Ok(Ok(value))
+            }
             Err(ExecutionError::CaughtByHost) => {
                 let caught = self.caught.take().unwrap_or(Value::Undefined);
                 if let (Value::Native(Native::ReturnSignal), Some(value)) = (&caught, returning) {
-                    generator.borrow_mut().done = true;
+                    let mut state = generator.borrow_mut();
+                    state.done = true;
+                    state.returning = None;
+                    drop(state);
                     return Ok(Ok((value, true)));
                 }
+                generator.borrow_mut().returning = None;
                 Ok(Err(caught))
             }
             Err(ExecutionError::GeneratorReturned) => {
-                generator.borrow_mut().done = true;
+                let mut state = generator.borrow_mut();
+                state.done = true;
+                state.returning = None;
+                drop(state);
                 Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
             }
             Err(error) => Err(error),
@@ -23853,6 +24308,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Option<Value>, ExecutionError> {
         Ok(Some(match parent {
             Native::Error(kind) => self.construct_error_reached(kind, arguments, current)?,
+            Native::AbortControllerConstructor => abort_controller(),
+            Native::TextEncoderConstructor => text_encoder(),
+            // `new AbortSignal()` is a TypeError in every engine: a signal is produced by a
+            // controller or by one of the statics, never constructed, and that is the whole of
+            // how cancellation stays one-directional.
+            Native::AbortSignalConstructor => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Illegal constructor".to_owned(),
+                });
+            }
             Native::NodeEventEmitter => node_event_emitter(),
             Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
@@ -24220,6 +24685,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::PromiseConstructor) => {
                 let promise = self.construct_promise(&arguments, current)?;
                 self.stack.push(promise);
+            }
+            Value::Native(Native::AbortControllerConstructor) => {
+                self.stack.push(abort_controller());
+            }
+            Value::Native(Native::TextEncoderConstructor) => {
+                self.stack.push(text_encoder());
+            }
+            // A signal comes from a controller or from one of the statics, never from a caller.
+            Value::Native(Native::AbortSignalConstructor) => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Illegal constructor".to_owned(),
+                });
             }
             Value::Native(
                 kind @ (Native::SetConstructor
@@ -27063,6 +27540,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "search" => Value::String(state.search.clone()),
                         "hash" => Value::String(state.hash.clone()),
                         "searchParams" => url_search_params_object(Rc::clone(state)),
+                        // Both answer `href`. A `URL` is one of the few objects real code hands
+                        // straight to string concatenation -- `` `imported from ${url}` `` --
+                        // and without them `String(url)` was "Cannot convert object to primitive
+                        // value": postcss's `CssSyntaxError` constructor stringifies the file URL
+                        // it built, so a *CSS syntax error* surfaced as a TypeError from the
+                        // reporter rather than as the located error it had already worked out.
+                        "toString" | "toJSON" => Value::Native(Native::UrlToString),
                         _ => object.get(name).unwrap_or(Value::Undefined),
                     };
                 }
@@ -28905,6 +29389,70 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
+    /// The abort algorithm: settle the signal once, then tell everyone who asked.
+    ///
+    /// Idempotent, which is what makes `controller.abort()` safe to call from a `finally` and
+    /// from a timeout that has already fired. The listeners run *after* `aborted` and `reason`
+    /// are visible, because that is the state every one of them reads first.
+    fn run_abort(
+        &mut self,
+        signal: &Value,
+        reason: Option<Value>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let Value::Object(object) = signal else {
+            return Ok(());
+        };
+        if object
+            .borrow()
+            .get_own("aborted")
+            .is_some_and(Value::is_truthy)
+        {
+            return Ok(());
+        }
+        // The default reason is an `AbortError`, which is what a program tests for when it wants
+        // to tell "the caller cancelled this" from "this failed".
+        let reason = match reason {
+            Some(reason) if !matches!(reason, Value::Undefined) => reason,
+            _ => {
+                let error = self.construct_error(
+                    ErrorKind::Error,
+                    &[Value::String("This operation was aborted".to_owned())],
+                );
+                if let Value::Object(error) = &error {
+                    error
+                        .borrow_mut()
+                        .set_non_enumerable("name", Value::String("AbortError".to_owned()));
+                }
+                error
+            }
+        };
+        let listeners = {
+            let mut held = object.borrow_mut();
+            held.set_non_enumerable("aborted", Value::Boolean(true));
+            held.set_non_enumerable("reason", reason);
+            let listeners = match held.get_own(ABORT_LISTENERS) {
+                Some(Value::Array(listeners)) => listeners.borrow().clone(),
+                _ => Vec::new(),
+            };
+            let handler = held.get_own("onabort").cloned();
+            handler
+                .filter(|handler| is_callable(handler))
+                .into_iter()
+                .chain(listeners)
+                .collect::<Vec<_>>()
+        };
+        // One event object, shared by every listener, as a real dispatch would be.
+        let event = ordinary_object([
+            ("type".to_owned(), Value::String("abort".to_owned())),
+            ("target".to_owned(), signal.clone()),
+        ]);
+        for listener in listeners {
+            self.call_value(&listener, signal.clone(), vec![event.clone()], instruction)?;
+        }
+        Ok(())
+    }
+
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
     /// assignment spelling. The write itself still goes through `set_computed` after the same
     /// descriptor probe used by `set_or_throw`, so setters and proxy traps run only once.
@@ -30434,6 +30982,55 @@ fn decode_utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8], end: bool) -> String {
     String::from_utf8_lossy(&complete).into_owned()
 }
 
+/// The three reserved slots an `AbortSignal` keeps beside its public shape.
+const ABORT_LISTENERS: &str = "@@abort-listeners";
+
+/// A fresh, un-aborted `AbortSignal`.
+///
+/// An ordinary object rather than an exotic kind: everything a signal does is state plus three
+/// methods, and nothing about it needs the value representation to know it exists. `aborted` and
+/// `reason` are stored rather than derived so a read is a read, and every member is
+/// non-enumerable, which is what keeps `Object.keys(signal)` empty as node's is.
+fn abort_signal() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("aborted", Value::Boolean(false));
+    data.set_non_enumerable("reason", Value::Undefined);
+    data.set_non_enumerable("onabort", Value::Null);
+    data.set_non_enumerable(
+        "addEventListener",
+        Value::Native(Native::AbortSignalListen { remove: false }),
+    );
+    data.set_non_enumerable(
+        "removeEventListener",
+        Value::Native(Native::AbortSignalListen { remove: true }),
+    );
+    data.set_non_enumerable(
+        "throwIfAborted",
+        Value::Native(Native::AbortSignalThrowIfAborted),
+    );
+    data.set_non_enumerable(ABORT_LISTENERS, Value::Array(ArrayData::new(Vec::new())));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// `new AbortController()`: a signal, and the one handle that can abort it.
+///
+/// Handing the two out separately is the whole point -- a callee can be given the signal without
+/// being given the power to fire it -- which is the same split `Proxy.revocable` makes.
+fn abort_controller() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("signal", abort_signal());
+    data.set_non_enumerable("abort", Value::Native(Native::AbortControllerAbort));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// `new TextEncoder()`. UTF-8 and nothing else, which is all the encoder half is defined to do.
+fn text_encoder() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("encoding", Value::String("utf-8".to_owned()));
+    data.set_non_enumerable("encode", Value::Native(Native::TextEncoderEncode));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
 fn url_object(state: UrlState) -> Value {
     let state = Rc::new(state);
     let object = ObjectData {
@@ -30491,7 +31088,12 @@ fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError
         .find(['/', '?', '#'])
         .map_or(absolute.len(), |index| authority_start + index);
     let host = absolute[authority_start..authority_end].to_owned();
-    if host.is_empty() {
+    // An empty authority is invalid for every special scheme except `file:`, which is defined
+    // to have one: `file:///a.css` is a valid URL whose host is the empty string, and it is what
+    // `pathToFileURL` produces for every path on this machine. Rejecting it made postcss's
+    // `CssSyntaxError` constructor throw a `TypeError` on its way to reporting a CSS syntax
+    // error, so a malformed stylesheet crashed the process instead of being reported.
+    if host.is_empty() && protocol != "file:" {
         return Err(ExecutionError::TypeErrorMessage {
             message: format!("Invalid URL: {absolute}"),
         });
@@ -30738,6 +31340,158 @@ fn split_mix_64(state: &mut u64) -> u64 {
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     mixed ^ (mixed >> 31)
+}
+
+/// The four pure decompositions of a POSIX path.
+///
+/// The scanning is `std::path::Path`'s -- `parent`, `file_name`, `extension` -- rather than a
+/// hand-rolled search for the last separator: it already knows that a trailing separator is not
+/// a component, that `.` is not one either, and that a leading dot is a hidden file rather than
+/// an extension. What is left here is the handful of places node's answer differs from Rust's,
+/// and those are worth being explicit about:
+///
+///   * node keeps the dot -- `extname("a.js")` is `".js"` where Rust's `extension` is `"js"`;
+///   * node answers `"."` for a path with no directory, where Rust answers `Some("")`;
+///   * node answers `"/"` for the root's own directory, where Rust answers `None`.
+fn posix_path_part(part: PathPart, path: &str, suffix: Option<&str>) -> String {
+    use std::path::Path;
+    if matches!(part, PathPart::Normalize) {
+        return normalize_posix_path(path);
+    }
+    let scanned = Path::new(path);
+    match part {
+        PathPart::Dir => match scanned.parent().and_then(std::path::Path::to_str) {
+            // The root, and anything that normalizes to it: its own parent.
+            None => path.chars().next().map_or(".", |_| "/").to_owned(),
+            Some("") => ".".to_owned(),
+            Some(parent) => parent.to_owned(),
+        },
+        PathPart::Base => {
+            // `Path::file_name` is `None` for `.` and `..`, which are `CurDir`/`ParentDir`
+            // components rather than names. node answers with the text.
+            let base = scanned
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(match path.trim_end_matches('/') {
+                    dots @ ("." | "..") => dots,
+                    _ => "",
+                });
+            match suffix {
+                Some(suffix) if !suffix.is_empty() => {
+                    base.strip_suffix(suffix).unwrap_or(base).to_owned()
+                }
+                _ => base.to_owned(),
+            }
+        }
+        PathPart::Ext => scanned
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map_or_else(String::new, |extension| format!(".{extension}")),
+        PathPart::Normalize => unreachable!("handled above"),
+    }
+}
+
+/// `path.relative(from, to)`: the path that reaches `to` when walked from `from`.
+///
+/// Over `Path::components`, which drops the empty and `.` components a split would leave behind.
+/// `..` is folded first by `normalize_posix_path`, because it has to be resolved lexically --
+/// there is no filesystem here to ask whether a component is a symlink.
+fn posix_path_relative(from: &str, to: &str) -> String {
+    use std::path::{Component, Path};
+    // `..` is folded first, lexically: there is no filesystem here to ask whether a component is
+    // a symlink, so `Path::components` -- which deliberately keeps `ParentDir` for that very
+    // reason -- is given a path that no longer has any. What it does do is drop the empty and
+    // `.` components, which is the part worth not writing twice.
+    let named = |path: &str| -> Vec<String> {
+        Path::new(&normalize_posix_path(path))
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => name.to_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    };
+    let (from, to) = (named(from), named(to));
+    let shared = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts: Vec<&str> = vec![".."; from.len() - shared];
+    parts.extend(to[shared..].iter().map(String::as_str));
+    parts.join("/")
+}
+
+/// What `node:os` answers for one fact about the machine.
+///
+/// The compile-time ones are read from `std::env::consts`, which is a property of *this build*
+/// rather than of the environment it is running in -- so answering them truthfully reads nothing
+/// and stays reproducible for a given target. The rest answer a fixed value, which is the
+/// convention `os.hostname()` set: see [`OsFact`].
+fn os_fact(fact: OsFact) -> Value {
+    let text = |value: &str| Value::String(value.to_owned());
+    match fact {
+        // node's spelling, which is not always Rust's: "macos" is "darwin" to every program that
+        // branches on this, and answering Rust's name would fail every one of those branches.
+        OsFact::Platform => text(match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            other => other,
+        }),
+        OsFact::Arch => text(match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            other => other,
+        }),
+        OsFact::Type => text(match std::env::consts::OS {
+            "macos" => "Darwin",
+            "windows" => "Windows_NT",
+            "linux" => "Linux",
+            other => other,
+        }),
+        OsFact::Machine => text(std::env::consts::ARCH),
+        OsFact::Endianness => text(if cfg!(target_endian = "big") {
+            "BE"
+        } else {
+            "LE"
+        }),
+        OsFact::TmpDir => text("/tmp"),
+        OsFact::HomeDir => text("/"),
+        OsFact::Release => text("0.0.0"),
+        OsFact::Version => text("kiln"),
+        // One, and truthfully so: the realm has one agent (see `Atomics.wait`), so a library
+        // sizing a worker pool by this gets a pool this realm can actually run.
+        OsFact::Parallelism => Value::Number(1.0),
+        OsFact::Cpus => Value::Array(ArrayData::new(vec![ordinary_object([
+            ("model".to_owned(), text("kiln")),
+            ("speed".to_owned(), Value::Number(0.0)),
+            (
+                "times".to_owned(),
+                ordinary_object([
+                    ("user".to_owned(), Value::Number(0.0)),
+                    ("nice".to_owned(), Value::Number(0.0)),
+                    ("sys".to_owned(), Value::Number(0.0)),
+                    ("idle".to_owned(), Value::Number(0.0)),
+                    ("irq".to_owned(), Value::Number(0.0)),
+                ]),
+            ),
+        ])])),
+        OsFact::TotalMem | OsFact::FreeMem => Value::Number(0.0),
+        // Zero for the same reason `Date.now()` starts at the epoch: nothing has happened yet.
+        OsFact::Uptime => Value::Number(0.0),
+        OsFact::LoadAvg => Value::Array(ArrayData::new(vec![
+            Value::Number(0.0),
+            Value::Number(0.0),
+            Value::Number(0.0),
+        ])),
+        OsFact::UserInfo => ordinary_object([
+            ("uid".to_owned(), Value::Number(-1.0)),
+            ("gid".to_owned(), Value::Number(-1.0)),
+            ("username".to_owned(), text("kiln")),
+            ("homedir".to_owned(), text("/")),
+            ("shell".to_owned(), Value::Null),
+        ]),
+    }
 }
 
 /// POSIX `path.normalize` semantics used by `path.join` on the Unix Node target.
@@ -31945,13 +32699,18 @@ fn call_native(
                     .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
-                // A built-in's own enumerated properties are the ones a program added: the
-                // tables' own are non-enumerable, exactly as the specification defines them.
-                Some(target @ (Value::Native(_) | Value::Callback(_))) => intrinsics
-                    .enumerable_entries(target)
-                    .into_iter()
-                    .map(|(key, _)| Value::String(key))
-                    .collect(),
+                // A built-in's own enumerated properties are the ones a program added -- the
+                // tables' own are non-enumerable, exactly as the specification defines them --
+                // with the one exception `own_properties` knows about: a Node builtin module's
+                // exports *are* enumerable. Asked of that function rather than of the realm
+                // store directly, so `Object.keys`, `Object.entries` and a spread cannot give
+                // three different answers about the same namespace.
+                Some(target @ (Value::Native(_) | Value::Callback(_))) => {
+                    own_properties(intrinsics, target)
+                        .into_iter()
+                        .map(|(key, _)| Value::String(key))
+                        .collect()
+                }
                 // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too, and a
                 // hole has no key at all.
                 // The elements, and then whatever the program hung on the array by name --
@@ -33896,6 +34655,11 @@ fn call_native(
         | Native::NodePathJoin
         | Native::NodePathResolve
         | Native::NodePathIsAbsolute
+        | Native::NodePathPart(_)
+        | Native::NodePathRelative
+        | Native::NodePathParse
+        | Native::NodePathFormat
+        | Native::NodeOsFact(_)
         | Native::NodeWorkerThreads
         | Native::NodeWorkerConstructor
         | Native::NodeQueryString
@@ -33941,6 +34705,7 @@ fn call_native(
         | Native::ProcessCwd
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
+        | Native::UrlToString
         | Native::TextDecoderConstructor
         | Native::TextDecoderDecode
         | Native::NodeServerListen
@@ -33960,6 +34725,19 @@ fn call_native(
         | Native::NodeFsPromises
         | Native::NodeFs
         | Native::NodeFsExistsSync
+        | Native::NodeFsSync
+        | Native::AbortControllerConstructor
+        | Native::AbortSignalConstructor
+        | Native::AbortControllerAbort
+        | Native::AbortSignalAbort
+        | Native::AbortSignalTimeout
+        | Native::AbortSignalAny
+        | Native::AbortSignalListen { .. }
+        | Native::AbortSignalThrowIfAborted
+        | Native::AbortSignalSettle
+        | Native::AbortSignalFollow
+        | Native::TextEncoderConstructor
+        | Native::TextEncoderEncode
         | Native::NodeFsReadFile
         | Native::NodeFsWriteFile
         | Native::NodeFsStat
@@ -35810,8 +36588,25 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
 fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Property)> {
     match value {
         // A built-in's tabulated properties are all non-enumerable, so what a spread or an
-        // `Object.assign` copies off one is exactly what a program put there.
-        Value::Native(_) | Value::Callback(_) => intrinsics.enumerable_entries(value),
+        // `Object.assign` copies off one is exactly what a program put there -- with one
+        // exception, and it is the exception every bundler's output depends on. A Node builtin
+        // module's exports *are* enumerable, which is what makes `{ ...require("path") }` and
+        // `export * from "path"` copy anything at all.
+        Value::Native(native) => {
+            let mut entries = intrinsics.enumerable_entries(value);
+            if node_builtin_specifier(*native).is_some() {
+                for name in intrinsic_static_property_names(value) {
+                    if entries.iter().any(|(held, _)| held == name) {
+                        continue;
+                    }
+                    if let Some(found) = native.property(name) {
+                        entries.push(((*name).to_owned(), Property::Value(found)));
+                    }
+                }
+            }
+            entries
+        }
+        Value::Callback(_) => intrinsics.enumerable_entries(value),
         Value::Object(object) => object
             .borrow()
             .entries()
@@ -38369,6 +39164,14 @@ fn native_is_constructor(native: Native) -> bool {
         // target's chain -- so the rule below cannot see it.
         Native::ProxyConstructor
         | Native::TextDecoderConstructor
+        | Native::TextEncoderConstructor
+        | Native::AbortControllerConstructor
+        // `AbortSignal` is a constructor that *refuses* `new`, exactly as `Symbol` is: a signal
+        // comes from a controller or from one of the statics and never from a caller, which is
+        // what keeps cancellation one-directional. Reported as a constructor so the refusal is
+        // "Illegal constructor" rather than "not a constructor", which is what node says and
+        // what a feature check reads.
+        | Native::AbortSignalConstructor
         | Native::NodeStringDecoderConstructor
         | Native::NodeAsyncResource => true,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
@@ -39119,8 +39922,10 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
         }
         Value::Native(native) => {
             // A namespace is an object, not a function: `Math` has no call behaviour, so it has
-            // no arity and no name of its own either.
-            if namespace_name(native).is_some() {
+            // no arity and no name of its own either. A Node builtin module is a namespace for
+            // the same reason -- `require("path")` is an object, and node's has neither a
+            // `length` nor a `name` for `Object.getOwnPropertyNames` to report.
+            if namespace_name(native).is_some() || node_builtin_specifier(*native).is_some() {
                 return None;
             }
             let length = native_length(*native)?;
@@ -40169,6 +40974,29 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// walking a store. Keep this candidate list next to the own-key walk and filter it through
 /// `own_attributes`: a name is included only when the same property machinery can describe it.
 fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
+    let tabulated = intrinsic_tabulated_property_names(target);
+    if !tabulated.is_empty() {
+        return tabulated;
+    }
+    // A Node builtin namespace publishes what the shared ABI table says it publishes, which is
+    // the same list the ESM projection binds. Without it the namespace had *no* own keys at all:
+    // `Object.keys(require("path"))` was 0 against node's 17, so every `{ ...require("path") }`
+    // re-export shim a bundler emits produced an empty object while every individual member
+    // still read correctly -- a silent hole rather than a failure.
+    //
+    // Consulted only where the tables above say nothing, because `node:buffer` is *both* the
+    // module and the `Buffer` constructor here, and the constructor's statics are the answer
+    // that arm was written to give.
+    if let Value::Native(native) = target
+        && let Some(specifier) = node_builtin_specifier(*native)
+        && let Some(abi) = kiln_node_abi::builtin_abi(specifier)
+    {
+        return abi.exports;
+    }
+    &[]
+}
+
+fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str] {
     match target {
         Value::Native(Native::ArrayConstructor) => {
             &["isArray", "from", "fromAsync", "of", "@@species"]
@@ -40566,7 +41394,12 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native) = target else {
         return None;
     };
-    if matches!(native, Native::NodeBuffer)
+    // A Node builtin module's exports are *enumerable*, which is how `{ ...require("path") }`
+    // and every `export * from "path"` re-export shim a bundler emits copies them.
+    // `Object.keys(require("path"))` was 0 against node's 17 while every individual member read
+    // correctly, so those shims produced empty objects and said nothing about it. This used to
+    // name `node:buffer` alone, because that is the one module somebody had needed it for.
+    if node_builtin_specifier(*native).is_some()
         && intrinsic_static_property_names(target).contains(&key)
         && native.property(key).is_some()
     {

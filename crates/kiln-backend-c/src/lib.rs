@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 5;
+pub const C_GENERATOR_VERSION: u32 = 6;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -8864,7 +8864,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
-        return KILN_C99_CONTROL_ERROR;
+        /* `GetV` boxes a primitive and then performs an ordinary prototype lookup. A name the
+         * wrapper prototype does not contain is absent, not a backend refusal. Keeping that
+         * distinction here makes named and computed access share one semantic seam and lets
+         * optional chaining compose with arbitrary primitive-valued fields. */
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
     case KILN_VALUE_STRING: {
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
@@ -9470,7 +9475,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
-        return KILN_C99_CONTROL_ERROR;
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
     case KILN_VALUE_NUMBER:
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
@@ -9488,7 +9494,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
-        return KILN_C99_CONTROL_ERROR;
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
     default:
         /* A boolean or callable has no own properties here. */
         return KILN_C99_CONTROL_ERROR;
@@ -16650,7 +16657,6 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_get(host, source, "@@iterator", 10, &iterator_method, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
