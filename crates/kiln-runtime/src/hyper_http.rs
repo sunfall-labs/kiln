@@ -42,6 +42,9 @@ pub(crate) struct ClientRequestCommand {
 
 #[derive(Debug)]
 pub(crate) enum ClientEvent {
+    Ready {
+        id: u64,
+    },
     ResponseHead {
         id: u64,
         status: u16,
@@ -122,6 +125,15 @@ where
                     return Ok(());
                 }
             };
+            if let Err(error) = sender.ready().await {
+                connection_task.abort();
+                let _ = events.send(ClientEvent::Error {
+                    id,
+                    message: error.to_string(),
+                });
+                let _ = events.send(ClientEvent::Closed);
+                return Ok(());
+            }
             match sender.send_request(request).await {
                 Ok(mut response) => {
                     let status = response.status();
@@ -164,6 +176,16 @@ where
                         }
                     }
                     let _ = events.send(ClientEvent::ResponseEnd { id });
+                    if let Err(error) = sender.ready().await {
+                        connection_task.abort();
+                        let _ = events.send(ClientEvent::Error {
+                            id,
+                            message: error.to_string(),
+                        });
+                        let _ = events.send(ClientEvent::Closed);
+                        return Ok(());
+                    }
+                    let _ = events.send(ClientEvent::Ready { id });
                 }
                 Err(error) => {
                     connection_task.abort();
@@ -653,7 +675,10 @@ mod tests {
                     client_events.recv().await,
                     Some(ClientEvent::ResponseEnd { id }) if id == request_id
                 ));
-                assert!(client_events.try_recv().is_err());
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::Ready { id }) if id == request_id
+                ));
             }
 
             drop(request_sender);
@@ -749,6 +774,10 @@ mod tests {
                 assert!(matches!(
                     client_events.recv().await,
                     Some(ClientEvent::ResponseEnd { id }) if id == request_id
+                ));
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::Ready { id }) if id == request_id
                 ));
             }
             drop(request_sender);
