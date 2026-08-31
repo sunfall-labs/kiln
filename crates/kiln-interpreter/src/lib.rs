@@ -7483,15 +7483,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for action in actions {
                     self.start_http_server_action(&state, action, instruction)?;
                 }
-                let streams = if state.borrow().protocol == ServerProtocol::Net {
-                    let mut state = state.borrow_mut();
-                    state
-                        .streams
-                        .iter_mut()
-                        .map(|stream| (stream.resource(), stream.driver.close_actions()))
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
+                let streams = match state.borrow().protocol {
+                    ServerProtocol::Net => {
+                        let mut state = state.borrow_mut();
+                        state
+                            .streams
+                            .iter_mut()
+                            .map(|stream| (stream.resource(), stream.driver.close_actions()))
+                            .collect::<Vec<_>>()
+                    }
+                    ServerProtocol::Http => {
+                        let resources = state
+                            .borrow()
+                            .streams
+                            .iter()
+                            .map(NodeConnection::resource)
+                            .collect::<Vec<_>>();
+                        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "node:http requires the realm HTTP runtime".into(),
+                        })?;
+                        resources
+                            .into_iter()
+                            .map(|resource| {
+                                // `close_connection` defers resource retirement until any
+                                // response bytes already selected by Hyper are acknowledged.
+                                // That keeps `server.close()` from truncating an active response
+                                // while ensuring an idle keep-alive socket cannot keep the realm
+                                // alive forever.
+                                let actions = unsafe {
+                                    ActiveHttpRuntime::close_connection(&mut *runtime, resource)
+                                }
+                                .ok_or_else(|| {
+                                    ExecutionError::Host {
+                                        instruction,
+                                        message: "HTTP server stream disappeared while closing"
+                                            .into(),
+                                    }
+                                })?;
+                                Ok((resource, actions))
+                            })
+                            .collect::<Result<Vec<_>, ExecutionError>>()?
+                    }
+                    _ => Vec::new(),
                 };
                 for (resource, actions) in streams {
                     for action in actions {
