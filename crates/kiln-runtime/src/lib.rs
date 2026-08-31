@@ -283,6 +283,20 @@ impl RealmRuntime {
         self.host.take_ready()
     }
 
+    /// Returns whether this realm still owns an asynchronous host request.
+    ///
+    /// The native ABI uses this to decide whether its realm drive must wait for a provider
+    /// completion after language work is exhausted. The provider's resource liveness remains
+    /// separate: this reports pending requests, not whether those requests keep the realm alive.
+    pub fn has_pending_host_work(&self) -> bool {
+        !self.host.pending.is_empty()
+    }
+
+    /// Cancels one asynchronous host request owned by this realm.
+    pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
+        AsyncHostOps::cancel(&mut self.host, request)
+    }
+
     /// Runs one synchronous realm operation as the current Tokio task.
     ///
     /// Interpreted bytecode and native continuation calls use this entry rather than executing
@@ -1587,6 +1601,7 @@ mod tests {
             },
             true,
         );
+        assert!(runtime.has_pending_host_work());
         assert!(runtime.host().has_referenced_work());
         assert_eq!(
             runtime
@@ -1604,6 +1619,7 @@ mod tests {
             completion.result,
             Ok(AsyncHostValue::Bytes(vec![0, 1, 2, 255]))
         );
+        assert!(!runtime.has_pending_host_work());
     }
 
     #[test]
