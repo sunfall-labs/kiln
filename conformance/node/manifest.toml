@@ -207,3 +207,10 @@ source = "upstream-adapted/commonjs-extensionless-entry.cjs"
 status = "runnable"
 features = ["commonjs", "node-resolution", "extension-search"]
 expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/crypto/random-uuid-url"
+source = "upstream-adapted/crypto-random-uuid-url.mjs"
+status = "runnable"
+features = ["node:crypto", "randomUUID", "realm-entropy", "node:url", "module-graph"]
+expected_stdout = "6e789e6a-a1b9-45f4-86c4-5d188009454f\n"
