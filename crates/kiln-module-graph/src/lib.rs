@@ -2041,6 +2041,37 @@ mod tests {
     }
 
     #[test]
+    fn node_commonjs_builtin_projection_preserves_namespace_named_exports() {
+        let project = TempProject::new();
+        project.write(
+            "bridge.cjs",
+            concat!(
+                "const hooks = require('node:async_hooks');",
+                "const resource = new hooks.AsyncResource('probe');",
+                "module.exports = typeof resource.bind === 'function';",
+            ),
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import supported from './bridge.cjs'; console.log(supported);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build builtin CommonJS graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute builtin CommonJS graph");
+        assert_eq!(host.into_stdout(), "true\n");
+    }
+
+    #[test]
     fn node_reads_accessor_backed_module_exports_through_commonjs_semantics() {
         let project = TempProject::new();
         project.write(

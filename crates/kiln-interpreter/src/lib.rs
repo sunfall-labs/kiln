@@ -3890,12 +3890,17 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
     let Value::Native(native) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
-    let value = native.property("default").unwrap_or(Value::Native(native));
-    // Node's callable CommonJS facades also carry the named exports as own-looking properties:
-    // `require('node:events').EventEmitter === require('node:events')`. Native values answer
-    // those properties from the canonical table, so no mutable wrapper or second identity is
-    // needed.
-    Some(value)
+    // Only Node's historically callable CommonJS modules project their default binding as
+    // `module.exports`. Namespace modules must retain the namespace: for example,
+    // `require('node:async_hooks').AsyncResource` is a named property, not a property on the
+    // AsyncResource constructor. Keeping this choice explicit prevents a newly-added `default`
+    // export from silently changing the CommonJS shape of a builtin.
+    match specifier.strip_prefix("node:").unwrap_or(specifier) {
+        "assert" | "assert/strict" | "events" => {
+            Some(native.property("default").unwrap_or(Value::Native(native)))
+        }
+        _ => Some(Value::Native(native)),
+    }
 }
 
 impl Value {
