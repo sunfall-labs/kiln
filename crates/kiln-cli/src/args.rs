@@ -63,6 +63,7 @@ pub enum Command {
         output: Option<PathBuf>,
         profile: NativeProfile,
         shared: bool,
+        node: bool,
     },
     Test {
         path: PathBuf,
@@ -213,9 +214,14 @@ where
             "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
         ));
     }
-    if node && name != "test" && name != "run" {
+    if node && name != "test" && name != "run" && name != "build" {
         return Err(Error::usage(
-            "--node only applies to `kiln run` or `kiln test`",
+            "--node only applies to `kiln run`, `kiln build`, or `kiln test`",
+        ));
+    }
+    if node && shared {
+        return Err(Error::usage(
+            "--node cannot be combined with `kiln build --shared`",
         ));
     }
     if node && parse_only {
@@ -244,6 +250,7 @@ where
             output,
             profile: profile.unwrap_or_default(),
             shared,
+            node,
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -417,7 +424,7 @@ options:
                        it is not a polling cadence.
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
-    --node             with `run` or `test`, install the Tokio-owned Node compatibility Adapter
+    --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
@@ -488,6 +495,7 @@ mod tests {
                 output: Some(PathBuf::from("bin/app")),
                 profile: NativeProfile::Release,
                 shared: false,
+                node: false,
             }
         );
         assert!(matches!(
@@ -610,6 +618,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn node_build_is_explicit_and_shared_node_builds_fail_closed() {
+        assert!(matches!(
+            run(&["build", "server.mjs", "--node"]).command,
+            Command::Build {
+                node: true,
+                shared: false,
+                ..
+            }
+        ));
+        assert!(
+            usage_error(&["build", "server.mjs", "--node", "--shared"])
+                .contains("cannot be combined")
+        );
     }
 
     #[test]

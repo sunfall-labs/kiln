@@ -745,6 +745,7 @@ fn handle<E: QueryEngine>(
         Request::NativeBuildAtRevision {
             path,
             project_root,
+            node,
             output,
             profile,
             source_view,
@@ -753,6 +754,7 @@ fn handle<E: QueryEngine>(
             state,
             path,
             project_root,
+            node,
             output,
             profile,
             source_view,
@@ -761,6 +763,7 @@ fn handle<E: QueryEngine>(
         Request::NativeBuild {
             path,
             project_root,
+            node,
             output,
             profile,
             source_view,
@@ -771,7 +774,7 @@ fn handle<E: QueryEngine>(
                 &project_root,
                 source_view,
                 false,
-                false,
+                node,
             ) {
                 Ok(prepared) => prepared,
                 Err(response) => return (response, Next::Continue),
@@ -926,6 +929,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     path: String,
     project_root: String,
+    node: bool,
     output: Option<String>,
     profile: kiln_proto::NativeProfile,
     source_view: SourceView,
@@ -958,7 +962,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
                 resolutions.as_ref(),
                 &path,
                 &project_root,
-                false,
+                node,
             )?;
             match graph {
                 Some(graph) => Ok(PreparedNative::Graph(graph)),

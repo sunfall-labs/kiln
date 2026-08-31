@@ -143,11 +143,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::NativeBuild {
             path,
             project_root,
+            node,
             output,
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, resolutions, &path, &project_root, false) {
+            match native_graph(engine, resolutions, &path, &project_root, node) {
                 Ok(Some(graph)) => native_build_graph(&graph, path, project_root, output, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {

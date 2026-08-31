@@ -8,18 +8,19 @@
   "versions": {
     "node": "v25.9.0",
     "deno": "deno 2.9.5 (stable, release, aarch64-apple-darwin)",
-    "bun": "1.4.0"
+    "bun": "1.4.0",
+    "kiln": "kiln 0.0.0"
   },
   "targets": [
     {
       "target": "node",
       "form": "script",
       "available": true,
-      "runtime_path": "~/.local/share/mise/shims/node",
+      "runtime_path": "/opt/homebrew/bin/node",
       "note": "no standalone form measured: Node's SEA is a multi-step postject flow rather than one command, and half-doing it would put a number in this table that nobody could reproduce from the line above it",
-      "startup_ms_median": 128.97,
-      "startup_ms_min": 122.79,
-      "peak_rss_bytes": 60964864
+      "startup_ms_median": 90.23,
+      "startup_ms_min": 79.34,
+      "peak_rss_bytes": 61054976
     },
     {
       "target": "deno",
@@ -27,9 +28,9 @@
       "available": true,
       "runtime_path": "~/.local/share/mise/installs/deno/2.9.5/bin/deno",
       "note": "",
-      "startup_ms_median": 26.72,
-      "startup_ms_min": 26.13,
-      "peak_rss_bytes": 36233216
+      "startup_ms_median": 40.47,
+      "startup_ms_min": 32.61,
+      "peak_rss_bytes": 36528128
     },
     {
       "target": "bun",
@@ -37,9 +38,9 @@
       "available": true,
       "runtime_path": "~/.local/share/mise/installs/bun/latest/bin/bun",
       "note": "",
-      "startup_ms_median": 22.8,
-      "startup_ms_min": 21.73,
-      "peak_rss_bytes": 26566656
+      "startup_ms_median": 44.01,
+      "startup_ms_min": 35.89,
+      "peak_rss_bytes": 26542080
     },
     {
       "target": "deno",
@@ -47,9 +48,9 @@
       "available": true,
       "artifact_bytes": 67463474,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 27.02,
-      "startup_ms_min": 25.25,
-      "peak_rss_bytes": 36372480
+      "startup_ms_median": 34.13,
+      "startup_ms_min": 32.72,
+      "peak_rss_bytes": 36429824
     },
     {
       "target": "bun",
@@ -57,9 +58,9 @@
       "available": true,
       "artifact_bytes": 63910514,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 21.76,
-      "startup_ms_min": 21.3,
-      "peak_rss_bytes": 25583616
+      "startup_ms_median": 33.56,
+      "startup_ms_min": 31.64,
+      "peak_rss_bytes": 25575424
     },
     {
       "target": "kiln",
@@ -67,15 +68,19 @@
       "available": true,
       "runtime_path": "~/Developer/Personal/kiln/target/debug/kiln",
       "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
-      "startup_ms_median": 697.11,
-      "startup_ms_min": 614.8,
-      "peak_rss_bytes": 41656320
+      "startup_ms_median": 1296.04,
+      "startup_ms_min": 1145.07,
+      "peak_rss_bytes": 43122688
     },
     {
       "target": "kiln",
       "form": "standalone",
-      "available": false,
-      "reason": "the native backend does not yet advertise Node mode; its async continuation ABI must use the same RealmRuntime before this form exists"
+      "available": true,
+      "artifact_bytes": 4852168,
+      "note": "native Node artifact; Tokio/Hyper runtime linked without a JavaScript engine",
+      "startup_ms_median": 15.72,
+      "startup_ms_min": 7.68,
+      "peak_rss_bytes": 3538944
     }
   ]
 }

@@ -282,17 +282,13 @@ pub fn build(
     requested_output: Option<&Path>,
     profile: NativeProfile,
     shared: bool,
+    node: bool,
 ) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let (mut project_notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(
-            backend,
-            project_root,
-            Some((&canonical, &text)),
-            false,
-        )?;
+        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)), node)?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
             backend,
@@ -362,6 +358,7 @@ pub fn build(
         project_root.clone(),
         output.clone(),
         profile,
+        node,
         source_view,
     )? {
         SourceResponse::Ready(summary) => summary,
@@ -375,6 +372,7 @@ pub fn build(
                 project_root,
                 output,
                 profile,
+                node,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => summary,
@@ -1638,8 +1636,16 @@ mod tests {
         std::fs::write(&entry, "export const main = 1;\n").expect("write shared fixture");
 
         let mut backend = Fake::new();
-        let output = build(&mut backend, &entry, &root, None, NativeProfile::Dev, true)
-            .expect("shared build");
+        let output = build(
+            &mut backend,
+            &entry,
+            &root,
+            None,
+            NativeProfile::Dev,
+            true,
+            false,
+        )
+        .expect("shared build");
         assert!(
             output.text.contains("native shared build"),
             "{}",
@@ -1674,8 +1680,16 @@ mod tests {
         let canonical = canonical_path(&entry).expect("canonical native build entry");
 
         let mut backend = RemoveEntryDuringSync::new(entry.clone());
-        build(&mut backend, &entry, &root, None, NativeProfile::Dev, false)
-            .expect("native build keeps its captured entry snapshot");
+        build(
+            &mut backend,
+            &entry,
+            &root,
+            None,
+            NativeProfile::Dev,
+            false,
+            false,
+        )
+        .expect("native build keeps its captured entry snapshot");
 
         assert_eq!(
             backend.inner.names(),

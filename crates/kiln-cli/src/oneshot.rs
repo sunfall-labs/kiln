@@ -278,6 +278,46 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn one_shot_builds_a_standalone_node_server_artifact() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-node-build-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native Node build fixture");
+        let source = fixture.join("s01-http-hello.mjs");
+        let artifact = fixture.join("s01-http-hello");
+        std::fs::copy(root.join("conformance/server/s01-http-hello.mjs"), &source)
+            .expect("copy canonical native HTTP fixture");
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                true,
+            )
+            .expect("build standalone native Node server")
+        };
+        assert_eq!(built.exit_code, 0);
+        assert!(artifact.is_file(), "{}", artifact.display());
+        let output = std::process::Command::new(&artifact)
+            .output()
+            .expect("run standalone native Node server");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"200 text/plain kiln\n");
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_native_node_streams_request_bodies_through_hyper() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-native-http-stream-fixture-{}",

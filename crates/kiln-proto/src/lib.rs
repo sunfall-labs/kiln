@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -469,6 +469,8 @@ pub enum Request {
     NativeBuild {
         path: String,
         project_root: String,
+        /// Enable the typed Node resolver and native runtime-module materializers.
+        node: bool,
         /// Requested output path. The client supplies the default so daemon and one-shot
         /// invocations produce the same artifact location.
         output: Option<String>,
@@ -479,6 +481,8 @@ pub enum Request {
     NativeBuildAtRevision {
         path: String,
         project_root: String,
+        /// Enable the typed Node resolver and native runtime-module materializers.
+        node: bool,
         output: Option<String>,
         profile: NativeProfile,
         source_view: SourceView,
@@ -846,8 +850,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v22_sync_source_view_and_cache_gc_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 22);
+    fn protocol_v23_node_native_build_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 23);
 
         let requests = [
             (
@@ -909,6 +913,24 @@ mod tests {
                     "path": "main.mjs",
                     "project_root": "/project",
                     "node": true,
+                    "source_view": 12
+                }}),
+            ),
+            (
+                Request::NativeBuild {
+                    path: "server.mjs".to_owned(),
+                    project_root: "/project".to_owned(),
+                    node: true,
+                    output: Some("/project/server".to_owned()),
+                    profile: NativeProfile::Release,
+                    source_view: SourceView(12),
+                },
+                serde_json::json!({"NativeBuild": {
+                    "path": "server.mjs",
+                    "project_root": "/project",
+                    "node": true,
+                    "output": "/project/server",
+                    "profile": "Release",
                     "source_view": 12
                 }}),
             ),
