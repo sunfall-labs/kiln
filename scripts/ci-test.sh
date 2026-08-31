@@ -19,11 +19,11 @@ cd "$(kiln_repo_root)"
 # reproducibility bug, and CI is the right place to notice it.
 if cargo nextest --version >/dev/null 2>&1; then
 	echo "test runner: cargo-nextest"
-	cargo nextest run --workspace --locked
-	cargo test --workspace --locked --doc
+	kiln_cargo nextest run --workspace --locked
+	kiln_cargo test --workspace --locked --doc
 else
 	echo "test runner: cargo test (cargo-nextest is not installed)"
-	cargo test --workspace --locked
+	kiln_cargo test --workspace --locked
 fi
 
 # The number provider is an rlib during ordinary workspace tests and a no-std, panic-abort static
@@ -32,15 +32,15 @@ scripts/check-native-number-ffi.sh
 
 # Exercise the public conformance workflow, not only its component crates. The local corpus is
 # intentionally tiny; the full upstream suite remains an external, separately pinned input.
-cargo run -p kiln-cli --locked -- --one-shot test tests/conformance/smoke
+kiln_cargo run -p kiln-cli --locked -- --one-shot test tests/conformance/smoke
 
 # Exercise the public native path against the same bytecode as the interpreter. The second build
 # must be a fully warm artifact-cache hit, and both execution engines must expose identical stdout
 # for the supported scalar slice.
 KILN_CI_NATIVE_OUTPUT="target/kiln-ci-native"
-cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
+kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
 	--output "$KILN_CI_NATIVE_OUTPUT" >/dev/null
-KILN_CI_WARM_BUILD="$(cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
+KILN_CI_WARM_BUILD="$(kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
 	--output "$KILN_CI_NATIVE_OUTPUT")"
 KILN_CI_HIT_COUNT="$(printf '%s\n' "$KILN_CI_WARM_BUILD" | grep -c '(hit)')"
 if [[ $KILN_CI_HIT_COUNT -ne 5 ]]; then
@@ -48,8 +48,8 @@ if [[ $KILN_CI_HIT_COUNT -ne 5 ]]; then
 	printf '%s\n' "$KILN_CI_WARM_BUILD" >&2
 	exit 1
 fi
-KILN_CI_INTERPRETER_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts)"
-KILN_CI_NATIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts --native)"
+KILN_CI_INTERPRETER_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts)"
+KILN_CI_NATIVE_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run examples/hello.ts --native)"
 if [[ $KILN_CI_NATIVE_STDOUT != "$KILN_CI_INTERPRETER_STDOUT" ]]; then
 	echo "native stdout differs from interpreter stdout" >&2
 	printf 'interpreter: %s\nnative: %s\n' "$KILN_CI_INTERPRETER_STDOUT" "$KILN_CI_NATIVE_STDOUT" >&2
@@ -60,9 +60,9 @@ fi
 # effects, an imported scalar value, per-module native artifacts, and interpreter/native
 # equivalence all have to survive the CLI/daemon boundary.
 KILN_CI_MODULE_OUTPUT="target/kiln-ci-native-modules"
-cargo run -p kiln-cli --locked -- --one-shot build examples/modules/main.ts \
+kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/modules/main.ts \
 	--output "$KILN_CI_MODULE_OUTPUT" >/dev/null
-KILN_CI_MODULE_WARM_BUILD="$(cargo run -p kiln-cli --locked -- --one-shot build \
+KILN_CI_MODULE_WARM_BUILD="$(kiln_cargo run -p kiln-cli --locked -- --one-shot build \
 	examples/modules/main.ts --output "$KILN_CI_MODULE_OUTPUT")"
 KILN_CI_MODULE_HIT_COUNT="$(printf '%s\n' "$KILN_CI_MODULE_WARM_BUILD" | grep -c '(hit)')"
 if [[ $KILN_CI_MODULE_HIT_COUNT -ne 5 ]]; then
@@ -70,9 +70,9 @@ if [[ $KILN_CI_MODULE_HIT_COUNT -ne 5 ]]; then
 	printf '%s\n' "$KILN_CI_MODULE_WARM_BUILD" >&2
 	exit 1
 fi
-KILN_CI_MODULE_INTERPRETER_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_MODULE_INTERPRETER_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/main.ts)"
-KILN_CI_MODULE_NATIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_MODULE_NATIVE_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/main.ts --native)"
 KILN_CI_MODULE_EXPECTED=$'dependency\n42'
 if [[ $KILN_CI_MODULE_INTERPRETER_STDOUT != "$KILN_CI_MODULE_EXPECTED" || \
@@ -87,7 +87,7 @@ fi
 # scalars-only, so asking it to link this would be testing a refusal rather than the seam.
 # What is being gated is that an exported function, class, arrow and default all run, and that
 # each reads its *own* module's bindings rather than the importer's same-numbered slot.
-KILN_CI_EXPORTS_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_EXPORTS_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/exports/main.ts)"
 KILN_CI_EXPORTS_EXPECTED=$'3cm\nbox 4cm\n42\n0cm in'
 if [[ $KILN_CI_EXPORTS_STDOUT != "$KILN_CI_EXPORTS_EXPECTED" ]]; then
@@ -98,7 +98,7 @@ fi
 
 # Every forwarding form: a named re-export, a rename, the default under a new name, a namespace,
 # and a star whose names lose to one the forwarding module exports itself.
-KILN_CI_REEXPORTS_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_REEXPORTS_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/exports/via.ts)"
 KILN_CI_REEXPORTS_EXPECTED=$'1cm 4 0cm box 3cm\nmm metric\nBox,default,describe,double\ntrue'
 if [[ $KILN_CI_REEXPORTS_STDOUT != "$KILN_CI_REEXPORTS_EXPECTED" ]]; then
@@ -114,7 +114,7 @@ fi
 # mutable `let`, a `const` and a *function*, so the native path has to hand a cell across the
 # module boundary for the first, a plain value for the second, and a closure for the third --
 # and then call that closure from a unit that did not create it.
-KILN_CI_LIVE_STDOUT="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_LIVE_STDOUT="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/live/main.ts)"
 KILN_CI_LIVE_EXPECTED=$'0 10\n2 10'
 if [[ $KILN_CI_LIVE_STDOUT != "$KILN_CI_LIVE_EXPECTED" ]]; then
@@ -122,7 +122,7 @@ if [[ $KILN_CI_LIVE_STDOUT != "$KILN_CI_LIVE_EXPECTED" ]]; then
 	printf 'expected: %s\nactual: %s\n' "$KILN_CI_LIVE_EXPECTED" "$KILN_CI_LIVE_STDOUT" >&2
 	exit 1
 fi
-KILN_CI_LIVE_NATIVE="$(cargo run -p kiln-cli --locked -- --one-shot run \
+KILN_CI_LIVE_NATIVE="$(kiln_cargo run -p kiln-cli --locked -- --one-shot run \
 	examples/modules/live/main.ts --native)"
 if [[ $KILN_CI_LIVE_NATIVE != "$KILN_CI_LIVE_STDOUT" ]]; then
 	echo "native stdout differs from interpreter stdout for a live binding" >&2

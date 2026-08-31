@@ -25,11 +25,22 @@ kiln_say() {
 	printf '%s\n' "$*" | kiln_block
 }
 
+# Share compilation cache and CPU budgeting when the developer tool is installed, while keeping
+# every script runnable on a stock GitHub runner. Keep direct `cargo` only in probes that measure
+# Cargo itself (`ci-rebuild-timing.sh` and `rebuild-probe.py`).
+kiln_cargo() {
+	if command -v mbx >/dev/null 2>&1; then
+		mbx "$@"
+	else
+		cargo "$@"
+	fi
+}
+
 # Build the timing harness and the sibling CLI it launches for the real daemon-startup scenario,
 # then echo the harness path. Release, because a debug build of a benchmark measures the wrong
 # thing.
 kiln_build_bench() {
-	cargo build --release --locked -p kiln-bench -p kiln-cli >&2
+	kiln_cargo build --release --locked -p kiln-bench -p kiln-cli >&2
 	printf '%s\n' "$(kiln_repo_root)/target/release/kiln-bench"
 }
 

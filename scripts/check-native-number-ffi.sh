@@ -96,7 +96,7 @@ fi
 # Exercise the same package through the product resolver/linker. The explicit manifest wins over
 # source fallback, so a schema, target, digest, cache-key, or archive-link regression fails here.
 env KILN_NATIVE_NUMBER_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
-	cargo run --quiet --locked -p kiln-cli --bin kiln -- \
+	kiln_cargo run --quiet --locked -p kiln-cli --bin kiln -- \
 	--one-shot build examples/hello.ts --output "$KILN_NUMBER_TEMP/native-probe" >/dev/null
 "$KILN_NUMBER_TEMP/native-probe" >/dev/null
 
