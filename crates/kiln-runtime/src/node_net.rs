@@ -69,6 +69,15 @@ impl TcpServerDriver {
         self.closed
     }
 
+    /// Whether an accept action produced before a synchronous listener callback is still valid.
+    ///
+    /// A `listening` callback may call `server.close()` before the following accept action from
+    /// the same completion batch is applied. The adapter uses this predicate to discard that
+    /// stale action without weakening validation for any other host operation.
+    pub const fn accepts_connections(&self) -> bool {
+        self.listener.is_some() && !self.closing && !self.closed
+    }
+
     pub fn set_referenced(&self, referenced: bool) -> Option<ServerAction> {
         self.listener.as_ref().map(|listener| {
             ServerAction::Start(AsyncHostOp::SetResourceReferenced {
@@ -314,5 +323,40 @@ mod tests {
             Some(vec![ServerAction::Close])
         );
         assert!(server.closed());
+    }
+
+    #[test]
+    fn listening_callback_can_invalidate_the_precomputed_accept_action() {
+        let mut server = TcpServerDriver::default();
+        let listen = AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        };
+        assert!(server.started(&listen, RequestId::new(1)));
+        let actions = server
+            .completed(completion(
+                1,
+                AsyncHostValue::Resource(ResourceInfo {
+                    id: ResourceId::new(7),
+                    kind: ResourceKind::TcpListener,
+                    address: Some("127.0.0.1".into()),
+                    port: Some(41000),
+                }),
+            ))
+            .expect("listen completion belongs to driver");
+        assert!(server.accepts_connections());
+        assert!(matches!(
+            actions[1],
+            ServerAction::Start(AsyncHostOp::TcpAccept { .. })
+        ));
+
+        let close = server.close();
+        assert!(!server.accepts_connections());
+        assert!(matches!(
+            close.last(),
+            Some(ServerAction::Start(AsyncHostOp::CloseResource { .. }))
+        ));
+        // The adapter must now discard `actions[1]`: it was computed before the synchronous
+        // listening callback closed the server.
     }
 }

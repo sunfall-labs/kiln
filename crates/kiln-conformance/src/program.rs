@@ -12,6 +12,8 @@ use std::time::Instant;
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
 use kiln_interpreter::{ExecutionLimits, execute, execute_node};
+use kiln_module_graph::{ModuleGraph, ModuleGraphError};
+use kiln_module_resolver::NodeRuntimeResolver;
 use kiln_runtime::CaptureHost;
 
 use crate::case::{
@@ -49,8 +51,76 @@ pub fn run_node_against_expected_stdout(
 ) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
-        result: run_with_executor(path, expected, mode, true),
+        result: if source_goal(path) == SourceGoal::Module {
+            run_node_module(path, expected, mode)
+        } else {
+            run_with_executor(path, expected, mode, true)
+        },
     }
+}
+
+/// Run a Node module through the production resolver, graph, linker, shared realm session, and
+/// Tokio-owned Adapter. Keeping this path in the corpus prevents a single-file test executor from
+/// becoming a second, easier-to-pass Node runtime that real programs never use.
+fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
+    let started = Instant::now();
+    crate::source_compiler::install();
+
+    if matches!(mode, RunMode::Parse) {
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                return failed(
+                    DiagnosticPhase::Harness,
+                    format!("cannot read {}: {error}", path.display()),
+                    started,
+                );
+            }
+        };
+        let module = parse_with_goal(&path.to_string_lossy(), &source, SourceGoal::Module);
+        return if module.diagnostics.is_empty() && !module.panicked {
+            CaseResult::new(Outcome::Pass, Vec::new(), String::new(), started)
+        } else {
+            failed(
+                DiagnosticPhase::Parse,
+                module
+                    .diagnostics
+                    .first()
+                    .map_or("frontend parser could not recover a module", |diagnostic| {
+                        diagnostic.message.as_str()
+                    }),
+                started,
+            )
+        };
+    }
+
+    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let resolver = match NodeRuntimeResolver::new(project_root) {
+        Ok(resolver) => resolver,
+        Err(error) => return failed(DiagnosticPhase::Harness, error.to_string(), started),
+    };
+    let graph = match ModuleGraph::build_with_policy(path, resolver, |module_path| {
+        let source = fs::read_to_string(module_path).map_err(|error| ModuleGraphError::Source {
+            path: module_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = parse_with_goal(&module_path.to_string_lossy(), &source, SourceGoal::Module);
+        kiln_ir::compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: module_path.to_path_buf(),
+            diagnostics,
+        })
+    }) {
+        Ok(graph) => graph,
+        Err(error) => return failed(DiagnosticPhase::Compile, error.to_string(), started),
+    };
+
+    let mut host = CaptureHost::new();
+    if let Err(error) = graph.execute_node(&mut host, ExecutionLimits::default()) {
+        let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
+        result.stdout = host.into_stdout();
+        return result;
+    }
+    judge_stdout(host.into_stdout(), expected, started)
 }
 
 fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> CaseResult {
@@ -149,7 +219,10 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
         return result;
     }
 
-    let stdout = host.into_stdout();
+    judge_stdout(host.into_stdout(), expected, started)
+}
+
+fn judge_stdout(stdout: String, expected: &str, started: Instant) -> CaseResult {
     if stdout == expected {
         return CaseResult::new(Outcome::Pass, Vec::new(), stdout, started);
     }

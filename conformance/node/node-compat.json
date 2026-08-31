@@ -10,17 +10,30 @@
     "parallel/test-fs-promises-readfile-empty.js": {
       "expectation": "pass",
       "sha256": "10247f1876bcae623c792ea78f890f6ba2682299636e3075c468c52e7d1e2870",
+      "adapted_complete": true,
+      "adapted": [
+        "upstream-adapted/fs-promises-readfile-empty-buffer.js",
+        "upstream-adapted/fs-promises-readfile-empty-utf8-string.js",
+        "upstream-adapted/fs-promises-readfile-empty-utf8-options.js"
+      ],
       "features": ["node:fs/promises", "buffer", "promise-jobs"]
     },
     "parallel/test-fs-promises-writefile-typedarray.js": {
       "expectation": "pass",
       "sha256": "a8cb5228c030b21dd560feb7362391fa217a3f9c06ecb2bd624103ce73151395",
+      "adapted_complete": true,
+      "adapted": [
+        "upstream-adapted/fs-promises-writefile-uint8array.js",
+        "upstream-adapted/fs-promises-writefile-uint16array.js",
+        "upstream-adapted/fs-promises-writefile-uint32array.js"
+      ],
       "features": ["node:fs/promises", "typed-arrays", "promise-jobs"]
     },
     "parallel/test-http-server.js": {
       "expectation": "expected-failure",
       "sha256": "e62450f338b93c15eab588fc70c91db638d35f30cb35c4da283f838f054cfb05",
-      "reason": "node:http, EventEmitter, streams, and Tokio socket resources are the next vertical slice",
+      "reason": "partial: the Tokio-owned server/client, request stream, and response stream pass; the upstream test still needs CommonJS harness support, url/querystring, pipelined requests, readyState, and allowHalfOpen",
+      "adapted": ["upstream-adapted/http-server-tokio-owned.mjs"],
       "features": ["node:http", "events", "streams", "tokio-net"]
     },
     "parallel/test-http-request-end.js": {
@@ -38,13 +51,15 @@
     "parallel/test-event-emitter-add-listeners.js": {
       "expectation": "expected-failure",
       "sha256": "03746da964b9490e004015a55d0692c51161fe11058273053ad9dcd8a86c42a3",
-      "reason": "node:events and EventEmitter listener semantics are not implemented yet",
+      "reason": "partial: newListener ordering, listener identity, emit arguments, and setMaxListeners pass; the upstream test's re-entrant newListener ordering still needs a complete adapted case",
+      "adapted": ["upstream-adapted/event-emitter-add-listeners.mjs"],
       "features": ["node:events", "event-emitter"]
     },
     "parallel/test-net-listen-close-server.js": {
       "expectation": "expected-failure",
       "sha256": "e7c0bf96be8619c6357aca1a11d0898fd9ed5ccc03778093d5d059d4185342a7",
-      "reason": "realm-owned TCP listener resources and referenced liveness are not implemented yet",
+      "reason": "partial: listen/address/close lifecycle passes through Tokio; the upstream case closes before listen completion and still needs that exact cancellation timing",
+      "adapted": ["upstream-adapted/net-listen-close-server.mjs"],
       "features": ["node:net", "tokio-net", "resource-lifecycle"]
     },
     "parallel/test-stream-readable-event.js": {

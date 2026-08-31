@@ -5480,6 +5480,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let ServerAction::Start(operation) = action else {
             return self.apply_http_server_action(state, action, instruction);
         };
+        if matches!(operation, AsyncHostOp::TcpAccept { .. })
+            && !state.borrow().driver.accepts_connections()
+        {
+            return Ok(());
+        }
         let host = self.node_host.ok_or_else(|| ExecutionError::Host {
             instruction,
             message: "node:http requires the Node execution Adapter".into(),
@@ -5488,7 +5493,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !state.borrow_mut().driver.started(&operation, request) {
             return Err(ExecutionError::Host {
                 instruction,
-                message: "node:http server rejected its own host operation".into(),
+                message: format!(
+                    "node:{:?} server rejected host operation {operation:?} as request {}",
+                    state.borrow().protocol,
+                    request.get()
+                ),
             });
         }
         self.push_pending_node(PendingNodeRequest::Server {

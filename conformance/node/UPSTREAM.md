@@ -1,6 +1,6 @@
 # Node compatibility corpus
 
-This directory pins an executable slice of Node.js `fs/promises` behavior to Node tag `v24.7.0`,
+This directory pins an executable slice of Node.js compatibility behavior to Node tag `v24.7.0`,
 commit `d795edb56765d4ec743bcda5a0c1452bed74de0c`. The two primary source tests are:
 
 - `test/parallel/test-fs-promises-readfile-empty.js`, SHA-256
@@ -20,10 +20,13 @@ extend the same upstream API slice with Node-shaped assertions needed to cover K
 Adapter boundary. They are derived compatibility probes rather than byte-for-byte upstream files;
 the manifest labels every exercised behavior so the supported surface is explicit.
 
-Node mode currently has one supported execution path: the bytecode interpreter selected by
-`kiln test --node`. The native backend does not accept or silently emulate Node mode yet; when its
-private continuation ABI grows asynchronous HostOps, this corpus becomes the shared interpreter /
-native gate. Run today's pinned gate with:
+Node mode currently has one supported executor: the bytecode interpreter selected by
+`kiln test --node`. Script cases use the direct program entrypoint; `.mjs` cases deliberately use
+the production Node resolver, typed builtin graph, linker, shared realm session, and Tokio Adapter.
+That second path is where server compatibility is gated, so a test-only loader cannot make the
+corpus greener than a real module graph. The native backend does not accept or silently emulate
+Node mode yet; when its private continuation ABI grows asynchronous HostOps, this corpus becomes
+the shared interpreter/native gate. Run today's pinned gate with:
 
 ```sh
 mbx run -p kiln-cli -- --one-shot test conformance/node --node
@@ -35,10 +38,15 @@ Ordinary deterministic conformance continues to omit `--node`, so it never obser
 
 `node-compat.json` is the Deno-style compatibility inventory. It pins the upstream repository,
 tag, commit, and suite directory, then assigns every selected upstream path an explicit
-expectation. Passing entries are CI claims; expected failures and skips require reasons. Platform
+expectation. Passing entries are CI claims and must name a complete executable adaptation. Partial
+adaptations remain expected failures, but name their runnable cases and the remaining upstream
+assertions in the reason. Expected failures and skips require reasons. Platform
 exclusions also require reasons. Every selected file carries its SHA-256, so validation fails closed
 if a path disappears or its bytes differ from the pinned Node revision.
 
-The initial inventory intentionally follows the real-server dependency chain: filesystem cases
-already passing, then Buffer, EventEmitter, streams, TCP resources, and HTTP. It records cluster as
-out of the current scope rather than allowing the absence of a test to look like compatibility.
+The inventory follows the real-server dependency chain: filesystem cases pass completely;
+EventEmitter, TCP, and HTTP now have executable partial coverage; Buffer, generic streams, and the
+HTTP client remain explicit gaps. The HTTP partial is self-contained: `node:http` serves a paused /
+resumed body and chunked response to a `node:net` client in the same realm, so Tokio owns both I/O
+paths and the scheduler/liveness decision. Cluster stays out of scope explicitly rather than
+letting an absent test look like compatibility.
