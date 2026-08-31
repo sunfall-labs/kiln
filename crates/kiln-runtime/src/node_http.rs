@@ -1,0 +1,454 @@
+//! Incremental HTTP/1 server semantics for the Node compatibility adapter.
+//!
+//! This module owns protocol bytes, not sockets or JavaScript objects. A `node:http` adapter
+//! feeds it chunks from [`crate::node_stream::StreamDriver`] and turns parsed requests into
+//! `IncomingMessage`/`ServerResponse` objects. Keeping protocol and transport separate makes the
+//! same parser usable with live Tokio sockets and ADR 0031's scripted deterministic host.
+
+use std::collections::BTreeMap;
+
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub target: String,
+    pub version: HttpVersion,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub keep_alive: bool,
+}
+
+impl HttpRequest {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn headers_object(&self) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        for (name, value) in &self.headers {
+            headers
+                .entry(name.to_ascii_lowercase())
+                .and_modify(|existing: &mut String| {
+                    existing.push_str(", ");
+                    existing.push_str(value);
+                })
+                .or_insert_with(|| value.clone());
+        }
+        headers
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpVersion {
+    Http10,
+    Http11,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpParseError {
+    HeadTooLarge,
+    InvalidRequestLine,
+    InvalidHeader,
+    InvalidContentLength,
+    ConflictingBodyFraming,
+    InvalidChunk,
+    UnsupportedVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BodyKind {
+    None,
+    Length(usize),
+    Chunked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestHead {
+    method: String,
+    target: String,
+    version: HttpVersion,
+    headers: Vec<(String, String)>,
+    body: BodyKind,
+    keep_alive: bool,
+}
+
+/// Incremental, pipelining-safe HTTP/1 request decoder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Http1Decoder {
+    bytes: Vec<u8>,
+}
+
+impl Http1Decoder {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<HttpRequest>, HttpParseError> {
+        self.bytes.extend_from_slice(bytes);
+        let mut requests = Vec::new();
+        loop {
+            let Some(head_end) = find_bytes(&self.bytes, b"\r\n\r\n") else {
+                if self.bytes.len() > MAX_HEAD_BYTES {
+                    return Err(HttpParseError::HeadTooLarge);
+                }
+                break;
+            };
+            if head_end > MAX_HEAD_BYTES {
+                return Err(HttpParseError::HeadTooLarge);
+            }
+            let head = parse_head(&self.bytes[..head_end])?;
+            let body_start = head_end + 4;
+            let decoded = match head.body {
+                BodyKind::None => Some((Vec::new(), body_start)),
+                BodyKind::Length(length) => {
+                    let end = body_start.saturating_add(length);
+                    (self.bytes.len() >= end).then(|| (self.bytes[body_start..end].to_vec(), end))
+                }
+                BodyKind::Chunked => decode_chunked(&self.bytes[body_start..])?
+                    .map(|(body, consumed)| (body, body_start + consumed)),
+            };
+            let Some((body, consumed)) = decoded else {
+                break;
+            };
+            requests.push(HttpRequest {
+                method: head.method,
+                target: head.target,
+                version: head.version,
+                headers: head.headers,
+                body,
+                keep_alive: head.keep_alive,
+            });
+            self.bytes.drain(..consumed);
+        }
+        Ok(requests)
+    }
+
+    pub fn buffered_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+fn parse_head(bytes: &[u8]) -> Result<RequestHead, HttpParseError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpParseError::InvalidHeader)?;
+    let mut lines = text.split("\r\n");
+    let mut request_line = lines
+        .next()
+        .ok_or(HttpParseError::InvalidRequestLine)?
+        .split_whitespace();
+    let method = request_line
+        .next()
+        .filter(|value| valid_token(value))
+        .ok_or(HttpParseError::InvalidRequestLine)?
+        .to_owned();
+    let target = request_line
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or(HttpParseError::InvalidRequestLine)?
+        .to_owned();
+    let version = match request_line.next() {
+        Some("HTTP/1.0") => HttpVersion::Http10,
+        Some("HTTP/1.1") => HttpVersion::Http11,
+        Some(_) => return Err(HttpParseError::UnsupportedVersion),
+        None => return Err(HttpParseError::InvalidRequestLine),
+    };
+    if request_line.next().is_some() {
+        return Err(HttpParseError::InvalidRequestLine);
+    }
+
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    let mut transfer_codings = Vec::new();
+    let mut connection = None;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(HttpParseError::InvalidHeader)?;
+        if !valid_token(name)
+            || value
+                .bytes()
+                .any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
+        {
+            return Err(HttpParseError::InvalidHeader);
+        }
+        let value = value.trim_matches([' ', '\t']).to_owned();
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .parse::<usize>()
+                .map_err(|_| HttpParseError::InvalidContentLength)?;
+            if content_length
+                .replace(length)
+                .is_some_and(|old| old != length)
+            {
+                return Err(HttpParseError::InvalidContentLength);
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            transfer_codings.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|coding| !coding.is_empty())
+                    .map(str::to_ascii_lowercase),
+            );
+        } else if name.eq_ignore_ascii_case("connection") {
+            connection = Some(value.to_ascii_lowercase());
+        }
+        headers.push((name.to_ascii_lowercase(), value));
+    }
+    let chunked = !transfer_codings.is_empty()
+        && transfer_codings
+            .last()
+            .is_some_and(|coding| coding == "chunked");
+    if !transfer_codings.is_empty() && !chunked {
+        return Err(HttpParseError::ConflictingBodyFraming);
+    }
+    if chunked && content_length.is_some() {
+        return Err(HttpParseError::ConflictingBodyFraming);
+    }
+    let keep_alive = match version {
+        HttpVersion::Http11 => connection.as_deref() != Some("close"),
+        HttpVersion::Http10 => connection.as_deref() == Some("keep-alive"),
+    };
+    Ok(RequestHead {
+        method,
+        target,
+        version,
+        headers,
+        body: if chunked {
+            BodyKind::Chunked
+        } else if let Some(length) = content_length {
+            BodyKind::Length(length)
+        } else {
+            BodyKind::None
+        },
+        keep_alive,
+    })
+}
+
+fn decode_chunked(bytes: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpParseError> {
+    let mut cursor = 0;
+    let mut body = Vec::new();
+    loop {
+        let Some(line_end) = find_bytes(&bytes[cursor..], b"\r\n") else {
+            return Ok(None);
+        };
+        let line_end = cursor + line_end;
+        let size_text = std::str::from_utf8(&bytes[cursor..line_end])
+            .map_err(|_| HttpParseError::InvalidChunk)?;
+        let size =
+            usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                .map_err(|_| HttpParseError::InvalidChunk)?;
+        cursor = line_end + 2;
+        if size == 0 {
+            let Some(trailers_end) = find_bytes(&bytes[cursor..], b"\r\n\r\n").or_else(|| {
+                bytes
+                    .get(cursor..cursor + 2)
+                    .filter(|ending| *ending == b"\r\n")
+                    .map(|_| 0)
+            }) else {
+                return Ok(None);
+            };
+            let consumed = if trailers_end == 0 {
+                cursor + 2
+            } else {
+                cursor + trailers_end + 4
+            };
+            return Ok(Some((body, consumed)));
+        }
+        let end = cursor.saturating_add(size);
+        if bytes.len() < end + 2 {
+            return Ok(None);
+        }
+        if &bytes[end..end + 2] != b"\r\n" {
+            return Err(HttpParseError::InvalidChunk);
+        }
+        body.extend_from_slice(&bytes[cursor..end]);
+        cursor = end + 2;
+    }
+}
+
+fn valid_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub reason: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn encode(self, keep_alive: bool) -> Vec<u8> {
+        let reason = self
+            .reason
+            .unwrap_or_else(|| reason_phrase(self.status).to_owned());
+        let mut headers = self.headers;
+        let has_length = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        let has_connection = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("connection"));
+        let no_body = matches!(self.status, 100..=199 | 204 | 304);
+        if !has_length && !no_body {
+            headers.push(("Content-Length".into(), self.body.len().to_string()));
+        }
+        if !has_connection && !keep_alive {
+            headers.push(("Connection".into(), "close".into()));
+        }
+        let mut bytes = format!("HTTP/1.1 {} {}\r\n", self.status, reason).into_bytes();
+        for (name, value) in headers {
+            if valid_token(&name) && !value.contains(['\r', '\n']) {
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.extend_from_slice(b": ");
+                bytes.extend_from_slice(value.as_bytes());
+                bytes.extend_from_slice(b"\r\n");
+            }
+        }
+        bytes.extend_from_slice(b"\r\n");
+        if !no_body {
+            bytes.extend_from_slice(&self.body);
+        }
+        bytes
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "Unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_incremental_content_length_and_pipelined_requests() {
+        let mut decoder = Http1Decoder::default();
+        assert!(
+            decoder
+                .push(b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhe")
+                .unwrap()
+                .is_empty()
+        );
+        let requests = decoder
+            .push(b"lloGET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, b"hello");
+        assert!(requests[0].keep_alive);
+        assert_eq!(requests[1].target, "/b");
+        assert!(!requests[1].keep_alive);
+        assert_eq!(decoder.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn parses_chunked_body_across_input_boundaries() {
+        let mut decoder = Http1Decoder::default();
+        assert!(
+            decoder
+                .push(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWi")
+                .unwrap()
+                .is_empty()
+        );
+        let request = decoder
+            .push(b"ki\r\n5\r\npedia\r\n0\r\n\r\n")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(request.body, b"Wikipedia");
+    }
+
+    #[test]
+    fn rejects_ambiguous_body_framing() {
+        let mut decoder = Http1Decoder::default();
+        assert_eq!(
+            decoder.push(
+                b"POST / HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            Err(HttpParseError::ConflictingBodyFraming)
+        );
+        let mut decoder = Http1Decoder::default();
+        assert_eq!(
+            decoder.push(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"),
+            Err(HttpParseError::ConflictingBodyFraming)
+        );
+        let mut decoder = Http1Decoder::default();
+        assert_eq!(
+            decoder.push(b"POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n"),
+            Err(HttpParseError::InvalidContentLength)
+        );
+    }
+
+    #[test]
+    fn response_adds_length_and_connection_policy_without_overwriting_headers() {
+        let bytes = HttpResponse {
+            status: 200,
+            reason: None,
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: b"hello".to_vec(),
+        }
+        .encode(false);
+        assert_eq!(
+            bytes,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
+        );
+    }
+
+    #[test]
+    fn no_content_response_suppresses_a_supplied_body() {
+        let bytes = HttpResponse {
+            status: 204,
+            reason: None,
+            headers: Vec::new(),
+            body: b"must not be sent".to_vec(),
+        }
+        .encode(true);
+        assert_eq!(bytes, b"HTTP/1.1 204 No Content\r\n\r\n");
+    }
+
+    #[test]
+    fn chunked_trailers_are_consumed_before_the_next_pipeline_request() {
+        let mut decoder = Http1Decoder::default();
+        let requests = decoder
+            .push(
+                b"POST /a HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nX-T: y\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n",
+            )
+            .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, b"x");
+        assert_eq!(requests[1].target, "/b");
+    }
+}
