@@ -4461,6 +4461,32 @@ pub fn execute_module_in_runtime<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_in_runtime_mode(module, import_values, host, limits, runtime, false)
+}
+
+/// Execute one linked module with the realm-owned Node host explicitly installed.
+///
+/// This is the module-graph counterpart of [`execute_node`]. Keeping it separate from
+/// [`execute_module_in_runtime`] makes deterministic graph execution the inert default while a
+/// host-backed caller opts into ambient I/O at one visible boundary.
+pub fn execute_node_module_in_runtime<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_in_runtime_mode(module, import_values, host, limits, runtime, true)
+}
+
+fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+    node: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
             expected: module.imports.len(),
@@ -4490,10 +4516,17 @@ pub fn execute_module_in_runtime<H: HostOps + ?Sized>(
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
     let mut vm = Vm::new(Rc::new(module.program.clone()), host, locals, limits);
+    if node {
+        vm.node_host = Some(runtime.host_mut() as *mut TokioHost);
+    }
     let execution = runtime.enter(|| vm.run())?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
-    vm.run_event_loop(runtime)?;
+    if node {
+        vm.run_node_event_loop(runtime)?;
+    } else {
+        vm.run_event_loop(runtime)?;
+    }
     let execution = ExecutionResult {
         steps: vm.steps,
         ..execution

@@ -14,7 +14,7 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module_in_runtime,
-    node_builtin_export_names, node_builtin_exports,
+    execute_node_module_in_runtime, node_builtin_export_names, node_builtin_exports,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -563,6 +563,28 @@ impl ModuleGraph {
         host: &mut H,
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, ModuleGraphError> {
+        self.execute_mode(host, limits, false)
+    }
+
+    /// Execute this graph with the realm-owned Tokio Node host installed.
+    ///
+    /// The graph and linker are identical to [`Self::execute`]; only the explicit execution
+    /// capability differs. This prevents importing a Node-shaped package from silently granting
+    /// host I/O to deterministic evaluation.
+    pub fn execute_node<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+    ) -> Result<ExecutionResult, ModuleGraphError> {
+        self.execute_mode(host, limits, true)
+    }
+
+    fn execute_mode<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        node: bool,
+    ) -> Result<ExecutionResult, ModuleGraphError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
@@ -575,19 +597,19 @@ impl ModuleGraph {
         })?;
 
         for path in &self.order {
-            let node = self
+            let module_node = self
                 .modules
                 .get(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
-            if let ModuleSource::NodeBuiltin(builtin) = node.source {
+            if let ModuleSource::NodeBuiltin(builtin) = module_node.source {
                 let exports = node_builtin_exports(builtin.specifier())
                     .expect("only materializable builtins have linkable exports");
                 values.insert(path.clone(), exports.into_iter().collect());
                 continue;
             }
-            let mut imports = Vec::with_capacity(node.program.imports.len());
-            for import in &node.program.imports {
-                let dependency = node
+            let mut imports = Vec::with_capacity(module_node.program.imports.len());
+            for import in &module_node.program.imports {
+                let dependency = module_node
                     .dependencies
                     .iter()
                     .find(|dependency| dependency.specifier == import.source)
@@ -635,13 +657,23 @@ impl ModuleGraph {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let result = execute_module_in_runtime(
-                &node.program,
-                &imports,
-                host,
-                remaining_limits,
-                &mut runtime,
-            )
+            let result = if node {
+                execute_node_module_in_runtime(
+                    &module_node.program,
+                    &imports,
+                    host,
+                    remaining_limits,
+                    &mut runtime,
+                )
+            } else {
+                execute_module_in_runtime(
+                    &module_node.program,
+                    &imports,
+                    host,
+                    remaining_limits,
+                    &mut runtime,
+                )
+            }
             .map_err(|error| {
                 let error = match error {
                     ExecutionError::StepLimitExceeded { steps, .. } => {
@@ -1227,6 +1259,54 @@ mod tests {
             error,
             ModuleGraphError::MissingExport { name, .. } if name == "createServer"
         ));
+    }
+
+    #[test]
+    fn node_graph_execution_is_an_explicit_host_capability() {
+        let project = TempProject::new();
+        let payload = project.write("payload.txt", "from tokio");
+        let payload = payload
+            .to_str()
+            .unwrap()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let entry = project.write(
+            "main.js",
+            &format!(
+                "import {{ readFile }} from 'node:fs/promises'; readFile('{payload}', 'utf8').then(value => console.log(value));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build Node graph");
+
+        let mut deterministic_host = TestHost::default();
+        let error = graph
+            .execute(&mut deterministic_host, ExecutionLimits::default())
+            .expect_err("deterministic execution must not gain host I/O from an import");
+        assert!(matches!(
+            error,
+            ModuleGraphError::Execution {
+                error: ExecutionError::Host { message, .. },
+                ..
+            } if message.contains("requires the Node execution Adapter")
+        ));
+
+        let mut node_host = TestHost::default();
+        graph
+            .execute_node(&mut node_host, ExecutionLimits::default())
+            .expect("explicit Node graph execution");
+        assert_eq!(node_host.output, ["from tokio"]);
     }
 
     /// A function value survives the module boundary it was exported across.
