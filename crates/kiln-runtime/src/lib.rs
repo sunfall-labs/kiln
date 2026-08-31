@@ -73,6 +73,10 @@ pub trait ActiveHttpRuntime {
         completion: Completion,
     ) -> Option<Vec<node_stream::StreamAction>>;
     fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>>;
+    fn poll_connection_in_context(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<node_stream::StreamAction>>;
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -664,6 +668,20 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .map(|connection| connection.transport.pump_write())
     }
 
+    /// Return transport writes while the caller is already executing inside this realm runtime.
+    ///
+    /// Sending a response command wakes Hyper on the same `LocalSet`; the task is polled when the
+    /// current synchronous language callback yields back to Tokio. This method must not nest
+    /// `block_on`, so it only collects bytes already selected at the current checkpoint.
+    pub fn poll_http_connection_in_context(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.http_connections
+            .get_mut(&resource)
+            .map(|connection| connection.transport.pump_write())
+    }
+
     /// Drain protocol events already selected at this realm checkpoint.
     pub fn take_http_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
         let Some(connection) = self.http_connections.get_mut(&resource) else {
@@ -866,6 +884,13 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
 
     fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>> {
         self.poll_http_connection(resource)
+    }
+
+    fn poll_connection_in_context(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.poll_http_connection_in_context(resource)
     }
 
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
