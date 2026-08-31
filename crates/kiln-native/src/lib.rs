@@ -3789,6 +3789,7 @@ mod tests {
                 ],
                 local_count: 0,
                 functions: vec![FunctionProto {
+                    prologue_end: 0,
                     asynchronous: false,
                     name: None,
                     arrow: false,

@@ -371,6 +371,16 @@ pub struct FunctionProto {
     pub declared_length: u32,
     /// Includes the parameters, which occupy the first slots in declaration order.
     pub local_count: u32,
+    /// Where parameter binding ends and the body begins: `code[..prologue_end]` is this
+    /// function's FunctionDeclarationInstantiation -- cells for captured parameters, pattern
+    /// destructuring, defaults, and the rest parameter.
+    ///
+    /// An ordinary call runs the two halves together and never needs the seam. A generator does:
+    /// the language runs instantiation during `[[Call]]` and only *then* builds the generator
+    /// object, so `function* g([{x}]) {}` called as `g([null])` throws at the call rather than at
+    /// the first `next()`. Recording the offset is what lets the interpreter run the first half
+    /// eagerly and start the body at the second.
+    pub prologue_end: u32,
     pub code: Vec<Instruction>,
     /// Where each captured cell comes from, resolved against the frame creating the closure.
     pub upvalues: Vec<Upvalue>,
@@ -1610,34 +1620,281 @@ impl Compiler {
                 self.finish_pattern_source(&source);
             }
             Pattern::Array { elements, rest } => {
-                self.code.push(Instruction::IterableToArray);
-                let spilled = elements.iter().flatten().any(stores_through_reference)
-                    || rest.as_deref().is_some_and(stores_through_reference);
-                let source = self.pattern_source(spilled, span);
-                for (index, element) in elements.iter().enumerate() {
-                    let Some(element) = element else {
-                        continue; // a hole binds nothing
-                    };
-                    self.destructure_element(leaf, element, span, |compiler| {
-                        compiler.load_pattern_source(&source);
-                        compiler.push_constant(Constant::Number((index as f64).to_bits()));
-                        compiler.code.push(Instruction::GetComputed);
-                    });
-                }
-                if let Some(rest) = rest {
-                    self.destructure_element(leaf, rest, span, |compiler| {
-                        compiler.load_pattern_source(&source);
-                        compiler.push_constant(Constant::Number((elements.len() as f64).to_bits()));
-                        let slice = compiler.constant_index(Constant::String("slice".to_owned()));
-                        compiler.code.push(Instruction::CallMethod {
-                            name: slice,
-                            argc: 1,
-                        });
-                    });
-                }
-                self.finish_pattern_source(&source);
+                self.destructure_array(leaf, elements, rest.as_deref(), span);
             }
         }
+    }
+
+    /// Take an array pattern apart by stepping its iterator, one element at a time.
+    ///
+    /// The shorter lowering -- materialise the iterable into an array and read it by index --
+    /// gets three separate things wrong, and each of them is something a program can observe:
+    ///
+    /// * `const [a] = naturals()` must take exactly one step. Draining first never returns.
+    /// * An iterator the pattern did not exhaust must be *closed*, by calling its `return`. A
+    ///   generator on the other side of one runs its `finally` blocks because of that call.
+    /// * How many times `next` ran is visible to whoever wrote the iterator, so `[] = iter` --
+    ///   which takes nothing -- must not step it at all.
+    ///
+    /// So the protocol is walked here, in the same shape `for-of` walks it and for the same
+    /// reason: no single instruction can stop part-way through an iterable.
+    ///
+    /// `done` tracks the specification's `iteratorRecord.[[Done]]`, and the flag is what decides
+    /// whether the close happens. It is set *before* each `next` and cleared only once a value
+    /// is in hand, because an iterator that threw is finished rather than merely unfinished --
+    /// closing one that has already failed would call `return` on it, which the language does
+    /// not do.
+    fn destructure_array(
+        &mut self,
+        leaf: PatternLeaf,
+        elements: &[Option<Pattern>],
+        rest: Option<&Pattern>,
+        span: Span,
+    ) {
+        let index = self.hidden_bindings;
+        self.hidden_bindings += 1;
+        let iterator = format!("%iterated{index}");
+        let done = format!("%drained{index}");
+        let step = format!("%stepped{index}");
+
+        // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
+        // pattern reads what the value yields, not what its indices hold.
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: symbol,
+            argc: 0,
+        });
+        self.declare_hidden(&iterator, span);
+        self.push_constant(Constant::Boolean(false));
+        self.declare_hidden(&done, span);
+        // The slot the step results land in, bound once here so each element can store into it.
+        self.push_constant(Constant::Undefined);
+        self.declare_hidden(&step, span);
+
+        // Everything from here to the close is guarded: an exception out of a default, a nested
+        // pattern or a target's own evaluation has to close the iterator on its way past.
+        let handler_jump = self.emit_jump(Instruction::PushHandler(0));
+
+        for element in elements {
+            match element {
+                // A hole steps the iterator and reads nothing -- not even `value`, which is why
+                // it is not the same as binding a name no one looks at.
+                None => self.emit_iterator_step(&iterator, &done, &step, false),
+                Some(element) => {
+                    self.destructure_element(leaf, element, span, |compiler| {
+                        compiler.emit_iterator_step(&iterator, &done, &step, true);
+                    });
+                }
+            }
+        }
+        if let Some(rest) = rest {
+            self.destructure_element(leaf, rest, span, |compiler| {
+                compiler.emit_iterator_drain(&iterator, &done, &step, span);
+            });
+        }
+
+        self.code.push(Instruction::PopHandler);
+        // A pattern that consumed every value has an iterator that closed itself; calling
+        // `return` on an exhausted iterator is a step the language does not take.
+        self.load_hidden(&done);
+        let closed = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.emit_iterator_close_checked(&iterator, span);
+        self.patch_jump(closed);
+        let finished = self.emit_jump(Instruction::Jump(0));
+
+        // The landing pad. Entering it has already popped the handler and put the thrown value
+        // on the stack. The close here is the forgiving flavour: an exception already on its way
+        // out is not replaced by whatever the cleanup thought of the iterator.
+        self.patch_jump(handler_jump);
+        self.load_hidden(&done);
+        let raise = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.emit_iterator_close_quietly(&iterator, span);
+        self.patch_jump(raise);
+        self.code.push(Instruction::Throw);
+
+        self.patch_jump(finished);
+    }
+
+    /// One `IteratorStep`, leaving the value it produced when `want_value` is set.
+    ///
+    /// An exhausted iterator yields `undefined` rather than stopping the walk: `var [a, b] = [1]`
+    /// binds `b` to undefined, and a default on it applies.
+    fn emit_iterator_step(&mut self, iterator: &str, done: &str, step: &str, want_value: bool) {
+        self.load_hidden(done);
+        let exhausted = self.emit_jump(Instruction::JumpIfTruthy(0));
+        // Marked done *before* the call, and cleared only after a value is in hand: a `next` or
+        // a `value` getter that throws leaves the iterator failed, and a failed one is never
+        // closed.
+        self.push_constant(Constant::Boolean(true));
+        self.store_hidden(done);
+        self.load_hidden(iterator);
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: next,
+            argc: 0,
+        });
+        self.store_hidden(step);
+        self.load_hidden(step);
+        let finished_key = self.constant_index(Constant::String("done".to_owned()));
+        self.code.push(Instruction::GetProperty(finished_key));
+        let finished = self.emit_jump(Instruction::JumpIfTruthy(0));
+        if want_value {
+            self.load_hidden(step);
+            let value_key = self.constant_index(Constant::String("value".to_owned()));
+            self.code.push(Instruction::GetProperty(value_key));
+        }
+        self.push_constant(Constant::Boolean(false));
+        self.store_hidden(done);
+        let ready = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(exhausted);
+        self.patch_jump(finished);
+        if want_value {
+            self.push_constant(Constant::Undefined);
+        }
+        self.patch_jump(ready);
+    }
+
+    /// `...rest`: everything the iterator has left, as a fresh array.
+    ///
+    /// Written with an index and `SetComputed` rather than with `push`, because
+    /// `Array.prototype.push` is a property a program can replace and the language defines this
+    /// as a plain data property on a fresh array.
+    fn emit_iterator_drain(&mut self, iterator: &str, done: &str, step: &str, span: Span) {
+        let index = self.hidden_bindings;
+        self.hidden_bindings += 1;
+        let collected = format!("%collected{index}");
+        let count = format!("%counted{index}");
+        self.code.push(Instruction::NewArray { count: 0 });
+        self.declare_hidden(&collected, span);
+        self.push_constant(Constant::Number(0.0f64.to_bits()));
+        self.declare_hidden(&count, span);
+
+        let start = self.code.len();
+        self.load_hidden(done);
+        let drained = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.push_constant(Constant::Boolean(true));
+        self.store_hidden(done);
+        self.load_hidden(iterator);
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.code.push(Instruction::CallMethod {
+            name: next,
+            argc: 0,
+        });
+        self.store_hidden(step);
+        self.load_hidden(step);
+        let finished_key = self.constant_index(Constant::String("done".to_owned()));
+        self.code.push(Instruction::GetProperty(finished_key));
+        let ended = self.emit_jump(Instruction::JumpIfTruthy(0));
+
+        self.load_hidden(&collected);
+        self.load_hidden(&count);
+        self.load_hidden(step);
+        let value_key = self.constant_index(Constant::String("value".to_owned()));
+        self.code.push(Instruction::GetProperty(value_key));
+        // The value survived, so the iterator is unfinished again.
+        self.push_constant(Constant::Boolean(false));
+        self.store_hidden(done);
+        self.code.push(Instruction::SetComputed);
+        self.code.push(Instruction::Pop);
+        self.load_hidden(&count);
+        self.push_constant(Constant::Number(1.0f64.to_bits()));
+        self.code.push(Instruction::Binary(BinaryOp::Add));
+        self.store_hidden(&count);
+        self.code.push(Instruction::Jump(start as u32));
+
+        self.patch_jump(drained);
+        self.patch_jump(ended);
+        self.load_hidden(&collected);
+    }
+
+    /// `IteratorClose` on a normal completion, which is the strict flavour of it.
+    ///
+    /// A `return` that throws propagates, and one that answers a non-object is a `TypeError`:
+    /// nothing is on its way out yet, so this failure is the program's outcome. The pad that
+    /// catches an exception uses [`Compiler::emit_iterator_close`] instead, which discards both.
+    fn emit_iterator_close_checked(&mut self, binding: &str, span: Span) {
+        let absent = self.emit_iterator_return(binding, span);
+        self.require_object("Iterator result of `return` is not an object");
+        self.code.push(Instruction::Pop);
+        self.patch_jump(absent);
+    }
+
+    /// `IteratorClose` on an abrupt completion, which is the forgiving flavour of it.
+    ///
+    /// The iterator is given its chance to clean up and anything it has to say about that is
+    /// dropped -- its result unread, and an exception out of its `return` swallowed. A value is
+    /// already travelling outwards, and the language keeps the one the program threw rather than
+    /// replacing it with whatever the cleanup thought.
+    fn emit_iterator_close_quietly(&mut self, binding: &str, span: Span) {
+        let guard = self.emit_jump(Instruction::PushHandler(0));
+        let absent = self.emit_iterator_return(binding, span);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(absent);
+        self.code.push(Instruction::PopHandler);
+        let closed = self.emit_jump(Instruction::Jump(0));
+        // Entering here truncated the stack back to where the guard went up, so the only thing
+        // above the exception being carried out is the one the `return` raised.
+        self.patch_jump(guard);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(closed);
+    }
+
+    /// Call the iterator's `return`, leaving its result on the stack.
+    ///
+    /// Returns the jump taken when there is no `return` to call, which the caller patches to
+    /// wherever it lands after dealing with the result: an absent `return` leaves nothing.
+    ///
+    /// Applied rather than called by name, because the language reads `return` once and a second
+    /// read would run an accessor twice. The empty argument array is also what `return` sees as
+    /// its own `arguments`, whose length one test asserts.
+    fn emit_iterator_return(&mut self, binding: &str, span: Span) -> usize {
+        let name = self.constant_index(Constant::String("return".to_owned()));
+        let held = format!("%closing{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.load_hidden(binding);
+        self.code.push(Instruction::GetProperty(name));
+        self.declare_hidden(&held, span);
+        self.load_hidden(&held);
+        let present = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        let absent = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(present);
+        self.load_hidden(binding);
+        self.load_hidden(&held);
+        self.code.push(Instruction::NewArray { count: 0 });
+        self.code.push(Instruction::Apply);
+        absent
+    }
+
+    /// Throw a `TypeError` unless the value on top of the stack is an object, leaving it either
+    /// way. `typeof` rather than a test of its own, because the two answers that mean "object"
+    /// are exactly `"object"` -- excluding `null`, which shares the answer -- and `"function"`.
+    fn require_object(&mut self, message: &str) {
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("object".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let nullable = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("function".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
+        let refused = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(nullable);
+        self.code.push(Instruction::Dup);
+        let object = self.emit_jump(Instruction::JumpIfNotNullish(0));
+
+        self.patch_jump(refused);
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(message.to_owned()));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+
+        self.patch_jump(callable);
+        self.patch_jump(object);
     }
 
     /// Take one element or property apart, given how to push the value it receives.
@@ -4021,6 +4278,12 @@ impl Compiler {
             self.bind_pattern(VariableKind::Let, rest, function.span);
         }
 
+        // Everything above binds parameters, and so is what the language calls
+        // FunctionDeclarationInstantiation; everything below is the body. A generator has to be
+        // able to run the first without the second, so the seam is recorded rather than left
+        // implicit in the instruction stream.
+        let prologue_end = self.code.len() as u32;
+
         if forwards_to_super {
             self.load_super();
             self.code.push(Instruction::SuperForward);
@@ -4070,6 +4333,7 @@ impl Compiler {
             parameter_count,
             declared_length,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
+            prologue_end,
             code: std::mem::replace(&mut self.code, restored.code),
             upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
         };
@@ -7535,7 +7799,17 @@ mod tests {
                 .expect("instruction is emitted")
         };
         let receiver = at(&Instruction::LoadLocal(0));
-        let read = at(&Instruction::GetComputed);
+        // The value an element receives is whatever stepping the iterator produced, so the step
+        // is what has to come after the receiver and before the store.
+        let next = program
+            .constants
+            .iter()
+            .position(|constant| matches!(constant, Constant::String(name) if name == "next"))
+            .expect("the walk steps the iterator by name") as u32;
+        let read = at(&Instruction::CallMethod {
+            name: next,
+            argc: 0,
+        });
         let store = program
             .code
             .iter()
