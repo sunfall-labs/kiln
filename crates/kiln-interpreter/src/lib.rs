@@ -1795,6 +1795,7 @@ struct NetSocketState {
     owner: Option<Weak<RefCell<NodeServerState>>>,
     resource: Option<kiln_host_abi::ResourceId>,
     object: Option<Weak<RefCell<ObjectData>>>,
+    readable: Rc<RefCell<ReadableState>>,
 }
 
 #[derive(Debug)]
@@ -1823,7 +1824,6 @@ struct NodeConnection {
     client_requests: std::collections::BTreeMap<u64, Value>,
     client_responses: std::collections::BTreeMap<u64, Value>,
     http_responses: Vec<(u64, Value)>,
-    close_after_finish: bool,
     closed: bool,
     applying_read_completion: bool,
 }
@@ -6862,6 +6862,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     owner: None,
                     resource: None,
                     object: None,
+                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                 }));
                 let socket = node_socket_object(&state);
                 if let Some(callback) = callback {
@@ -6964,6 +6965,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         if node_readable_state(receiver).is_ok() {
             return self.dispatch_memory_readable(native, receiver, arguments, instruction);
+        }
+        if let Ok(state) = node_net_socket_state(receiver) {
+            let readable = Rc::clone(&state.borrow().readable);
+            return self.dispatch_readable_state(
+                native,
+                receiver,
+                arguments,
+                instruction,
+                &readable,
+                false,
+            );
         }
         let state = node_http_incoming(receiver)?;
         let (resource, readable) = {
@@ -7600,7 +7612,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     client_requests: std::collections::BTreeMap::new(),
                     client_responses: std::collections::BTreeMap::new(),
                     http_responses: Vec::new(),
-                    close_after_finish: false,
                     closed: false,
                     applying_read_completion: false,
                 };
@@ -7802,10 +7813,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             message: "node:net received data for an unknown stream".into(),
                         }
                     })?;
+                    let readable = Rc::clone(&node_net_socket_state(&socket)?.borrow().readable);
+                    let chunk = match readable.borrow().encoding.as_deref() {
+                        Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                        _ => node_bytes_value(bytes),
+                    };
                     self.dispatch_node_event(
                         Native::NodeEventEmit,
                         &socket,
-                        &[Value::String("data".into()), node_bytes_value(bytes)],
+                        &[Value::String("data".into()), chunk],
                         instruction,
                     )?;
                     return Ok(());
@@ -7832,25 +7848,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                     }
                     return Ok(());
-                }
-                let close = server
-                    .borrow()
-                    .streams
-                    .iter()
-                    .find(|stream| stream.resource() == resource)
-                    .is_some_and(|stream| stream.close_after_finish);
-                if close {
-                    let action = {
-                        let server = server.borrow();
-                        server
-                            .streams
-                            .iter()
-                            .find(|stream| stream.resource() == resource)
-                            .expect("finish belongs to this stream")
-                            .driver
-                            .close()
-                    };
-                    self.start_http_stream_action(server, resource, action, instruction)?;
                 }
                 Ok(())
             }
@@ -8030,21 +8027,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         stream
                             .http_responses
                             .retain(|(response_id, _)| *response_id != id);
-                    }
-                    if finished {
-                        let actions = {
-                            let mut owner = server.borrow_mut();
-                            owner
-                                .streams
-                                .iter_mut()
-                                .find(|stream| stream.resource() == resource)
-                                .filter(|stream| stream.close_after_finish)
-                                .map(|stream| stream.driver.close_actions())
-                                .unwrap_or_default()
-                        };
-                        for action in actions {
-                            self.start_http_stream_action(server, resource, action, instruction)?;
-                        }
                     }
                 }
                 RuntimeHttpEvent::Error { id: _, message } => {
@@ -8473,7 +8455,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .find(|stream| stream.resource() == resource)
         {
             connection.response = Some(response.clone());
-            connection.close_after_finish = !request.keep_alive;
             if let Some(request_id) = request_id {
                 connection
                     .http_responses
@@ -9337,6 +9318,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                     owner: None,
                                     resource: None,
                                     object: None,
+                                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                                 }));
                                 let socket = node_socket_object(&socket_state);
                                 let request = state
@@ -9379,7 +9361,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             client_requests: std::collections::BTreeMap::new(),
                             client_responses: std::collections::BTreeMap::new(),
                             http_responses: Vec::new(),
-                            close_after_finish: false,
                             closed: false,
                             applying_read_completion: false,
                         };
@@ -25672,6 +25653,7 @@ fn node_net_socket(
         owner: Some(Rc::downgrade(server)),
         resource: Some(resource),
         object: None,
+        readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
     }));
     let socket = node_socket_object(&state);
     if let Some(connection) = server
@@ -25697,6 +25679,10 @@ fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
     data.set("write", Value::Native(Native::NodeSocketWrite));
     data.set("end", Value::Native(Native::NodeSocketEnd));
     data.set("destroy", Value::Native(Native::NodeSocketDestroy));
+    data.set(
+        "setEncoding",
+        Value::Native(Native::NodeReadableSetEncoding),
+    );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
