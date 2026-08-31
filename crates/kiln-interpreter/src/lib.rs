@@ -5834,6 +5834,23 @@ pub struct ExecutionLimits {
     pub max_call_depth: usize,
 }
 
+impl ExecutionLimits {
+    /// `max_steps` for an execution nothing is waiting on.
+    ///
+    /// A step budget is a promise to whoever is queued behind this program -- a corpus runner, a
+    /// resident daemon -- that a loop which never ends will be reported rather than endured. A
+    /// person running their own program has made no such promise, and node makes none either.
+    /// The counter still runs, so `RunSummary::instructions` still reports what the program cost;
+    /// it simply has nothing to exceed.
+    pub const UNMETERED_STEPS: u64 = u64::MAX;
+
+    /// The default limits with a different step budget.
+    #[must_use]
+    pub const fn with_max_steps(self, max_steps: u64) -> Self {
+        Self { max_steps, ..self }
+    }
+}
+
 impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {

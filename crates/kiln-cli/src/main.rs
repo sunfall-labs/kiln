@@ -105,16 +105,19 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             node,
             native: false,
+            steps,
             ..
         } => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::run(backend.as_mut(), &path, &root, node)?)
+            report(commands::run(backend.as_mut(), &path, &root, node, steps)?)
         }
         Command::Run {
             path,
             node,
             native: true,
             profile,
+            // Refused by the parser: the native backend does not count steps.
+            steps: _,
         } => {
             let mut backend = open(one_shot, &socket)?;
             report(commands::native_run(

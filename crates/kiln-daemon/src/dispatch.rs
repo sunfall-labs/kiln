@@ -9,7 +9,7 @@ use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, Stats,
+    RunSummary, ScalarValueSummary, Stats, StepBudget,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -135,9 +135,10 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             path,
             project_root,
             node,
+            steps,
             source_view: _,
         } => (
-            run(engine, resolutions, path, project_root, node),
+            run(engine, resolutions, path, project_root, node, steps),
             Next::Continue,
         ),
         Request::NativeBuild {
@@ -360,24 +361,41 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
 }
 
 /// Execute an interpreted run after preparation has released the query-engine mutex.
-pub(crate) fn execute_prepared_run(prepared: PreparedRun, node: bool) -> Response {
+pub(crate) fn execute_prepared_run(
+    prepared: PreparedRun,
+    node: bool,
+    steps: StepBudget,
+) -> Response {
     #[cfg(test)]
     wait_for_run_gate(prepared.path());
 
+    let limits = execution_limits(steps);
     match prepared {
         PreparedRun::Graph {
             graph,
             path,
             file,
             revision,
-        } => execute_graph(graph, path, file, revision, node),
+        } => execute_graph(graph, path, file, revision, node, limits),
         PreparedRun::Program {
             program,
             path,
             file,
             revision,
-        } => execute_program(program, path, file, revision, node),
+        } => execute_program(program, path, file, revision, node, limits),
     }
+}
+
+/// The engine limits one run request asked for.
+///
+/// Only the step budget is the client's to choose. The call-depth and native-depth bounds guard
+/// the *host* stack, whose exhaustion aborts the process rather than raising an error, so they
+/// are not negotiable by anyone.
+fn execution_limits(steps: StepBudget) -> kiln_interpreter::ExecutionLimits {
+    kiln_interpreter::ExecutionLimits::default().with_max_steps(match steps {
+        StepBudget::Unmetered => kiln_interpreter::ExecutionLimits::UNMETERED_STEPS,
+        StepBudget::Limited(steps) => steps,
+    })
 }
 
 #[cfg(test)]
@@ -496,9 +514,10 @@ fn run<E: QueryEngine>(
     path: String,
     project_root: String,
     node: bool,
+    steps: StepBudget,
 ) -> Response {
     match prepare_run(engine, resolutions, path, project_root, node) {
-        Ok(prepared) => execute_prepared_run(prepared, node),
+        Ok(prepared) => execute_prepared_run(prepared, node, steps),
         Err(message) => Response::Error { message },
     }
 }
@@ -509,6 +528,7 @@ fn execute_graph(
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
     // `eval` and `Function` are runtime compilation, but still use the exact frontend pipeline
     // linked into this executable. The interpreter receives it as an explicit host service and
@@ -516,8 +536,8 @@ fn execute_graph(
     kiln_conformance::install_source_compiler();
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
-        Ok(graph) if node => graph.execute_node(&mut host, Default::default()),
-        Ok(graph) => graph.execute(&mut host, Default::default()),
+        Ok(graph) if node => graph.execute_node(&mut host, limits),
+        Ok(graph) => graph.execute(&mut host, limits),
         Err(error) => Err(error),
     };
     match result {
@@ -855,6 +875,7 @@ fn execute_program(
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
     kiln_conformance::install_source_compiler();
     let program = match program {
@@ -884,9 +905,9 @@ fn execute_program(
 
     let mut host = kiln_runtime::CaptureHost::new();
     let result = if node {
-        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, Default::default())
+        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits)
     } else {
-        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default())
+        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits)
     };
     match result {
         Ok(execution) => {

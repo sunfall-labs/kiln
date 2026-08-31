@@ -439,6 +439,7 @@ fn run_once(
                     source.canonical,
                     source.text,
                     false,
+                    kiln_proto::StepBudget::Unmetered,
                 )?;
             *manifest = current_manifest;
             *truncated = current_truncated;

@@ -111,7 +111,7 @@ mod tests {
     use crate::commands;
     use kiln_proto::{
         NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution, ResolutionMap,
-        SourceHash, source_digest,
+        SourceHash, StepBudget, source_digest,
     };
 
     #[test]
@@ -171,12 +171,24 @@ mod tests {
 
         let (output, updated) = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            let output =
-                commands::run(&mut session, &source, &fixture, false).expect("run package graph");
+            let output = commands::run(
+                &mut session,
+                &source,
+                &fixture,
+                false,
+                StepBudget::Unmetered,
+            )
+            .expect("run package graph");
             std::fs::write(package.join("index.js"), "export const answer = 43;\n")
                 .expect("update package entry");
-            let updated = commands::run(&mut session, &source, &fixture, false)
-                .expect("rerun updated package graph");
+            let updated = commands::run(
+                &mut session,
+                &source,
+                &fixture,
+                false,
+                StepBudget::Unmetered,
+            )
+            .expect("rerun updated package graph");
             (output, updated)
         };
 
@@ -202,7 +214,8 @@ mod tests {
 
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            commands::run(&mut session, &source, &fixture, true).expect("run Node graph")
+            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
+                .expect("run Node graph")
         };
 
         assert_eq!(output.text, "function\n");
@@ -440,7 +453,7 @@ server.listen(0, "127.0.0.1", () => {
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
-            commands::run(&mut session, &source, &fixture, true)
+            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
                 .expect("run interpreted Node request identity fixture")
         };
         assert_eq!(interpreted.text, "/first,/second\n");
@@ -480,7 +493,7 @@ server.listen(0, "127.0.0.1", () => {
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
-            commands::run(&mut session, &source, &fixture, true)
+            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
                 .expect("run interpreted HTTP half-close fixture")
         };
         assert_eq!(interpreted.text, "pass\n");
@@ -538,7 +551,8 @@ server.listen(0, "127.0.0.1", () => {
 
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            commands::run(&mut session, &entry, &fixture, true).expect("run dual package graph")
+            commands::run(&mut session, &entry, &fixture, true, StepBudget::Unmetered)
+                .expect("run dual package graph")
         };
 
         assert_eq!(output.text, "import require\n");
@@ -627,7 +641,13 @@ server.listen(0, "127.0.0.1", () => {
 
         std::fs::remove_file(&manifest).expect("remove manifest after commit");
         let SourceResponse::Ready(summary) = session
-            .run_at_view(source_path, root.to_string_lossy().into_owned(), true, view)
+            .run_at_view(
+                source_path,
+                root.to_string_lossy().into_owned(),
+                true,
+                StepBudget::Unmetered,
+                view,
+            )
             .expect("run pinned graph")
         else {
             panic!("fresh source view became stale");

@@ -15,8 +15,8 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, ResolutionMap, SourceDigest, SourceHash, SourceView, TestMode, TestOutcome,
-    TestSummary, source_digest,
+    NativeProfile, ResolutionMap, SourceDigest, SourceHash, SourceView, StepBudget, TestMode,
+    TestOutcome, TestSummary, source_digest,
 };
 use serde_json::json;
 
@@ -53,10 +53,11 @@ pub fn run(
     path: &Path,
     project_root: &Path,
     node: bool,
+    steps: StepBudget,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    run_source(backend, path, project_root, &canonical, text, node)
+    run_source(backend, path, project_root, &canonical, text, node, steps)
 }
 
 /// Compile and execute a source snapshot that the caller has already read. This is used by
@@ -69,8 +70,9 @@ pub(crate) fn run_source(
     canonical: &str,
     text: String,
     node: bool,
+    steps: StepBudget,
 ) -> Result<Output> {
-    run_source_with_manifest(backend, path, project_root, canonical, text, node)
+    run_source_with_manifest(backend, path, project_root, canonical, text, node, steps)
         .map(|(output, _, _, _)| output)
 }
 
@@ -86,6 +88,7 @@ pub(crate) fn run_source_with_manifest(
     canonical: &str,
     text: String,
     node: bool,
+    steps: StepBudget,
 ) -> Result<(Output, SourceManifest, bool, SourceView)> {
     let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)), node)?;
@@ -105,6 +108,7 @@ pub(crate) fn run_source_with_manifest(
         canonical.to_owned(),
         project_root_string(project_root)?,
         node,
+        steps,
         source_view,
     )? {
         SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
@@ -119,6 +123,7 @@ pub(crate) fn run_source_with_manifest(
                 canonical.to_owned(),
                 project_root_string(project_root)?,
                 node,
+                steps,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
@@ -158,6 +163,9 @@ pub(crate) fn run_watched_source_at_view(
             canonical.to_owned(),
             project_root_string(project_root)?,
             false,
+            // `watch` re-runs the same program the user is editing, so it is bounded by nothing
+            // but the user's patience, exactly as `kiln run` is.
+            StepBudget::Unmetered,
             source_view,
         )
         .map_err(ViewError::Other)?
@@ -1519,6 +1527,7 @@ mod tests {
                 "/tmp/main.ts".to_string(),
                 "/tmp".to_string(),
                 false,
+                StepBudget::Unmetered,
                 source_view,
             )
             .expect("run succeeds");
@@ -1546,7 +1555,8 @@ mod tests {
         .expect("write entry");
 
         let mut backend = Fake::new();
-        let output = run(&mut backend, &entry, &root, false).expect("run graph");
+        let output =
+            run(&mut backend, &entry, &root, false, StepBudget::Unmetered).expect("run graph");
         assert_eq!(output.text, "hello from kiln\n");
         assert_eq!(output.exit_code, 0);
         assert_eq!(
@@ -2266,7 +2276,8 @@ mod tests {
         std::fs::write(&entry, "console.log('node');\n").expect("write fixture");
 
         let mut backend = StaleBackend::with_stale_runs(1);
-        run(&mut backend, &entry, &dir, true).expect("stale Node run is retried");
+        run(&mut backend, &entry, &dir, true, StepBudget::Unmetered)
+            .expect("stale Node run is retried");
         let runs = backend
             .inner
             .seen
@@ -2301,6 +2312,7 @@ mod tests {
             &canonical,
             captured.to_owned(),
             false,
+            StepBudget::Unmetered,
         )
         .expect("captured snapshot runs");
 
