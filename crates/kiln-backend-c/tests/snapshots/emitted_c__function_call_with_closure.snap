@@ -52,7 +52,7 @@ kiln_label_3:;
         int status;
         kiln_value captured[1];
         captured[0] = locals[0];
-        status = kiln_c99_make_closure(&stack[sp], kiln_module_4621d2b232403b4beb9ab4f29e406520_fn_0, kiln_module_4621d2b232403b4beb9ab4f29e406520_name_0, 3, UINT32_C(0), UINT32_C(1), 0, 0, 0, 0, kiln_c99_undefined(), kiln_c99_new_target, UINT32_C(2), UINT32_C(2), UINT32_C(6), captured, UINT32_C(1));
+        status = kiln_c99_make_closure(&stack[sp], kiln_module_4621d2b232403b4beb9ab4f29e406520_fn_0, kiln_module_4621d2b232403b4beb9ab4f29e406520_name_0, 3, UINT32_C(0), UINT32_C(1), 0, 0, 0, 0, kiln_c99_undefined(), kiln_c99_new_target, UINT32_C(2), UINT32_C(2), UINT32_C(6), UINT32_C(0), captured, UINT32_C(1));
         if (status != KILN_C99_OK) return status;
         ++sp;
     }

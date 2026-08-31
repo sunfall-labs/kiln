@@ -299,6 +299,8 @@ KILN_VALUE_TYPED_ARRAY = 23
 #define KILN_C99_METHOD_TYPED_SUBARRAY 230
 #define KILN_C99_METHOD_TYPED_SET 231
 #define KILN_C99_METHOD_TYPED_FILL 232
+#define KILN_C99_METHOD_TYPED_OF 233
+#define KILN_C99_METHOD_TYPED_FROM 234
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -523,6 +525,8 @@ static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown) 
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value) {
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
+static int kiln_c99_typed_order(double left, double right) {
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
@@ -570,6 +574,7 @@ static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
 static int kiln_c99_is_string_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
+static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
 static kiln_value kiln_c99_builtin(uint64_t code) {
@@ -589,6 +594,7 @@ static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
 static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
+static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static kiln_value kiln_c99_number(double value) {
 static kiln_value kiln_c99_number_bits(uint64_t bits) {
