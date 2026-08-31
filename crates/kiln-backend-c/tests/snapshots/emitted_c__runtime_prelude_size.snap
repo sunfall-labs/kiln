@@ -1,7 +1,7 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 162
+assertion_line: 319
 expression: "format!(\"prelude lines: {}\\nprelude bytes: {}\", prelude.lines().count(),\nprelude.len())"
 ---
-prelude lines: 18967
-prelude bytes: 908403
+prelude lines: 19270
+prelude bytes: 923301

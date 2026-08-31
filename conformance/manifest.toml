@@ -949,10 +949,11 @@ and the resulting executable serves the recorded bytes, at 8ms to first response
 resident and 4.6 MiB on disk - against 24ms/24.4/60.9 for `bun build --compile` and \
 27ms/34.7/64.3 for `deno compile`, measured by scripts/server-baseline.sh on the same file.
 
-The remaining server probe refuses with a named backlog entry rather than a generic control error, \
-which is the distribution doing its job:
-
-    s04  native Node execution does not yet materialize the `node:util` builtin
+The remaining server probe refuses with a named semantic backlog entry rather than a generic \
+control error, which is the distribution doing its job. Native graph construction now crosses \
+the deterministic `node:util`, `node:diagnostics_channel`, `node:dns`, and `node:os` facades, plus \
+the explicitly capability-gated `node:https` and `node:http2` namespaces. Its next boundary is \
+`node:stream`, whose classes must preserve lifecycle semantics rather than merely exist.\
 
 `s02` now builds and passes through the same public standalone path as `s01`. Its three requests \
 exercise async routing, the native WHATWG URL constructor and URLSearchParams lookup, JSON \

@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
+assertion_line: 293
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -370,6 +370,22 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 341
 #define KILN_C99_METHOD_BUFFER_CONCAT 342
 #define KILN_C99_METHOD_BUFFER_TO_STRING 343
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 344
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 345
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 346
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 347
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 348
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 349
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 350
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 353
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 354
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 355
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 356
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -650,6 +666,9 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -741,6 +760,11 @@ static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_channel(kiln_value *out) {
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
