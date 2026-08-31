@@ -26,7 +26,7 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
 /// 0025). The list is part of the identity below, so an archive built before them is rejected
 /// rather than linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 35] = [
+const REQUIRED_EXPORTS: [&str; 41] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
@@ -46,6 +46,12 @@ const REQUIRED_EXPORTS: [&str; 35] = [
     "kiln_http1_decoder_free",
     "kiln_http1_decoder_push",
     "kiln_http1_response_encode",
+    "kiln_http1_response_decoder_create",
+    "kiln_http1_response_decoder_free",
+    "kiln_http1_response_decoder_push",
+    "kiln_http1_response_events_len",
+    "kiln_http1_response_events_get",
+    "kiln_http1_response_events_free",
     "kiln_number_to_js_string",
     "kiln_string_to_number",
     "kiln_regexp_compile",

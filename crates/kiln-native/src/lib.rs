@@ -1656,7 +1656,7 @@ fn native_builtin_supports_export(
     match builtin {
         NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
         NodeBuiltin::Net => export_name == "createServer",
-        NodeBuiltin::Http => matches!(export_name, "createServer" | "default"),
+        NodeBuiltin::Http => matches!(export_name, "createServer" | "default" | "get"),
         _ => false,
     }
 }
@@ -1696,15 +1696,18 @@ exports[2] = create_server;"#,
         ),
         NodeBuiltin::Http => Some(
             r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_undefined();
 exports[1] = create_server;
 exports[2] = namespace;
-exports[3] = kiln_c99_undefined();
+exports[3] = get;
 exports[4] = kiln_c99_undefined();"#,
         ),
         _ => None,
