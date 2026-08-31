@@ -3322,6 +3322,12 @@ extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_is_active(void);
 
+typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
+                                    const kiln_value *imports, size_t import_count,
+                                    kiln_value *exports, size_t export_count);
+typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
+
 "#,
     );
     for (_, module) in modules {
@@ -3331,6 +3337,34 @@ extern int kiln_realm_is_active(void);
             module.symbol
         )
         .unwrap();
+    }
+    output.push_str(
+        r#"
+typedef struct kiln_commonjs_context {
+    kiln_graph_module_fn module;
+    kiln_host *host;
+    kiln_value *imports;
+    size_t import_count;
+    kiln_value *exports;
+    int state;
+} kiln_commonjs_context;
+
+typedef struct kiln_commonjs_graph_context {
+    kiln_commonjs_context *modules;
+    kiln_value **exports;
+    size_t module_count;
+} kiln_commonjs_graph_context;
+"#,
+    );
+    for (node, module) in modules {
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context);",
+                module.symbol
+            )
+            .unwrap();
+        }
     }
     output.push_str(
         r#"
@@ -3410,9 +3444,44 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
 
 "#,
     );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source != ModuleSource::CommonJs {
+            continue;
+        }
+        writeln!(
+            output,
+            "\nstatic int kiln_commonjs_require_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    kiln_commonjs_graph_context *graph = (kiln_commonjs_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;"
+        )
+        .unwrap();
+        for dependency in &node.dependencies {
+            let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: dependency.target.clone(),
+                })
+            })?;
+            let specifier = native_c_string(&dependency.specifier);
+            let specifier_len = dependency.specifier.len();
+            if modules[provider_index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_graph_load_commonjs(&graph->modules[{provider_index}], result, thrown);"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = graph->exports[{provider_index}][0]; return KILN_C99_OK; }}"
+                )
+                .unwrap();
+            }
+        }
+        output.push_str(
+            "    if (thrown != NULL) *thrown = specifier;\n    return KILN_C99_HOST_ERROR;\n}\n",
+        );
+    }
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    if (import_arrays == NULL || export_arrays == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -3427,15 +3496,38 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             )
             .unwrap();
         }
-        if !node.program.exports.is_empty() {
+        let export_count = native_graph_export_count(node);
+        if export_count != 0 {
             writeln!(
                 output,
-                "    if ((size_t){} > (size_t)-1 / sizeof(**export_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    export_arrays[{index}] = (kiln_value *)malloc((size_t){} * sizeof(**export_arrays));\n    if (export_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
-                node.program.exports.len(),
-                node.program.exports.len()
+                "    if ((size_t){export_count} > (size_t)-1 / sizeof(**export_arrays)) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    export_arrays[{index}] = (kiln_value *)malloc((size_t){export_count} * sizeof(**export_arrays));\n    if (export_arrays[{index}] == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}",
             )
             .unwrap();
         }
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        if node.source != ModuleSource::CommonJs {
+            continue;
+        }
+        let filename = node.path.to_string_lossy();
+        let dirname = node
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_string_lossy();
+        writeln!(
+            output,
+            "    status = {}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+            module.symbol,
+            native_c_string(&filename),
+            filename.len(),
+            native_c_string(&dirname),
+            dirname.len(),
+            module.symbol,
+        )
+        .unwrap();
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
             let Some((provider_index, export_index)) =
                 graph_import_slot(graph, modules, &indices, node, import)?
@@ -3449,7 +3541,18 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             .unwrap();
         }
         let import_count = node.program.imports.len();
-        let export_count = node.program.exports.len();
+        let export_count = native_graph_export_count(node);
+        if node.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "    status = kiln_graph_load_commonjs(&commonjs_modules[{index}], &module_result, &module_result);\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}"
+            )
+            .unwrap();
+            if index == entry_index {
+                output.push_str("    *result = module_result;\n");
+            }
+            continue;
+        }
         writeln!(
             output,
             "    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
@@ -3461,7 +3564,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         }
     }
     output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
-    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    return status;\n}}\n", modules.len()).unwrap();
+    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
     writeln!(
         output,
         r#"
@@ -6155,6 +6258,20 @@ int main(void) {{
 
         let launcher = graph_launcher_source(&graph, &modules).expect("launcher reserves wrappers");
         assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
+        assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
+        assert_eq!(
+            launcher.matches("_commonjs_wrapper(kiln_imports_").count(),
+            1
+        );
+        let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_commonjs_graph")
+            .expect("shared wrapper emits CommonJS support");
+        let context = wrapper
+            .find("typedef struct kiln_commonjs_context")
+            .expect("shared wrapper declares CommonJS context");
+        let loader = wrapper
+            .find("static int kiln_graph_load_commonjs")
+            .expect("shared wrapper declares CommonJS loader");
+        assert!(context < loader, "context must precede its first use");
 
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native CommonJS execution: no C compiler found");
@@ -6172,6 +6289,16 @@ int main(void) {{
             )
             .expect("native mixed graph builds and runs");
         assert_eq!(report.stdout, b"42\n");
+        builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native shared CommonJS graph builds and links");
 
         fs::write(
             root.path.join("pkg/index.js"),
