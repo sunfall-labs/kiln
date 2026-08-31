@@ -785,6 +785,7 @@ fn timed_native_graph(
             &NativeBuildOptions {
                 output,
                 profile: NativeProfile::Dev,
+                realm: kiln_native::NativeRealmPolicy::default(),
             },
         )
         .map_err(|error| format!("native linked graph build: {error}"))?;
