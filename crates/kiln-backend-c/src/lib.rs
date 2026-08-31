@@ -867,6 +867,7 @@ method_ids! {
     (KILN_C99_METHOD_PROMISE_ANY, 136, Generic),
     (KILN_C99_METHOD_PROMISE_WITH_RESOLVERS, 411, Generic),
     (KILN_C99_METHOD_NODE_TTY_ISATTY, 412, Direct),
+    (KILN_C99_METHOD_TYPED_TO_STRING_TAG, 413, Direct),
     (KILN_C99_METHOD_REJECT_STEP, 137, Generic),
     (KILN_C99_METHOD_FINALLY_PASS, 138, Generic),
     (KILN_C99_METHOD_FINALLY_RAISE, 139, Generic),
@@ -1058,6 +1059,7 @@ const HEADER: &str = concat!(
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1534,6 +1536,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROMISE_ANY),
     emit_method_define!(KILN_C99_METHOD_PROMISE_WITH_RESOLVERS),
     emit_method_define!(KILN_C99_METHOD_NODE_TTY_ISATTY),
+    emit_method_define!(KILN_C99_METHOD_TYPED_TO_STRING_TAG),
     emit_method_define!(KILN_C99_METHOD_REJECT_STEP),
     r#"
 /* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
@@ -4720,6 +4723,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_TYPED_FILL: return "fill";
     case KILN_C99_METHOD_TYPED_OF: return "of";
     case KILN_C99_METHOD_TYPED_FROM: return "from";
+    case KILN_C99_METHOD_TYPED_TO_STRING_TAG: return "get [Symbol.toStringTag]";
     case KILN_C99_METHOD_MATH_RANDOM: return "random";
     case KILN_C99_METHOD_MATH_SINH: return "sinh";
     case KILN_C99_METHOD_MATH_COSH: return "cosh";
@@ -13299,6 +13303,19 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         *result = kiln_c99_boolean(0);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_TYPED_TO_STRING_TAG) {
+        if (receiver.tag != KILN_VALUE_TYPED_ARRAY) {
+            return kiln_c99_throw_error(
+                thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                "get %TypedArray%.prototype[@@toStringTag] needs a typed array receiver");
+        }
+        {
+            kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
+            const char *name = view->is_buffer ? "Uint8Array" : kiln_c99_typed_name(view->kind);
+            *result = kiln_c99_copy_text(name, strlen(name));
+            return KILN_C99_OK;
+        }
+    }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_STREAM)) {
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
@@ -16103,15 +16120,60 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value built;
             kiln_value mapper = argc > 1 ? args[1] : kiln_c99_undefined();
             kiln_array *collected;
+            kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value iterator_method;
+            if (mapper.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(mapper)) {
+                return kiln_c99_throw_not_a(thrown, mapper, "function");
+            }
+            if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_not_a(thrown, source, "iterable or array-like object");
+            }
             status = kiln_c99_new_array(&built);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_iterate(host, built, argc > 0 ? args[0] : kiln_c99_undefined(),
-                                      depth, thrown);
+            status = kiln_c99_get(host, source, "@@iterator", 10, &iterator_method, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
+            if (iterator_method.tag == KILN_VALUE_UNDEFINED ||
+                iterator_method.tag == KILN_VALUE_NULL) {
+                kiln_value length_value;
+                size_t length = 0;
+                status = kiln_c99_get(host, source, "length", 6, &length_value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (length_value.tag == KILN_VALUE_NUMBER &&
+                    kiln_c99_as_number(length_value) > 0.0) {
+                    double wanted = floor(kiln_c99_as_number(length_value));
+                    length = wanted > 9007199254740991.0 ? (size_t)-1 : (size_t)wanted;
+                }
+                for (index = 0; index < length; ++index) {
+                    char key[32];
+                    int key_len = kiln_number_to_js_string((double)index, key, sizeof key);
+                    kiln_value value;
+                    kiln_value produced;
+                    if (key_len < 0 || (size_t)key_len >= sizeof key) return KILN_C99_CONTROL_ERROR;
+                    status = kiln_c99_get(host, source, key, (size_t)key_len, &value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (mapper.tag != KILN_VALUE_UNDEFINED) {
+                        kiln_value visit[2] = {value, kiln_c99_number((double)index)};
+                        kiln_value this_arg = argc > 2 ? args[2] : kiln_c99_undefined();
+                        status = kiln_c99_call(host, &produced, mapper, this_arg, visit, 2, depth,
+                                               thrown);
+                        if (status != KILN_C99_OK) return status;
+                        value = produced;
+                    }
+                    status = kiln_c99_array_push(built, value);
+                    if (status != KILN_C99_OK) return status;
+                }
+                *result = built;
+                return KILN_C99_OK;
+            }
+            if (!kiln_c99_is_callable(iterator_method)) {
+                return kiln_c99_throw_not_a(thrown, iterator_method, "function");
+            }
+            status = kiln_c99_iterate(host, built, source, depth, thrown);
+            if (status != KILN_C99_OK) return status;
             if (!kiln_c99_is_callable(mapper)) {
                 *result = built;
                 return KILN_C99_OK;
@@ -16122,8 +16184,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 kiln_value produced;
                 visit[0] = collected->elements[index];
                 visit[1] = kiln_c99_number((double)index);
-                status = kiln_c99_call(host, &produced, mapper, kiln_c99_undefined(), visit, 2,
-                                       depth, thrown);
+                status = kiln_c99_call(host, &produced, mapper,
+                                       argc > 2 ? args[2] : kiln_c99_undefined(), visit, 2, depth,
+                                       thrown);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -18010,6 +18073,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
                                     kiln_value getter, kiln_value setter, int enumerable) {
     kiln_object *object;
+    kiln_property *property;
     size_t index;
     int status;
     if (target.tag == KILN_VALUE_FUNCTION) {
@@ -18021,6 +18085,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         return kiln_c99_define_accessor(store, key, key_len, getter, setter, enumerable);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
+        kiln_c99_diagnostic_detail = "DefineAccessor target has no property store";
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
@@ -18044,22 +18109,22 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         }
         return KILN_C99_OK;
     }
-    status = kiln_c99_put(NULL, target, key, key_len, kiln_c99_undefined(), 0, NULL);
+    /* A definition creates an own slot directly. Going through assignment would invoke an
+     * inherited setter (or silently refuse a getter-only property), after which no own property
+     * exists to turn into the accessor requested here. */
+    status = kiln_c99_own_slot(target, key, key_len, &property);
     if (status != KILN_C99_OK) {
+        if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL)
+            kiln_c99_diagnostic_detail = "DefineAccessor could not create the property";
         return status;
     }
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            object->properties[index].accessor = 1;
-            object->properties[index].getter = getter;
-            object->properties[index].setter = setter;
-            if (!enumerable) {
-                object->properties[index].enumerable = 0;
-            }
-            return KILN_C99_OK;
-        }
-    }
-    return KILN_C99_CONTROL_ERROR;
+    property->accessor = 1;
+    property->getter = getter;
+    property->setter = setter;
+    property->writable = 0;
+    property->enumerable = enumerable;
+    property->configurable = 1;
+    return KILN_C99_OK;
 }
 
 /* The store a *definition* lands in.
@@ -18359,6 +18424,30 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         if (status == KILN_C99_OK) {
             status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
         }
+        *out = built;
+        return status;
+    }
+    if (target.tag == KILN_VALUE_BUILTIN &&
+        target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE &&
+        kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        /* `%TypedArray%.prototype[@@toStringTag]` is an accessor on the shared prototype, not a
+         * string stored on each concrete view. Framework serializers take this getter and call
+         * it against arbitrary typed arrays to identify their element kind. */
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "get", 3,
+                                  kiln_c99_method(KILN_C99_METHOD_TYPED_TO_STRING_TAG), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "set", 3, kiln_c99_undefined(), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+        }
+        *found = 1;
         *out = built;
         return status;
     }
@@ -26581,6 +26670,122 @@ int main(void) {
         assert!(
             run.status.success(),
             "native callable statics failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_typed_array_tag_is_a_shared_prototype_accessor() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value descriptor;
+    kiln_value getter;
+    kiln_value view;
+    kiln_value tag;
+    kiln_value thrown = kiln_c99_undefined();
+    int found = 0;
+    if (kiln_c99_describe_property(NULL,
+                                   kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE),
+                                   "@@toStringTag", 13, &descriptor, &found, 0, &thrown) !=
+            KILN_C99_OK || !found) return 1;
+    if (kiln_c99_get(NULL, descriptor, "get", 3, &getter, 0, &thrown) != KILN_C99_OK ||
+        getter.tag != KILN_VALUE_METHOD ||
+        getter.bits != KILN_C99_METHOD_TYPED_TO_STRING_TAG) return 2;
+    if (kiln_c99_new_typed_array(&view, KILN_TYPED_INT8, kiln_c99_undefined(), 0, 0, 0,
+                                 &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_call(NULL, &tag, getter, view, NULL, 0, 0, &thrown) != KILN_C99_OK ||
+        tag.tag != KILN_VALUE_STRING || tag.len != 9 ||
+        memcmp(tag.ptr, "Int8Array", 9) != 0) return 4;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "typed-array-tag-accessor");
+        assert!(
+            run.status.success(),
+            "typed-array tag accessor failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_accessor_definition_bypasses_an_inherited_setter() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value parent;
+    kiln_value child;
+    kiln_value inherited = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+    kiln_value own = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_FORMAT);
+    kiln_value descriptor;
+    kiln_value read;
+    kiln_value thrown = kiln_c99_undefined();
+    int found = 0;
+    if (kiln_c99_new_object(&parent) != KILN_C99_OK ||
+        kiln_c99_new_object(&child) != KILN_C99_OK) return 1;
+    if (kiln_c99_define_accessor(parent, "value", 5, kiln_c99_undefined(), inherited, 0) !=
+        KILN_C99_OK) return 2;
+    if (kiln_c99_set_prototype(child, parent) != KILN_C99_OK) return 3;
+    if (kiln_c99_define_accessor(child, "value", 5, own, kiln_c99_undefined(), 1) !=
+        KILN_C99_OK) return 4;
+    if (kiln_c99_describe_property(NULL, child, "value", 5, &descriptor, &found, 0, &thrown) !=
+            KILN_C99_OK || !found) return 5;
+    if (kiln_c99_get(NULL, descriptor, "get", 3, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_METHOD || read.bits != own.bits) return 6;
+    if (kiln_c99_get(NULL, descriptor, "set", 3, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 7;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_BOOLEAN || read.bits != 1) return 8;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "accessor-definition-own-slot");
+        assert!(
+            run.status.success(),
+            "accessor definition failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_array_from_maps_an_array_like_object() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value source;
+    kiln_value method = kiln_c99_method(KILN_C99_METHOD_ARRAY_FROM);
+    kiln_value mapper = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+    kiln_value arguments[3];
+    kiln_value result;
+    kiln_value value;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_new_object(&source) != KILN_C99_OK) return 1;
+    if (kiln_c99_put(NULL, source, "length", 6, kiln_c99_number(2), 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_put(NULL, source, "0", 1, kiln_c99_copy_text("a", 1), 0, &thrown) != KILN_C99_OK)
+        return 2;
+    arguments[0] = source;
+    arguments[1] = mapper;
+    arguments[2] = kiln_c99_undefined();
+    if (kiln_c99_call(NULL, &result, method, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY),
+                      arguments, 3, 0, &thrown) != KILN_C99_OK) return 3;
+    if (result.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(result)->count != 2) return 4;
+    value = kiln_c99_array_of(result)->elements[0];
+    if (value.tag != KILN_VALUE_UNDEFINED) return 5;
+    value = kiln_c99_array_of(result)->elements[1];
+    if (value.tag != KILN_VALUE_UNDEFINED) return 6;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "array-from-array-like");
+        assert!(
+            run.status.success(),
+            "Array.from array-like failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );

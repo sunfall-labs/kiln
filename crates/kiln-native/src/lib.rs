@@ -2789,13 +2789,16 @@ fn native_builtin_runtime_module(
                 export_name: export.to_owned(),
             })?;
             writeln!(body, "exports[{private_slot}] = exports[{index}];").unwrap();
+            if !properties.is_empty() {
+                writeln!(body, "int commonjs_status;").unwrap();
+            }
             for (property, target) in properties {
                 let target_index =
                     export_index(target).ok_or(NativeError::UnsupportedNodeBuiltinExport {
                         specifier: builtin.specifier(),
                         export_name: (*target).to_owned(),
                     })?;
-                writeln!(body, "int commonjs_status = kiln_c99_put(host, exports[{private_slot}], {}, {}, exports[{target_index}], 0, NULL);", native_c_string(property), property.len()).unwrap();
+                writeln!(body, "commonjs_status = kiln_c99_put(host, exports[{private_slot}], {}, {}, exports[{target_index}], 0, NULL);", native_c_string(property), property.len()).unwrap();
                 writeln!(
                     body,
                     "if (commonjs_status != KILN_C99_OK) return commonjs_status;"
