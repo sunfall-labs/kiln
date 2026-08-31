@@ -1888,6 +1888,7 @@ struct NodeConnection {
     driver: StreamDriver,
     runtime_http: bool,
     socket: Option<Rc<RefCell<NetSocketState>>>,
+    socket_object: Option<Value>,
     request: Option<Value>,
     response: Option<Value>,
     client_requests: std::collections::BTreeMap<u64, Value>,
@@ -8677,17 +8678,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
             ServerAction::Connection(accepted) => {
                 let protocol = state.borrow().protocol;
-                let socket_state = Rc::new(RefCell::new(NetSocketState {
-                    owner: Some(Rc::downgrade(state)),
-                    resource: Some(accepted.resource.id),
-                    object: None,
-                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
-                }));
-                let socket = node_socket_object(&socket_state);
+                let (socket_state, socket) = if protocol == ServerProtocol::Http {
+                    (None, node_http_socket_facade())
+                } else {
+                    let socket_state = Rc::new(RefCell::new(NetSocketState {
+                        owner: Some(Rc::downgrade(state)),
+                        resource: Some(accepted.resource.id),
+                        object: None,
+                        readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                    }));
+                    let socket = node_socket_object(&socket_state);
+                    (Some(socket_state), socket)
+                };
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
-                    socket: Some(socket_state),
+                    socket: socket_state,
+                    socket_object: Some(socket.clone()),
                     request: None,
                     response: None,
                     client_requests: std::collections::BTreeMap::new(),
@@ -9570,8 +9577,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .streams
             .iter()
             .find(|stream| stream.resource() == resource)
-            .and_then(|stream| stream.socket.clone())
-            .map(|state| node_socket_object(&state))
+            .and_then(|stream| stream.socket_object.clone())
             .unwrap_or(Value::Undefined);
         incoming.set("socket", socket.clone());
         incoming.set("connection", socket.clone());
@@ -10523,6 +10529,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                             runtime_http: protocol == ServerProtocol::HttpClient,
                             socket: Some(Rc::clone(&socket_state)),
+                            socket_object: Some(socket.clone()),
                             request: Some(request.clone()),
                             response: None,
                             client_requests: std::collections::BTreeMap::new(),
@@ -28016,6 +28023,28 @@ fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
+}
+
+fn node_http_socket_facade() -> Value {
+    let mut data = ObjectData {
+        node_events: Some(Vec::new()),
+        ..Default::default()
+    };
+    data.set("on", Value::Native(Native::NodeEventOn));
+    data.set("once", Value::Native(Native::NodeEventOnce));
+    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set(
+        "removeListener",
+        Value::Native(Native::NodeEventRemoveListener),
+    );
+    data.set("off", Value::Native(Native::NodeEventRemoveListener));
+    data.set(
+        "removeAllListeners",
+        Value::Native(Native::NodeEventRemoveAllListeners),
+    );
+    data.set("destroyed", Value::Boolean(false));
+    data.set("encrypted", Value::Boolean(false));
+    Value::Object(Rc::new(RefCell::new(data)))
 }
 
 fn node_net_socket_value(

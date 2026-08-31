@@ -570,4 +570,19 @@ fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((by
             "{commonjs_result:?}"
         );
     }
+
+    #[test]
+    fn pinned_node_http_server_client_case_runs_through_the_production_graph() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/node");
+        let test = crate::discover(&root)
+            .expect("discover pinned Node corpus")
+            .into_iter()
+            .find(|test| test.id() == "node-v24.7.0/http/tokio-owned-server-client")
+            .expect("pinned HTTP server/client case is present");
+
+        let results = test.run(RunMode::Node);
+        assert_eq!(results.len(), 1, "manifest cases have one execution");
+        assert_eq!(results[0].result.outcome, Outcome::Pass, "{results:#?}");
+        assert_eq!(results[0].result.stdout, "pass\n");
+    }
 }

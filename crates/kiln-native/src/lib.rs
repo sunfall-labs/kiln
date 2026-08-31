@@ -4227,6 +4227,9 @@ server.listen({port}, "127.0.0.1");
             r#"import { createServer } from "node:http";
 const server = createServer((request, response) => {
   console.log(request.method, request.url, request.httpVersion);
+  if (!request.socket || request.connection !== request.socket) throw new Error("request socket");
+  if (response.req !== request) throw new Error("response request");
+  if (response.socket !== request.socket || response.connection !== request.socket) throw new Error("response socket");
   let body = "";
   request.on("data", chunk => body += chunk);
   request.on("end", () => {
