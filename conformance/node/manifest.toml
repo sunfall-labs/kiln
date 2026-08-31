@@ -179,3 +179,17 @@ source = "../server/s03-request-body-streams.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "buffer", "request-stream", "response-stream", "module-graph"]
 expected_stdout = "200 {\"method\":\"POST\",\"bytes\":12,\"text\":\"kiln streams\"}\n"
+
+[[test]]
+id = "web/url-server-routing"
+source = "upstream-adapted/url-server-routing.mjs"
+status = "runnable"
+features = ["url", "url-search-params", "form-url-encoding", "server-routing"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "server/s02-routing-json"
+source = "../server/s02-routing-json.mjs"
+status = "runnable"
+features = ["node:http", "tokio-net", "url", "url-search-params", "async-await", "microtask-checkpoint", "json", "routing"]
+expected_stdout = "200 {\"ok\":true}\n200 {\"path\":\"/echo\",\"q\":\"1\"}\n404 {\"error\":\"not found\"}\n"

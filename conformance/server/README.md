@@ -1,7 +1,7 @@
 # The Node-server probes
 
-Four vertical server programs. The first and third now run under explicit interpreted Node mode;
-the later gaps stay visible, and native standalone remains a separate gate.
+Four vertical server programs. The first three now run under explicit interpreted Node mode; the
+framework gap stays visible, and native standalone remains a separate gate.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
 step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and
@@ -11,7 +11,8 @@ directory marks the destination, so that "run a Node server, compiled" is a gaug
 rather than an intention with a date.
 
 The reading is executable behavior plus precise refusal. `s01` is the minimal end-to-end gate and
-`s03` proves request-body streaming and Buffer reassembly; each remaining probe contributes the
+`s02` proves sequential routing through async handlers and `s03` proves request-body streaming and
+Buffer reassembly; each remaining probe contributes the
 next missing prerequisite rather than collapsing the whole target to a compatibility percentage.
 
 ## The two things a server breaks, and where they are handled
