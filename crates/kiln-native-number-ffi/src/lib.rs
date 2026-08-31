@@ -3883,6 +3883,12 @@ mod realm {
         (realm, kiln_realm_is_active, realm_is_active) => {
             const _: extern "C" fn() -> i32 = kiln_realm_is_active;
         };
+        (realm, kiln_realm_symbol_for, realm_symbol_for) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut u64) -> i32 = kiln_realm_symbol_for;
+        };
+        (realm, kiln_realm_symbol_key_for, realm_symbol_key_for) => {
+            const _: unsafe extern "C" fn(u64, *mut *const u8, *mut u64) -> i32 = kiln_realm_symbol_key_for;
+        };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
         };
