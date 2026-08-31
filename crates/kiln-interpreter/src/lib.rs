@@ -478,6 +478,23 @@ pub enum Native {
     /// property -- Annex B's spelling of `Object.getPrototypeOf` and `setPrototypeOf`.
     ProtoGetter,
     ProtoSetter,
+    /// One of the accessors a built-in prototype publishes about its instances.
+    ///
+    /// Each of these used to be a `match` arm on the *instance*, which answered a read and
+    /// nothing else: the prototype had no such property to describe, to list or to take apart,
+    /// `Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")` was `undefined`,
+    /// and a collection's `size` turned up as a bogus own property of every instance. As
+    /// accessors they are what the specification says they are -- one own accessor on the
+    /// prototype, non-enumerable and configurable, refusing a receiver of the wrong kind.
+    BuiltinAccessor(BuiltinAccessor),
+    /// `%ThrowTypeError%`: the realm's one anonymous function whose whole behaviour is to throw.
+    ///
+    /// It is both halves of `Function.prototype.caller` and of `Function.prototype.arguments`,
+    /// and both halves of `callee` on a strict function's arguments object. One object fills all
+    /// six slots because the specification says so and because a program can *see* it: Test262
+    /// compares the getter it takes off `arguments` with the one it takes off `Function.prototype`
+    /// and requires them to be the same value.
+    ThrowTypeError,
     /// Annex B's four accessor helpers on `Object.prototype`. The payload is which half of which
     /// pair: defining or looking up, a getter or a setter.
     LegacyAccessor {
@@ -2318,24 +2335,25 @@ fn own_property_state(
 
 /// What a built-in's own property held when the realm was built.
 fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
+    // An accessor is asked about first, because one of them is named `length`:
+    // `%TypedArray%.prototype.length` is a getter over the view's element count, and reading it
+    // as the arity of a callable answered `None` for a property that is really there.
+    if let Some(accessor) = intrinsic_accessor(target, key) {
+        return Some(accessor);
+    }
     match key {
         "name" => intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name))),
         "length" => {
             intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
         }
         "prototype" => intrinsic_prototype(target).map(Property::Value),
-        _ => {
-            if let Some(accessor) = intrinsic_accessor(target, key) {
-                return Some(accessor);
-            }
-            match target {
-                Value::Native(native) => match native.property(key) {
-                    Some(Value::Undefined) | None => None,
-                    Some(found) => Some(Property::Value(found)),
-                },
-                _ => None,
-            }
-        }
+        _ => match target {
+            Value::Native(native) => match native.property(key) {
+                Some(Value::Undefined) | None => None,
+                Some(found) => Some(Property::Value(found)),
+            },
+            _ => None,
+        },
     }
 }
 
@@ -4168,7 +4186,7 @@ impl Value {
                 // object is its `toString` tag. `typeof Math` already answered `"object"`; this
                 // is the same fact reaching the other conversion.
                 Some(name) => format!("[object {name}]"),
-                None => format!("[Function: {}]", native_js_name(native)),
+                None => format!("[Function: {}]", native_js_name(&native)),
             },
             Self::Callback(method) => {
                 format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
@@ -9008,11 +9026,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // `in` consults a proxy's `has` trap, so it cannot go through the pure operator
                 // table the way the arithmetic ones do.
+                // A proxy answers `in` with a trap, and an object on the left is a key that
+                // `ToPropertyKey` has to reduce first -- `({toString(){return "K"}}) in o` asks
+                // about `K`. Either way the operator needs the machine, which `binary` is not.
                 Instruction::Binary(BinaryOp::In)
-                    if matches!(self.stack.last(), Some(Value::Proxy(_))) =>
+                    if matches!(self.stack.last(), Some(Value::Proxy(_)))
+                        || matches!(
+                            self.stack
+                                .len()
+                                .checked_sub(2)
+                                .and_then(|at| self.stack.get(at)),
+                            Some(key) if is_reflect_target(key)
+                        ) =>
                 {
                     let right = self.pop(current)?;
                     let left = self.pop(current)?;
+                    let coerced = self.computed_key(&left, current);
+                    let Some(left) = self.catchable(coerced, current)? else {
+                        continue;
+                    };
                     let found = self.has(&right, &left, current);
                     let Some(found) = self.catchable(found, current)? else {
                         continue;
@@ -9665,12 +9697,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     let flat = self.stack.split_off(self.stack.len() - count * 2);
                     let mut object = ObjectData::default();
+                    let mut raised = false;
                     for pair in flat.chunks_exact(2) {
                         // Any value can be a computed key: it is converted the same way a
                         // property read converts one, so `{ [Symbol.iterator]: f }` and
                         // `o[Symbol.iterator]` name the same property. A duplicate key keeps
                         // the last value and the first position, which is what `set` does.
-                        object.set(&pair[0].property_key(), pair[1].clone());
+                        // An object key is `ToPropertyKey`'d, which runs the program's own
+                        // conversion and may throw.
+                        let coerced = self.computed_key(&pair[0], current);
+                        let Some(key) = self.catchable(coerced, current)? else {
+                            raised = true;
+                            break;
+                        };
+                        object.set(&key.property_key(), pair[1].clone());
+                    }
+                    if raised {
+                        continue;
                     }
                     self.stack
                         .push(Value::Object(Rc::new(RefCell::new(object))));
@@ -9858,6 +9901,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
+                    // `{ get [k]() {} }` names the property `ToPropertyKey(k)`, which for an
+                    // object is the program's own conversion.
+                    let coerced = self.computed_key(&key, current);
+                    let Some(key) = self.catchable(coerced, current)? else {
+                        continue;
+                    };
                     let name = key.property_key();
                     let (getter, setter) = if *setter {
                         (None, Some(function))
@@ -9897,6 +9946,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
+                    let coerced = self.computed_key(&key, current);
+                    let Some(key) = self.catchable(coerced, current)? else {
+                        continue;
+                    };
                     let name = key.property_key();
                     match &target {
                         Value::Object(object) => {
@@ -10526,10 +10579,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     generator.borrow_mut().done = true;
                     return Ok((sent.clone(), true));
                 }
-                other => other?,
+                // Any other abrupt completion leaves the body for good. The specification
+                // sets the generator to `completed` before it propagates the throw, so a later
+                // `next()` answers `{value: undefined, done: true}` rather than re-entering a
+                // body that has already unwound -- which ran it a second time from the top.
+                Err(error) => {
+                    generator.borrow_mut().done = true;
+                    return Err(error);
+                }
+                Ok(outcome) => outcome,
             }
         } else {
-            self.run_frames(depth)?
+            match self.run_frames(depth) {
+                Ok(outcome) => outcome,
+                // Same ending, reached from an ordinary `next()`: a throw out of the body is an
+                // abrupt completion, and a completed generator is finished.
+                Err(error) => {
+                    generator.borrow_mut().done = true;
+                    return Err(error);
+                }
+            }
         };
 
         if self.suspended {
@@ -10567,6 +10636,157 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         generator.borrow_mut().done = true;
         let _ = instruction;
         Ok((outcome.value, true))
+    }
+
+    /// One built-in accessor, run against the receiver it was reached through.
+    ///
+    /// Every one of them is branded: the specification's first step checks the receiver has the
+    /// internal slot the accessor reports on, and answers a `TypeError` when it does not. That
+    /// check is the whole reason these are accessors rather than table entries -- a getter taken
+    /// off `ArrayBuffer.prototype` and called on a plain object has to say so.
+    fn builtin_accessor(
+        &mut self,
+        accessor: BuiltinAccessor,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // `Symbol.species` is the exception: it reports its receiver rather than anything about
+        // it, and is defined for any receiver at all.
+        if matches!(accessor, BuiltinAccessor::Species) {
+            return Ok(receiver.clone());
+        }
+        let branded = match accessor {
+            BuiltinAccessor::BufferByteLength
+            | BuiltinAccessor::BufferMaxByteLength
+            | BuiltinAccessor::BufferResizable
+            | BuiltinAccessor::BufferDetached => {
+                matches!(receiver, Value::ArrayBuffer(buffer) if !buffer.shared)
+            }
+            BuiltinAccessor::SharedByteLength
+            | BuiltinAccessor::SharedMaxByteLength
+            | BuiltinAccessor::SharedGrowable => {
+                matches!(receiver, Value::ArrayBuffer(buffer) if buffer.shared)
+            }
+            BuiltinAccessor::DataViewBuffer
+            | BuiltinAccessor::DataViewByteLength
+            | BuiltinAccessor::DataViewByteOffset => matches!(receiver, Value::DataView(_)),
+            BuiltinAccessor::TypedArrayBuffer
+            | BuiltinAccessor::TypedArrayByteLength
+            | BuiltinAccessor::TypedArrayByteOffset
+            | BuiltinAccessor::TypedArrayLength => matches!(receiver, Value::TypedArray(_)),
+            BuiltinAccessor::CollectionSize(is_map) => {
+                !is_weak_collection(receiver)
+                    && collection_state(receiver)
+                        .is_some_and(|(_, receiver_is_map)| receiver_is_map == is_map)
+            }
+            BuiltinAccessor::Species => unreachable!("answered above"),
+        };
+        if !branded {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "get {}: receiver does not have the required internal slot",
+                    accessor.property_key()
+                ),
+            });
+        }
+        // A collection's count lives in a reserved slot rather than under its own name, so that
+        // it is not an own property of every instance -- which is what
+        // `Object.getOwnPropertyNames(new Map())` reported before this accessor existed.
+        if matches!(accessor, BuiltinAccessor::CollectionSize(_)) {
+            let Value::Object(object) = receiver else {
+                unreachable!("the brand check passed, so this is a collection object");
+            };
+            let size = object.borrow().get_own(COLLECTION_SIZE).cloned();
+            return Ok(size.unwrap_or(Value::Number(0.0)));
+        }
+        // Everything else is the same answer an instance gives for the same name, taken from
+        // the one place that knows it -- including the `TypeError` a `DataView` a shrink has
+        // stranded raises for its two measurements.
+        self.read_property(receiver, accessor.property_key(), instruction)
+    }
+
+    /// The specification's `InternalizeJSONProperty`: one node of the parsed document, revived.
+    ///
+    /// Depth first, because a reviver is defined to see its children already revived -- that is
+    /// the whole reason it is useful. A child revived to `undefined` is *deleted* rather than
+    /// stored, which is how a reviver drops a key.
+    ///
+    /// The recursion is bounded by the same budget every other re-entry into the machine uses:
+    /// this walks a structure the program controls, and the Rust stack it walks on cannot grow.
+    fn internalize_json_property(
+        &mut self,
+        holder: &Value,
+        name: &str,
+        reviver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if self.native_depth >= self.limits.max_native_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_native_depth,
+            });
+        }
+        let value = self.read_property(holder, name, instruction)?;
+        if is_reflect_target(&value) {
+            // An array is walked by index up to its own `length`, and anything else by its own
+            // enumerable keys. Both readings go through the machine rather than through a store,
+            // because either may be a proxy: `length` can be a getter that throws, and the keys
+            // come from an `ownKeys` trap.
+            let keys: Vec<String> = if matches!(unwrap_proxy(&value), Value::Array(_)) {
+                let length = self.read_property(&value, "length", instruction)?;
+                let length = to_length(self.as_number_argument(Some(&length), instruction)?);
+                (0..length).map(|index| index.to_string()).collect()
+            } else {
+                let mut names = Vec::new();
+                for key in self.own_keys(&value, instruction)? {
+                    let descriptor =
+                        self.proxy_descriptor(&value, &Value::String(key.clone()), instruction)?;
+                    if is_reflect_target(&descriptor)
+                        && self
+                            .read_property(&descriptor, "enumerable", instruction)?
+                            .is_truthy()
+                    {
+                        names.push(key);
+                    }
+                }
+                names
+            };
+            for key in keys {
+                self.native_depth += 1;
+                let revived = self.internalize_json_property(&value, &key, reviver, instruction);
+                self.native_depth -= 1;
+                let revived = revived?;
+                if matches!(revived, Value::Undefined) {
+                    self.delete(&value, &Value::String(key), instruction)?;
+                } else {
+                    // `CreateDataProperty`, not a write: a reviver's result is installed as a
+                    // plain own property whatever the holder had there, and a holder that
+                    // refuses the definition -- a non-configurable slot, a proxy trap saying no
+                    // -- is *ignored* rather than made into an error. `Reflect.defineProperty`
+                    // is the spelling of the operation that reports rather than throws.
+                    let mut descriptor = ObjectData::default();
+                    descriptor.set("value", revived);
+                    descriptor.set("writable", Value::Boolean(true));
+                    descriptor.set("enumerable", Value::Boolean(true));
+                    descriptor.set("configurable", Value::Boolean(true));
+                    self.dispatch_native(
+                        Native::ReflectDefineProperty,
+                        &Value::Undefined,
+                        &[
+                            value.clone(),
+                            Value::String(key),
+                            Value::Object(Rc::new(RefCell::new(descriptor))),
+                        ],
+                        instruction,
+                    )?;
+                }
+            }
+        }
+        self.call_value(
+            reviver,
+            holder.clone(),
+            vec![Value::String(name.to_owned()), value],
+            instruction,
+        )
     }
 
     /// Put back the frame a generator resumption displaced.
@@ -10751,6 +10971,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpAccessor(accessor) => {
                 return self.regexp_accessor(accessor, receiver, instruction);
             }
+            Native::BuiltinAccessor(accessor) => {
+                return self.builtin_accessor(accessor, receiver, instruction);
+            }
             // `Object.prototype.toString` is defined to *read* `@@toStringTag` off the receiver
             // and use it when it is a string, falling back to the shape it worked out itself.
             // The read can run a getter, so the answer cannot come from the pure table alone --
@@ -10788,18 +11011,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::FinalizationRegistryUnregister => {
                 return self.finalization_registry_unregister(receiver, arguments, instruction);
             }
-            // Calling either constructor without `new` is a `TypeError`: each exists to build a
-            // value with reserved state, and there is nothing for a plain call to answer with.
-            Native::WeakRefConstructor | Native::FinalizationRegistryConstructor => {
+            // Calling any of these without `new` is a `TypeError`: each exists to build a value
+            // with reserved state, and there is nothing for a plain call to answer with. The
+            // specification says so in the first step of every one of them -- "If NewTarget is
+            // undefined, throw a TypeError" -- and a `new` never arrives here, because
+            // `construct_as` builds each of these itself rather than routing through a call.
+            //
+            // `Promise` is in this list for a second reason as well: without it, `Promise(f)`
+            // fell through to `call_native`, whose `Promise` arm is the `unreachable!` that says
+            // the scheduling built-ins are dispatched by the machine -- so the *process aborted*
+            // where the language wanted a catchable TypeError.
+            Native::WeakRefConstructor
+            | Native::FinalizationRegistryConstructor
+            | Native::MapConstructor
+            | Native::SetConstructor
+            | Native::WeakMapConstructor
+            | Native::WeakSetConstructor
+            | Native::ProxyConstructor
+            | Native::ArrayBufferConstructor
+            | Native::SharedArrayBufferConstructor
+            | Native::DataViewConstructor
+            | Native::PromiseConstructor
+            | Native::TypedArrayConstructor(_) => {
                 return Err(ExecutionError::TypeErrorMessage {
-                    message: format!(
-                        "Constructor {} requires 'new'",
-                        if matches!(native, Native::WeakRefConstructor) {
-                            "WeakRef"
-                        } else {
-                            "FinalizationRegistry"
-                        }
-                    ),
+                    message: format!("Constructor {} requires 'new'", native_js_name(&native)),
                 });
             }
             // Closing runs the program's `return`, so this needs the machine too.
@@ -11431,6 +11666,60 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let coerced = Value::String(primitive.to_display_string());
             return self.dispatch_native(native, &coerced, arguments, instruction);
         }
+        // `ToPropertyKey` for every built-in that names a property with an argument. The
+        // conversion is the program's own `Symbol.toPrimitive`/`valueOf`/`toString`, so the pure
+        // table cannot run it: it read every object as `"[object Object]"` and asked about the
+        // wrong property, silently. Done once here rather than in each built-in, and the
+        // re-dispatch cannot loop because what it puts back is a primitive.
+        let keyed_argument = match native {
+            Native::ObjectDefineProperty
+            | Native::ReflectDefineProperty
+            | Native::ObjectGetOwnPropertyDescriptor
+            | Native::ReflectGetOwnPropertyDescriptor
+            | Native::ObjectHasOwn
+            | Native::ReflectHas
+            | Native::ReflectGet
+            | Native::ReflectSet
+            | Native::ReflectDeleteProperty => Some(1),
+            // These two take the property on the *receiver*, so the key is their first argument.
+            Native::ObjectHasOwnProperty | Native::ObjectPropertyIsEnumerable => Some(0),
+            _ => None,
+        };
+        if let Some(index) = keyed_argument
+            && let Some(key) = arguments.get(index)
+            && is_reflect_target(key)
+        {
+            let coerced = self.computed_key(key, instruction)?;
+            let mut converted = arguments.to_vec();
+            converted[index] = coerced;
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
+        // `ToNumber` for every argument a built-in reads as a number. Done once here, after the
+        // receiver has been validated and coerced -- which is the order the specification uses,
+        // and which a `valueOf` that counts its calls can see -- rather than inside fifty
+        // built-ins that have no machine to run the conversion with. The re-dispatch cannot
+        // loop, because what it puts back is a Number.
+        let numeric = numeric_arguments(native);
+        if !numeric.is_empty()
+            && numeric.iter().any(|&index| {
+                arguments
+                    .get(index)
+                    .is_some_and(|argument| needs_number_conversion(argument))
+            })
+        {
+            let mut converted = arguments.to_vec();
+            for &index in numeric {
+                let Some(argument) = converted.get(index) else {
+                    continue;
+                };
+                if !needs_number_conversion(argument) {
+                    continue;
+                }
+                let number = self.as_number_argument(Some(&argument.clone()), instruction)?;
+                converted[index] = Value::Number(number);
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
         // A prototype is stored rather than read, so the only two things it may be are an object
         // and the explicit absence of one.
         if matches!(native, Native::ObjectSetPrototypeOf) {
@@ -11732,6 +12021,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // both `valueOf` and `toString` uses the second.
                 let primitive = self.as_primitive(value, true, instruction)?;
                 Ok(Value::String(primitive.to_display_string()))
+            }
+            // `JSON.parse(text, reviver)`. The reviver is called on every value the text
+            // produced, deepest first, with the holder as its `this` -- which is how a program
+            // turns `{"at":"2020-01-01"}` into an object holding a `Date`. Without it the
+            // second argument was read and discarded, and the parse looked like it had worked.
+            Native::JsonParse => {
+                let text =
+                    self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                let parsed = parse_json_text(&text)?;
+                let reviver = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&reviver) {
+                    return Ok(parsed);
+                }
+                // The specification's root holder: an ordinary object whose one property is
+                // named by the empty string. The reviver is called for it too, last of all,
+                // which is what lets a reviver replace the whole document.
+                let mut holder = ObjectData::default();
+                holder.set("", parsed);
+                let root = Value::Object(Rc::new(RefCell::new(holder)));
+                self.internalize_json_property(&root, "", &reviver, instruction)
             }
             Native::JsonStringify => {
                 let indent = json_indent(arguments.get(2));
@@ -12076,6 +12385,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let callee = receiver.clone();
                 self.call_value(&callee, this_value, rest, instruction)
             }
+            // `bind` is generic in its receiver but not *that* generic: the specification's
+            // first step refuses one that is not callable, because the result would be a bound
+            // function wrapping nothing -- an object that says `typeof` is "function" and
+            // throws only later, wherever it is finally called.
+            Native::FunctionBind if !is_callable(receiver) => {
+                Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Bind must be called on a function, got {}",
+                        receiver.type_name()
+                    ),
+                })
+            }
             Native::FunctionBind => Ok(Value::Bound(Rc::new(BoundFunction {
                 target: receiver.clone(),
                 this_value: arguments.first().cloned().unwrap_or(Value::Undefined),
@@ -12236,6 +12557,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "Object prototype may only be an Object or null".to_owned(),
                     });
+                }
+                // The same two refusals, reported rather than thrown: answering whether the
+                // change happened is what this spelling of the operation exists for.
+                if !prototype_may_change(&self.intrinsics, &target, &prototype) {
+                    return Ok(Value::Boolean(false));
                 }
                 let stored = match &target {
                     Value::Object(object) => {
@@ -12920,7 +13246,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             data.set("@@entries", Value::Array(ArrayData::new(entries)));
             data.set("@@map", Value::Boolean(true));
             data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Map)));
-            data.set("size", Value::Number(size));
+            data.set(COLLECTION_SIZE, Value::Number(size));
             return Ok(Value::Object(Rc::new(RefCell::new(data))));
         }
         let mut result = ObjectData::default();
@@ -13007,6 +13333,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(Value::Undefined)
+    }
+
+    /// `ToPropertyKey` of a key that arrived from the program, as a value.
+    ///
+    /// Only an object needs converting: every primitive is already a key, and a Number left as
+    /// one keeps the array fast path that recognises `a[0]` as an index. An object reduces
+    /// through `Symbol.toPrimitive`, `valueOf` and `toString` -- the program's own code, which
+    /// may return anything and may throw. The pure `Value::property_key` could do none of it:
+    /// it answered `"[object Object]"` for every object, so `o[{toString(){return "K"}}]` wrote
+    /// under the wrong name and `o[{toString(){throw x}}]` did not throw at all.
+    fn computed_key(&mut self, key: &Value, instruction: usize) -> Result<Value, ExecutionError> {
+        if !is_reflect_target(key) {
+            return Ok(key.clone());
+        }
+        self.as_primitive(key, true, instruction)
     }
 
     /// `ToPropertyKey` of an argument, which may run the program's own `toString`.
@@ -17429,10 +17770,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .map(|character| Value::String(character.to_string()))
                 .collect(),
             Value::Object(_) | Value::Function(_) => {
-                let length = bounded_length(
-                    self.read_property(&receiver, "length", instruction)?
-                        .as_number(),
-                )?;
+                // `LengthOfArrayLike` is `ToLength(Get(obj, "length"))`, and the conversion is
+                // the program's own: `{length: {valueOf(){throw x}}}` throws here, and a
+                // `length` that is an object read as `NaN` -- an empty walk -- without it.
+                let raw = self.read_property(&receiver, "length", instruction)?;
+                let length = bounded_length(self.as_number_argument(Some(&raw), instruction)?)?;
                 let mut items = Vec::with_capacity(length);
                 for index in 0..length {
                     items.push(self.read_property(&receiver, &index.to_string(), instruction)?);
@@ -17702,7 +18044,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             (true, true) => PrototypeTable::WeakMap,
             (false, true) => PrototypeTable::WeakSet,
         })));
-        data.set("size", Value::Number(0.0));
+        data.set(COLLECTION_SIZE, Value::Number(0.0));
         let collection = Value::Object(Rc::new(RefCell::new(data)));
         // A seeded collection goes through `add`/`set`, so deduplication and size accounting are
         // the same code the explicit calls use rather than a second copy of it.
@@ -19357,6 +19699,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(is_callable(&trap).then_some(trap))
     }
 
+    /// What the *stores* say about one name: the own property, or the nearest one up the chain.
+    ///
+    /// This is deliberately only the stores. A built-in's tabulated methods are not here, and
+    /// neither are the handful of accessors the machine answers itself, so `None` means "nothing
+    /// a program put there" rather than "no such property" -- which is the question both the
+    /// read path and the write path have to ask before either falls back to one of those
+    /// accessors, or they would disagree about which shadows which.
+    fn stored_property(&self, target: &Value, name: &str) -> Option<Property> {
+        match target {
+            Value::Object(object) => object.borrow().lookup(name),
+            Value::Function(closure) if name != "prototype" => {
+                closure.properties.borrow().lookup(name)
+            }
+            // An array's non-element properties live in an ordinary store with an ordinary
+            // chain, so a subclass's accessor is reachable the same way.
+            Value::Array(items) => items.properties.borrow().lookup(name),
+            // A built-in keeps what a program defined on it in the realm's store, accessors
+            // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
+            // rather than read as undefined.
+            Value::Bound(bound) => bound.properties.borrow().lookup(name),
+            Value::Native(_) | Value::Callback(_) => match self.intrinsics.overridden(target, name)
+            {
+                Overridden::Held(property, _) => Some(property),
+                Overridden::Removed | Overridden::Untouched => None,
+            },
+            _ => None,
+        }
+    }
+
     fn read_property(
         &mut self,
         target: &Value,
@@ -19375,31 +19746,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return Err(ExecutionError::DataViewOutOfBounds);
         }
-        let accessor = match target {
-            Value::Object(object) => object.borrow().lookup(name),
-            Value::Function(closure) if name != "prototype" => {
-                closure.properties.borrow().lookup(name)
-            }
-            // An array's non-element properties live in an ordinary store with an ordinary
-            // chain, so a subclass's accessor is reachable the same way.
-            Value::Array(items) => items.properties.borrow().lookup(name),
-            // A built-in keeps what a program defined on it in the realm's store, accessors
-            // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
-            // rather than read as undefined.
-            Value::Bound(bound) => bound.properties.borrow().lookup(name),
-            Value::Native(_) | Value::Callback(_) => match self.intrinsics.overridden(target, name)
-            {
-                Overridden::Held(property, _) => Some(property),
-                Overridden::Removed | Overridden::Untouched => None,
-            },
-            _ => None,
-        };
+        let accessor = self.stored_property(target, name);
         // `Object.prototype.__proto__` is an accessor and the tables have no room for one, so
         // the read reaches it here. An own or inherited property of that name shadows it exactly
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
         if name == "__proto__" && accessor.is_none() && is_reflect_target(target) {
             return Ok(prototype_of(target));
+        }
+        // `Function.prototype.caller` and `.arguments` are the same shape of problem: an
+        // accessor on a table that has no room for one. Every function inherits the pair from
+        // `%Function.prototype%`, both halves are `%ThrowTypeError%`, and so a read of either
+        // name through anything callable throws -- unless the program gave that function an own
+        // property of the name, which shadows the accessor exactly as it would any other.
+        if accessor.is_none() && is_restricted_function_property(target, name) {
+            return Err(restricted_property_error());
+        }
+        // The same shape once more: an accessor a built-in *prototype* owns is a call, and the
+        // tables have no room for one. `Map.prototype.size` is a `TypeError` for exactly this
+        // reason -- the prototype is not a Map -- where the table answered `undefined`.
+        if accessor.is_none()
+            && let Some(builtin) = machine_accessor(target, name)
+        {
+            return self.builtin_accessor(builtin, target, instruction);
         }
         match accessor {
             Some(Property::Accessor { get, .. }) => match get {
@@ -19486,7 +19855,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if weak {
                         return Value::Undefined;
                     }
-                    return object.borrow().get(name).unwrap_or(Value::Undefined);
+                    return object
+                        .borrow()
+                        .get(COLLECTION_SIZE)
+                        .unwrap_or(Value::Number(0.0));
                 }
                 // Through the realm's store first, so that a program which replaced -- or
                 // removed -- a method on `Map.prototype` sees its change from an instance too.
@@ -20231,6 +20603,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        let key = &self.computed_key(key, instruction)?;
         let Value::Proxy(proxy) = target else {
             return Ok(delete_property(&self.intrinsics, target, key));
         };
@@ -20319,10 +20692,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let key = &self.computed_key(key, instruction)?;
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
         let property_key = key.property_key();
+        // The same accessors the named read consults, for the computed spelling: a symbol key
+        // reaches `Symbol.species` only through here.
+        if let Some(builtin) = machine_accessor(target, &property_key)
+            && self.stored_property(target, &property_key).is_none()
+        {
+            return self.builtin_accessor(builtin, receiver, instruction);
+        }
         let accessor = match target {
             Value::Object(object) => object.borrow().lookup(&property_key),
             Value::Function(closure) if property_key != "prototype" => {
@@ -20386,6 +20767,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        let key = &self.computed_key(key, instruction)?;
         if let Value::Proxy(proxy) = target {
             let proxy = Rc::clone(proxy);
             let inner = proxy.target.clone();
@@ -20422,6 +20804,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 (Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null, _) => {}
                 _ => return Ok(()),
             }
+            // `o.__proto__ = p` runs the setter, and the setter refuses a cycle or a
+            // non-extensible target. Storing it anyway is how `a.__proto__ = b` on an object `b`
+            // already inherits from produced a chain whose walk never ends.
+            if !prototype_may_change(&self.intrinsics, target, &value) {
+                return Err(prototype_change_refused());
+            }
             match target {
                 Value::Object(object) => object.borrow_mut().set_prototype(value),
                 Value::Function(closure) => closure.properties.borrow_mut().set_prototype(value),
@@ -20430,6 +20818,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 _ => {}
             }
             return Ok(());
+        }
+        // The other half of the restricted pair. Its setter is `%ThrowTypeError%` too, so a
+        // write throws rather than shadowing the accessor with an own property -- which is what
+        // `f.caller = {}` does in every engine, in sloppy mode as well as strict.
+        if let Value::String(name) = key
+            && is_restricted_function_property(target, name)
+            && self.stored_property(target, name).is_none()
+        {
+            return Err(restricted_property_error());
         }
         match target {
             // A frozen array ignores an element write, the same way a frozen object ignores a
@@ -23120,6 +23517,12 @@ fn call_native(
         Native::ObjectSetPrototypeOf => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
             if let Some(prototype) = arguments.get(1) {
+                // A cycle or a sealed target is a `TypeError` here rather than the `false`
+                // `Reflect.setPrototypeOf` answers with. Accepting either silently left the
+                // object with a chain that no lookup could finish walking.
+                if !prototype_may_change(intrinsics, &target, prototype) {
+                    return Err(prototype_change_refused());
+                }
                 match &target {
                     Value::Object(object) => object.borrow_mut().set_prototype(prototype.clone()),
                     // A function is an object, and setting its prototype is how a program gives
@@ -23186,6 +23589,9 @@ fn call_native(
         Native::RegExpAccessor(_) => {
             unreachable!("the regexp accessors are dispatched by the interpreter")
         }
+        Native::BuiltinAccessor(_) => {
+            unreachable!("the built-in accessors are dispatched by the interpreter")
+        }
         Native::SetOperation(_) => {
             unreachable!("the set operations are dispatched by the interpreter")
         }
@@ -23217,6 +23623,15 @@ fn call_native(
         | Native::PromiseTry => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
+        // `%ThrowTypeError%`, in full. The message is the one every engine gives, because a
+        // program that reaches this has almost always reached it by accident.
+        Native::ThrowTypeError => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "'caller', 'callee', and 'arguments' properties may not be accessed on \
+                          strict mode functions or the arguments objects for calls to them"
+                    .to_owned(),
+            });
+        }
         // The two halves of `Object.prototype.__proto__`. A read of the property is answered by
         // the machine without reaching here; these are what a program gets when it takes the
         // accessor apart and calls one directly.
@@ -23241,6 +23656,12 @@ fn call_native(
                 prototype,
                 Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null
             ) {
+                // A change the object cannot take is a `TypeError`, exactly as it is through
+                // `Object.setPrototypeOf`: this accessor is Annex B's spelling of that
+                // operation, not a weaker one.
+                if !prototype_may_change(intrinsics, receiver, &prototype) {
+                    return Err(prototype_change_refused());
+                }
                 match receiver {
                     Value::Object(object) => object.borrow_mut().set_prototype(prototype),
                     Value::Function(closure) => {
@@ -23746,21 +24167,15 @@ fn call_native(
         Native::JsonStringify => {
             unreachable!("`JSON.stringify` is dispatched by the interpreter")
         }
+        // Reached only when there is no reviver: with one, `JSON.parse` has to call back into
+        // the program, so the machine takes it. Both go through `parse_json_text`, so the two
+        // entry points cannot disagree about what the grammar is.
         Native::JsonParse => {
             let text = match arguments.first() {
                 None | Some(Value::Undefined) => "undefined".to_owned(),
                 Some(value) => value.to_display_string(),
             };
-            let mut reader = JsonReader {
-                rest: text.as_str(),
-            };
-            reader.skip_whitespace();
-            let value = reader.value()?;
-            reader.skip_whitespace();
-            if !reader.rest.is_empty() {
-                return Err(ExecutionError::InvalidJson);
-            }
-            value
+            parse_json_text(&text)?
         }
         // Present so `typeof` reports "function", which is what the corpus checks. Calling it
         // returns undefined rather than inventing a stack this VM does not record.
@@ -23864,9 +24279,50 @@ fn call_native(
                 Native::StringToUpperCase => Value::String(text.to_uppercase()),
                 Native::StringToLowerCase => Value::String(text.to_lowercase()),
                 Native::StringTrim => Value::String(text.trim().to_owned()),
-                Native::StringIncludes => Value::Boolean(text.contains(&argument(0))),
-                Native::StringStartsWith => Value::Boolean(text.starts_with(&argument(0))),
-                Native::StringEndsWith => Value::Boolean(text.ends_with(&argument(0))),
+                // All three take a position, and all three ignored it: `"hello".startsWith("ell", 1)`
+                // is true and read as false, which is a wrong answer rather than a missing
+                // feature. Counted in UTF-16 units, like every other position the language
+                // reports, so a position inside an astral character lands where the language
+                // says it does rather than where Rust's byte offsets would.
+                Native::StringIncludes | Native::StringStartsWith | Native::StringEndsWith => {
+                    let haystack: Vec<u16> = text.encode_utf16().collect();
+                    let needle: Vec<u16> = argument(0).encode_utf16().collect();
+                    let clamp = |raw: f64| -> usize {
+                        if raw.is_nan() || raw <= 0.0 {
+                            0
+                        } else if !raw.is_finite() {
+                            haystack.len()
+                        } else {
+                            (raw.trunc() as usize).min(haystack.len())
+                        }
+                    };
+                    // `endsWith`'s argument is where the *match ends*, and leaving it out means
+                    // the end of the string -- not position zero, which is what the shared
+                    // default would give it.
+                    let position = match arguments.get(1) {
+                        None | Some(Value::Undefined)
+                            if matches!(native, Native::StringEndsWith) =>
+                        {
+                            haystack.len()
+                        }
+                        other => clamp(other.map_or(0.0, Value::as_number)),
+                    };
+                    Value::Boolean(match native {
+                        Native::StringEndsWith => position
+                            .checked_sub(needle.len())
+                            .is_some_and(|start| haystack[start..position] == needle[..]),
+                        Native::StringStartsWith => {
+                            position + needle.len() <= haystack.len()
+                                && haystack[position..position + needle.len()] == needle[..]
+                        }
+                        _ => {
+                            needle.is_empty() && position <= haystack.len()
+                                || haystack[position..]
+                                    .windows(needle.len().max(1))
+                                    .any(|window| window == needle.as_slice())
+                        }
+                    })
+                }
                 Native::StringIndexOf => {
                     // Both the position and result are UTF-16 code-unit offsets. Slicing Rust
                     // strings by bytes made the optional start unusable and would split astral
@@ -25029,13 +25485,23 @@ fn find_entry(entries: &[Value], key: &Value, is_map: bool) -> Option<usize> {
     })
 }
 
-/// Adjust a collection's stored `size`.
+/// Where a collection keeps its count.
 ///
-/// Stored rather than derived so a read is a plain property lookup; the two cannot drift because
+/// Reserved rather than spelled `size`, because a plain property of that name *is* an own
+/// property: `Object.getOwnPropertyNames(new Map())` answered `["size"]`, which is a property
+/// no Map has. The count is reported by the accessor on `Map.prototype`, where the
+/// specification puts it.
+const COLLECTION_SIZE: &str = "@@size";
+
+/// Adjust a collection's stored size.
+///
+/// Stored rather than derived so a read is a plain slot lookup; the two cannot drift because
 /// only `add` and `delete` change either.
 fn set_size(receiver: &Value, size: f64) {
     if let Value::Object(object) = receiver {
-        object.borrow_mut().set("size", Value::Number(size));
+        object
+            .borrow_mut()
+            .set(COLLECTION_SIZE, Value::Number(size));
     }
 }
 
@@ -25043,11 +25509,11 @@ fn bump_size(receiver: &Value, delta: f64) {
     if let Value::Object(object) = receiver {
         let current = object
             .borrow()
-            .get_own("size")
+            .get_own(COLLECTION_SIZE)
             .map_or(0.0, Value::as_number);
         object
             .borrow_mut()
-            .set("size", Value::Number(current + delta));
+            .set(COLLECTION_SIZE, Value::Number(current + delta));
     }
 }
 
@@ -25546,7 +26012,7 @@ fn new_set(values: Vec<Value>) -> Value {
     let mut data = ObjectData::default();
     data.set("@@entries", Value::Array(ArrayData::new(values)));
     data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Set)));
-    data.set("size", Value::Number(size));
+    data.set(COLLECTION_SIZE, Value::Number(size));
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -25871,6 +26337,21 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
 /// string's `length` is false: the property is real and cannot be configured away. Every store
 /// answers from the property's own `configurable` flag, so `delete` and the descriptor that
 /// reports the flag cannot disagree.
+/// `JSON.parse`'s grammar, on text that has already been converted to a string.
+///
+/// Separate from either caller because there are two: the pure built-in, and the machine's
+/// route for a call that carries a reviver.
+fn parse_json_text(text: &str) -> Result<Value, ExecutionError> {
+    let mut reader = JsonReader { rest: text };
+    reader.skip_whitespace();
+    let value = reader.value()?;
+    reader.skip_whitespace();
+    if !reader.rest.is_empty() {
+        return Err(ExecutionError::InvalidJson);
+    }
+    Ok(value)
+}
+
 fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     match target {
         Value::Object(object) => {
@@ -26585,7 +27066,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         },
         Value::Native(native) => match namespace_name(native) {
             Some(name) => format!("Object [{name}] {{}}"),
-            None => format!("[Function: {}]", native_js_name(native)),
+            None => format!("[Function: {}]", native_js_name(&native)),
         },
         Value::Callback(method) => {
             format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
@@ -27669,6 +28150,24 @@ fn is_iterator_object(value: &Value) -> bool {
     )
 }
 
+/// Whether reading or writing `name` on `target` reaches the restricted pair.
+///
+/// `caller` and `arguments` live on `%Function.prototype%` and nowhere else, so this is exactly
+/// "is `target` something that inherits from it" -- which is "is it callable", asked the way the
+/// arity table asks it: a namespace like `Math` is a `Native` too and is not a function.
+fn is_restricted_function_property(target: &Value, name: &str) -> bool {
+    matches!(name, "caller" | "arguments") && function_identity(target).is_some()
+}
+
+/// What `%ThrowTypeError%` throws, for the paths that reach the pair without calling it.
+fn restricted_property_error() -> ExecutionError {
+    ExecutionError::TypeErrorMessage {
+        message: "'caller', 'callee', and 'arguments' properties may not be accessed on strict \
+                  mode functions or the arguments objects for calls to them"
+            .to_owned(),
+    }
+}
+
 fn is_callable(value: &Value) -> bool {
     matches!(
         value,
@@ -28395,6 +28894,142 @@ fn native_is_constructor(native: Native) -> bool {
     }
 }
 
+/// One accessor published by a built-in prototype, or by a constructor in the case of
+/// `Symbol.species`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinAccessor {
+    /// `ArrayBuffer.prototype`'s four, each a `TypeError` on a *shared* buffer: the two types
+    /// share no accessor, and answering a shared buffer's length from the unshared getter would
+    /// make the brand check the specification demands invisible.
+    BufferByteLength,
+    BufferMaxByteLength,
+    BufferResizable,
+    BufferDetached,
+    /// `SharedArrayBuffer.prototype`'s three, the mirror image.
+    SharedByteLength,
+    SharedMaxByteLength,
+    SharedGrowable,
+    DataViewBuffer,
+    DataViewByteLength,
+    DataViewByteOffset,
+    TypedArrayBuffer,
+    TypedArrayByteLength,
+    TypedArrayByteOffset,
+    TypedArrayLength,
+    /// `Map.prototype.size` and `Set.prototype.size`. The payload is which of the two, because
+    /// each is branded: `Map.prototype`'s getter refuses a `Set`.
+    CollectionSize(bool),
+    /// `get [Symbol.species]`, which every one of them defines identically: it answers its own
+    /// receiver, so a subclass's derived operations build the subclass.
+    Species,
+}
+
+impl BuiltinAccessor {
+    /// The name the accessor is published under.
+    fn property_key(self) -> &'static str {
+        match self {
+            Self::BufferByteLength
+            | Self::SharedByteLength
+            | Self::DataViewByteLength
+            | Self::TypedArrayByteLength => "byteLength",
+            Self::BufferMaxByteLength | Self::SharedMaxByteLength => "maxByteLength",
+            Self::BufferResizable => "resizable",
+            Self::SharedGrowable => "growable",
+            Self::BufferDetached => "detached",
+            Self::DataViewBuffer | Self::TypedArrayBuffer => "buffer",
+            Self::DataViewByteOffset | Self::TypedArrayByteOffset => "byteOffset",
+            Self::TypedArrayLength => "length",
+            Self::CollectionSize(_) => "size",
+            Self::Species => WellKnown::Species.property_key(),
+        }
+    }
+}
+
+/// The accessors one intrinsic prototype publishes, in the order the specification lists them.
+fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
+    match table {
+        PrototypeTable::ArrayBuffer => &["byteLength", "maxByteLength", "resizable", "detached"],
+        PrototypeTable::SharedArrayBuffer => &["byteLength", "maxByteLength", "growable"],
+        PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
+        PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
+        PrototypeTable::Map | PrototypeTable::Set => &["size"],
+        _ => &[],
+    }
+}
+
+/// Which accessor an intrinsic prototype publishes under `key`, or `None` for a name that is
+/// not one of them.
+fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccessor> {
+    Some(match (table, key) {
+        (PrototypeTable::ArrayBuffer, "byteLength") => BuiltinAccessor::BufferByteLength,
+        (PrototypeTable::ArrayBuffer, "maxByteLength") => BuiltinAccessor::BufferMaxByteLength,
+        (PrototypeTable::ArrayBuffer, "resizable") => BuiltinAccessor::BufferResizable,
+        (PrototypeTable::ArrayBuffer, "detached") => BuiltinAccessor::BufferDetached,
+        (PrototypeTable::SharedArrayBuffer, "byteLength") => BuiltinAccessor::SharedByteLength,
+        (PrototypeTable::SharedArrayBuffer, "maxByteLength") => {
+            BuiltinAccessor::SharedMaxByteLength
+        }
+        (PrototypeTable::SharedArrayBuffer, "growable") => BuiltinAccessor::SharedGrowable,
+        (PrototypeTable::DataView, "buffer") => BuiltinAccessor::DataViewBuffer,
+        (PrototypeTable::DataView, "byteLength") => BuiltinAccessor::DataViewByteLength,
+        (PrototypeTable::DataView, "byteOffset") => BuiltinAccessor::DataViewByteOffset,
+        (PrototypeTable::TypedArray, "buffer") => BuiltinAccessor::TypedArrayBuffer,
+        (PrototypeTable::TypedArray, "byteLength") => BuiltinAccessor::TypedArrayByteLength,
+        (PrototypeTable::TypedArray, "byteOffset") => BuiltinAccessor::TypedArrayByteOffset,
+        (PrototypeTable::TypedArray, "length") => BuiltinAccessor::TypedArrayLength,
+        (PrototypeTable::Map, "size") => BuiltinAccessor::CollectionSize(true),
+        (PrototypeTable::Set, "size") => BuiltinAccessor::CollectionSize(false),
+        _ => return None,
+    })
+}
+
+/// The accessor the *machine* has to run for a read of `key` on `target`, or `None`.
+///
+/// These are the accessors whose getter does real work -- a brand check and a slot -- so a read
+/// of one is a call. The tables cannot answer a call, which is why a read has to ask here
+/// before it falls through to them.
+fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
+    match target {
+        Value::Native(Native::PrototypeOf(table)) => prototype_accessor(*table, key),
+        Value::Native(native) if defines_species(*native) => {
+            (key == WellKnown::Species.property_key()).then_some(BuiltinAccessor::Species)
+        }
+        _ => None,
+    }
+}
+
+/// Whether this built-in defines `Symbol.species`, which is the eight the specification names
+/// and nothing else -- a constructor that does not define one inherits whatever its own
+/// prototype has, which for the nine view constructors is `%TypedArray%`'s.
+const fn defines_species(native: Native) -> bool {
+    matches!(
+        native,
+        Native::ArrayConstructor
+            | Native::ArrayBufferConstructor
+            | Native::SharedArrayBufferConstructor
+            | Native::MapConstructor
+            | Native::SetConstructor
+            | Native::PromiseConstructor
+            | Native::RegExpConstructor
+            | Native::TypedArrayIntrinsic
+    )
+}
+
+/// Whether a numeric argument still has to go through `ToNumber` to become one.
+///
+/// `undefined` is left alone: it is not a missing number but a *meaningful* one, and each
+/// built-in says for itself what it means -- `slice(1, undefined)` runs to the end, where
+/// `ToNumber(undefined)` is `NaN`. A symbol and a BigInt are converted rather than skipped,
+/// because converting either is the `TypeError` the language requires and the pure table
+/// answered `NaN` for both.
+fn needs_number_conversion(value: &Value) -> bool {
+    match value {
+        Value::Undefined | Value::Number(_) => false,
+        Value::Symbol(_) | Value::BigInt(_) => true,
+        other => is_reflect_target(other),
+    }
+}
+
 /// Whether this value reduces to a primitive by calling one of its own methods.
 fn is_object_like(value: &Value) -> bool {
     matches!(
@@ -28405,6 +29040,113 @@ fn is_object_like(value: &Value) -> bool {
 
 /// `Reflect.get` does not box primitive targets. Every other public `Value` variant represents an
 /// object or callable object; `Cell` is internal and must never escape as a target.
+/// Whether `target` may be given `prototype`, per `OrdinarySetPrototypeOf`'s two refusals.
+///
+/// An object that has been made non-extensible has declared its shape final, and its prototype
+/// is part of that shape. And a chain that reaches back to the object it started from is a
+/// cycle: every failed lookup on it walks forever, which is a hang rather than an error, so the
+/// language refuses to build one at all. Assigning the prototype an object already has is
+/// always allowed -- nothing changes, so neither refusal has anything to refuse.
+///
+/// Answering `bool` rather than throwing is what lets the four spellings of this operation each
+/// react as the specification says: `Reflect.setPrototypeOf` reports `false`, `Object.setPrototypeOf`
+/// and the `__proto__` setter throw, and `{ __proto__: x }` in a literal never gets here at all.
+fn prototype_may_change(intrinsics: &Intrinsics, target: &Value, prototype: &Value) -> bool {
+    if same_value(&prototype_of(target), prototype) {
+        return true;
+    }
+    if !is_extensible_target(intrinsics, target) {
+        return false;
+    }
+    let mut link = prototype.clone();
+    // The chain being walked cannot already contain a cycle -- this is the check that keeps one
+    // from being made -- so the walk terminates on its own. The step cap is there for the one
+    // case that is not this operation's to reason about: a chain that reaches a value whose
+    // prototype is answered by a table rather than a slot.
+    for _ in 0..MAX_PROTOTYPE_WALK {
+        if !is_reflect_target(&link) {
+            return true;
+        }
+        if same_value(&link, target) {
+            return false;
+        }
+        // A proxy answers `[[GetPrototypeOf]]` with a trap, and running the program's code in
+        // the middle of this check is not what the specification asks for: it stops the walk at
+        // the first non-ordinary object.
+        if matches!(link, Value::Proxy(_)) {
+            return true;
+        }
+        link = prototype_of(&link);
+    }
+    true
+}
+
+/// How far the cycle check walks before it gives up and allows the write.
+const MAX_PROTOTYPE_WALK: usize = 10_000;
+
+/// What `Object.setPrototypeOf` and the `__proto__` setter throw when the change is refused.
+fn prototype_change_refused() -> ExecutionError {
+    ExecutionError::TypeErrorMessage {
+        message: "Cyclic __proto__ value or non-extensible object".to_owned(),
+    }
+}
+
+/// Which of a built-in's arguments name a *number*, in argument order.
+///
+/// Every one of these begins with `ToNumber`, and `ToNumber` of an object is the program's own
+/// `Symbol.toPrimitive`, `valueOf` or `toString` -- a call, which the pure table cannot make.
+/// It answered `NaN` for every object instead, so `a.slice({valueOf: () => 1})` silently sliced
+/// from zero and `"ab".repeat({valueOf(){throw x}})` never threw at all.
+///
+/// In argument order because the order is observable: two arguments that both throw must throw
+/// the leftmost first. Only positions that are numbers are listed -- `fill`'s value and
+/// `indexOf`'s needle are any value at all, and converting either would be wrong.
+const fn numeric_arguments(native: Native) -> &'static [usize] {
+    use Native as N;
+    match native {
+        N::ArraySlice
+        | N::ArraySplice
+        | N::StringSlice
+        | N::StringSubstring
+        | N::StringSubstr
+        | N::ArrayBufferSlice
+        | N::TypedArraySubarray
+        | N::ArrayCopy(ArrayCopy::ToSpliced) => &[0, 1],
+        N::ArrayCopyWithin => &[0, 1, 2],
+        N::ArrayFill => &[1, 2],
+        N::ArrayIndexOf
+        | N::ArrayLastIndexOf
+        | N::ArrayIncludes
+        | N::StringIndexOf
+        | N::StringLastIndexOf
+        | N::StringIncludes
+        | N::StringStartsWith
+        | N::StringEndsWith
+        | N::TypedArraySet => &[1],
+        N::ArrayAt
+        | N::ArrayCopy(ArrayCopy::With)
+        | N::StringAt
+        | N::StringCharAt
+        | N::StringCharCodeAt
+        | N::StringCodePointAt
+        | N::StringPadStart
+        | N::StringPadEnd
+        | N::StringRepeat
+        | N::NumberToFixed
+        | N::NumberToExponential
+        | N::NumberToPrecision
+        | N::NumberToString
+        | N::ArrayBufferResize
+        | N::ArrayBufferGrow
+        | N::ArrayBufferTransfer { .. }
+        | N::DataViewGet(_)
+        | N::DataViewSet(_)
+        | N::DataViewGetBig { .. }
+        | N::DataViewSetBig => &[0],
+        _ => &[],
+    }
+}
+
 fn is_reflect_target(value: &Value) -> bool {
     !matches!(
         value,
@@ -28665,7 +29407,9 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
             // `Function.prototype` is a function that takes nothing, returns undefined and is
             // *anonymous*: the derived spelling would call it `prototypeOf`, which is the name
             // of the variant rather than of anything a program can see.
-            if matches!(native, Native::PrototypeOf(_)) {
+            // `%ThrowTypeError%` is anonymous by definition, and the derived spelling would
+            // hand a program the name of a Rust variant.
+            if matches!(native, Native::PrototypeOf(_) | Native::ThrowTypeError) {
                 return Some((String::new(), length));
             }
             Some((native_js_name(native), length))
@@ -28743,7 +29487,9 @@ const fn native_length(native: Native) -> Option<f64> {
         // The zero-argument built-ins: every accessor, every `toString`, and the collection
         // constructors, which take their contents through an optional argument.
         N::RegExpAccessor(_)
+        | N::BuiltinAccessor(_)
         | N::ProtoGetter
+        | N::ThrowTypeError
         | N::PromiseWithResolvers
         | N::MathRandom
         | N::DateNow
@@ -29280,7 +30026,10 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             "toPrecision",
             "valueOf",
         ],
-        PrototypeTable::Function => &["toString", "call", "apply", "bind"],
+        // `caller` and `arguments` are the restricted accessor pair
+        // `AddRestrictedFunctionProperties` installs here, and they are own properties of this
+        // object -- which is what makes every function that inherits from it throw on a read.
+        PrototypeTable::Function => &["toString", "call", "apply", "bind", "caller", "arguments"],
         PrototypeTable::RegExp => &[
             "exec",
             "dotAll",
@@ -29419,6 +30168,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
     let target = Value::Native(Native::PrototypeOf(table));
     std::iter::once("constructor")
         .chain(intrinsic_prototype_method_names(table).iter().copied())
+        .chain(prototype_accessor_names(table).iter().copied())
         .filter_map(|name| {
             if let Some(accessor) = intrinsic_accessor(&target, name) {
                 return Some((name.to_owned(), accessor));
@@ -29443,6 +30193,37 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
                 // No setter half at all, which is what makes `re.global = true` silently do
                 // nothing rather than store a shadowing property.
                 set: None,
+            })
+        }
+        // Everything a built-in prototype publishes about its instances: `byteLength`, `size`,
+        // and their eleven siblings. One table, so that reading the property, describing it and
+        // listing it cannot disagree.
+        Value::Native(Native::PrototypeOf(table)) if prototype_accessor(*table, key).is_some() => {
+            prototype_accessor(*table, key).map(|accessor| Property::Accessor {
+                get: Some(Value::Native(Native::BuiltinAccessor(accessor))),
+                set: None,
+            })
+        }
+        // `Symbol.species` is one accessor defined eight times over, always the same: it
+        // answers its own receiver.
+        Value::Native(native)
+            if defines_species(*native) && key == WellKnown::Species.property_key() =>
+        {
+            Some(Property::Accessor {
+                get: Some(Value::Native(Native::BuiltinAccessor(
+                    BuiltinAccessor::Species,
+                ))),
+                set: None,
+            })
+        }
+        // The restricted pair. Both halves are the *same* function, and a program can compare
+        // them, so both spell it the same way.
+        Value::Native(Native::PrototypeOf(PrototypeTable::Function))
+            if matches!(key, "caller" | "arguments") =>
+        {
+            Some(Property::Accessor {
+                get: Some(Value::Native(Native::ThrowTypeError)),
+                set: Some(Value::Native(Native::ThrowTypeError)),
             })
         }
         Value::Native(Native::PrototypeOf(PrototypeTable::Object)) if key == "__proto__" => {
@@ -29844,6 +30625,7 @@ fn native_js_name(native: &Native) -> String {
         // An accessor is named for what it reads, prefixed with the half it is -- which is what
         // a stack trace through `Object.getOwnPropertyDescriptor(...).get` prints.
         Native::RegExpAccessor(accessor) => format!("get {}", accessor.property_key()),
+        Native::BuiltinAccessor(accessor) => format!("get {}", accessor.property_key()),
         Native::SetOperation(operation) => operation.property_key().to_owned(),
         Native::ArrayCopy(method) => method.property_key().to_owned(),
         Native::StringHtml(wrapper) => wrapper.property_key().to_owned(),
@@ -29875,6 +30657,7 @@ fn native_js_name(native: &Native) -> String {
         // The derivation has no `Iterator` in its table of type prefixes, so it spells this
         // `iteratorFrom` rather than `from`.
         Native::IteratorFrom => "from".to_owned(),
+        Native::ThrowTypeError => String::new(),
         Native::ProtoGetter => "get __proto__".to_owned(),
         Native::ProtoSetter => "set __proto__".to_owned(),
         Native::LegacyAccessor { defines, setter } => match (defines, setter) {
