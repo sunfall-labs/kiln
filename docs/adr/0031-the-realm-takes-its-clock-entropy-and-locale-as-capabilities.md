@@ -122,6 +122,18 @@ it does not replace Tokio with a mock executor. Live Node execution selects the 
 filesystem/socket provider. Thus the corpus can exercise server state machines without binding a
 real port or making kernel completion order observable.
 
+Capability policy and host-provider policy are orthogonal. The former selects observable clock,
+entropy, timezone, and locale and participates in artifact identity. The latter selects how an
+execution obtains external services; it is chosen explicitly when the realm is constructed and is
+never inferred by a builtin. A deterministic realm may run Node server state machines against a
+scripted provider, and a live provider may be combined with seeded entropy or a named timezone.
+
+Both providers implement the same request/resource/completion protocol. A script validates the
+operation and its arguments, uses ordinary opaque identities, models cancellation and partial I/O,
+and releases owned completions through the realm's sole completion ingress. It does not mock
+`node:http`, streams, EventEmitter, or the module graph. Those semantics are therefore tested once
+and run unchanged over scripted and Tokio-backed services.
+
 ## Alternatives rejected
 
 **A global `--deterministic` / `--real` flag.** One bit for four independent axes, and the wrong

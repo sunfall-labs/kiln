@@ -278,6 +278,20 @@ pub trait AsyncHostOps {
     fn next_completion(&mut self) -> Option<Completion>;
 }
 
+/// Starts and cancels asynchronous services while code is executing on its realm task.
+///
+/// This is the narrow active-realm half of [`AsyncHostOps`]. It deliberately has no blocking
+/// completion method: callers already inside a runtime must return control to the realm pump before
+/// a provider can make progress. Persistent-resource operations use this same service boundary;
+/// they are not a Node-specific executor API.
+pub trait ActiveAsyncHostOps {
+    /// Submit one operation and return its realm-scoped request identity immediately.
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
+
+    /// Cancel a pending operation, returning whether it was still owned by this host.
+    fn cancel(&mut self, request: RequestId) -> bool;
+}
+
 /// A number as `String(value)` renders it.
 ///
 /// The allocation-free semantic core writes into caller-owned storage; this boundary turns those

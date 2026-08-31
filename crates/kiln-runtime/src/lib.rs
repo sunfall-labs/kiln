@@ -17,9 +17,9 @@ use std::time::Duration;
 
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
-    AcceptedTcpStream, AsyncHostError, AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion,
-    FileStat, HostError, HostOp, HostOps, HostValue, RequestId, ResourceId, ResourceInfo,
-    ResourceKind, ResourceState,
+    AcceptedTcpStream, ActiveAsyncHostOps, AsyncHostError, AsyncHostOp, AsyncHostOps,
+    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, RequestId,
+    ResourceId, ResourceInfo, ResourceKind, ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -352,23 +352,23 @@ impl RealmRuntime {
     }
 }
 
-/// The resource-aware asynchronous host boundary exposed to a Node language adapter.
-///
-/// Unlike [`AsyncHostOps`], this starter also admits persistent resources whose tables must be
-/// mutated on the owning runtime thread. The interpreter receives this trait object rather than
-/// a Tokio handle or `RealmRuntime`, keeping executor ownership out of language objects.
-pub trait NodeHostOps {
-    fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
-    fn cancel_node_op(&mut self, request: RequestId) -> bool;
-}
-
-impl NodeHostOps for RealmRuntime {
-    fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+impl ActiveAsyncHostOps for RealmRuntime {
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.start_host_op_in_context(operation, referenced)
     }
 
-    fn cancel_node_op(&mut self, request: RequestId) -> bool {
-        self.host.cancel(request)
+    fn cancel(&mut self, request: RequestId) -> bool {
+        AsyncHostOps::cancel(&mut self.host, request)
+    }
+}
+
+impl ActiveAsyncHostOps for TokioHost {
+    fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        self.start_on(operation, referenced)
+    }
+
+    fn cancel(&mut self, request: RequestId) -> bool {
+        AsyncHostOps::cancel(self, request)
     }
 }
 
@@ -1488,6 +1488,45 @@ mod tests {
     }
 
     #[test]
+    fn active_realm_host_protocol_admits_persistent_resources() {
+        fn submit_listener(host: &mut dyn ActiveAsyncHostOps) -> RequestId {
+            host.start(
+                AsyncHostOp::TcpListen {
+                    host: "127.0.0.1".into(),
+                    port: 0,
+                },
+                true,
+            )
+        }
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        // This is the same trait object the interpreter calls from inside `RealmRuntime::enter`.
+        // Unlike the old Node-only seam, the generic host protocol admits resource operations.
+        let request = runtime.local.block_on(&runtime.runtime, async {
+            submit_listener(&mut runtime.host)
+        });
+        let resource = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener resource, got {other:?}"),
+        };
+        assert_eq!(resource.kind, ResourceKind::TcpListener);
+        assert!(!ActiveAsyncHostOps::cancel(&mut runtime.host, request));
+
+        runtime.start_host_op(
+            AsyncHostOp::CloseResource {
+                resource: resource.id,
+            },
+            false,
+        );
+        runtime.next_host_completion().expect("close completes");
+    }
+
+    #[test]
     fn default_capabilities_preserve_the_deterministic_realm() {
         let runtime = RealmRuntime::new().expect("Tokio runtime builds");
         let capabilities = runtime.capabilities();
@@ -1632,8 +1671,8 @@ mod tests {
             },
             true,
         );
-        assert!(runtime.host().cancel(request));
-        assert!(!runtime.host().cancel(request));
+        assert!(AsyncHostOps::cancel(runtime.host(), request));
+        assert!(!AsyncHostOps::cancel(runtime.host(), request));
         assert!(!runtime.host().has_referenced_work());
         assert!(runtime.next_host_completion().is_none());
     }
@@ -2206,7 +2245,7 @@ mod tests {
                 };
                 let next_request = runtime.start_host_op(next_accept.clone(), false);
                 assert!(server.started(next_accept, next_request));
-                assert!(runtime.host().cancel(next_request));
+                assert!(AsyncHostOps::cancel(runtime.host(), next_request));
             } else {
                 client_resource = Some(match completion.result.expect("connect succeeds") {
                     AsyncHostValue::Resource(resource) => resource.id,

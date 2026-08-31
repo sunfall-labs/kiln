@@ -5,12 +5,14 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use kiln_host_abi::{AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId};
+use kiln_host_abi::{
+    ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
+};
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    NodeHostOps, Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
+    Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
     node_http::{
         Http1Decoder, Http1ResponseDecoder, HttpRequestEvent, HttpResponse, HttpResponseEvent,
     },
@@ -4943,7 +4945,7 @@ pub fn execute_node<H: HostOps + ?Sized>(
         limits,
         runtime_entropy_seed(&runtime)?,
     );
-    vm.node_host = Some(&mut runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
+    vm.async_host = Some(&mut runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     let execution = runtime.enter(|| vm.run())?;
     vm.run_node_event_loop(&mut runtime)?;
     Ok(ExecutionResult {
@@ -5299,7 +5301,7 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
         runtime_entropy_seed(runtime)?,
     );
     if session.is_some() {
-        vm.node_host = Some(runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
+        vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     }
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
     if let Some((session, _)) = session.as_ref() {
@@ -5310,7 +5312,7 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
     // that mutates a binding afterwards has not changed what the module exported.
     if drain {
         vm.run_node_event_loop(runtime)?;
-    } else if vm.node_host.is_none() {
+    } else if vm.async_host.is_none() {
         vm.run_event_loop(runtime)?;
     }
     let execution = ExecutionResult {
@@ -5652,7 +5654,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Stable graph-realm ownership for resources referenced by callbacks created in another VM.
     module_realm: Option<Rc<RefCell<ModuleRealmShared>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
-    node_host: Option<*mut dyn NodeHostOps>,
+    async_host: Option<*mut dyn ActiveAsyncHostOps>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -5763,7 +5765,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_node: Vec::new(),
             node_servers: Vec::new(),
             module_realm: None,
-            node_host: None,
+            async_host: None,
             caught: None,
             unhandled: None,
             symbol_registry: Vec::new(),
@@ -5882,12 +5884,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
-                let host_ops = self.node_host.ok_or_else(|| ExecutionError::Host {
+                let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:net requires the Node execution Adapter".into(),
                 })?;
                 let request = unsafe {
-                    (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
+                    ActiveAsyncHostOps::start(
+                        &mut *host_ops,
+                        AsyncHostOp::TcpConnect { host, port },
+                        true,
+                    )
                 };
                 self.push_pending_node(PendingNodeRequest::Connect {
                     request,
@@ -6039,12 +6045,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ended: false,
                 }));
                 let request_object = node_http_client_request_object(&state);
-                let host_ops = self.node_host.ok_or_else(|| ExecutionError::Host {
+                let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:http client requires the Node execution Adapter".into(),
                 })?;
                 let request = unsafe {
-                    (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
+                    ActiveAsyncHostOps::start(
+                        &mut *host_ops,
+                        AsyncHostOp::TcpConnect { host, port },
+                        true,
+                    )
                 };
                 self.push_pending_node(PendingNodeRequest::Connect {
                     request,
@@ -6159,11 +6169,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return Ok(());
         }
-        let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+        let host = self.async_host.ok_or_else(|| ExecutionError::Host {
             instruction,
             message: "node:http requires the Node execution Adapter".into(),
         })?;
-        let request = unsafe { (&mut *host).start_node_op(operation.clone(), true) };
+        let request = unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), true) };
         if !state.borrow_mut().driver.started(&operation, request) {
             return Err(ExecutionError::Host {
                 instruction,
@@ -6189,11 +6199,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         match action {
             ServerAction::Cancel(request) => {
-                let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+                let host = self.async_host.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
-                unsafe { (&mut *host).cancel_node_op(request) };
+                unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) };
                 if let Some(realm) = &self.module_realm {
                     // The caller is iterating actions produced by `driver.close()`. Retiring the
                     // executor request here is safe; borrowing the realm only for this statement
@@ -6315,11 +6325,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         match action {
             StreamAction::Start(operation) => {
-                let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+                let host = self.async_host.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
-                let request = unsafe { (&mut *host).start_node_op(operation.clone(), true) };
+                let request =
+                    unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), true) };
                 let accepted = server
                     .borrow_mut()
                     .streams
@@ -7198,14 +7209,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         };
         let promise = PromiseState::pending();
-        let node = self.node_host.ok_or_else(|| ExecutionError::Host {
+        let node = self.async_host.ok_or_else(|| ExecutionError::Host {
             instruction,
             message: "node filesystem operation requires the Node execution Adapter".to_owned(),
         })?;
         // The pointer names the caller-owned realm runtime. It outlives this VM and is accessed
         // only while that current-thread owner is polling the VM, so no alias can concurrently
         // mutate it. The trait hides Tokio and the runtime's resource table from language code.
-        let request = unsafe { (&mut *node).start_node_op(operation, true) };
+        let request = unsafe { ActiveAsyncHostOps::start(&mut *node, operation, true) };
         let conversion = match native {
             Native::NodeFsReadFile if node_encoding(arguments.get(1))? => {
                 HostResultConversion::Utf8
