@@ -631,6 +631,10 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_TYPED_SUBARRAY 230
 #define KILN_C99_METHOD_TYPED_SET 231
 #define KILN_C99_METHOD_TYPED_FILL 232
+/* The two statics a concrete view constructor carries. Kept below the string block that
+ * begins at 240, which `kiln_c99_invoke_method` routes by range. */
+#define KILN_C99_METHOD_TYPED_OF 233
+#define KILN_C99_METHOD_TYPED_FROM 234
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -733,6 +737,18 @@ typedef struct kiln_closure {
     /* Declared parameters, which is what `f.length` answers and what `bind` subtracts from.
      * Counted where the body was compiled, because that is the only place it is known. */
     uint32_t arity;
+    /* The `resume` position meaning "the parameters are bound and the body has not started".
+     *
+     * Binding them is part of the *call*, not of the first resumption: the language runs
+     * FunctionDeclarationInstantiation and only then hands back the generator object, so
+     * `function* g([{x}]) {}` called as `g([null])` throws where it is written and a parameter
+     * default's side effect happens whether or not anyone ever steps the generator.
+     *
+     * Zero when there is nothing to run at the call: an ordinary function, a generator with no
+     * pattern, default or rest to bind, and a plain async function -- whose instantiation
+     * failure *rejects* rather than throwing, which is already what running the prologue inside
+     * the body gives. */
+    uint32_t prologue_resume;
     uint32_t proto;
     uint32_t upvalue_count;
     kiln_value *upvalues;
@@ -841,6 +857,10 @@ typedef struct kiln_generator {
      * A rejected `await` throws *into* the body, so a `try` around it catches -- which is the
      * whole reason the handler stack above has to survive a suspension. */
     int raising;
+    /* Whether this entry is the parameter binding rather than the body. Set only for the call
+     * that builds the generator, and read at the seam between the two halves: the emitted body
+     * is one flat instruction sequence, so the only thing that can stop it there is a test. */
+    int binding;
     int started;
     int done;
 } kiln_generator;
@@ -1615,6 +1635,56 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     return KILN_C99_OK;
 }
 
+/* An all-zero view of `count` elements over a buffer of its own.
+ *
+ * `map`, `filter` and `slice` each answer with a *view of the receiver's kind* rather than with a
+ * plain array: `new Uint8Array([3, 1, 2]).map(f)` is a `Uint8Array`, and an Array would lose both
+ * the width and the wrapping that decide what the values mean. */
+static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
+    size_t width = kiln_c99_typed_width(kind);
+    kiln_value buffer;
+    kiln_typed_array *view;
+    int status;
+    if (count > ((size_t)-1) / width) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_new_typed_buffer(&buffer, count * width);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    view = (kiln_typed_array *)malloc(sizeof *view);
+    if (view == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    view->buffer = kiln_c99_typed_buffer_of(buffer);
+    view->byte_offset = 0;
+    view->length = count;
+    view->kind = kind;
+    *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* The order `%TypedArray%.prototype.sort` uses with no comparator: ascending *numeric*.
+ *
+ * Not `Array.prototype.sort`'s order, which spells its elements out and compares the text --
+ * `[10, 9].sort()` is `[10, 9]` and `new Uint8Array([10, 9]).sort()` is `[9, 10]`. A view holds
+ * numbers and nothing else, so there is nothing to spell out. NaN sorts last and `-0` before
+ * `+0`, which are the two places the ordinary comparison has no answer. */
+static int kiln_c99_typed_order(double left, double right) {
+    int left_nan = left != left;
+    int right_nan = right != right;
+    if (left_nan || right_nan) {
+        return left_nan - right_nan;
+    }
+    if (left < right) {
+        return -1;
+    }
+    if (left > right) {
+        return 1;
+    }
+    return kiln_c99_signbit(right) - kiln_c99_signbit(left);
+}
+
 /* Doubling, so building an object or an array one member at a time stays linear overall. */
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
     size_t grown = *capacity == 0 ? 4 : *capacity;
@@ -1894,6 +1964,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->awaiting = 0;
     frame->async_generator = 0;
     frame->raising = 0;
+    frame->binding = 0;
     frame->promise = kiln_c99_undefined();
     frame->is_async = 0;
     frame->started = 0;
@@ -2148,6 +2219,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_TYPED_SUBARRAY: return "subarray";
     case KILN_C99_METHOD_TYPED_SET: return "set";
     case KILN_C99_METHOD_TYPED_FILL: return "fill";
+    case KILN_C99_METHOD_TYPED_OF: return "of";
+    case KILN_C99_METHOD_TYPED_FROM: return "from";
     case KILN_C99_METHOD_MATH_RANDOM: return "random";
     case KILN_C99_METHOD_MATH_SINH: return "sinh";
     case KILN_C99_METHOD_MATH_COSH: return "cosh";
@@ -3076,7 +3149,13 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
     return 0;
 }
 
-/* The fixed-length subset inherited from `%TypedArray%.prototype`. */
+/* The fixed-length subset inherited from `%TypedArray%.prototype`.
+ *
+ * `%TypedArray%.prototype` is deliberately *not* `Array.prototype`: it shares the readers and the
+ * two in-place rearrangements, and it has none of the methods that change a length, because a
+ * view's length is its buffer's and cannot change. That is why the table is written out here
+ * rather than delegating to `kiln_c99_array_method`, which would hand out `push` -- a name node
+ * answers `undefined` for and a program feature-detects on. */
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
     if (kiln_c99_same_name(key, key_len, "join")) return KILN_C99_METHOD_JOIN;
     if (kiln_c99_same_name(key, key_len, "values")) return KILN_C99_METHOD_ARRAY_VALUES;
@@ -3086,6 +3165,48 @@ static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len)
     if (kiln_c99_same_name(key, key_len, "slice")) return KILN_C99_METHOD_SLICE;
     if (kiln_c99_same_name(key, key_len, "set")) return KILN_C99_METHOD_TYPED_SET;
     if (kiln_c99_same_name(key, key_len, "fill")) return KILN_C99_METHOD_TYPED_FILL;
+    /* `toString` is `Array.prototype.toString`, which joins -- not `Object.prototype.toString`,
+     * which reports the kind. Falling through to the generic one is how `String(view)` came to
+     * be "[object Uint8Array]" where both node and the interpreter say "1,2,3". */
+    if (kiln_c99_same_name(key, key_len, "toString")) return KILN_C99_METHOD_ARRAY_TO_STRING;
+    if (kiln_c99_same_name(key, key_len, "at")) return KILN_C99_METHOD_ARRAY_AT;
+    if (kiln_c99_same_name(key, key_len, "indexOf")) return KILN_C99_METHOD_INDEX_OF;
+    if (kiln_c99_same_name(key, key_len, "lastIndexOf")) return KILN_C99_METHOD_ARRAY_LAST_INDEX_OF;
+    if (kiln_c99_same_name(key, key_len, "includes")) return KILN_C99_METHOD_INCLUDES;
+    if (kiln_c99_same_name(key, key_len, "find")) return KILN_C99_METHOD_ARRAY_FIND;
+    if (kiln_c99_same_name(key, key_len, "findIndex")) return KILN_C99_METHOD_ARRAY_FIND_INDEX;
+    if (kiln_c99_same_name(key, key_len, "findLast")) return KILN_C99_METHOD_ARRAY_FIND_LAST;
+    if (kiln_c99_same_name(key, key_len, "findLastIndex"))
+        return KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX;
+    if (kiln_c99_same_name(key, key_len, "forEach")) return KILN_C99_METHOD_FOR_EACH;
+    if (kiln_c99_same_name(key, key_len, "some")) return KILN_C99_METHOD_ARRAY_SOME;
+    if (kiln_c99_same_name(key, key_len, "every")) return KILN_C99_METHOD_ARRAY_EVERY;
+    if (kiln_c99_same_name(key, key_len, "reduce")) return KILN_C99_METHOD_REDUCE;
+    if (kiln_c99_same_name(key, key_len, "reduceRight")) return KILN_C99_METHOD_ARRAY_REDUCE_RIGHT;
+    if (kiln_c99_same_name(key, key_len, "map")) return KILN_C99_METHOD_MAP;
+    if (kiln_c99_same_name(key, key_len, "filter")) return KILN_C99_METHOD_FILTER;
+    if (kiln_c99_same_name(key, key_len, "sort")) return KILN_C99_METHOD_ARRAY_SORT;
+    if (kiln_c99_same_name(key, key_len, "reverse")) return KILN_C99_METHOD_ARRAY_REVERSE;
+    return 0;
+}
+
+/* Whether a name is a member of `%TypedArray%.prototype` *in the language*, which is a different
+ * question from whether this backend implements it -- the same distinction
+ * `kiln_c99_is_string_member` draws, and for the same reason.
+ *
+ * A view's properties are its live indices, its buffer metadata, and the methods above. Anything
+ * else a program names is absent, and absent is `undefined`. These are the names that are not
+ * absent and are not implemented either: answering `undefined` for one would be a silent wrong
+ * answer, so a read of one refuses instead and lands in the backlog by name. */
+static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
+    static const char *const members[] = {"copyWithin", "toLocaleString", "toReversed",
+                                          "toSorted",   "with"};
+    size_t index;
+    for (index = 0; index < sizeof members / sizeof *members; ++index) {
+        if (kiln_c99_same_name(key, key_len, members[index])) {
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -3313,7 +3434,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  int async_generator, int arrow, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
                                  uint32_t stack_size,
-                                 uint32_t handler_depth, const kiln_value *captured,
+                                 uint32_t handler_depth, uint32_t prologue_resume,
+                                 const kiln_value *captured,
                                  uint32_t count) {
     kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
     kiln_value *upvalues = NULL;
@@ -3358,6 +3480,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->name = name;
     closure->name_len = name_len;
     closure->arity = arity;
+    closure->prologue_resume = prologue_resume;
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
@@ -3382,6 +3505,56 @@ static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
     kiln_value saved = kiln_c99_new_target;
     kiln_c99_new_target = closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
     return saved;
+}
+
+/* Bind a generator's parameters, before the generator object reaches the program.
+ *
+ * The body runs in the generator's own frame, because the binding is compiled against the
+ * callee's slots and the locals it writes are the ones the body will resume with. `binding` is
+ * what stops it at the seam -- the emitted body is one flat instruction sequence, so nothing
+ * else could -- and the resume position it leaves behind is what makes the first `next()` start
+ * at the body rather than at the parameters a second time.
+ *
+ * The frame globals are established here and not at the resumption for the same reason `this`
+ * is captured at the call: `...rest` is taken from the *caller's* argument list, and by the time
+ * `next` runs those globals belong to whoever is stepping the generator. */
+static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_value produced = kiln_c99_undefined();
+    kiln_value saved_target = kiln_c99_new_target;
+    const kiln_value *saved_args = kiln_c99_frame_args;
+    size_t saved_argc = kiln_c99_frame_argc;
+    kiln_value saved_captured = kiln_c99_captured_arguments;
+    int saved_is_arrow = kiln_c99_frame_is_arrow;
+    int status;
+    kiln_c99_new_target = closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
+    kiln_c99_frame_is_arrow = closure->arrow;
+    if (closure->arrow) {
+        kiln_c99_captured_arguments = closure->captured_arguments;
+    } else {
+        kiln_c99_frame_args = args;
+        kiln_c99_frame_argc = argc;
+    }
+    frame->binding = 1;
+    status = closure->body(host, &produced, closure->upvalues, receiver, args, argc, depth + 1,
+                           thrown, frame);
+    frame->binding = 0;
+    kiln_c99_new_target = saved_target;
+    kiln_c99_frame_args = saved_args;
+    kiln_c99_frame_argc = saved_argc;
+    kiln_c99_captured_arguments = saved_captured;
+    kiln_c99_frame_is_arrow = saved_is_arrow;
+    if (status != KILN_C99_YIELDED) {
+        /* The seam is the only exit a prologue has: it holds no `Yield` and no `Return`, so
+         * `OK` here would mean the guard was never reached and the whole body ran. A throw is
+         * the expected other outcome and travels out of the *call*, which is the point. */
+        return status == KILN_C99_OK ? KILN_C99_CONTROL_ERROR : status;
+    }
+    frame->started = 1;
+    frame->resume = closure->prologue_resume;
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
@@ -3564,12 +3737,21 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         if (status != KILN_C99_OK) {
             return status;
         }
+        if (closure->async_generator) {
+            kiln_c99_generator_of(built)->async_generator = 1;
+        }
+        /* Parameter binding belongs to the call, not to the first resumption -- so it runs
+         * before the object is handed over, and its throw leaves from here. */
+        if (closure->prologue_resume != 0) {
+            status =
+                kiln_c99_bind_parameters(host, built, closure, receiver, args, argc, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
         if (!closure->asynchronous || closure->async_generator) {
             /* An async generator is handed over too: it awaits *and* yields, so nothing can drive
              * it to completion -- each `next` drives one step and gets a promise of its own. */
-            if (closure->async_generator) {
-                kiln_c99_generator_of(built)->async_generator = 1;
-            }
             *result = built;
             return KILN_C99_OK;
         }
@@ -4369,32 +4551,30 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(kiln_c99_typed_constructor(view->kind));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name(key, key_len, "join")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_JOIN);
-        } else if (kiln_c99_same_name(key, key_len, "values") ||
-                   kiln_c99_same_name(key, key_len, "@@iterator")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
-        } else if (kiln_c99_same_name(key, key_len, "entries")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_ENTRIES);
-        } else if (kiln_c99_same_name(key, key_len, "keys")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_KEYS);
-        } else if (kiln_c99_same_name(key, key_len, "subarray")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_SUBARRAY);
-        } else if (kiln_c99_same_name(key, key_len, "slice")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
-        } else if (kiln_c99_same_name(key, key_len, "set")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_SET);
-        } else if (kiln_c99_same_name(key, key_len, "fill")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_TYPED_FILL);
-        } else {
-            uint64_t inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
-                                     ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                                 : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
-                                     ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                                     : kiln_c99_lookup_method(key, key_len,
-                                                              KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                                              KILN_C99_METHOD_OBJECT_VALUE_OF);
-            *out = inherited == 0 ? kiln_c99_undefined() : kiln_c99_method(inherited);
+        {
+            /* One table for the prototype's own members, shared with `in` and with the
+             * reflective paths, so a read and a presence test can never disagree about which
+             * names a view has. `@@iterator` is `values`, which is what makes `[...view]` and
+             * `for (const x of view)` walk the live view rather than a copy. */
+            uint64_t method = kiln_c99_same_name(key, key_len, "@@iterator")
+                                  ? KILN_C99_METHOD_ARRAY_VALUES
+                                  : kiln_c99_typed_prototype_method(key, key_len);
+            if (method == 0) {
+                if (kiln_c99_is_typed_array_member(key, key_len)) {
+                    /* A real member this backend has not grown yet. `undefined` would be a
+                     * silent wrong answer -- the program would call it and get a TypeError
+                     * naming the wrong thing -- so this refuses and joins the backlog. */
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                method = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                             ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                         : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                             ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                             : kiln_c99_lookup_method(key, key_len,
+                                                      KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                                      KILN_C99_METHOD_OBJECT_VALUE_OF);
+            }
+            *out = method == 0 ? kiln_c99_undefined() : kiln_c99_method(method);
         }
         return KILN_C99_OK;
     }
@@ -4723,10 +4903,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         {
             kiln_typed_kind typed_kind;
-            if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
-                kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
-                *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
-                return KILN_C99_OK;
+            if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind)) {
+                if (kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT")) {
+                    *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
+                    return KILN_C99_OK;
+                }
+                /* `Uint8Array.of` and `Uint8Array.from` are not `Array`'s with a conversion
+                 * afterwards: the constructor decides the width, so which constructor was named
+                 * is part of the answer -- and it is the receiver of the call these return. */
+                if (kiln_c99_same_name(key, key_len, "of")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_TYPED_OF);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "from")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_TYPED_FROM);
+                    return KILN_C99_OK;
+                }
             }
         }
         /* A namespace's constants are values rather than methods, so they are answered here
@@ -4898,6 +5090,36 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (index < 0.0) {
+            /* A symbol names its reserved slot rather than its description, which is the same
+             * conversion every other computed access makes. Without it a symbol key was not a
+             * string and reached the general read below as a *nameless* one, so
+             * `a[Symbol.iterator]` refused where `[].values` -- the very same function -- did
+             * not. */
+            if (key.tag == KILN_VALUE_SYMBOL) {
+                kiln_value name = kiln_c99_property_key(key);
+                if (name.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                if (array->properties.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *store = kiln_c99_object_of(array->properties);
+                    size_t slot;
+                    for (slot = 0; slot < store->count; ++slot) {
+                        if (kiln_c99_same_key(&store->properties[slot], name.ptr, name.len)) {
+                            *out = store->properties[slot].value;
+                            return KILN_C99_OK;
+                        }
+                    }
+                }
+                /* `@@iterator` is the one reserved slot an array carries of its own, and the
+                 * general read answers it. Any other that nobody set is *absent*, and absent is
+                 * undefined -- not the refusal an unknown ordinary name gets, which is there to
+                 * catch a method this backend has not grown and which a symbol can never be. */
+                if (!kiln_c99_same_name(name.ptr, name.len, "@@iterator")) {
+                    *out = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_get(host, target, name.ptr, name.len, out, depth, thrown);
+            }
             /* Reserved protocol slots are reached through Symbols. An ordinary string that only
              * happens to have the same spelling remains an ordinary named property. */
             if (key.tag == KILN_VALUE_STRING && key.len >= 2 && key.ptr[0] == '@' &&
@@ -5358,6 +5580,35 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
     }
     case KILN_VALUE_GENERATOR:
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
+    case KILN_VALUE_TYPED_ARRAY: {
+        /* `Uint8Array(4) [ 1, 255, 0, 255 ]`. The kind and the count go in front because a view
+         * is the one container whose contents do not say how wide its elements are, and reading
+         * `[ 1, 255, 0, 255 ]` alone would leave that unanswerable.
+         *
+         * The elements go back through `inspect` rather than through `String`: `-0` prints as
+         * itself in a console and as "0" everywhere else, and a `Float64Array` can hold one. */
+        kiln_typed_array *view = kiln_c99_typed_array_of(value);
+        size_t at;
+        if (kiln_c99_text_append_c(text, kiln_c99_typed_name(view->kind)) != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, "(") != KILN_C99_OK ||
+            kiln_c99_pad_number(text, (int64_t)view->length, 1) != KILN_C99_OK ||
+            kiln_c99_text_append_c(text, view->length == 0 ? ") []" : ") [ ") != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (view->length == 0) {
+            return KILN_C99_OK;
+        }
+        for (at = 0; at < view->length; ++at) {
+            if (at != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_inspect_into(text, kiln_c99_number(kiln_c99_typed_get(view, at)),
+                                      depth + 1) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        return kiln_c99_text_append_c(text, " ]");
+    }
     case KILN_VALUE_HOLE:
         return kiln_c99_text_append_c(text, "undefined");
     case KILN_VALUE_BUILTIN: {
@@ -6222,6 +6473,70 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_ERROR_TO_STRING) {
         return kiln_c99_error_to_string(host, result, receiver, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_TYPED_OF || code == KILN_C99_METHOD_TYPED_FROM) {
+        /* `Uint8Array.of(...)` and `Uint8Array.from(source, mapper)`. The kind comes from the
+         * receiver -- the constructor the call named -- and every value goes through that
+         * kind's conversion, which is the whole difference from `Array.of` followed by a
+         * copy: `Uint8Array.of(-1)` is 255 and `Array.of(-1)` is -1.
+         *
+         * Gathered into a plain array first because `from` takes anything iterable and the
+         * length is not known until the walk is over; `of` fills the same array from its
+         * arguments so the conversion below is written once. */
+        kiln_typed_kind kind;
+        kiln_value gathered;
+        kiln_array *items;
+        kiln_value mapper = code == KILN_C99_METHOD_TYPED_FROM && argc > 1
+                                ? args[1]
+                                : kiln_c99_undefined();
+        if (receiver.tag != KILN_VALUE_BUILTIN ||
+            !kiln_c99_builtin_typed_kind(receiver.bits, &kind)) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        status = kiln_c99_new_array(&gathered);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (code == KILN_C99_METHOD_TYPED_OF) {
+            for (index = 0; index < argc; ++index) {
+                status = kiln_c99_array_push(gathered, args[index]);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+        } else {
+            status = kiln_c99_iterate(host, gathered,
+                                      argc > 0 ? args[0] : kiln_c99_undefined(), depth,
+                                      thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        items = kiln_c99_array_of(gathered);
+        status = kiln_c99_typed_alloc(result, kind, items->count);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = 0; index < items->count; ++index) {
+            kiln_value element = items->elements[index];
+            double converted;
+            if (kiln_c99_is_callable(mapper)) {
+                kiln_value visit[2];
+                visit[0] = element;
+                visit[1] = kiln_c99_number((double)index);
+                status = kiln_c99_call(host, &element, mapper, kiln_c99_undefined(), visit, 2,
+                                       depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            status = kiln_c99_to_number_checked(host, element, &converted, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            kiln_c99_typed_set(kiln_c99_typed_array_of(*result), index, converted);
+        }
+        return KILN_C99_OK;
     }
     if (code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
@@ -8589,29 +8904,150 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
                                                  view->length, view->length);
             size_t count = end >= start ? end - start : 0;
-            kiln_value buffer;
             kiln_typed_array *copy;
-            if (count > ((size_t)-1) / width) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            status = kiln_c99_new_typed_buffer(&buffer, count * width);
+            status = kiln_c99_typed_alloc(result, view->kind, count);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            copy = (kiln_typed_array *)malloc(sizeof *copy);
-            if (copy == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            copy->buffer = kiln_c99_typed_buffer_of(buffer);
-            copy->byte_offset = 0;
-            copy->length = count;
-            copy->kind = view->kind;
+            copy = kiln_c99_typed_array_of(*result);
             if (count != 0) {
+                /* The bytes rather than the elements: a copy of the same kind reinterprets them
+                 * identically, so there is nothing for a per-element conversion to decide. */
                 memcpy(copy->buffer->bytes,
                        view->buffer->bytes + view->byte_offset + start * width,
                        count * width);
             }
-            *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)copy, NULL, 0);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_MAP:
+        case KILN_C99_METHOD_FILTER: {
+            /* Both answer with a view of the receiver's kind. `filter`'s length is not known
+             * until the predicate has run, so what it keeps is gathered first and the view is
+             * sized from that; `map` fills one of the receiver's own length.
+             *
+             * Gathering as `double` rather than into the view directly is what keeps a callback
+             * that reads the receiver seeing the values it started with. */
+            kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
+            double *kept;
+            size_t count = 0;
+            if (!kiln_c99_is_callable(callback)) {
+                return kiln_c99_throw_not_a(thrown, callback, "function");
+            }
+            kept = (double *)malloc((view->length == 0 ? 1 : view->length) * sizeof *kept);
+            if (kept == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < view->length; ++index) {
+                kiln_value visit[3];
+                kiln_value produced;
+                visit[0] = kiln_c99_number(kiln_c99_typed_get(view, index));
+                visit[1] = kiln_c99_number((double)index);
+                visit[2] = receiver;
+                status =
+                    kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    free(kept);
+                    return status;
+                }
+                if (code == KILN_C99_METHOD_FILTER) {
+                    if (kiln_c99_truthy(produced)) {
+                        kept[count++] = kiln_c99_as_number(visit[0]);
+                    }
+                    continue;
+                }
+                {
+                    /* `map` converts what the callback answered, so a callback returning "5"
+                     * stores 5 -- the element write is the conversion, exactly as `view[i] = x`
+                     * is. */
+                    double converted;
+                    status = kiln_c99_to_number_checked(host, produced, &converted, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        free(kept);
+                        return status;
+                    }
+                    kept[count++] = converted;
+                }
+            }
+            status = kiln_c99_typed_alloc(result, view->kind, count);
+            if (status != KILN_C99_OK) {
+                free(kept);
+                return status;
+            }
+            for (index = 0; index < count; ++index) {
+                kiln_c99_typed_set(kiln_c99_typed_array_of(*result), index, kept[index]);
+            }
+            free(kept);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ARRAY_REVERSE: {
+            /* In place, and the receiver is the answer -- `view.reverse()` is the view it just
+             * changed, not a copy, which is what makes `a.reverse() === a` true. */
+            size_t low = 0;
+            size_t high = view->length == 0 ? 0 : view->length - 1;
+            while (low < high) {
+                double kept = kiln_c99_typed_get(view, low);
+                kiln_c99_typed_set(view, low, kiln_c99_typed_get(view, high));
+                kiln_c99_typed_set(view, high, kept);
+                ++low;
+                --high;
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ARRAY_SORT: {
+            /* Insertion sort, because a comparator is program code: it can throw, and it can
+             * read the view it is sorting. Sorting a copy of the values and writing them back at
+             * the end is what keeps a throw from leaving the view half-rearranged. */
+            kiln_value comparator = argc > 0 ? args[0] : kiln_c99_undefined();
+            double *items;
+            if (comparator.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(comparator)) {
+                return kiln_c99_throw_not_a(thrown, comparator, "function");
+            }
+            items = (double *)malloc((view->length == 0 ? 1 : view->length) * sizeof *items);
+            if (items == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < view->length; ++index) {
+                items[index] = kiln_c99_typed_get(view, index);
+            }
+            for (index = 1; index < view->length; ++index) {
+                double moving = items[index];
+                size_t at = index;
+                while (at > 0) {
+                    int order;
+                    if (comparator.tag == KILN_VALUE_UNDEFINED) {
+                        order = kiln_c99_typed_order(items[at - 1], moving);
+                    } else {
+                        kiln_value pair[2];
+                        kiln_value answer;
+                        double decided;
+                        pair[0] = kiln_c99_number(items[at - 1]);
+                        pair[1] = kiln_c99_number(moving);
+                        status = kiln_c99_call(host, &answer, comparator, kiln_c99_undefined(),
+                                               pair, 2, depth, thrown);
+                        if (status != KILN_C99_OK) {
+                            free(items);
+                            return status;
+                        }
+                        decided = kiln_c99_as_number(answer);
+                        /* A comparator answering NaN means "no opinion", which the language
+                         * treats as equal rather than as an error. */
+                        order = decided > 0.0 ? 1 : decided < 0.0 ? -1 : 0;
+                    }
+                    if (order <= 0) {
+                        break;
+                    }
+                    items[at] = items[at - 1];
+                    at -= 1;
+                }
+                items[at] = moving;
+            }
+            for (index = 0; index < view->length; ++index) {
+                kiln_c99_typed_set(view, index, items[index]);
+            }
+            free(items);
+            *result = receiver;
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_TYPED_SET: {
@@ -8667,7 +9103,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return KILN_C99_OK;
         }
         default:
-            return KILN_C99_CONTROL_ERROR;
+            /* Everything else a view shares with `Array.prototype` -- `indexOf`, `includes`,
+             * `reduce`, `some`, `at`, `toString` and the rest -- is a *reader*, and the generic
+             * array-like walk below already implements those against anything with a `length`
+             * and indices. Falling through rather than refusing is what gives a view all of them
+             * without a second copy of each; only the four that must answer with a view of their
+             * own, or rearrange one in place, are written out above. */
+            break;
         }
     }
     if (receiver.tag != KILN_VALUE_ARRAY) {
@@ -9539,20 +9981,15 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
         if (index >= 0.0) {
             *answer = (size_t)index < view->length;
         } else {
-            *answer = kiln_c99_same_name(key, key_len, "length") ||
+            /* The same table the read uses, so `"map" in view` and `view.map` can never
+             * disagree -- listing the methods a second time here is how they came to. */
+            *answer = kiln_c99_typed_prototype_method(key, key_len) != 0 ||
+                      kiln_c99_same_name(key, key_len, "length") ||
                       kiln_c99_same_name(key, key_len, "byteLength") ||
                       kiln_c99_same_name(key, key_len, "byteOffset") ||
                       kiln_c99_same_name(key, key_len, "BYTES_PER_ELEMENT") ||
                       kiln_c99_same_name(key, key_len, "buffer") ||
                       kiln_c99_same_name(key, key_len, "constructor") ||
-                      kiln_c99_same_name(key, key_len, "join") ||
-                      kiln_c99_same_name(key, key_len, "values") ||
-                      kiln_c99_same_name(key, key_len, "entries") ||
-                      kiln_c99_same_name(key, key_len, "keys") ||
-                      kiln_c99_same_name(key, key_len, "subarray") ||
-                      kiln_c99_same_name(key, key_len, "slice") ||
-                      kiln_c99_same_name(key, key_len, "set") ||
-                      kiln_c99_same_name(key, key_len, "fill") ||
                       kiln_c99_same_name(key, key_len, "@@iterator") ||
                       kiln_c99_same_name(key, key_len, "isPrototypeOf") ||
                       kiln_c99_same_name(key, key_len, "propertyIsEnumerable") ||
@@ -9573,7 +10010,11 @@ static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_
             *answer = (size_t)index < array->count && !kiln_c99_is_hole(array->elements[(size_t)index]);
             return KILN_C99_OK;
         }
-        *answer = kiln_c99_array_method(key, key_len) != 0;
+        /* `@@iterator` is not in the method table -- the read spells it out separately, because
+         * `for...of` and spread reach it by different paths -- so `in` has to spell it out too
+         * or `Symbol.iterator in []` answers false about a method the array demonstrably has. */
+        *answer = kiln_c99_same_name(key, key_len, "@@iterator") ||
+                  kiln_c99_array_method(key, key_len) != 0;
         return KILN_C99_OK;
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
@@ -9766,7 +10207,76 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
         return KILN_C99_OK;
     }
-    if (target.tag != KILN_VALUE_OBJECT || source.tag != KILN_VALUE_OBJECT) {
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    /* A primitive has no own enumerable properties, so spreading one contributes nothing:
+     * `{...5}` is `{}`, not an error. A string is the exception and is handled below, because
+     * its indices *are* own properties. */
+    if (source.tag == KILN_VALUE_NUMBER || source.tag == KILN_VALUE_BOOLEAN ||
+        source.tag == KILN_VALUE_SYMBOL || source.tag == KILN_VALUE_BIGINT) {
+        return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_TYPED_ARRAY ||
+        source.tag == KILN_VALUE_STRING) {
+        /* An indexed value spreads as its own enumerable properties, and those are its indices:
+         * `{...[7, 8]}` is `{"0": 7, "1": 8}` and `{..."hi"}` is `{"0": "h", "1": "i"}`.
+         *
+         * A different operation from array spread, which reads the iterator -- which is why a
+         * hole is *skipped* here instead of becoming undefined. `[...[1, , 3]]` has three
+         * elements and `{...[1, , 3]}` has two properties. */
+        size_t count = 0;
+        size_t at;
+        if (source.tag == KILN_VALUE_ARRAY) {
+            kiln_array *elements = kiln_c99_array_of(source);
+            count = elements->count;
+            /* An array's named properties are own and enumerable too, so `a.total = 1` belongs
+             * in the result. node copies it and the interpreter does not, and the two engines
+             * have to agree before either can. Copying would make this backend right and the
+             * pair inconsistent; not copying would make the pair consistently wrong. Refusing
+             * does neither, and leaves the disagreement visible. */
+            if (elements->properties.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_object_of(elements->properties)->count != 0) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+        } else if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+            count = kiln_c99_typed_array_of(source)->length;
+        } else {
+            uint16_t *units = NULL;
+            int status = kiln_c99_to_units(source, &units, &count);
+            free(units);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        for (at = 0; at < count; ++at) {
+            kiln_value element;
+            kiln_value name;
+            int status;
+            if (source.tag == KILN_VALUE_ARRAY &&
+                kiln_c99_is_hole(kiln_c99_array_of(source)->elements[at])) {
+                continue;
+            }
+            status = kiln_c99_get_computed(host, source, kiln_c99_number((double)at), &element,
+                                           depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* The key has to outlive this frame -- a property stores the pointer rather than
+             * copying the bytes -- which is why it is built as a value rather than sprintf'd
+             * into a local buffer, exactly as a computed write builds one. */
+            name = kiln_c99_text(kiln_c99_number((double)at));
+            if (name.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            status = kiln_c99_put(host, target, name.ptr, name.len, element, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (source.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(source);
@@ -10018,7 +10528,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     default:
         break;
     }
-    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY) {
+    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
+        value.tag != KILN_VALUE_TYPED_ARRAY) {
         *serialised = 0;
         return KILN_C99_OK;
     }
@@ -10092,6 +10603,47 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         }
         free(nested.bytes);
         return kiln_c99_text_append_c(text, "]");
+    }
+    if (value.tag == KILN_VALUE_TYPED_ARRAY) {
+        /* An *object* keyed by index, not an array: `JSON.stringify(new Uint8Array([1, 2]))` is
+         * `{"0":1,"1":2}`. A view is not an Array -- `Array.isArray` says so -- and JSON's array
+         * form is reserved for things that are, so the generic object walk over own enumerable
+         * properties is what applies, and a view's own enumerable properties are its indices. */
+        kiln_typed_array *view = kiln_c99_typed_array_of(value);
+        KILN_JSON_OPEN("{");
+        for (index = 0; index < view->length; ++index) {
+            char digits[24];
+            int written;
+            int wrote;
+            written = kiln_number_to_js_string((double)index, digits, sizeof digits);
+            if (written < 0) {
+                free(nested.bytes);
+                return KILN_C99_CONTROL_ERROR;
+            }
+            KILN_JSON_BREAK(index == 0);
+            if (kiln_c99_json_quote(text, digits, (size_t)written) != KILN_C99_OK ||
+                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK) {
+                free(nested.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            /* Through the same recursion an object member takes, so a `Float64Array` holding
+             * NaN spells it `null` here for the same reason a plain number does. */
+            status = kiln_c99_json_value(host, text, kiln_c99_number(kiln_c99_typed_get(view, index)),
+                                         indent, indent_len, nested.bytes, nested.len, &wrote,
+                                         depth, parents, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+        }
+        if (indent_len != 0 && view->length != 0 &&
+            (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
+             kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
+            free(nested.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        free(nested.bytes);
+        return kiln_c99_text_append_c(text, "}");
     }
     {
         kiln_object *object = kiln_c99_object_of(value);
@@ -11576,8 +12128,45 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return KILN_C99_OK;
     }
     if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_error_name(callee.bits) != NULL) {
-        return kiln_c99_new_error(result, callee.bits,
-                                  argc > 0 ? args[0] : kiln_c99_undefined());
+        int present = 0;
+        status = kiln_c99_new_error(result, callee.bits,
+                                    argc > 0 ? args[0] : kiln_c99_undefined());
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        /* `new Error(message, { cause })` carries the cause *by identity*, which is the whole
+         * reason it exists: a wrapper has to be able to hand back the error it wrapped. Dropping
+         * the options argument left the wrapping looking entirely right -- message, name and
+         * stack were all there -- with only `wrapped.cause === original` saying otherwise.
+         *
+         * Presence rather than truthiness decides, so `{ cause: undefined }` installs one and a
+         * plain `new Error(m)` has no such property at all. Non-enumerable like the other three,
+         * which is what keeps `JSON.stringify(error)` at `{}`. */
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_has_property(args[1], "cause", 5, &present);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        if (present) {
+            kiln_value cause;
+            kiln_object *object;
+            size_t index;
+            status = kiln_c99_get(host, args[1], "cause", 5, &cause, depth, thrown);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, *result, "cause", 5, cause, 0, NULL);
+            }
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            object = kiln_c99_object_of(*result);
+            for (index = 0; index < object->count; ++index) {
+                if (kiln_c99_same_key(&object->properties[index], "cause", 5)) {
+                    object->properties[index].enumerable = 0;
+                }
+            }
+        }
+        return KILN_C99_OK;
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER) {
         size_t length;
@@ -13167,6 +13756,20 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
     }
 }
 
+/// Whether this body's parameter binding runs during the call rather than at the first
+/// resumption.
+///
+/// Only a suspending body has the two halves apart at all: an ordinary call runs them together
+/// and never needs the seam. An async *function* is the one suspending shape that must keep them
+/// together too -- its instantiation failure rejects rather than throwing, and running the
+/// prologue as the first thing its driver does is already exactly that.
+fn binds_at_call(proto: &FunctionProto) -> bool {
+    (proto.generator || proto.asynchronous)
+        && !(proto.asynchronous && !proto.async_generator)
+        && proto.prologue_end > 0
+        && (proto.prologue_end as usize) < proto.code.len()
+}
+
 /// Declare the handler stack a body needs, or nothing when it catches nothing.
 fn render_handler_prologue(output: &mut String, handlers: &[u32], depth: usize, suspends: bool) {
     if handlers.is_empty() {
@@ -13267,7 +13870,11 @@ fn render_function(
         // Re-entry. A generator that has not started begins at its first instruction; one that
         // has jumps back to just after the `Yield` that suspended it, with the operand stack
         // restored to the height it had there.
-        if !yields.is_empty() {
+        //
+        // A body whose parameters were bound at the call re-enters too, even with no `yield` in
+        // it at all: the seam is a resume target like any other, and without one `g([{x}])` with
+        // an empty body would run its destructuring twice.
+        if !yields.is_empty() || binds_at_call(proto) {
             output.push_str("    if (frame->started) {\n        sp = frame->sp;\n");
             // A rejected `await` arrives as a throw at the suspension point rather than as a
             // value, so it goes to the handler stack instead of to the resume label.
@@ -13285,6 +13892,18 @@ fn render_function(
                 writeln!(
                     output,
                     "        case {position}: goto kiln_resume_{position};"
+                )
+                .unwrap();
+            }
+            if binds_at_call(proto) {
+                // One past the last instruction, so it cannot collide with a `Yield`'s position
+                // however the body was compiled -- and unlike a suspension it resumes *at* the
+                // instruction rather than after it, because nothing was sent in.
+                writeln!(
+                    output,
+                    "        case {}: goto kiln_label_{};",
+                    proto.code.len(),
+                    proto.prologue_end
                 )
                 .unwrap();
             }
@@ -13327,6 +13946,13 @@ fn render_function(
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
+        // The seam between FunctionDeclarationInstantiation and the body. Reached twice: once
+        // by falling out of the binding the *call* ran, which stops here, and once from the
+        // resume switch above, where `binding` is clear and the body carries on.
+        if binds_at_call(proto) && position == proto.prologue_end as usize {
+            output
+                .push_str("    if (frame->binding) { frame->sp = sp; return KILN_C99_YIELDED; }\n");
+        }
         emit_instruction(output, &proto.code[position], position, &emitter);
     }
     render_unwind(output, &emitter.handlers, suspends, false);
@@ -13896,6 +14522,13 @@ fn emit_instruction(
             // One handler slot per instruction: a body cannot register more handlers than it has
             // instructions, which is the same bound an automatic frame uses.
             let frame_handlers = target.code.len().max(1);
+            // Non-zero only where the binding runs at the call; the runtime needs no other test,
+            // and the value is the resume position that seam leaves behind.
+            let prologue_resume = if binds_at_call(target) {
+                target.code.len()
+            } else {
+                0
+            };
             // Every function body receives its effective receiver. An arrow snapshots that
             // value now; an ordinary closure carries the same field but never consults it.
             // Module entry has no receiver and therefore captures `undefined` explicitly.
@@ -13908,7 +14541,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -13928,7 +14561,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -14099,7 +14732,7 @@ fn emit_instruction(
             let enumerable = i32::from(*enumerable);
             writeln!(
                 output,
-                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_text(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -14107,14 +14740,18 @@ fn emit_instruction(
         // `SetProperty` an object literal's methods lower to.
         Instruction::DefineMethod => {
             output.push_str(
-                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_text(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
+                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
             );
         }
         // `in` asks whether the property exists, not what it produces, so unlike a read it does
         // not call an accessor.
+        //
+        // The key is resolved the way a *read* resolves one, not by converting to text: a symbol
+        // keys its reserved slot, so `Symbol.iterator in x` has to ask about `@@iterator` rather
+        // than about the property literally spelled "Symbol(Symbol.iterator)", which nothing has.
         Instruction::Binary(BinaryOp::In) => {
             output.push_str(
-                "    { kiln_value container = stack[--sp]; kiln_value key = kiln_c99_text(stack[sp - 1]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property(container, key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+                "    { kiln_value container = stack[--sp]; kiln_value key = kiln_c99_property_key(stack[sp - 1]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property(container, key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
         Instruction::DeleteProperty(name) => {
@@ -14130,7 +14767,7 @@ fn emit_instruction(
         }
         Instruction::DeleteComputed => {
             output.push_str(
-                "    { kiln_value key = kiln_c99_text(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+                "    { kiln_value key = kiln_c99_property_key(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
             );
         }
         // `arguments` is every argument this frame was given, as an array. A real one is an
