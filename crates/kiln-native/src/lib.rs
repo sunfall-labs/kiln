@@ -61,7 +61,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 7);
+    assert!(PROVIDER_ABI_VERSION == 8);
 };
 
 /// Native optimization and checking policy.
@@ -3551,7 +3551,7 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-2"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-7"
+            "kiln-native-number-provider-8"
         );
     }
 
