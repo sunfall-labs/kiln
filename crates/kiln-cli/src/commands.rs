@@ -302,14 +302,17 @@ pub fn build(
             source_view,
         )?;
     }
-    let output = native_output_path(
-        Path::new(&canonical),
-        project_root,
-        requested_output,
-        shared,
-    )?;
-    if Path::new(&output) == Path::new(&canonical)
-        || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&canonical))
+    // The daemon owns omitted output naming because only it has selected and probed the native
+    // toolchain target. Explicit paths are resolved here as before and remain caller-controlled.
+    let output = requested_output
+        .map(|requested| {
+            native_output_path(Path::new(&canonical), project_root, Some(requested), shared)
+        })
+        .transpose()?;
+    if let Some(output) = output.as_deref()
+        && (Path::new(output) == Path::new(&canonical)
+            || std::fs::canonicalize(output)
+                .is_ok_and(|resolved| resolved == Path::new(&canonical)))
     {
         return Err(Error::BadInput(format!(
             "native output would overwrite source file {canonical}"
@@ -321,7 +324,7 @@ pub fn build(
         let summary = match backend.native_shared_build_at_view(
             canonical.clone(),
             project_root.clone(),
-            Some(output.clone()),
+            output.clone(),
             profile,
             source_view,
         )? {
@@ -334,7 +337,7 @@ pub fn build(
                 match backend.native_shared_build_at_view(
                     canonical.clone(),
                     project_root.clone(),
-                    Some(output),
+                    output,
                     profile,
                     source_view,
                 )? {
@@ -357,7 +360,7 @@ pub fn build(
     let summary = match backend.native_build_at_view(
         canonical.clone(),
         project_root.clone(),
-        Some(output.clone()),
+        output.clone(),
         profile,
         source_view,
     )? {
@@ -370,7 +373,7 @@ pub fn build(
             match backend.native_build_at_view(
                 canonical.clone(),
                 project_root,
-                Some(output),
+                output,
                 profile,
                 source_view,
             )? {
@@ -1653,13 +1656,7 @@ mod tests {
         else {
             panic!("last request must be NativeSharedBuild");
         };
-        assert!(
-            output
-                .as_deref()
-                .is_some_and(|path| path.ends_with(".kiln/lib/main.ts.so")
-                    || path.ends_with(".kiln/lib/main.ts.dylib")
-                    || path.ends_with(".kiln/lib/main.ts.dll"))
-        );
+        assert!(output.is_none(), "omitted output is daemon-resolved");
         let _ = std::fs::remove_dir_all(&root);
     }
 

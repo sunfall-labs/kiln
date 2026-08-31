@@ -15,21 +15,39 @@ use kiln_digest::Digest;
 /// Sources outside the project are placed below `_external/<full path digest>` so two same-named
 /// external entries cannot collide and no source component can escape the publication directory.
 pub fn default_native_output(project_root: &Path, source: &Path) -> PathBuf {
+    default_native_output_with_suffix(project_root, source, host_executable_suffix())
+}
+
+/// Default executable path using a suffix selected by the native compiler target.
+pub(crate) fn default_native_output_with_suffix(
+    project_root: &Path,
+    source: &Path,
+    suffix: &str,
+) -> PathBuf {
     with_platform_extension(
         project_root
             .join(".kiln/bin")
             .join(output_identity(project_root, source)),
-        false,
+        suffix,
     )
 }
 
 /// Default shared-library path for `source` under `project_root`.
 pub fn default_native_shared_output(project_root: &Path, source: &Path) -> PathBuf {
+    default_native_shared_output_with_suffix(project_root, source, host_shared_library_suffix())
+}
+
+/// Default shared-library path using a suffix selected by the native compiler target.
+pub(crate) fn default_native_shared_output_with_suffix(
+    project_root: &Path,
+    source: &Path,
+    suffix: &str,
+) -> PathBuf {
     with_platform_extension(
         project_root
             .join(".kiln/lib")
             .join(output_identity(project_root, source)),
-        true,
+        suffix,
     )
 }
 
@@ -79,28 +97,27 @@ fn safe_relative(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn with_platform_extension(output: PathBuf, shared: bool) -> PathBuf {
-    let extension = if shared {
-        Some(if cfg!(target_os = "macos") {
-            "dylib"
-        } else if cfg!(windows) {
-            "dll"
-        } else {
-            "so"
-        })
+fn with_platform_extension(output: PathBuf, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return output;
+    }
+    let mut name = output.into_os_string();
+    name.push(".");
+    name.push(suffix.strip_prefix('.').unwrap_or(suffix));
+    PathBuf::from(name)
+}
+
+fn host_executable_suffix() -> &'static str {
+    if cfg!(windows) { ".exe" } else { "" }
+}
+
+fn host_shared_library_suffix() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "dylib"
     } else if cfg!(windows) {
-        Some("exe")
+        "dll"
     } else {
-        None
-    };
-    match extension {
-        Some(extension) => {
-            let mut name = output.into_os_string();
-            name.push(".");
-            name.push(extension);
-            PathBuf::from(name)
-        }
-        None => output,
+        "so"
     }
 }
 
@@ -171,6 +188,28 @@ mod tests {
         assert_eq!(
             default_native_shared_output(root, Path::new("src/main.ts")),
             root.join(".kiln/lib/src").join(shared_name("main.ts"))
+        );
+    }
+
+    #[test]
+    fn target_selected_suffixes_are_independent_of_daemon_host() {
+        let root = Path::new("/tmp/project");
+
+        assert_eq!(
+            default_native_output_with_suffix(root, Path::new("src/main.ts"), ".exe"),
+            root.join(".kiln/bin/src/main.ts.exe")
+        );
+        assert_eq!(
+            default_native_output_with_suffix(root, Path::new("src/main.ts"), ""),
+            root.join(".kiln/bin/src/main.ts")
+        );
+        assert_eq!(
+            default_native_shared_output_with_suffix(root, Path::new("src/main.ts"), "dylib"),
+            root.join(".kiln/lib/src/main.ts.dylib")
+        );
+        assert_eq!(
+            default_native_shared_output_with_suffix(root, Path::new("src/main.ts"), "so"),
+            root.join(".kiln/lib/src/main.ts.so")
         );
     }
 

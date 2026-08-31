@@ -954,6 +954,39 @@ fn native_shared_built(
     Response::NativeSharedBuilt(native_shared_summary(report))
 }
 
+fn discover_native_builder(project_root: &Path) -> Result<kiln_native::NativeBuilder, String> {
+    kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache"))
+        .map_err(|error| error.to_string())
+}
+
+fn default_native_output_for_builder(
+    builder: &kiln_native::NativeBuilder,
+    project_root: &Path,
+    path: &Path,
+    shared: bool,
+) -> Result<PathBuf, String> {
+    let platform = builder.toolchain().identity().target_platform();
+    if shared {
+        let suffix = platform.shared_library_suffix().ok_or_else(|| {
+            format!(
+                "native shared-library output naming is unsupported for target {}",
+                builder.toolchain().identity().target
+            )
+        })?;
+        Ok(crate::output::default_native_shared_output_with_suffix(
+            project_root,
+            path,
+            suffix,
+        ))
+    } else {
+        Ok(crate::output::default_native_output_with_suffix(
+            project_root,
+            path,
+            platform.executable_suffix(),
+        ))
+    }
+}
+
 /// Answer a finished native run, accounting for what its build published into the cache.
 fn native_ran(project_root: &Path, report: kiln_native::NativeRunReport) -> Response {
     crate::cache_gc::record_publication(
@@ -985,10 +1018,22 @@ pub(crate) fn native_build_program(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = output.map_or_else(
-        || crate::default_native_output(&project_root, Path::new(&path)),
-        PathBuf::from,
-    );
+    let builder = match discover_native_builder(&project_root) {
+        Ok(builder) => builder,
+        Err(message) => return Response::Error { message },
+    };
+    let output = match output {
+        Some(output) => PathBuf::from(output),
+        None => match default_native_output_for_builder(
+            &builder,
+            &project_root,
+            Path::new(&path),
+            false,
+        ) {
+            Ok(output) => output,
+            Err(message) => return Response::Error { message },
+        },
+    };
     if output == Path::new(&path)
         || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&path))
     {
@@ -996,15 +1041,6 @@ pub(crate) fn native_build_program(
             message: format!("native output would overwrite source file {path}"),
         };
     }
-    let builder =
-        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return Response::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
     match builder.build(
         &program,
         &kiln_native::NativeBuildOptions {
@@ -1024,11 +1060,15 @@ pub(crate) fn native_build_output(
     project_root: &str,
     path: &str,
     output: Option<String>,
-) -> PathBuf {
-    output.map_or_else(
-        || crate::default_native_output(Path::new(project_root), Path::new(path)),
-        PathBuf::from,
-    )
+) -> Result<PathBuf, String> {
+    match output {
+        Some(output) => Ok(PathBuf::from(output)),
+        None => {
+            let project_root = Path::new(project_root);
+            let builder = discover_native_builder(project_root)?;
+            default_native_output_for_builder(&builder, project_root, Path::new(path), false)
+        }
+    }
 }
 
 pub(crate) fn native_build_shared_program(
@@ -1078,17 +1118,18 @@ fn prepare_native_shared_build(
     profile: NativeProfile,
 ) -> Result<(kiln_native::NativeBuilder, kiln_native::NativeBuildOptions), String> {
     let project_root = PathBuf::from(project_root);
-    let output = output.map_or_else(
-        || crate::default_native_shared_output(&project_root, Path::new(path)),
-        |output| {
+    let builder = discover_native_builder(&project_root)?;
+    let output = match output {
+        Some(output) => {
             let output = PathBuf::from(output);
             if output.is_absolute() {
                 output
             } else {
                 project_root.join(output)
             }
-        },
-    );
+        }
+        None => default_native_output_for_builder(&builder, &project_root, Path::new(path), true)?,
+    };
     let source = PathBuf::from(path);
     let project_source = if source.is_absolute() {
         source.clone()
@@ -1118,8 +1159,6 @@ fn prepare_native_shared_build(
     {
         return Err("native shared-library header path must differ from library output".to_owned());
     }
-    let builder = kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache"))
-        .map_err(|error| error.to_string())?;
     Ok((
         builder,
         kiln_native::NativeBuildOptions {
@@ -1137,10 +1176,22 @@ pub(crate) fn native_build_graph(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = output.map_or_else(
-        || crate::default_native_output(&project_root, Path::new(&path)),
-        PathBuf::from,
-    );
+    let builder = match discover_native_builder(&project_root) {
+        Ok(builder) => builder,
+        Err(message) => return Response::Error { message },
+    };
+    let output = match output {
+        Some(output) => PathBuf::from(output),
+        None => match default_native_output_for_builder(
+            &builder,
+            &project_root,
+            Path::new(&path),
+            false,
+        ) {
+            Ok(output) => output,
+            Err(message) => return Response::Error { message },
+        },
+    };
     if output == Path::new(&path)
         || std::fs::canonicalize(&output).is_ok_and(|resolved| resolved == Path::new(&path))
     {
@@ -1148,15 +1199,6 @@ pub(crate) fn native_build_graph(
             message: format!("native output would overwrite source file {path}"),
         };
     }
-    let builder =
-        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return Response::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
     match builder.build_graph(
         graph,
         &kiln_native::NativeBuildOptions {
@@ -1178,15 +1220,14 @@ pub(crate) fn native_run_program(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = crate::default_native_output(&project_root, Path::new(&path));
-    let builder =
-        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return Response::Error {
-                    message: error.to_string(),
-                };
-            }
+    let builder = match discover_native_builder(&project_root) {
+        Ok(builder) => builder,
+        Err(message) => return Response::Error { message },
+    };
+    let output =
+        match default_native_output_for_builder(&builder, &project_root, Path::new(&path), false) {
+            Ok(output) => output,
+            Err(message) => return Response::Error { message },
         };
     match builder.run(
         &program,
@@ -1209,15 +1250,14 @@ pub(crate) fn native_run_graph(
     profile: NativeProfile,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
-    let output = crate::default_native_output(&project_root, Path::new(&path));
-    let builder =
-        match kiln_native::NativeBuilder::discover_cached(project_root.join(".kiln/cache")) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return Response::Error {
-                    message: error.to_string(),
-                };
-            }
+    let builder = match discover_native_builder(&project_root) {
+        Ok(builder) => builder,
+        Err(message) => return Response::Error { message },
+    };
+    let output =
+        match default_native_output_for_builder(&builder, &project_root, Path::new(&path), false) {
+            Ok(output) => output,
+            Err(message) => return Response::Error { message },
         };
     match builder.run_graph(
         graph,
