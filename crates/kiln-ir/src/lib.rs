@@ -577,6 +577,10 @@ pub enum Builtin {
     /// Node's check-phase task primitives. Appended to preserve existing artifact discriminants.
     SetImmediate,
     ClearImmediate,
+    /// The error kind that reports several failures as one, and what `Promise.any` rejects with.
+    /// Appended for the reason every name after `Json` is: the discriminant is hashed into the
+    /// artifact cache key, so inserting one in the middle would invalidate every cached build.
+    AggregateError,
 }
 
 impl Builtin {
@@ -648,6 +652,7 @@ impl Builtin {
             "eval" => Some(Self::Eval),
             "DisposableStack" => Some(Self::DisposableStack),
             "SuppressedError" => Some(Self::SuppressedError),
+            "AggregateError" => Some(Self::AggregateError),
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
             "EvalError" => Some(Self::EvalError),
             "Atomics" => Some(Self::Atomics),
@@ -721,6 +726,7 @@ impl Builtin {
             Self::Eval => "eval",
             Self::DisposableStack => "DisposableStack",
             Self::SuppressedError => "SuppressedError",
+            Self::AggregateError => "AggregateError",
             Self::AsyncDisposableStack => "AsyncDisposableStack",
             Self::EvalError => "EvalError",
             Self::Atomics => "Atomics",
@@ -1440,6 +1446,52 @@ enum Resolution {
     Unresolved,
 }
 
+/// The private methods and instance fields a class installs on every instance it builds.
+///
+/// Carried rather than emitted in place because *when* they are installed is part of the
+/// language: a base class installs them on entry to its constructor, and a derived class
+/// installs them the moment `super()` returns -- which is the moment `this` first exists, and,
+/// when the parent is an exotic builtin, the moment it stops being the object the derived class
+/// allocated.
+#[derive(Debug, Clone)]
+struct InstanceElements {
+    private: Vec<(String, PrivateKind, Function)>,
+    fields: Vec<ClassField>,
+}
+
+/// What makes a constructor a *class* constructor rather than an ordinary function.
+///
+/// A constructor is a function plus the instance elements it owes and the place it owes them, so
+/// this is the whole of the difference: `compile_constructor` takes `None` for a plain function
+/// and one of these for a class body.
+struct ClassBody<'a> {
+    /// The class extends something, so `this` does not exist until `super()` has run.
+    derived: bool,
+    /// A derived class with no constructor of its own, whose synthesized body is
+    /// `super(...arguments)` and nothing else.
+    forwards_to_super: bool,
+    private_elements: &'a [(String, PrivateKind, Function)],
+    fields: &'a [&'a ClassField],
+}
+
+impl ClassBody<'_> {
+    /// Whether the elements have to wait for a `super()` the body writes for itself.
+    ///
+    /// A base class has no `super()` to wait for, and a synthesized forward has already made
+    /// the call by the time the prologue ends -- so only a derived class with a constructor of
+    /// its own defers.
+    fn installs_elements_at_super(&self) -> bool {
+        self.derived && !self.forwards_to_super
+    }
+
+    fn elements(&self) -> InstanceElements {
+        InstanceElements {
+            private: self.private_elements.to_vec(),
+            fields: self.fields.iter().map(|field| (*field).clone()).collect(),
+        }
+    }
+}
+
 struct Compiler {
     constants: Vec<Constant>,
     functions: Vec<FunctionProto>,
@@ -1563,6 +1615,15 @@ struct Compiler {
     /// The hidden `super` bindings of the derived classes currently being compiled, innermost
     /// last. A stack rather than a field because class bodies nest.
     super_bindings: Vec<String>,
+    /// The instance elements each constructor currently being compiled still owes its instance,
+    /// innermost last, and `None` for a constructor that has already emitted them.
+    ///
+    /// A *derived* class initialises its fields when `super()` returns, not when the constructor
+    /// is entered, and the difference is visible whenever the parent hands back a different
+    /// object than the one allocated up front -- `class E extends Error { name = "E" }` with an
+    /// explicit constructor wrote its field onto the abandoned instance and read `"Error"` back.
+    /// So the elements are carried here and emitted at each `super()` site instead.
+    pending_elements: Vec<Option<InstanceElements>>,
     /// Monotonic, so two derived classes in one scope never share a binding. The stack depth
     /// cannot serve: it returns to zero after each class, and the bindings are siblings in the
     /// same scope rather than nested.
@@ -1654,6 +1715,7 @@ impl Compiler {
             pending_label: None,
             chains: Vec::new(),
             super_bindings: Vec::new(),
+            pending_elements: Vec::new(),
             super_binding_count: 0,
             home_bindings: Vec::new(),
             home_binding_count: 0,
@@ -1674,6 +1736,9 @@ impl Compiler {
     }
 
     fn compile_body(&mut self, module: &Module) {
+        // A module body is a variable environment like a function's, so its `var`s are hoisted
+        // to the top of it rather than to the top of whichever block they were written in.
+        self.hoist_var_names(&module.body);
         self.plain_statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
@@ -1697,6 +1762,7 @@ impl Compiler {
         self.code.push(Instruction::StoreLocal(completion));
         // The same three passes `statements` makes -- names, then hoisted function values, then
         // the rest -- with the expression statements diverted into the completion slot.
+        self.hoist_var_names(&module.body);
         for statement in &module.body {
             self.hoist_names(statement);
         }
@@ -2891,6 +2957,109 @@ impl Compiler {
                     }
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Predeclare every `var` a body contains, wherever inside it the declaration is written.
+    ///
+    /// `hoist_names` runs once per *block*, which is right for a lexical declaration and wrong
+    /// for a `var`: a `var` belongs to the function, not to the block it appears in. Its slot
+    /// already went to scope 0, but the instructions `predeclare` emits went wherever the block
+    /// was compiled -- so a captured `var` written inside one arm of an `if` had its `NewCell`
+    /// inside that arm, and the *other* arm's write found an unboxed slot. That is
+    /// `local slot 460 does not hold a captured cell`, and `import "react-dom/server"` is
+    /// exactly it -- `if (typeof performance === "object") { var getCurrentTime = ... } else {
+    /// getCurrentTime = ... }`, with the closure that reads `getCurrentTime` being what makes
+    /// the binding boxed and the else path fatal.
+    ///
+    /// The initialisation is the same story told quietly: a `var` reads as `undefined` from the
+    /// top of its function, not from the top of the block it was written in.
+    ///
+    /// Walks into every statement that shares this variable environment and into none that
+    /// starts a new one, which is the specification's `VarScopedDeclarations`: a nested function
+    /// owns its own `var`s, and a class body is a function's worth of scopes away.
+    fn hoist_var_names(&mut self, body: &[Statement]) {
+        for statement in body {
+            self.hoist_var_names_in(statement);
+        }
+    }
+
+    fn hoist_var_names_in(&mut self, statement: &Statement) {
+        match &statement.kind {
+            StatementKind::Variable {
+                kind: VariableKind::Var,
+                declarations,
+            } => {
+                for declaration in declarations {
+                    let mut names = Vec::new();
+                    pattern_names_in_order(&declaration.pattern, &mut names);
+                    for name in names {
+                        self.predeclare(VariableKind::Var, &name, true);
+                    }
+                }
+            }
+            StatementKind::Block(body) => self.hoist_var_names(body),
+            StatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                self.hoist_var_names_in(consequent);
+                if let Some(alternate) = alternate {
+                    self.hoist_var_names_in(alternate);
+                }
+            }
+            StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Labelled { body, .. }
+            | StatementKind::With { body, .. } => self.hoist_var_names_in(body),
+            StatementKind::For { init, body, .. } => {
+                if let Some(init) = init {
+                    self.hoist_var_names_in(init);
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::ForIn {
+                kind, name, body, ..
+            } => {
+                if *kind == VariableKind::Var {
+                    self.predeclare(VariableKind::Var, name, true);
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::ForOf {
+                kind,
+                pattern,
+                body,
+                ..
+            } => {
+                if *kind == VariableKind::Var {
+                    let mut names = Vec::new();
+                    pattern_names_in_order(pattern, &mut names);
+                    for name in names {
+                        self.predeclare(VariableKind::Var, &name, true);
+                    }
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::Switch { cases, .. } => {
+                for case in cases {
+                    self.hoist_var_names(&case.body);
+                }
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.hoist_var_names(block);
+                if let Some(handler) = handler {
+                    self.hoist_var_names(&handler.body);
+                }
+                self.hoist_var_names(finalizer);
+            }
+            // A function owns its own `var`s, and everything else declares nothing.
             _ => {}
         }
     }
@@ -4212,6 +4381,7 @@ impl Compiler {
                     self.load_super();
                     self.array_literal(arguments, expression.span);
                     self.code.push(Instruction::SuperApply);
+                    self.emit_elements_after_super(expression.span);
                     return;
                 }
                 if arguments.len() > u16::MAX as usize {
@@ -4230,6 +4400,7 @@ impl Compiler {
                 self.code.push(Instruction::SuperCall {
                     argc: arguments.len() as u16,
                 });
+                self.emit_elements_after_super(expression.span);
             }
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
             // program can write, so asking whether the key is there *is* the brand check.
@@ -5075,12 +5246,15 @@ impl Compiler {
         let compiled = self.compile_constructor(
             &constructor,
             class.span,
-            // A *derived* class with no constructor is not empty: it forwards its arguments to
-            // the parent. Without that, `class F extends Error {}` would construct an error with
-            // no message.
-            synthesized_derived,
-            &private_elements,
-            &instance_fields,
+            Some(ClassBody {
+                derived: class.superclass.is_some(),
+                // A *derived* class with no constructor is not empty: it forwards its arguments
+                // to the parent. Without that, `class F extends Error {}` would construct an
+                // error with no message.
+                forwards_to_super: synthesized_derived,
+                private_elements: &private_elements,
+                fields: &instance_fields,
+            }),
         );
         self.home_bindings.pop();
         let Some(index) = compiled else {
@@ -5373,17 +5547,65 @@ impl Compiler {
     /// starting at the parameters, and its own scope stack. Module scope stays reachable through
     /// `enclosing[0]`; anything between is a capture and is refused by `resolve`.
     fn compile_function(&mut self, function: &Function, span: Span) -> Option<u32> {
-        self.compile_function_with(function, span, false)
+        self.compile_constructor(function, span, None)
     }
 
-    /// As [`Compiler::compile_function`], optionally prefixing a `super(...arguments)` forward.
-    fn compile_function_with(
+    /// Install a class's private methods and instance fields on `this`.
+    ///
+    /// Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
+    /// the language installs the elements that make that call possible before it runs any
+    /// initialiser.
+    fn emit_instance_elements(
         &mut self,
-        function: &Function,
+        private_elements: &[(String, PrivateKind, Function)],
+        fields: &[&ClassField],
         span: Span,
-        forwards_to_super: bool,
-    ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[], &[])
+    ) -> Option<()> {
+        for (name, kind, function) in private_elements {
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let body = self.compile_function(function, span)?;
+            self.code.push(Instruction::LoadThis);
+            self.code.push(Instruction::MakeFunction(body));
+            self.code
+                .push(Instruction::DefinePrivate { name, kind: *kind });
+            self.code.push(Instruction::Pop);
+        }
+        for field in fields {
+            self.code.push(Instruction::LoadThis);
+            match &field.key {
+                ObjectKey::Private(name) => {
+                    let name = self.constant_index(Constant::String(self.private_key(name)));
+                    self.emit_field_value(field);
+                    self.code.push(self.set_property_instruction(name));
+                }
+                ObjectKey::Static(key) => {
+                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.emit_field_value(field);
+                    self.code.push(self.set_property_instruction(name));
+                }
+                ObjectKey::Computed(key) => {
+                    self.expression(key);
+                    self.emit_field_value(field);
+                    self.code.push(self.set_computed_instruction());
+                }
+            }
+            self.code.push(Instruction::Pop);
+        }
+        Some(())
+    }
+
+    /// The elements a derived constructor owes its instance, emitted where `super()` just
+    /// returned.
+    ///
+    /// The `super()` expression has left the parent's answer on the stack and every sequence
+    /// below is stack-balanced, so the expression's own value survives being followed by this.
+    fn emit_elements_after_super(&mut self, span: Span) {
+        let Some(Some(elements)) = self.pending_elements.last().cloned() else {
+            return;
+        };
+        let fields: Vec<&ClassField> = elements.fields.iter().collect();
+        self.emit_instance_elements(&elements.private, &fields, span);
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -5395,9 +5617,7 @@ impl Compiler {
         &mut self,
         function: &Function,
         span: Span,
-        forwards_to_super: bool,
-        private_elements: &[(String, PrivateKind, Function)],
-        fields: &[&ClassField],
+        class: Option<ClassBody<'_>>,
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
@@ -5585,46 +5805,39 @@ impl Compiler {
         // implicit in the instruction stream.
         let prologue_end = self.code.len() as u32;
 
-        if forwards_to_super {
-            self.load_super();
-            self.code.push(Instruction::SuperForward);
-            self.code.push(Instruction::Pop);
-        }
-        // Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
-        // the language installs the elements that make that call possible before it runs any
-        // initialiser.
-        for (name, kind, function) in private_elements {
-            let key = self.private_key(name);
-            let name = self.constant_index(Constant::String(key));
-            let body = self.compile_function(function, span)?;
-            self.code.push(Instruction::LoadThis);
-            self.code.push(Instruction::MakeFunction(body));
-            self.code
-                .push(Instruction::DefinePrivate { name, kind: *kind });
-            self.code.push(Instruction::Pop);
-        }
-        for field in fields {
-            self.code.push(Instruction::LoadThis);
-            match &field.key {
-                ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name)));
-                    self.emit_field_value(field);
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Static(key) => {
-                    let name = self.constant_index(Constant::String(key.clone()));
-                    self.emit_field_value(field);
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Computed(key) => {
-                    self.expression(key);
-                    self.emit_field_value(field);
-                    self.code.push(self.set_computed_instruction());
-                }
+        // Every `var` in the body belongs to *this* function, so its slot and its `undefined`
+        // are established here rather than wherever the block containing it happens to be
+        // compiled.
+        self.hoist_var_names(&function.body);
+        if let Some(class) = &class {
+            if class.forwards_to_super {
+                // `super(...arguments)`, and nothing else can run before it -- so by the line
+                // after, the instance is already the parent's and the elements go in there.
+                self.load_super();
+                self.code.push(Instruction::SuperForward);
+                self.code.push(Instruction::Pop);
             }
-            self.code.push(Instruction::Pop);
+            // A derived class with a constructor of its own installs its elements when *that*
+            // constructor's `super()` returns, which is a place only the body knows. Anywhere
+            // else -- a base class, or the forward just emitted -- `this` is already the
+            // instance, so here is the place.
+            if class.installs_elements_at_super() {
+                self.pending_elements.push(Some(class.elements()));
+            } else {
+                self.emit_instance_elements(class.private_elements, class.fields, span)?;
+                // Pushed even with nothing owed: that is what stops a `super()` in a *nested*
+                // class's constructor from reaching past it to this one's elements.
+                self.pending_elements.push(None);
+            }
         }
         self.statements(&function.body);
+        // An ordinary function never took an entry, because an arrow is where a derived
+        // constructor's `super()` is allowed to be written -- `constructor() { const go = () =>
+        // super(); go(); }` is legal -- and an entry there would hide the constructor's own
+        // elements from it.
+        if class.is_some() {
+            self.pending_elements.pop();
+        }
         // Falling off the end of a function returns undefined. Emitted unconditionally rather
         // than only when the body cannot fall through: proving that needs flow analysis, and an
         // unreachable epilogue costs two instructions.
@@ -7269,6 +7482,17 @@ fn collect_nested_function_names(
                 if let Some(initializer) = &declaration.initializer {
                     collect_identifiers(initializer, names, inside_function);
                 }
+                // The *pattern* reads names too, and only the initializer was ever walked. A
+                // destructuring default and a computed key are both ordinary expressions
+                // evaluated in this scope -- `const { a = n } = {}` inside a nested function
+                // reads `n` from the enclosing one -- so a binding named only there was left
+                // unboxed and the nested function could not resolve it at all.
+                //
+                // `collect_pattern_identifiers` records what a pattern *reads*, never what it
+                // binds, which is why walking it here cannot box the declaration's own names.
+                if inside_function {
+                    collect_pattern_identifiers(&declaration.pattern, names);
+                }
             }
         }
         StatementKind::Expression(expression) | StatementKind::ExportDefault(expression) => {
@@ -7345,8 +7569,18 @@ fn collect_nested_function_names(
             }
             collect_nested_function_names(body, names, inside_function);
         }
-        StatementKind::ForOf { iterable, body, .. } => {
+        StatementKind::ForOf {
+            pattern,
+            iterable,
+            body,
+            ..
+        } => {
             collect_identifiers(iterable, names, inside_function);
+            // The loop's own pattern, for the reason a declaration's is walked above:
+            // `for (const { a = n } of xs)` reads `n` where the loop is written.
+            if inside_function {
+                collect_pattern_identifiers(pattern, names);
+            }
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::Throw(value) => collect_identifiers(value, names, inside_function),

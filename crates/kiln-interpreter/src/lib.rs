@@ -99,6 +99,24 @@ impl WellKnown {
             .unwrap_or_else(|| unreachable!("every well-known key carries the prefix"))
     }
 
+    /// The well-known symbol a reserved key names, if it names one.
+    ///
+    /// The inverse of [`Self::property_key`], and exact: every other `@@` key in this
+    /// interpreter is an internal slot -- `@@entries`, `@@disposeEntries`, `@@trace` -- and none
+    /// of them collides with a name here. That exactness is what lets reflection tell a
+    /// symbol-keyed property apart from the machine's own bookkeeping, which is the whole
+    /// difficulty of storing symbols as strings.
+    ///
+    /// `@@nodeInspectCustom` is included even though `ALL` excludes it: `Symbol` does not
+    /// publish it, but an object that carries it carries a symbol-keyed property and
+    /// `Object.getOwnPropertySymbols` has to say so.
+    fn from_property_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .chain(std::iter::once(Self::NodeInspectCustom))
+            .find(|symbol| symbol.property_key() == key)
+    }
+
     /// Every well-known symbol, so `Symbol` can publish them all from one list.
     const ALL: [Self; 15] = [
         Self::Iterator,
@@ -168,7 +186,7 @@ impl Symbol {
     pub fn property_key(&self) -> String {
         match self {
             Self::WellKnown(symbol) => symbol.property_key().to_owned(),
-            Self::Unique(symbol) => format!("@@symbol:{}", symbol.serial),
+            Self::Unique(symbol) => format!("{UNIQUE_SYMBOL_PREFIX}{}", symbol.serial),
         }
     }
 
@@ -178,7 +196,19 @@ impl Symbol {
             Self::Unique(symbol) => symbol.description.as_deref().unwrap_or(""),
         }
     }
+
+    /// The serial in a unique symbol's reserved key, or `None` for any other key.
+    ///
+    /// The inverse of the `@@symbol:{serial}` half of [`Self::property_key`]. The serial alone
+    /// is not the symbol -- identity is the allocation's, not the number's -- which is why the
+    /// realm keeps every one it has made and this only says which to look up.
+    fn serial_in_key(key: &str) -> Option<u64> {
+        key.strip_prefix(UNIQUE_SYMBOL_PREFIX)?.parse().ok()
+    }
 }
+
+/// The reserved key prefix a `Symbol(description)` names its properties under.
+const UNIQUE_SYMBOL_PREFIX: &str = "@@symbol:";
 
 impl PartialEq for Symbol {
     fn eq(&self, other: &Self) -> bool {
@@ -263,11 +293,15 @@ pub enum ErrorKind {
     /// of its own because that is exactly what it is: an `Error` with two extra fields naming
     /// the two throws, and a prototype chaining to `Error.prototype` like every other.
     Suppressed,
+    /// `AggregateError`, which reports several failures as one. `Promise.any` raises it when
+    /// every input rejected, and it is the same shape as `SuppressedError`: an `Error` with one
+    /// extra field -- `errors` -- and a prototype chaining to `Error.prototype`.
+    Aggregate,
 }
 
 impl ErrorKind {
     /// Every kind, in declaration order, so the realm can build all their prototypes.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Error,
         Self::Type,
         Self::Range,
@@ -276,6 +310,7 @@ impl ErrorKind {
         Self::Uri,
         Self::Eval,
         Self::Suppressed,
+        Self::Aggregate,
     ];
 
     pub fn name(self) -> &'static str {
@@ -288,6 +323,34 @@ impl ErrorKind {
             Self::Uri => "URIError",
             Self::Eval => "EvalError",
             Self::Suppressed => "SuppressedError",
+            Self::Aggregate => "AggregateError",
+        }
+    }
+
+    /// Which argument is the message.
+    ///
+    /// Not the first for every kind. `SuppressedError(error, suppressed, message)` puts it third
+    /// and `AggregateError(errors, message)` puts it second, both for the same reason: the
+    /// failures the type is reporting are what it is *for*, and the sentence is an afterthought.
+    const fn message_index(self) -> usize {
+        match self {
+            Self::Suppressed => 2,
+            Self::Aggregate => 1,
+            _ => 0,
+        }
+    }
+
+    /// The own properties this kind carries beside `stack` and `message`, in argument order.
+    ///
+    /// Each is taken from the argument at its own position and installed whatever was passed,
+    /// `undefined` included: a program that catches one of these reads the field without
+    /// checking first, and an absent property would make that read a silent `undefined` from a
+    /// prototype rather than the value the constructor was handed.
+    const fn carried_fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Suppressed => &["error", "suppressed"],
+            Self::Aggregate => &["errors"],
+            _ => &[],
         }
     }
 
@@ -3153,6 +3216,28 @@ fn indexed_definition(
     })
 }
 
+/// The built-in a callable's prototype chain ends at, if it ends at one.
+///
+/// `class P extends Promise {}` links the two prototypes *and* the two constructors, and the
+/// second link is what makes `P.resolve` mean `Promise.resolve`. It is an ordinary prototype
+/// pointer, but the value it points at is an intrinsic rather than an object with a store, so
+/// the walk over property stores has nowhere left to go and has to ask the built-in instead.
+///
+/// Bounded like every other prototype walk here: the chain is the program's business, running
+/// out of Rust stack is not.
+fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
+    let mut current = closure.properties.borrow().prototype().cloned();
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        current = match current {
+            Some(Value::Native(native)) => return Some(native),
+            Some(Value::Function(parent)) => parent.properties.borrow().prototype().cloned(),
+            Some(Value::Object(object)) => object.borrow().prototype().cloned(),
+            _ => return None,
+        };
+    }
+    None
+}
+
 fn define_own_property(
     intrinsics: &Intrinsics,
     target: &Value,
@@ -5787,6 +5872,23 @@ pub struct ExecutionLimits {
     pub max_call_depth: usize,
 }
 
+impl ExecutionLimits {
+    /// `max_steps` for an execution nothing is waiting on.
+    ///
+    /// A step budget is a promise to whoever is queued behind this program -- a corpus runner, a
+    /// resident daemon -- that a loop which never ends will be reported rather than endured. A
+    /// person running their own program has made no such promise, and node makes none either.
+    /// The counter still runs, so `RunSummary::instructions` still reports what the program cost;
+    /// it simply has nothing to exceed.
+    pub const UNMETERED_STEPS: u64 = u64::MAX;
+
+    /// The default limits with a different step budget.
+    #[must_use]
+    pub const fn with_max_steps(self, max_steps: u64) -> Self {
+        Self { max_steps, ..self }
+    }
+}
+
 impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {
@@ -6087,6 +6189,7 @@ struct ModuleRealmShared {
     next_http_client_request_id: u64,
     symbol_serial: u64,
     symbol_registry: Vec<(String, Value)>,
+    symbols: Vec<Rc<UniqueSymbol>>,
 }
 
 impl Default for ModuleRealmSession {
@@ -6101,6 +6204,7 @@ impl Default for ModuleRealmSession {
                 next_http_client_request_id: 1,
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
+                symbols: Vec::new(),
             })),
         }
     }
@@ -8188,6 +8292,15 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
     /// symbol needs: it never leaves the run that made it.
     symbol_serial: u64,
+    /// Every `Symbol(...)` this run has made, by serial.
+    ///
+    /// A symbol-keyed property stores only the *string* the symbol names it under, so nothing on
+    /// the object can hand the symbol itself back -- and `Object.getOwnPropertySymbols` has to
+    /// hand back the same symbol, by identity, not a fresh one with the same description.
+    /// Strongly held, because the last reference to a symbol can legitimately be the property
+    /// key it is stored under: `const o = {}; o[Symbol("k")] = 1;` keeps nothing else, and node
+    /// still reports it.
+    symbols: Vec<Rc<UniqueSymbol>>,
     /// Every closure this run has created, held weakly.
     ///
     /// `F.prototype.constructor` is `F`, and `Rc` frees nothing that is inside a cycle, so every
@@ -8316,6 +8429,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             self_bindings: Vec::new(),
             self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
+            symbols: Vec::new(),
             random_state: match entropy {
                 EntropyCapability::Deterministic | EntropyCapability::Host => DEFAULT_ENTROPY_SEED,
                 EntropyCapability::Seeded(seed) => seed,
@@ -12427,6 +12541,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Native::AsyncDisposableStackConstructor
                         }
                         kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
+                        kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
                             Native::TypedArrayConstructor(TypedKind::Int8)
@@ -15258,21 +15373,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Undefined)
             }
             Native::PromiseResolve => {
-                // Already a promise? Hand it straight back; wrapping would add a tick for
-                // nothing and break `Promise.resolve(p) === p`.
+                // Already a promise *of this constructor*? Hand it straight back; wrapping would
+                // add a tick for nothing and break `Promise.resolve(p) === p`. A promise of a
+                // different constructor is wrapped, which is what makes `P.resolve(plain)` a `P`.
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                if matches!(value, Value::Promise(_)) {
+                let derived = self.promise_subclass_prototype(receiver);
+                if matches!(value, Value::Promise(_))
+                    && derived
+                        .as_ref()
+                        .is_none_or(|wanted| same_value(&prototype_of(&value), wanted))
+                {
                     return Ok(value);
                 }
                 let promise = PromiseState::pending();
                 self.resolve_promise(&promise, value);
-                Ok(Value::Promise(promise))
+                Ok(Self::as_promise_of(Value::Promise(promise), derived))
             }
             Native::PromiseReject => {
                 let promise = PromiseState::pending();
                 let reason = arguments.first().cloned().unwrap_or(Value::Undefined);
                 self.settle(&promise, &Settled::Rejected(reason));
-                Ok(Value::Promise(promise))
+                let derived = self.promise_subclass_prototype(receiver);
+                Ok(Self::as_promise_of(Value::Promise(promise), derived))
+            }
+            // The pure spelling builds the pair; the constructor it was reached through decides
+            // what kind of promise is in it, and only the machine can see the receiver's chain.
+            Native::PromiseWithResolvers => {
+                let derived = self.promise_subclass_prototype(receiver);
+                let pair = call_native(
+                    &self.intrinsics,
+                    Native::PromiseWithResolvers,
+                    receiver,
+                    arguments,
+                )?;
+                if let Some(prototype) = derived
+                    && let Value::Object(object) = &pair
+                    && let Some(promise) = object.borrow().get_own("promise")
+                {
+                    record_prototype(promise, prototype);
+                }
+                Ok(pair)
             }
             Native::PromiseThen => {
                 let Value::Promise(promise) = receiver else {
@@ -15281,15 +15421,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
+                let promise = Rc::clone(promise);
+                let species = self.promise_species_prototype(receiver, instruction)?;
                 let derived = PromiseState::pending();
                 self.react(
-                    &Rc::clone(promise),
+                    &promise,
                     arguments.first().cloned().unwrap_or(Value::Undefined),
                     arguments.get(1).cloned().unwrap_or(Value::Undefined),
                     Sink::Promise(Rc::clone(&derived)),
                     false,
                 );
-                Ok(Value::Promise(derived))
+                Ok(Self::as_promise_of(Value::Promise(derived), species))
             }
             // `catch(r)` is `then(undefined, r)`, and saying so keeps one implementation.
             Native::PromiseCatch => self.dispatch_native(
@@ -15310,16 +15452,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
+                let promise = Rc::clone(promise);
                 let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let species = self.promise_species_prototype(receiver, instruction)?;
                 let derived = PromiseState::pending();
                 self.react(
-                    &Rc::clone(promise),
+                    &promise,
                     handler.clone(),
                     handler,
                     Sink::Promise(Rc::clone(&derived)),
                     true,
                 );
-                Ok(Value::Promise(derived))
+                Ok(Self::as_promise_of(Value::Promise(derived), species))
             }
             // `all`, `allSettled`, `race` and `any` differ only in when they settle and what
             // they collect, so they share one walk over the inputs.
@@ -15336,12 +15480,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
+                let derived = self.promise_subclass_prototype(receiver);
                 let combined = match self.drain_iterable(&source, instruction) {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
                 match combined {
-                    Ok(promise) => Ok(promise),
+                    Ok(promise) => Ok(Self::as_promise_of(promise, derived)),
                     // A failure the machine cannot express as a value -- a step limit, a
                     // bytecode defect -- is not a rejection and `thrown_value` hands it back.
                     Err(error) => {
@@ -15351,6 +15496,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Ok(Value::Promise(rejected))
                     }
                 }
+            }
+            // `Object.getOwnPropertySymbols`: the symbol-keyed own properties, and only those.
+            //
+            // It answered `[]` for everything. The properties were there and read back
+            // correctly -- a symbol key is a reserved *string* here -- but nothing could
+            // recover the symbol from the key, so every faithful-copy routine (deep clone, deep
+            // merge, a decorator re-wrapping an object, `Object.assign` over `Reflect.ownKeys`)
+            // silently dropped symbol-keyed data instead of failing.
+            Native::ObjectGetOwnPropertySymbols => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_an_object(&source) {
+                    return Ok(Value::Array(ArrayData::new(Vec::new())));
+                }
+                let symbols = self
+                    .own_keys_reflected(&source, instruction)?
+                    .into_iter()
+                    .filter(|key| matches!(key, Value::Symbol(_)))
+                    .collect();
+                Ok(Value::Array(ArrayData::new(symbols)))
+            }
+            // `Error("x")` is `new Error("x")`: every error constructor answers the same way
+            // called or constructed, which is why `throw Error(m)` is as common in real code as
+            // `throw new Error(m)`. Reaching the pure table instead answered `undefined`, and
+            // the `TypeError` a program then got was about reading `.message` of nothing.
+            Native::Error(kind) => self.construct_error_reached(kind, arguments, instruction),
+            // `Error.prototype.toString` reads `name` and `message` off the receiver, and a
+            // read is a *call* when either is an accessor -- `class G extends Error { get
+            // name() { return "G"; } }` is the ordinary way a library names its error kind
+            // without an own property. The pure spelling walks the store data-only and answered
+            // "Error" for exactly that class.
+            Native::ErrorToString => {
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Error.prototype.toString called on non-object".to_owned(),
+                    });
+                }
+                let read = |vm: &mut Self, key: &str| -> Result<String, ExecutionError> {
+                    Ok(match vm.read_property(receiver, key, instruction)? {
+                        Value::Undefined => String::new(),
+                        other => other.to_display_string(),
+                    })
+                };
+                let named = self.read_property(receiver, "name", instruction)?;
+                let name = match named {
+                    Value::Undefined => "Error".to_owned(),
+                    other => other.to_display_string(),
+                };
+                let message = read(self, "message")?;
+                // Either half being empty drops the separator with it, so a message-less error
+                // is "Error" rather than "Error: ".
+                Ok(Value::String(if name.is_empty() {
+                    message
+                } else if message.is_empty() {
+                    name
+                } else {
+                    format!("{name}: {message}")
+                }))
             }
             Native::StringConstructor => {
                 let Some(value) = arguments.first() else {
@@ -15480,11 +15682,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if matches!(native, Native::ReflectOwnKeys) {
                     let source = self.reflect_target(Some(&source), "ownKeys")?;
-                    let items = self
-                        .own_keys(&source, instruction)?
-                        .into_iter()
-                        .map(reflection_key_value)
-                        .collect();
+                    let items = self.own_keys_reflected(&source, instruction)?;
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 // A proxy answers "what keys do you have" with a trap, not with a property
@@ -16101,32 +16299,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let key = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
-                if let Some(realm) = &self.module_realm {
-                    let mut realm = realm.borrow_mut();
-                    if let Some((_, symbol)) =
-                        realm.symbol_registry.iter().find(|(name, _)| *name == key)
-                    {
-                        return Ok(symbol.clone());
-                    }
-                    realm.symbol_serial += 1;
-                    let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                        serial: realm.symbol_serial,
-                        description: Some(key.clone()),
-                    })));
-                    realm.symbol_registry.push((key, symbol.clone()));
-                    return Ok(symbol);
-                }
-                if let Some((_, symbol)) =
-                    self.symbol_registry.iter().find(|(name, _)| *name == key)
-                {
+                let registered = match &self.module_realm {
+                    Some(realm) => realm.borrow().symbol_registry.clone(),
+                    None => self.symbol_registry.clone(),
+                };
+                if let Some((_, symbol)) = registered.iter().find(|(name, _)| *name == key) {
                     return Ok(symbol.clone());
                 }
-                self.symbol_serial += 1;
-                let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
-                    description: Some(key.clone()),
-                })));
-                self.symbol_registry.push((key, symbol.clone()));
+                let symbol = self.new_symbol(Some(key.clone()));
+                match &self.module_realm {
+                    Some(realm) => realm
+                        .borrow_mut()
+                        .symbol_registry
+                        .push((key, symbol.clone())),
+                    None => self.symbol_registry.push((key, symbol.clone())),
+                }
                 Ok(symbol)
             }
             Native::SymbolKeyFor => {
@@ -16372,25 +16559,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Every call has to produce a symbol distinct from every other, so this needs the
             // counter rather than only its arguments.
             Native::SymbolConstructor => {
-                if let Some(realm) = &self.module_realm {
-                    let mut realm = realm.borrow_mut();
-                    realm.symbol_serial += 1;
-                    return Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                        serial: realm.symbol_serial,
-                        description: match arguments.first() {
-                            None | Some(Value::Undefined) => None,
-                            Some(value) => Some(value.to_display_string()),
-                        },
-                    }))));
-                }
-                self.symbol_serial += 1;
-                Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
-                    description: match arguments.first() {
-                        None | Some(Value::Undefined) => None,
-                        Some(value) => Some(value.to_display_string()),
-                    },
-                }))))
+                let description = match arguments.first() {
+                    None | Some(Value::Undefined) => None,
+                    Some(value) => Some(value.to_display_string()),
+                };
+                Ok(self.new_symbol(description))
             }
             // The two built-ins that compile. Both need the machine -- a compiled program is
             // entered as a frame and run -- so neither can live in `call_native`, which is a
@@ -21258,23 +21431,81 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// The prototype a promise built by one of `Promise`'s statics should carry, or `None` when
+    /// the static was reached through `Promise` itself.
+    ///
+    /// `Promise.resolve` and its siblings build "a promise of the constructor they were called
+    /// on". That is what makes `class P extends Promise {}`'s `P.resolve(1) instanceof P` true,
+    /// and it is the whole reason a cancellable-promise or bluebird-interop layer subclasses
+    /// `Promise` at all: without it the layer's own methods are missing from everything its
+    /// factories hand back.
+    ///
+    /// `None` for the intrinsic and for anything that is not a `Promise` subclass, because those
+    /// want the prototype the new promise already has.
+    fn promise_subclass_prototype(&mut self, receiver: &Value) -> Option<Value> {
+        let Value::Function(closure) = receiver else {
+            return None;
+        };
+        (inherited_builtin(closure) == Some(Native::PromiseConstructor))
+            .then(|| prototype_object(closure))
+    }
+
+    /// `SpeciesConstructor(promise, %Promise%)`, reduced to the prototype the promise `then`
+    /// hands back should carry.
+    ///
+    /// `p.then(f)` on a subclass instance answers a promise of the subclass, which is what keeps
+    /// a cancellable-promise layer's own methods reachable down a chain rather than only on the
+    /// first link. Every step is observable and every step is taken: `constructor` off the
+    /// promise, then `@@species` off that. A library that writes `static get [Symbol.species]()
+    /// { return Promise; }` -- the standard way to opt a subclass *out* of this -- gets the
+    /// intrinsic back, and that is `None`.
+    fn promise_species_prototype(
+        &mut self,
+        promise: &Value,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let constructor = self.read_property(promise, "constructor", instruction)?;
+        if !is_an_object(&constructor) {
+            return Ok(None);
+        }
+        let named = self.read_computed(
+            &constructor,
+            &Value::Symbol(Symbol::WellKnown(WellKnown::Species)),
+            instruction,
+        )?;
+        let species = if matches!(named, Value::Null | Value::Undefined) {
+            constructor
+        } else {
+            named
+        };
+        Ok(self.promise_subclass_prototype(&species))
+    }
+
+    /// Give a freshly built promise the subclass prototype its constructor asked for.
+    fn as_promise_of(promise: Value, prototype: Option<Value>) -> Value {
+        if let Some(prototype) = prototype {
+            record_prototype(&promise, prototype);
+        }
+        promise
+    }
+
     /// What `Promise.any` rejects with when nothing succeeded: the reasons, and a sentence.
     ///
-    /// `errors` is not enumerated, for the same reason an error's `message` is not -- it is the
-    /// error saying what happened rather than a property of an object -- and an empty `any`
-    /// carries an empty one rather than none, so a handler can read `error.errors.length`
-    /// without knowing how the list it was given was empty.
+    /// An `AggregateError`, so `e.constructor.name` answers what a program's `if (e instanceof
+    /// AggregateError)` is testing for. It used to be a plain `Error` carrying an `errors`
+    /// array, which is a *plausible* wrong answer -- everything a handler reads off it is right
+    /// except what it is.
+    ///
+    /// The reasons are already a list here, so this reaches the constructor beneath the
+    /// iteration: `Promise.any` has nothing to iterate and no program code to run.
     fn aggregate_error(&mut self, reasons: Vec<Value>) -> Value {
-        let error = self.construct_error(
-            ErrorKind::Error,
-            &[Value::String("All promises were rejected".to_owned())],
-        );
-        if let Value::Object(object) = &error {
-            object
-                .borrow_mut()
-                .set_non_enumerable("errors", Value::Array(ArrayData::new(reasons)));
-        }
-        error
+        self.construct_error(
+            ErrorKind::Aggregate,
+            &[
+                Value::Array(ArrayData::new(reasons)),
+                Value::String("All promises were rejected".to_owned()),
+            ],
+        )
     }
 
     /// Run every queued job, moving the virtual clock forward to reach each timer.
@@ -23569,7 +23800,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         current: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         Ok(Some(match parent {
-            Native::Error(kind) => self.construct_error(kind, arguments),
+            Native::Error(kind) => self.construct_error_reached(kind, arguments, current)?,
             Native::NodeEventEmitter => node_event_emitter(),
             Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
@@ -23743,7 +23974,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
             Value::Native(Native::Error(kind)) => {
-                let error = self.construct_error(kind, &arguments);
+                let error = self.construct_error_reached(kind, &arguments, current)?;
                 self.stack.push(error);
             }
             Value::Native(Native::ArrayConstructor) => {
@@ -24593,6 +24824,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             !same_value(&recorded, &token)
         });
         Ok(Value::Boolean(held.len() != before))
+    }
+
+    /// The error constructor a *program* reached, as opposed to one the machine raised itself.
+    ///
+    /// They differ in exactly one place. `new AggregateError(errors, message)` iterates its
+    /// first argument -- it is `IterableToList`, not an array-like read -- so it can run the
+    /// program's own `Symbol.iterator` and can fail. Every other kind takes its arguments as
+    /// they are, which is why [`Vm::construct_error`] stays infallible and every internal
+    /// `TypeError` the machine raises can keep using it.
+    fn construct_error_reached(
+        &mut self,
+        kind: ErrorKind,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !matches!(kind, ErrorKind::Aggregate) {
+            return Ok(self.construct_error(kind, arguments));
+        }
+        let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let errors = Value::Array(ArrayData::new(self.drain_iterable(&source, instruction)?));
+        let mut listed = arguments.to_vec();
+        match listed.first_mut() {
+            Some(slot) => *slot = errors,
+            None => listed.push(errors),
+        }
+        Ok(self.construct_error(kind, &listed))
     }
 
     /// Build an error instance whose prototype is this run's prototype for that kind.
@@ -26315,6 +26572,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `FromPropertyDescriptor`: the fields the record holds, and no others.
+    ///
+    /// Distinct from [`Self::completed_descriptor`], which fills the absent ones in with their
+    /// defaults. A *partial* descriptor is a real thing in the specification -- it is what
+    /// `[[Set]]` hands `[[DefineOwnProperty]]` to change a value without touching the flags --
+    /// and a handler that is shown a completed one is being told about attributes nobody asked
+    /// to change.
+    fn descriptor_object(described: &Descriptor) -> Value {
+        let mut data = ObjectData::default();
+        if let Some(value) = &described.value {
+            data.set("value", value.clone());
+        }
+        if let Some(writable) = described.writable {
+            data.set("writable", Value::Boolean(writable));
+        }
+        if let Some(get) = &described.get {
+            data.set("get", get.clone());
+        }
+        if let Some(set) = &described.set {
+            data.set("set", set.clone());
+        }
+        if let Some(enumerable) = described.enumerable {
+            data.set("enumerable", Value::Boolean(enumerable));
+        }
+        if let Some(configurable) = described.configurable {
+            data.set("configurable", Value::Boolean(configurable));
+        }
+        Value::Object(Rc::new(RefCell::new(data)))
+    }
+
     /// `FromPropertyDescriptor(ToPropertyDescriptor(x))`: every field spelled out.
     fn completed_descriptor(described: &Descriptor) -> Value {
         let mut data = ObjectData::default();
@@ -26805,6 +27092,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .properties
                     .borrow()
                     .get(name)
+                    // A subclass of a built-in inherits that built-in's statics, which is the
+                    // whole of what `class P extends Promise {}` does to the two *constructors*.
+                    // The link is an ordinary prototype pointer, but what it points at is an
+                    // intrinsic with no property store -- so the store walk above runs out and
+                    // `P.resolve`, `P.all` and `A.from` all read as `undefined`. Asked of the
+                    // built-in rather than of a table, so a program that replaced
+                    // `Promise.resolve` is seen from the subclass too.
+                    .or_else(|| {
+                        inherited_builtin(closure)
+                            .map(|native| self.property(&Value::Native(native), name))
+                            .filter(|found| !matches!(found, Value::Undefined))
+                    })
                     // No fallback for `name` or `length`: both are stored on the closure, and
                     // answering them from the proto as well would resurrect one a program had
                     // just deleted -- which is precisely the observation `configurable: true`
@@ -27498,7 +27797,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Vec<String>, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return Ok(own_property_keys(&self.intrinsics, target));
+            // Symbol keys included: `Reflect.ownKeys`, `Object.assign` and `Object.freeze` all
+            // reach a proxy's target through here, and all three are defined over both kinds.
+            // Internal slots stay out -- copying a collection's `@@entries` would be copying the
+            // machine rather than the object.
+            return Ok(own_property_keys_with_symbols(&self.intrinsics, target));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -28463,6 +28766,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Number(0.0))
     }
 
+    /// Allocate a `Symbol(description)` and remember it by serial.
+    ///
+    /// The remembering is the point. A symbol-keyed property is stored under the *string*
+    /// `@@symbol:{serial}`, so the object holds the key and not the symbol -- and
+    /// `Object.getOwnPropertySymbols` has to answer with the symbol itself, the same one by
+    /// identity. Nothing else can produce it: `Symbol()` deliberately makes a different symbol
+    /// every time it is called.
+    ///
+    /// Serials come from the module realm when there is one, so that two modules of the same
+    /// program cannot mint the same key for two different symbols.
+    fn new_symbol(&mut self, description: Option<String>) -> Value {
+        let allocate = |serial: &mut u64, symbols: &mut Vec<Rc<UniqueSymbol>>| {
+            *serial += 1;
+            let symbol = Rc::new(UniqueSymbol {
+                serial: *serial,
+                description,
+            });
+            symbols.push(Rc::clone(&symbol));
+            Value::Symbol(Symbol::Unique(symbol))
+        };
+        match &self.module_realm {
+            Some(realm) => {
+                let mut realm = realm.borrow_mut();
+                let ModuleRealmShared {
+                    symbol_serial,
+                    symbols,
+                    ..
+                } = &mut *realm;
+                allocate(symbol_serial, symbols)
+            }
+            None => allocate(&mut self.symbol_serial, &mut self.symbols),
+        }
+    }
+
+    /// The symbol a reserved store key names, or `None` when the key is an internal slot.
+    ///
+    /// Both halves of the question are answered here because both are the same question: this
+    /// interpreter stores a symbol key as a string with a reserved prefix, and so does its own
+    /// bookkeeping -- `@@entries` for a collection, `@@trace` on an error, `@@disposeEntries` on
+    /// a stack. Reflection must report the first kind and must never report the second, and this
+    /// is the one place that line is drawn.
+    fn symbol_of_key(&self, key: &str) -> Option<Symbol> {
+        if let Some(symbol) = WellKnown::from_property_key(key) {
+            return Some(Symbol::WellKnown(symbol));
+        }
+        let serial = Symbol::serial_in_key(key)?;
+        let held = |symbols: &[Rc<UniqueSymbol>]| {
+            symbols
+                .iter()
+                .find(|symbol| symbol.serial == serial)
+                .map(|symbol| Symbol::Unique(Rc::clone(symbol)))
+        };
+        match &self.module_realm {
+            Some(realm) => held(&realm.borrow().symbols),
+            None => held(&self.symbols),
+        }
+    }
+
+    /// The own keys of `target` that a reflection operation reporting symbols sees.
+    ///
+    /// String keys first in the store's order, then symbol keys in theirs, which is
+    /// `OrdinaryOwnPropertyKeys`. Internal slots are dropped: they share the reserved prefix
+    /// with symbol keys and are not properties of the object at all.
+    fn own_keys_reflected(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let keys = match target {
+            // A proxy answers with a trap rather than a store, and the trap already reports
+            // both kinds -- reduced to reserved strings on the way in, and restored here.
+            Value::Proxy(_) => self.own_keys(target, instruction)?,
+            _ => own_property_keys_with_symbols(&self.intrinsics, target),
+        };
+        let (reserved, named): (Vec<String>, Vec<String>) = keys
+            .into_iter()
+            .partition(|key| key.starts_with(RESERVED_KEY_PREFIX));
+        let mut reflected: Vec<Value> = named.into_iter().map(Value::String).collect();
+        reflected.extend(
+            reserved
+                .into_iter()
+                .filter_map(|key| self.symbol_of_key(&key))
+                .map(Value::Symbol),
+        );
+        Ok(reflected)
+    }
+
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
     /// assignment spelling. The write itself still goes through `set_computed` after the same
     /// descriptor probe used by `set_or_throw`, so setters and proxy traps run only once.
@@ -28554,11 +28944,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !is_reflect_target(receiver) {
                 return Ok(false);
             }
-            let descriptor = Descriptor {
-                value: Some(value),
-                ..Descriptor::default()
-            };
-            return self.define_on_receiver(receiver, name, &descriptor, instruction);
+            return self.define_on_receiver(receiver, name, value, instruction);
         }
         let parent = self.prototype_for(target, instruction)?;
         if !matches!(parent, Value::Null | Value::Undefined) {
@@ -28567,47 +28953,80 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !is_reflect_target(receiver) {
             return Ok(false);
         }
-        self.define_on_receiver(
-            receiver,
-            name,
-            &Descriptor {
+        self.define_on_receiver(receiver, name, value, instruction)
+    }
+
+    /// The tail of `OrdinarySetWithOwnDescriptor`: the write lands on the *receiver*, and what
+    /// it is allowed to change there is decided by what the receiver already holds.
+    ///
+    /// The distinction this makes is the whole of the operation. A receiver that already has an
+    /// own data property is redefined with a descriptor carrying **only** `[[Value]]`, so its
+    /// writable, enumerable and configurable flags are left exactly as they were; a receiver
+    /// that has no own property gets `CreateDataProperty`, which is the full descriptor with all
+    /// three flags true. Completing the partial descriptor instead -- filling the three absent
+    /// fields with their `false` defaults -- turns the first write through a proxy into a
+    /// freeze, and every write after it is refused. That is one write per property, which is
+    /// what a reactive store looks like when it stops working.
+    fn define_on_receiver(
+        &mut self,
+        receiver: &Value,
+        name: &str,
+        value: Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
+        let descriptor = match held {
+            // An accessor on the receiver is refused outright, whichever half it has: the
+            // target's data property is what decided this is a data write, and the receiver
+            // never agreed to that.
+            Some((Property::Accessor { .. }, _)) => return Ok(false),
+            Some((Property::Value(_), attributes)) if !attributes.writable => return Ok(false),
+            Some((Property::Value(_), _)) => Descriptor {
+                value: Some(value),
+                ..Descriptor::default()
+            },
+            None => Descriptor {
                 value: Some(value),
                 writable: Some(true),
                 enumerable: Some(true),
                 configurable: Some(true),
                 ..Descriptor::default()
             },
-            instruction,
-        )
+        };
+        self.define_own_operation(receiver, name, &descriptor, instruction)
     }
 
-    fn define_on_receiver(
+    /// `target.[[DefineOwnProperty]](name, descriptor)`, asked as an operation rather than of a
+    /// store, so a proxy answers with its trap and keeps the descriptor *partial* while it does.
+    fn define_own_operation(
         &mut self,
-        receiver: &Value,
+        target: &Value,
         name: &str,
         descriptor: &Descriptor,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
-        if let Some((property, attributes)) = held {
-            match property {
-                Property::Accessor { set: None, .. } => return Ok(false),
-                Property::Value(_) if !attributes.writable => return Ok(false),
-                _ => {}
-            }
+        let Value::Proxy(proxy) = target else {
+            return self.define_own(target, name, descriptor, instruction);
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let key = Value::String(name.to_owned());
+        let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
+            // No trap: the definition forwards to the target as the record it is. Round-tripping
+            // it through a descriptor object here is what used to complete it.
+            return self.define_own_operation(&inner, name, descriptor, instruction);
+        };
+        // `FromPropertyDescriptor`, which spells out only the fields the record actually has --
+        // a handler that reads `"writable" in descriptor` can see the difference.
+        let object = Self::descriptor_object(descriptor);
+        let handler = proxy.handler.clone();
+        let list = vec![inner.clone(), Self::trap_key(&key), object];
+        let answered = self.call_value(&trap, handler, list, instruction)?;
+        if !answered.is_truthy() {
+            return Ok(false);
         }
-        if let Value::Proxy(_) = receiver {
-            let object = Self::completed_descriptor(descriptor);
-            return Ok(self
-                .dispatch_native(
-                    Native::ReflectDefineProperty,
-                    &Value::Undefined,
-                    &[receiver.clone(), Value::String(name.to_owned()), object],
-                    instruction,
-                )?
-                .is_truthy());
-        }
-        self.define_own(receiver, name, descriptor, instruction)
+        self.check_define_invariant(&inner, &key, descriptor, instruction)?;
+        Ok(true)
     }
 
     /// One of the six `Uint8Array` conversions between bytes and text.
@@ -30594,15 +31013,24 @@ fn binary(
 /// `cause` follows InstallErrorCause: the property exists when the options object *has* a
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
 /// the whole point of that step in the specification.
+///
+/// `name` is deliberately **not** an own property. It lives on `Error.prototype` and on each
+/// kind's prototype, exactly as the specification puts it, and an own one here would shadow
+/// anything a subclass says about itself: a `name = "TimeoutError"` class field is installed on
+/// the instance during construction, and an own `name` written afterwards overwrote it with
+/// `"Error"`. `catch (e) { if (e.name === "TimeoutError") }` -- how a server tells a timeout
+/// from a real failure -- then took the wrong branch, and so did a `get name()` accessor on the
+/// subclass prototype, which an own property on the instance shadows outright.
+///
+/// `message` is own only when one was passed, which is the other half of the same rule: the
+/// empty default belongs to the prototype too.
 fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
-    // `new SuppressedError(error, suppressed, message)`: the message comes *third*, because the
-    // two throws it is reporting are what the type is for and the sentence is an afterthought.
-    let suppressed = matches!(kind, ErrorKind::Suppressed);
-    let message_at = usize::from(suppressed) * 2;
-    let message = match arguments.get(message_at) {
-        None | Some(Value::Undefined) => String::new(),
-        Some(value) => value.to_display_string(),
+    let message_at = kind.message_index();
+    let given = match arguments.get(message_at) {
+        None | Some(Value::Undefined) => None,
+        Some(value) => Some(value.to_display_string()),
     };
+    let message = given.clone().unwrap_or_default();
 
     let name = kind.name();
     let mut data = ObjectData {
@@ -30612,8 +31040,10 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     // Every own property of an error is non-enumerable, which is why `JSON.stringify(err)` is
     // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
     // program that serialises one is asking for the fields it names rather than all of them.
-    data.set_non_enumerable("message", Value::String(message.clone()));
-    data.set_non_enumerable("name", Value::String(name.to_owned()));
+    //
+    // `stack` is installed first, because that is the order the own keys come out in: the
+    // header is attached by the constructor before the message is, and a program that copies an
+    // error by walking `Object.getOwnPropertyNames` reproduces the order it saw.
     data.set_non_enumerable(
         "stack",
         Value::String(if message.is_empty() {
@@ -30622,16 +31052,13 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
             format!("{name}: {message}")
         }),
     );
-    if suppressed {
-        // Both are own properties whatever was passed, `undefined` included: a program that
-        // catches one of these reads `.error` and `.suppressed` without checking first.
+    if let Some(message) = given {
+        data.set_non_enumerable("message", Value::String(message));
+    }
+    for (index, field) in kind.carried_fields().iter().enumerate() {
         data.set_non_enumerable(
-            "error",
-            arguments.first().cloned().unwrap_or(Value::Undefined),
-        );
-        data.set_non_enumerable(
-            "suppressed",
-            arguments.get(1).cloned().unwrap_or(Value::Undefined),
+            field,
+            arguments.get(index).cloned().unwrap_or(Value::Undefined),
         );
     }
     if let Some(Value::Object(options)) = arguments.get(message_at + 1)
@@ -31392,7 +31819,11 @@ fn call_native(
         }),
         // Symbol keys are stored as reserved strings, and a string cannot be turned back into
         // the symbol it came from -- so this reports none rather than inventing any.
-        Native::ObjectGetOwnPropertySymbols => Value::Array(ArrayData::new(Vec::new())),
+        // The machine answers this one: recovering a symbol from the reserved key it is stored
+        // under needs the realm's registry, which a free function has no way to reach.
+        Native::ObjectGetOwnPropertySymbols => {
+            unreachable!("`Object.getOwnPropertySymbols` is dispatched by the interpreter")
+        }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let key = arguments
@@ -31403,7 +31834,10 @@ fn call_native(
         Native::ObjectGetOwnPropertyDescriptors => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let mut data = ObjectData::default();
-            for key in own_property_keys(intrinsics, target) {
+            // Symbol keys too: this is how a faithful copy is made, and one that quietly leaves
+            // them out is the bug this whole family had. The result object holds them under the
+            // same reserved key the source did, so it needs no registry to build.
+            for key in own_property_keys_with_symbols(intrinsics, target) {
                 if let Some(descriptor) = own_descriptor(intrinsics, target, &key) {
                     data.set(&key, descriptor);
                 }
@@ -39870,26 +40304,33 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     }
 }
 
-/// Reify a reserved well-known symbol key when a reflection operation returns it to JavaScript.
-///
-/// Internal own-key walks use strings for compactness, but `Reflect.ownKeys` must hand a symbol
-/// back to the program. Unique symbols cannot be reconstructed from their opaque serial here;
-/// well-known symbols are stable and cover the built-in keys that the realm publishes.
-fn reflection_key_value(key: String) -> Value {
-    WellKnown::ALL
-        .into_iter()
-        .find(|symbol| symbol.property_key() == key)
-        .map_or(Value::String(key), |symbol| {
-            Value::Symbol(Symbol::WellKnown(symbol))
-        })
-}
-
 /// The own-key walk used by operations whose specification includes symbol keys.
 ///
 /// Most reflection helpers in this interpreter intentionally return only names because the
 /// current compact symbol representation cannot reconstruct a `Symbol` value from its reserved
 /// slot. Internal algorithms do not need that reconstruction: preserving the slot is enough to
 /// read and define the same symbol-keyed property without losing its identity.
+/// Whether a reserved store key names a symbol-keyed property rather than an internal slot.
+///
+/// The two share the `@@` prefix, which is what made reflection unable to tell them apart and so
+/// report neither. A key is a symbol's exactly when a well-known symbol claims it or it carries
+/// a `Symbol()` serial; everything else -- `@@entries`, `@@trace`, `@@disposeEntries`,
+/// `@@private:x` -- is the machine's own bookkeeping and is not a property of the object at all.
+fn is_symbol_key(key: &str) -> bool {
+    WellKnown::from_property_key(key).is_some() || Symbol::serial_in_key(key).is_some()
+}
+
+/// `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
+///
+/// Distinct from [`own_property_keys_including_symbols`], which hands back every reserved slot
+/// and is what an internal algorithm wants; this is the list a *program* is allowed to see.
+fn own_property_keys_with_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
+    own_property_keys_including_symbols(intrinsics, target)
+        .into_iter()
+        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX) || is_symbol_key(key))
+        .collect()
+}
+
 fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     let mut keys = own_property_keys(intrinsics, target);
     // Ordinary reflection intentionally hides symbol slots, but internal operations such as
@@ -41971,7 +42412,8 @@ mod tests {
         assert!(own_property_keys(&intrinsics, &constructor).contains(&"escape".to_owned()));
     }
 
-    /// An error with no message gets a bare header, not one with a trailing colon.
+    /// An error with no message gets a bare header, not one with a trailing colon -- and no own
+    /// `message` at all, because an absent message is the prototype's empty one.
     #[test]
     fn an_empty_message_produces_a_bare_stack_header() {
         for arguments in [Vec::new(), vec![Value::Undefined]] {
@@ -41982,11 +42424,28 @@ mod tests {
                 data.borrow().get("stack"),
                 Some(Value::String("Error".to_owned()))
             );
-            assert_eq!(
-                data.borrow().get("message"),
-                Some(Value::String(String::new()))
-            );
+            assert_eq!(data.borrow().get_own("message"), None);
         }
+    }
+
+    /// `name` is the prototype's, never the instance's.
+    ///
+    /// An own one would shadow a subclass's `name` class field, which is installed on the
+    /// instance while the constructor runs -- so `e.name` answered "Error" for an error the
+    /// program had explicitly named, and `if (e.name === "TimeoutError")` took the wrong branch.
+    #[test]
+    fn an_error_instance_has_no_own_name() {
+        let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned())])
+        else {
+            panic!("construct_error returns an object");
+        };
+        let data = data.borrow();
+        assert_eq!(data.get_own("name"), None);
+        assert_eq!(
+            data.get_own("message"),
+            Some(&Value::String("m".to_owned())),
+            "a message that was passed is still the instance's own"
+        );
     }
 
     /// A `DataView` reads *big*-endian unless told otherwise -- the opposite of the platform and

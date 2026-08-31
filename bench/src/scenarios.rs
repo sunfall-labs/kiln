@@ -19,7 +19,7 @@ use kiln_ir::{
 use kiln_module_graph::ModuleGraph;
 use kiln_native::{NativeBuildOptions, NativeBuilder, NativeProfile};
 use kiln_native_toolchain::{Toolchain, ToolchainError};
-use kiln_proto::{Request, Response, RunSummary, SourceView, Stats};
+use kiln_proto::{Request, Response, RunSummary, SourceView, Stats, StepBudget};
 
 use crate::report::{Measurement, NativeArtifactInfo, Scenario};
 use crate::timing::Samples;
@@ -310,6 +310,10 @@ impl WarmDaemonFixture {
                 path,
                 project_root,
                 node: false,
+                // The benchmark measures the daemon's answer for a fixed program, which is the
+                // same program every iteration -- a budget could only turn a measurement into a
+                // refusal.
+                steps: StepBudget::Unmetered,
                 source_view,
             })
             .map_err(|error| format!("warm daemon Run: {error}"))?;

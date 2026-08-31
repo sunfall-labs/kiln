@@ -14,4 +14,10 @@
 # Large third-party probe bundles; the small ones are committed as fixtures.
 /conformance/thirdparty/zod.bundle.js
 /conformance/thirdparty/yaml.bundle.js
+# The heavy set's three biggest: 9.9 MB of the TypeScript compiler, and two bundles that inline
+# a whole toolchain. Same line as the two above -- reproducible from build.sh, too large to be a
+# diff anyone reads.
+/conformance/thirdparty/typescript.bundle.js
+/conformance/thirdparty/react-ssr.bundle.js
+/conformance/thirdparty/babel.bundle.js
 /conformance/thirdparty/.scratch/

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use kiln_proto::NativeProfile;
+use kiln_proto::{NativeProfile, StepBudget};
 
 // `--interval` outlived the poll it was written for, but it now names the debounce window
 // rather than a cadence. Dropping it was the alternative, and it was tempting: one fewer
@@ -57,6 +57,9 @@ pub enum Command {
         node: bool,
         native: bool,
         profile: NativeProfile,
+        /// How long the program may run. Unmetered unless `--max-steps` says otherwise: a
+        /// person running their own program is not the caller a step budget protects.
+        steps: StepBudget,
     },
     Build {
         path: PathBuf,
@@ -115,6 +118,7 @@ where
     let mut output: Option<PathBuf> = None;
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
+    let mut max_steps: Option<u64> = None;
     let mut shared = false;
     let mut dry_run = false;
     let mut only_positional = false;
@@ -178,6 +182,10 @@ where
                 let raw = value_for(&flag, inline, &mut args)?;
                 profile = Some(parse_profile(&raw)?);
             }
+            "--max-steps" => {
+                let raw = value_for(&flag, inline, &mut args)?;
+                max_steps = Some(parse_max_steps(&raw)?);
+            }
             _ => {
                 return Err(Error::usage(format!("unknown option `{arg}`")));
             }
@@ -234,6 +242,16 @@ where
             "--profile only applies to native `kiln run` or `kiln build`",
         ));
     }
+    if max_steps.is_some() && name != "run" {
+        return Err(Error::usage("--max-steps only applies to `kiln run`"));
+    }
+    // The native backend compiles the step counter out entirely, so a budget there would be a
+    // flag that silently does nothing -- which is the one thing this parser refuses to be.
+    if max_steps.is_some() && native {
+        return Err(Error::usage(
+            "--max-steps cannot be combined with `kiln run --native`: the native backend does not count steps",
+        ));
+    }
 
     let command = match name.as_str() {
         "check" => Command::Check {
@@ -244,6 +262,7 @@ where
             node,
             native,
             profile: profile.unwrap_or_default(),
+            steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
         },
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -356,6 +375,19 @@ fn parse_interval(raw: &str) -> Result<Duration> {
     Ok(Duration::from_millis(ms))
 }
 
+/// `--max-steps <n>`: the bound a caller wants imposed on a program that may not terminate.
+///
+/// Zero is rejected rather than treated as "no bound", because a budget of nothing is a request
+/// nobody means and the absence of the flag already says the other thing.
+fn parse_max_steps(raw: &str) -> Result<u64> {
+    match raw.parse::<u64>() {
+        Ok(0) | Err(_) => Err(Error::usage(format!(
+            "--max-steps expects a positive number of interpreter steps, got `{raw}`"
+        ))),
+        Ok(steps) => Ok(steps),
+    }
+}
+
 fn parse_profile(raw: &str) -> Result<NativeProfile> {
     match raw {
         "native-dev" => Ok(NativeProfile::Dev),
@@ -431,6 +463,10 @@ options:
     --output <path>    with `build`, write the native executable or shared library here
     --out <path>       with `test`, write schema-1 conformance results here
     --profile <name>   native-dev, native-check, or native-release
+    --max-steps <n>    with `run`, refuse after n interpreter steps. Unbounded by
+                       default: a program you are running yourself is not one this
+                       tool needs protecting from. The conformance corpus keeps its
+                       own bound, which is where the guarantee is actually needed.
     -h, --help         show this help
     -V, --version      show version and protocol information
 
@@ -520,6 +556,7 @@ mod tests {
                 node: false,
                 native: true,
                 profile: NativeProfile::Check,
+                steps: StepBudget::Unmetered,
             }
         );
     }
@@ -596,6 +633,48 @@ mod tests {
         assert!(
             usage_error(&["test", "test262", "--parse-only", "--out", "result.json"])
                 .contains("interpreter run")
+        );
+    }
+
+    /// The step budget is the caller's to choose, and `kiln run` chooses none.
+    ///
+    /// `ExecutionLimits::default()` bounds a run at a million steps so a corpus probe that loops
+    /// forever fails instead of hanging the runner. That bound reached `kiln run` too, where
+    /// nobody is queued behind the program and node imposes none -- and the smallest schema
+    /// `ajv` can compile exceeds it on its own, so it answered "too long" to a program that was
+    /// not.
+    #[test]
+    fn a_run_is_unmetered_unless_the_caller_asks_for_a_bound() {
+        assert!(matches!(
+            run(&["run", "a.mjs"]).command,
+            Command::Run {
+                steps: StepBudget::Unmetered,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "a.mjs", "--max-steps", "5000"]).command,
+            Command::Run {
+                steps: StepBudget::Limited(5000),
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "a.mjs", "--max-steps=5000"]).command,
+            Command::Run {
+                steps: StepBudget::Limited(5000),
+                ..
+            }
+        ));
+        // A budget of nothing is a request nobody means, and the absence of the flag already
+        // says the other thing.
+        assert!(usage_error(&["run", "a.mjs", "--max-steps", "0"]).contains("positive number"));
+        assert!(usage_error(&["run", "a.mjs", "--max-steps", "many"]).contains("positive number"));
+        assert!(usage_error(&["check", "a.mjs", "--max-steps", "10"]).contains("only applies"));
+        // Refused rather than accepted and ignored: the native backend does not count steps.
+        assert!(
+            usage_error(&["run", "a.mjs", "--native", "--max-steps", "10"])
+                .contains("cannot be combined")
         );
     }
 
