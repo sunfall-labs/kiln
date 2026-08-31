@@ -20817,6 +20817,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetPrototype
         | Instruction::LoadPrototype
         | Instruction::LoadSuperProperty(_)
+        | Instruction::LoadSuperElement
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
@@ -21083,6 +21084,14 @@ fn stack_effect(
                 Err(underflow(1))
             } else {
                 Ok((height, false))
+            }
+        }
+        // The value replaces both the prototype and the key that were read from.
+        Instruction::LoadSuperElement => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // The link replaces the value it was read from.
@@ -22773,6 +22782,16 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        // The computed spelling. The key was pushed first, so it is the value the read leaves
+        // its answer in place of.
+        Instruction::LoadSuperElement => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value prototype = stack[--sp]; kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, stack[sp - 1], receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+            )
+            .unwrap();
+        }
         Instruction::LoadPrototype => {
             let unwind = unwind_or_return(handlers, site);
             writeln!(
@@ -23219,6 +23238,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 72);
                 word(&mut hash, u64::from(*value));
             }
+            Instruction::LoadSuperElement => byte(&mut hash, 73),
             Instruction::SuperCall { argc } => {
                 byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));

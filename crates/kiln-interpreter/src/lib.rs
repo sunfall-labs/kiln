@@ -12849,6 +12849,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(value);
                 }
+                Instruction::LoadSuperElement => {
+                    let target = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    if target.is_nullish() {
+                        let shown = key.to_display_string();
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read properties of {} (reading '{shown}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let receiver = self.this_value.clone();
+                    let read =
+                        self.read_computed_with_receiver(&target, &key, &receiver, current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    self.stack.push(value);
+                }
                 Instruction::SetProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;

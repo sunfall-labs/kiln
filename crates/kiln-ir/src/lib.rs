@@ -221,6 +221,13 @@ pub enum Instruction {
     /// super.who } }` asked `P.prototype`'s getter about `P.prototype` and answered `undefined`
     /// where the instance had the value.
     LoadSuperProperty(u32),
+    /// `super[k]`: the computed spelling of [`Instruction::LoadSuperProperty`].
+    /// Stack: `[key, prototype] -> [value]`.
+    ///
+    /// The key sits *under* the prototype because the language evaluates it first: the home
+    /// object's `[[Prototype]]` is read after the key expression has run, so a key expression
+    /// that re-links the home object is seen by the lookup it precedes.
+    LoadSuperElement,
     /// Read a value's `[[Prototype]]`. Stack: `[value] -> [prototype]`.
     ///
     /// The read half of [`Instruction::SetPrototype`], and it exists for exactly one caller:
@@ -4238,6 +4245,13 @@ impl Compiler {
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.code.push(Instruction::LoadSuperProperty(name));
             }
+            ExpressionKind::SuperComputedMember { property } => {
+                // The key first, then the prototype: `super[f()]` runs `f` before it asks the
+                // home object what it inherits from.
+                self.expression(property);
+                self.load_home_prototype();
+                self.code.push(Instruction::LoadSuperElement);
+            }
             ExpressionKind::Function(function) => {
                 // A function expression the source gave a name to can call itself by that name,
                 // and the name is visible nowhere else. The scope pushed here is what keeps it
@@ -6337,7 +6351,7 @@ impl Compiler {
             // could reach `Object.prototype` -- `super.toString()` in a base class reported that
             // `Object.prototype.toString` is not a constructor. `SuperCall` now means `super()`
             // and nothing else.
-            ExpressionKind::SuperMember { .. } => {
+            ExpressionKind::SuperMember { .. } | ExpressionKind::SuperComputedMember { .. } => {
                 self.code.push(Instruction::LoadThis);
                 self.expression(callee);
                 self.array_literal(arguments, span);
@@ -7107,6 +7121,9 @@ fn expression_contains_direct_eval(expression: &Expression) -> bool {
                     || function_contains_direct_eval(function)
             }
         }),
+        ExpressionKind::SuperComputedMember { property } => {
+            expression_contains_direct_eval(property)
+        }
         ExpressionKind::Identifier(_)
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
@@ -7539,6 +7556,9 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
         ExpressionKind::PrivateIn { object, .. } => {
             collect_identifiers(object, names, collecting);
+        }
+        ExpressionKind::SuperComputedMember { property } => {
+            collect_identifiers(property, names, collecting);
         }
         ExpressionKind::Literal(_)
         | ExpressionKind::This
