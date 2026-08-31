@@ -1053,13 +1053,20 @@ mod tests {
     use super::*;
     use crate::workload::{SMALL, Workload};
 
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn temp_root() -> PathBuf {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        temp_root_at(timestamp)
+    }
+
+    fn temp_root_at(timestamp: u128) -> PathBuf {
+        let sequence = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "kiln-bench-linked-{}-{}",
+            "kiln-bench-linked-{}-{timestamp}-{sequence}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_nanos())
         ))
     }
 
@@ -1137,6 +1144,11 @@ esac
         );
         assert_eq!(measurement.iterations, 1);
         assert_eq!(measurement.stats, kiln_proto::Stats::default());
+    }
+
+    #[test]
+    fn parallel_fixtures_remain_distinct_when_the_clock_repeats() {
+        assert_ne!(temp_root_at(7), temp_root_at(7));
     }
 
     #[test]
