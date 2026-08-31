@@ -23786,6 +23786,106 @@ int main(void) {{
         );
     }
 
+    #[test]
+    fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
+        for (operator, expected_value_of_calls) in [
+            (BinaryOp::Multiply, 0),
+            (BinaryOp::Add, 1),
+            (BinaryOp::LessThan, 1),
+        ] {
+            let generated = emit(&Program {
+                version: BYTECODE_VERSION,
+                constants: vec![
+                    Constant::String("valueOf".to_owned()),
+                    Constant::String("called".to_owned()),
+                    Constant::Number(1.0f64.to_bits()),
+                ],
+                code: vec![
+                    Instruction::LoadBuiltin(Builtin::Symbol),
+                    Instruction::Call { argc: 0 },
+                    Instruction::MakeFunction(0),
+                    Instruction::Call { argc: 0 },
+                    Instruction::Binary(operator),
+                    Instruction::Return,
+                ],
+                local_count: 0,
+                functions: vec![
+                    FunctionProto {
+                        prologue_end: 0,
+                        asynchronous: false,
+                        name: Some("right".to_owned()),
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        declared_length: 0,
+                        local_count: 0,
+                        code: vec![
+                            Instruction::Const(0),
+                            Instruction::MakeFunction(1),
+                            Instruction::NewObject { count: 1 },
+                            Instruction::Return,
+                        ],
+                        upvalues: Vec::new(),
+                    },
+                    FunctionProto {
+                        prologue_end: 0,
+                        asynchronous: false,
+                        name: Some("valueOf".to_owned()),
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        declared_length: 0,
+                        local_count: 0,
+                        code: vec![
+                            Instruction::Const(1),
+                            Instruction::HostCall {
+                                op: HostOp::WriteStdout,
+                                argc: 1,
+                            },
+                            Instruction::Const(2),
+                            Instruction::Return,
+                        ],
+                        upvalues: Vec::new(),
+                    },
+                ],
+            })
+            .expect("symbol conversion order probe emits");
+            let wrapper = format!(
+                r#"
+static int value_of_calls;
+static int host_call(void *context, uint16_t operation, uint16_t argc,
+                     const kiln_value *arguments, kiln_value *result) {{
+    (void)context;
+    if (operation != UINT16_C(1) || argc != 1 || arguments == NULL || result == NULL ||
+        arguments[0].tag != KILN_VALUE_STRING || arguments[0].len != 6 ||
+        memcmp(arguments[0].ptr, "called", 6) != 0) return 90;
+    ++value_of_calls;
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_host host = {{host_call, NULL}};
+    kiln_value result = kiln_c99_undefined();
+    int status = {symbol}(&host, &result);
+    if (value_of_calls != {expected_value_of_calls}) return 10;
+    return status == KILN_C99_THROWN ? 0 : 11;
+}}
+"#,
+                symbol = generated.symbol,
+                expected_value_of_calls = expected_value_of_calls
+            );
+            let run = run_with_main(&generated, &wrapper, "symbol-operand-order");
+            assert!(
+                run.status.success(),
+                "{operator:?} operand order failed ({:?}): {}",
+                run.status.code(),
+                String::from_utf8_lossy(&run.stderr)
+            );
+        }
+    }
+
     fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
         Program {
             version: BYTECODE_VERSION,
