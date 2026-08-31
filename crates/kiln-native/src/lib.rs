@@ -4995,8 +4995,10 @@ mod tests {
         let project = TestDirectory::new("kiln-native-node-fs-promises");
         let entry = project.path.join("main.mjs");
         let data = project.path.join("data.txt");
+        let malformed = project.path.join("malformed.bin");
         let missing = project.path.join("missing.txt");
         let path = data.to_string_lossy();
+        let malformed_path = malformed.to_string_lossy();
         let missing_path = missing.to_string_lossy();
         fs::write(
             &entry,
@@ -5018,6 +5020,12 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
   console.log(info.isFile());
   delete info['@@kiln:node:is-file'];
   console.log(info.isFile());
+  console.log(Object.hasOwn(info, '@@kiln:node:is-file') === false);
+  console.log(('@@kiln:node:is-file' in info) === false);
+  console.log(Object.getOwnPropertyDescriptor(info, '@@kiln:node:is-file') === undefined);
+  return writeFile({malformed_path:?}, new Uint8Array([0xe2, 0x82]));
+}}).then(() => readFile({malformed_path:?}, 'utf8')).then((text) => {{
+  console.log(text === '\ufffd');
   return readFile({missing_path:?});
 }}).then(() => console.log('unexpected'), (error) => {{
   console.log(error.code);
@@ -5026,6 +5034,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
 }});
 "#,
                 path = path,
+                malformed_path = malformed_path,
                 missing_path = missing_path
             ),
         )
@@ -5059,7 +5068,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
         );
         assert_eq!(
             output.stdout,
-            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
+            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
         );
     }
 
