@@ -74,10 +74,8 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
         }
     };
 
-    // These programs are ordinary scripts.  Choosing the script goal keeps module-only syntax
-    // from being silently accepted in a corpus whose expected output was observed from a script.
     let display_path = path.to_string_lossy();
-    let module = parse_with_goal(display_path.as_ref(), &source, SourceGoal::Script);
+    let module = parse_with_goal(display_path.as_ref(), &source, source_goal(path));
     if !module.diagnostics.is_empty() {
         return failed_with(
             module
@@ -162,6 +160,25 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
     );
     result.stdout = stdout;
     result
+}
+
+/// The ECMAScript goal a corpus program is parsed under, decided by extension and nothing else.
+///
+/// `.js` is a Script.  Most of this corpus is, its expected output was observed from a script,
+/// and choosing the module goal for all of it would let module-only syntax be silently accepted
+/// in programs that were never run that way.
+///
+/// `.mjs` is a Module, because in Node that extension *is* the declaration and the server probes
+/// use it to make one.  Note what this deliberately does not do: Node also takes the goal from
+/// the nearest package.json `type` field, and nothing here reads it, so a `.js` file in a
+/// `"type": "module"` package is a Script to Kiln and a Module to Node.  That divergence is a
+/// work item for the compatibility graft (design.md §14 step 10) rather than something to paper
+/// over in the harness, and `conformance/manifest.toml`'s `[server]` table records it as one.
+fn source_goal(path: &Path) -> SourceGoal {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("mjs") => SourceGoal::Module,
+        _ => SourceGoal::Script,
+    }
 }
 
 /// The reason a program cannot be run in process, if there is one.
@@ -288,11 +305,8 @@ fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((by
         );
         fs::write(&script, source).expect("fixture script is written");
 
-        let result = run_node_against_expected_stdout(
-            &script,
-            "11\n104\n11\ntrue\nfalse\n",
-            RunMode::Node,
-        );
+        let result =
+            run_node_against_expected_stdout(&script, "11\n104\n11\ntrue\nfalse\n", RunMode::Node);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
     }

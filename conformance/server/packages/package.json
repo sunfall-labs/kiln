@@ -1,0 +1,9 @@
+{
+  "name": "kiln-conformance-server-packages",
+  "private": true,
+  "type": "module",
+  "description": "Pins the framework the s04 probe imports by bare specifier. See conformance/server/README.md.",
+  "dependencies": {
+    "fastify": "5.12.1"
+  }
+}

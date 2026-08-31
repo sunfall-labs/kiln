@@ -22,6 +22,9 @@
 #     needs-bundle  a TypeScript entry point that imports a library. It runs only as a
 #                   single-file bundle, which effect/build.sh produces out of process (npm ci +
 #                   esbuild), so the runner reports it skipped-with-reason rather than failed.
+#     needs-packages  a program that imports a package by bare specifier and runs only where
+#                   `npm ci` has been run beside it. Unlike needs-bundle there is no build step
+#                   and no generated file: the probe's own imports are the thing under test.
 #
 # It deliberately says nothing about whether a test passes, and the runner deliberately does not
 # read it - it decides from the file extension instead. A field in the file that records an
@@ -876,4 +879,171 @@ expected_stdout = """
 true s -150 0
 {"n":"a\\"b\\\\cé\\n"}
 true
+"""
+
+# ---------------------------------------------------------------------------------------------
+# server/ - 4 probes for the compiled-Node-server target, authored in this repository.
+#
+# These are a horizon marker rather than a backlog rung. Every other group asks a question the
+# ladder in docs/language-coverage.md already answers in order; this group asks the one that
+# design.md §14 step 10 ("Node compatibility graft") names and nothing has reached yet. They are
+# a separate group so the [corpus] counts above keep meaning "what was ported from
+# porffor-effect-findings" and the [regress] count keeps meaning "defects already found".
+#
+# Two properties of a server break the shape every other probe relies on, and both are handled
+# in the probe rather than in the runner.
+#
+# A server does not terminate, and its output goes to a socket rather than to stdout. So each
+# probe is *self-driving*: it listens on port 0, issues a fixed sequence of requests to itself
+# through node:http, prints one line per response, and closes the server. That leaves them
+# ordinary single-file programs with byte-comparable stdout, executed by the existing runner
+# with no new machinery, and it keeps a failure naming a defect rather than a region.
+#
+# A response carries a `Date:` header from the host clock, and ADR 0015 gave the realm a virtual
+# clock starting at the epoch. No probe prints a response header kiln does not itself set, so
+# none of them can be made to pass by reading the host clock. That collision is real, and it is
+# what ADR 0031 was written to answer: the clock, entropy, timezone and locale become realm
+# capabilities whose defaults are today's constants. So these four are expected to pass in the
+# deterministic realm - a server that works only by reading the real clock is not finished.
+#
+# Requests are issued sequentially, never concurrently, so the recorded output does not depend
+# on the order two responses happen to complete in.
+[server]
+tests = 4
+authored = "2026-08-30"
+target = """
+A Node HTTP server, compiled. design.md §14 places the compatibility graft at step 10 and the \
+async event loop at step 11; docs/language-coverage.md's ten-step ladder is a prerequisite for \
+all four of these, and the corpus is currently at step 0. Nothing here is expected to pass for \
+a long time. The value is the refusal, which names the next thing in the way.\
+"""
+expected_output_method = """
+Ran each probe under `node v25.9.0` on this machine, stdout and stderr merged, and recorded the \
+bytes verbatim. All four exit 0 and write nothing to stderr. Each was then run 30 times and \
+produced identical output every time, which is what qualified the assertions below: the first \
+draft of s03 also printed the number of `data` events the request body arrived in, and that is \
+removed rather than recorded. It was stable, but it is stable as a property of node's stream \
+implementation and of loopback TCP rather than of JavaScript, and requiring kiln to reproduce \
+node's write coalescing would be over-specification. Reassembling the chunks is the semantic \
+being asserted; how many there were is not.\
+"""
+observed_refusal = """
+Observed on 2026-08-30 with `kiln --one-shot test conformance`. The runner refuses all four \
+during lowering, and the distribution is the whole point of recording it: three want \
+`module dependency `node:http` is not supported by this execution backend`, and s04 separately \
+wants `module dependency `fastify``. So the group already ranks its own backlog - builtin \
+modules first, packages second - rather than collapsing to one blocker.
+
+Two by-hand observations sit behind those, from `kiln --one-shot run`, and they are worth more \
+than the runner's summary. `node:http` refuses earlier and differently there - \
+`invalid module specifier `node:http`: URL schemes are not supported` - so the `node:` scheme is \
+rejected by the resolver before any backend is consulted, and builtin-module resolution is a \
+prerequisite for the graft rather than a consequence of it. And a probe importing only \
+`fastify` gets `imports missing export `default`` naming `node_modules/fastify/fastify.js`, \
+which means ADR 0027's NodePackageResolver already resolves the bare specifier to its real file \
+on disk: the gap there is CommonJS interop, not package resolution.\
+"""
+extension_finding = """
+The probes are `.mjs` rather than `.js`, and that is a finding rather than a preference. The \
+runner parsed every program under the Script goal, so the first draft of these four - written \
+as `.js` - refused with `Cannot use import statement outside a module`: a harness-shaped answer \
+naming the runner's own default instead of kiln's server gap. kiln-conformance now takes the \
+goal from the extension, `.js` staying a Script so the rest of the corpus keeps the guarantee \
+that comment was protecting. Node decides the same question from the nearest package.json `type` field, \
+which nothing here consults; `conformance/server/packages/package.json` sets `"type": "module"` \
+and has no effect. Ordinary Node applications are overwhelmingly `.js`-plus-`type`, so this is \
+a real item for the step 10 graft, and the extension chosen here sidesteps it deliberately so \
+that these four probes measure the thing they were written to measure.\
+"""
+
+[[test]]
+id = "server/s01-http-hello"
+group = "server"
+source = "server/s01-http-hello.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "functions", "closures", "objects", "member-access", "callbacks", "event-emitter", "sockets", "event-loop", "process-lifetime"]
+catches = """
+Whether kiln can be a server at all. Ten lines, no dependencies, one route, a constant body. \
+The demand is out of all proportion to the size: a builtin namespace import, closures over the \
+server, object literals and member access, EventEmitter underneath every `.on`, a real accept \
+loop, and - the requirement nothing else in this corpus makes - the process must stay alive \
+with no work pending because a socket is listening. Every existing probe terminates when its \
+last statement runs; this one terminates only when it decides to.\
+"""
+expected_stdout = """
+200 text/plain kiln
+"""
+
+[[test]]
+id = "server/s02-routing-json"
+group = "server"
+source = "server/s02-routing-json.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "promises", "async-await", "microtasks", "collections", "url", "json", "destructuring", "iterators", "for-of", "closures"]
+catches = """
+The honest floor for "a server someone would actually write": dispatch on a path, await the \
+handler, serialize the result, branch the status code. Adds Promises and async/await over an \
+I/O callback, `Map` as a route table, `URL` and its search params, `JSON.stringify`, array \
+destructuring, and `for...of` over a literal. The 404 is asserted because a router that only \
+proves its happy path proves very little.\
+"""
+expected_stdout = """
+200 {"ok":true}
+200 {"path":"/echo","q":"1"}
+404 {"error":"not found"}
+"""
+
+[[test]]
+id = "server/s03-request-body-streams"
+group = "server"
+source = "server/s03-request-body-streams.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "streams", "buffer", "event-emitter", "readable-stream", "typed-arrays", "json", "closures"]
+catches = """
+Where design.md §5's leverage claim gets tested rather than asserted. Streams, `Buffer` and \
+`EventEmitter` are supposed to be JS/TS on top of a thin HostOps syscall surface, so that \
+editing one does not recompile Rust; this probe is the smallest program that depends on all \
+three being real. A request body arrives as `data` events, is reassembled with `Buffer.concat`, \
+and is measured in bytes and decoded as UTF-8 - which also pins that a Buffer length is bytes \
+and not code units, the distinction ADR 0022 made for strings.\
+"""
+notes = """
+The number of `data` events is deliberately not asserted; see expected_output_method above.\
+"""
+expected_stdout = """
+200 {"method":"POST","bytes":12,"text":"kiln streams"}
+"""
+
+[[test]]
+id = "server/s04-fastify"
+group = "server"
+source = "server/packages/s04-fastify.mjs"
+status = "needs-packages"
+features = ["modules", "builtin-modules", "node-http", "node-packages", "commonjs", "cjs-esm-interop", "promises", "async-await", "top-level-await", "classes", "prototype-chain", "getters-setters", "proxies", "regexp", "streams", "json"]
+catches = """
+The ecosystem gate, and the only probe here that is not expected to be reachable in one step \
+from the one above it. Fastify is the smallest credible real framework - ESM-native, and a \
+closure of 41 packages and 1,139 JavaScript files rather than the thousands a full application \
+pulls. Between them they exercise route-tree matching, schema compilation, hooks, content-type \
+parsing and a great deal of prototype and getter machinery that no hand-written probe would \
+think to cover. Expect it to refuse for a long list of reasons for a long time; it is a horizon \
+marker, not a milestone.\
+"""
+notes = """
+`status = "needs-packages"` is to node_modules what "needs-bundle" is to effect/bundle: the \
+probe imports `fastify` by bare specifier, so it runs only where `npm ci` has been run in \
+conformance/server/packages/. The directory is gitignored for the same reason effect/bundle/ \
+is - it is reproducible from package-lock.json and is 41 packages of machine output.
+
+This is deliberately NOT bundled the way the Effect programs are. Bundling would answer a \
+question kiln has already answered: ADR 0027 gave bare specifiers a resolution policy, and a \
+by-hand check confirms `fastify` resolves to its real file in node_modules today. Bundling \
+would erase exactly the part still unproven - Node package resolution and CommonJS interop at \
+the scale a real dependency tree has - so the probe keeps its imports.\
+"""
+expected_stdout = """
+200 {"ok":true}
+200 {"id":"7"}
+200 {"got":{"hello":"kiln"}}
+404 {"error":"not found"}
 """

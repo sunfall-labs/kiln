@@ -517,9 +517,9 @@ expected_stdout = "bundle\n"
     fn the_repositorys_own_manifest_reads() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/manifest.toml");
         let manifest = Manifest::read(&path).expect("the corpus manifest is in the subset");
-        // 32 ported plus the regression probes authored here, which are a separate group so
-        // the ported counts keep meaning what they say.
-        assert_eq!(manifest.tests().len(), 39);
+        // 32 ported plus the regression probes and the server probes authored here, which are
+        // separate groups so the ported counts keep meaning what they say.
+        assert_eq!(manifest.tests().len(), 43);
         assert_eq!(
             manifest
                 .tests_under(&manifest.directory().join("guard"))
@@ -531,6 +531,12 @@ expected_stdout = "bundle\n"
                 .tests_under(&manifest.directory().join("regress"))
                 .count(),
             7
+        );
+        assert_eq!(
+            manifest
+                .tests_under(&manifest.directory().join("server"))
+                .count(),
+            4
         );
         let probe = manifest
             .tests()

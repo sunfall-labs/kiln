@@ -10,3 +10,9 @@ effect/bundle/
 effect/src/node_modules
 
 effect/node_modules/
+
+# Installed by `npm ci` in server/packages/ for the s04 probe, which imports `fastify` by bare
+# specifier on purpose (ADR 0027). 41 packages of machine output, reproducible from
+# package-lock.json, so it is generated rather than committed - the same reasoning as
+# effect/bundle/ above. A checkout without it skips s04 exactly as effect/ skips without bundles.
+server/packages/node_modules/

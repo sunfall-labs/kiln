@@ -106,6 +106,7 @@ count() { printf '%s\n' "$1" | grep -c . || true; }
 TOTAL="$(count "$TESTS")"
 GUARD="$(count "$(printf '%s\n' "$TESTS" | grep '	guard	' || true)")"
 EFFECT="$(count "$(printf '%s\n' "$TESTS" | grep '	effect	' || true)")"
+SERVER="$(count "$(printf '%s\n' "$TESTS" | grep '	server	' || true)")"
 REGRESS="$(count "$(printf '%s\n' "$TESTS" | grep '	regress	' || true)")"
 FIXTURE_COUNT="$(count "$FIXTURES")"
 
@@ -155,6 +156,7 @@ kiln_say '```'
 	printf 'guard    %5s  standalone probes, one JavaScript behaviour each\n' "$GUARD"
 	printf 'effect   %5s  real Effect-TS programs, whole-library at once\n' "$EFFECT"
 	printf 'regress  %5s  Kiln-native regressions, one fixed defect each\n' "$REGRESS"
+	printf 'server   %5s  compiled-Node-server probes; the design.md §14 step 10 horizon\n' "$SERVER"
 	printf '                %s committed input fixture(s), not counted as tests\n' "$FIXTURE_COUNT"
 	printf -- '-------  -----\n'
 	printf 'total    %5s\n' "$TOTAL"
