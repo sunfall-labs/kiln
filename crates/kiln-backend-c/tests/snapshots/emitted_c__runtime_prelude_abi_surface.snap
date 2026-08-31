@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -416,6 +417,7 @@ struct kiln_node_server {
 struct kiln_node_socket {
 typedef struct kiln_node_client_request {
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
+static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown);
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
@@ -469,12 +471,26 @@ typedef struct kiln_realm_http_response {
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+int kiln_realm_http_client_request_id_active(uint64_t *out_id);
+#define KILN_REALM_HTTP_AGENT_CONNECT 1
+#define KILN_REALM_HTTP_AGENT_REUSE 2
+#define KILN_REALM_HTTP_AGENT_QUEUED 3
+#define KILN_REALM_HTTP_AGENT_IDLE 4
+#define KILN_REALM_HTTP_AGENT_DISPATCH 5
+#define KILN_REALM_HTTP_AGENT_RETIRE 6
+int kiln_realm_http_agent_acquire_active(const uint8_t *host, uint64_t host_len,
+int kiln_realm_http_client_owner_active(uint64_t resource, void **out_owner);
+int kiln_realm_http_agent_connected_active(const uint8_t *host, uint64_t host_len,
+int kiln_realm_http_agent_release_active(uint64_t resource, int reusable,
 int kiln_realm_http_client_start_active(uint64_t resource,
 int kiln_realm_http_client_write_active(uint64_t resource,
 int kiln_realm_http_client_end_active(uint64_t resource,
 int kiln_realm_http_response_start_active(uint64_t resource, uint64_t id,
 int kiln_realm_http_response_write_active(uint64_t resource, uint64_t id,
 int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
+static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
+static void kiln_c99_node_drop_http_connection(void *opaque);
+static int kiln_c99_node_client_attach(kiln_node_client_request *request,
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
