@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -470,6 +469,7 @@ typedef struct kiln_realm_http_response {
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+int kiln_realm_http_client_request_id_active(uint64_t *out_id);
 int kiln_realm_http_client_start_active(uint64_t resource,
 int kiln_realm_http_client_write_active(uint64_t resource,
 int kiln_realm_http_client_end_active(uint64_t resource,
@@ -562,6 +562,13 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_assign(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_assign_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const char *key,
+static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static kiln_value *kiln_c99_exotic_store(kiln_value target);
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
@@ -569,6 +576,7 @@ static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
 static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
@@ -713,7 +721,12 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
+static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_assign(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_assign_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const char *key,
+static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
@@ -832,6 +845,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_array_push(kiln_value target, kiln_value value) {
 #define KILN_C99_INSPECT_DEPTH 2
@@ -952,6 +966,8 @@ static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *s
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role) {
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value) {
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target) {
+static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len) {
+static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len) {
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
 static int kiln_c99_new_promise(kiln_value *out) {
