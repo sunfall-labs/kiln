@@ -779,6 +779,16 @@ fn runtime_diagnostic(error: &ExecutionError) -> Diagnostic {
 /// not a loop, and it is the one thing in the corpus the default budget cannot pay for.
 const UNICODE_STRING_BUILDER_STEPS: u64 = 60_000_000;
 
+/// The harness files whose own work outgrows the default budget before the test starts.
+///
+/// Both are *generators of cases* rather than assertion helpers: `regExpUtils.js` builds strings
+/// over whole Unicode ranges, and `iteratorZipUtils.js` runs its body once per combination of
+/// prefixes of three four-element sequences -- a hundred and fifty-six of them, each verifying
+/// every property of every result. A test that spends its budget on the harness has not found a
+/// language bug, and the raise is spent on the two files that provably need it and nowhere else:
+/// the note above applies unchanged to everything not on this list.
+const BUDGETED_INCLUDES: [&str; 2] = ["regExpUtils.js", "iteratorZipUtils.js"];
+
 /// Execution limits for a Test262 case.
 ///
 /// The default for everything except the cases that include `regExpUtils.js`. Raising the budget
@@ -791,7 +801,7 @@ fn conformance_limits(case: &TestCase) -> ExecutionLimits {
     let default = ExecutionLimits::default();
     if case_includes(case)
         .iter()
-        .any(|include| include == "regExpUtils.js")
+        .any(|include| BUDGETED_INCLUDES.contains(&include.as_str()))
     {
         return ExecutionLimits {
             max_steps: UNICODE_STRING_BUILDER_STEPS,

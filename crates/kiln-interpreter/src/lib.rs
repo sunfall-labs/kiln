@@ -8976,7 +8976,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // were lost and nothing constructed a call that reached them. `Set.prototype.union`
         // panicked the process rather than answering.
         match native {
-
+            Native::SetOperation(operation) => {
+                return self.set_operation(operation, receiver, arguments, instruction);
+            }
             Native::ArrayCopy(method) => {
                 return self.array_copy(method, receiver, arguments, instruction);
             }
@@ -16385,25 +16387,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut at = 0;
         while at < characters.len() {
             if characters[at] != '$' || at + 1 >= characters.len() {
-                out.push(characters[at]);
+                push_bounded_char(&mut out, characters[at])?;
                 at += 1;
                 continue;
             }
             match characters[at + 1] {
                 '$' => {
-                    out.push('$');
+                    push_bounded_char(&mut out, '$')?;
                     at += 2;
                 }
                 '&' => {
-                    out.push_str(matched);
+                    push_bounded(&mut out, matched)?;
                     at += 2;
                 }
                 '`' => {
-                    out.push_str(&utf16_slice(units, 0..position));
+                    push_bounded(&mut out, &utf16_slice(units, 0..position))?;
                     at += 2;
                 }
                 '\'' => {
-                    out.push_str(&utf16_slice(units, tail..units.len()));
+                    push_bounded(&mut out, &utf16_slice(units, tail..units.len()))?;
                     at += 2;
                 }
                 '<' => {
@@ -16412,19 +16414,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // there is a groups object for it to name something in.
                     let Some(end) = characters[at + 2..].iter().position(|found| *found == '>')
                     else {
-                        out.push('$');
+                        push_bounded_char(&mut out, '$')?;
                         at += 1;
                         continue;
                     };
                     if matches!(named, Value::Undefined) {
-                        out.push('$');
+                        push_bounded_char(&mut out, '$')?;
                         at += 1;
                         continue;
                     }
                     let name: String = characters[at + 2..at + 2 + end].iter().collect();
                     let value = self.read_property(named, &name, instruction)?;
                     if !matches!(value, Value::Undefined) {
-                        out.push_str(&self.as_text(&value, instruction)?);
+                        push_bounded(&mut out, &self.as_text(&value, instruction)?)?;
                     }
                     at += end + 3;
                 }
@@ -16439,18 +16441,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Some(both) if both >= 1 && both <= captures.len() => (both, 3),
                         _ if single >= 1 && single <= captures.len() => (single, 2),
                         _ => {
-                            out.push('$');
+                            push_bounded_char(&mut out, '$')?;
                             at += 1;
                             continue;
                         }
                     };
                     if let Value::String(text) = &captures[index - 1] {
-                        out.push_str(text);
+                        push_bounded(&mut out, text)?;
                     }
                     at += width;
                 }
                 _ => {
-                    out.push('$');
+                    push_bounded_char(&mut out, '$')?;
                     at += 1;
                 }
             }
@@ -23729,6 +23731,18 @@ fn bounded_string(bytes: usize) -> Result<(), ExecutionError> {
 }
 
 /// Append to a string under [`MAX_STRING_BYTES`], refusing rather than growing past it.
+/// Append one character, refusing past [`MAX_STRING_BYTES`].
+///
+/// A replacement template is expanded character by character, and `$1` against a megabyte-long
+/// match appends a megabyte every time it appears -- so the refusal has to be checked as the
+/// string grows. Checked once at the end, the allocation has already happened: this is what took
+/// `staging/sm/String/replace-math.js` to 3.9 GB.
+fn push_bounded_char(out: &mut String, character: char) -> Result<(), ExecutionError> {
+    bounded_string(out.len().saturating_add(character.len_utf8()))?;
+    out.push(character);
+    Ok(())
+}
+
 fn push_bounded(out: &mut String, text: &str) -> Result<(), ExecutionError> {
     bounded_string(out.len().saturating_add(text.len()))?;
     out.push_str(text);
@@ -24588,13 +24602,13 @@ fn expand_replacement(
     let mut at = 0;
     while at < characters.len() {
         if characters[at] != '$' || at + 1 >= characters.len() {
-            out.push(characters[at]);
+            push_bounded_char(&mut out, characters[at])?;
             at += 1;
             continue;
         }
         match characters[at + 1] {
             '$' => {
-                out.push('$');
+                push_bounded_char(&mut out, '$')?;
                 at += 2;
             }
             '&' => {
@@ -24623,7 +24637,7 @@ fn expand_replacement(
                         Some(index) if index > 0 && index < groups.len() => (index, 2),
                         // Not a group reference at all, so the text stands as written.
                         _ => {
-                            out.push('$');
+                            push_bounded_char(&mut out, '$')?;
                             at += 1;
                             continue;
                         }
@@ -24635,7 +24649,7 @@ fn expand_replacement(
                 at += width;
             }
             _ => {
-                out.push('$');
+                push_bounded_char(&mut out, '$')?;
                 at += 1;
             }
         }
