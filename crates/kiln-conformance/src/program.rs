@@ -13,7 +13,9 @@ use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
 use kiln_interpreter::{ExecutionLimits, execute, execute_node};
 use kiln_module_graph::ModuleGraph;
-use kiln_module_resolver::NodeRuntimeResolver;
+use kiln_module_resolver::{
+    NodeModuleFormat, NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, ResolvedModule,
+};
 use kiln_runtime::CaptureHost;
 
 use crate::case::{
@@ -51,9 +53,7 @@ pub fn run_node_against_expected_stdout(
 ) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
-        result: if source_goal(path) == SourceGoal::Module
-            || path.extension().is_some_and(|extension| extension == "cjs")
-        {
+        result: if is_javascript_source(path) {
             run_node_module(path, expected, mode)
         } else {
             run_with_executor(path, expected, mode, true)
@@ -68,6 +68,24 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     let started = Instant::now();
     crate::source_compiler::install();
 
+    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let resolver = match NodeRuntimeResolver::new(project_root) {
+        Ok(resolver) => resolver,
+        Err(error) => return failed(DiagnosticPhase::Harness, error.to_string(), started),
+    };
+    let resolved_entry = ResolvedModule::new(path.to_path_buf(), ResolutionKind::Relative);
+    let format = match resolver.node_format(&resolved_entry) {
+        Ok(Some(format)) => format,
+        Ok(None) => {
+            return failed(
+                DiagnosticPhase::Harness,
+                format!("Node resolver did not classify source {}", path.display()),
+                started,
+            );
+        }
+        Err(error) => return failed(DiagnosticPhase::Harness, error.to_string(), started),
+    };
+
     if matches!(mode, RunMode::Parse) {
         let source = match fs::read_to_string(path) {
             Ok(source) => source,
@@ -79,7 +97,11 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
                 );
             }
         };
-        let module = parse_with_goal(&path.to_string_lossy(), &source, SourceGoal::Module);
+        let module = parse_with_goal(
+            &path.to_string_lossy(),
+            &source,
+            source_goal_for_node_format(format),
+        );
         return if module.diagnostics.is_empty() && !module.panicked {
             CaseResult::new(Outcome::Pass, Vec::new(), String::new(), started)
         } else {
@@ -96,11 +118,6 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
         };
     }
 
-    let project_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let resolver = match NodeRuntimeResolver::new(project_root) {
-        Ok(resolver) => resolver,
-        Err(error) => return failed(DiagnosticPhase::Harness, error.to_string(), started),
-    };
     struct NodeFrontend;
     impl kiln_module_graph::Frontend for NodeFrontend {
         fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
@@ -261,6 +278,18 @@ fn source_goal(path: &Path) -> SourceGoal {
     }
 }
 
+fn source_goal_for_node_format(format: NodeModuleFormat) -> SourceGoal {
+    match format {
+        NodeModuleFormat::EsModule => SourceGoal::Module,
+        NodeModuleFormat::CommonJs => SourceGoal::Script,
+    }
+}
+
+fn is_javascript_source(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "js" || extension == "mjs" || extension == "cjs")
+}
+
 /// The reason a program cannot be run in process, if there is one.
 ///
 /// The Effect half of the corpus is TypeScript that imports a library, and the corpus builds each
@@ -389,5 +418,156 @@ fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((by
             run_node_against_expected_stdout(&script, "11\n104\n11\ntrue\nfalse\n", RunMode::Node);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
+    fn node_mode_uses_package_type_for_js_modules() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-package-type-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        fs::write(root.join("package.json"), r#"{"type":"module"}"#)
+            .expect("package manifest is written");
+        let entry = root.join("entry.js");
+        fs::write(root.join("dependency.js"), "export const answer = 42;\n")
+            .expect("module dependency is written");
+        fs::write(
+            &entry,
+            "import { answer } from './dependency.js'; console.log(answer);\n",
+        )
+        .expect("module entry is written");
+
+        let parse_result = run_node_against_expected_stdout(&entry, "", RunMode::Parse);
+        let result = run_node_against_expected_stdout(&entry, "42\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            parse_result.result.outcome,
+            Outcome::Pass,
+            "{parse_result:?}"
+        );
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
+    fn node_mode_uses_module_for_mjs_by_extension() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-mjs-module-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let entry = root.join("entry.mjs");
+        fs::write(&entry, "export const answer = 42; console.log(answer);\n")
+            .expect("module entry is written");
+
+        let result = run_node_against_expected_stdout(&entry, "42\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
+    fn node_mode_uses_commonjs_for_package_type_and_cjs() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-commonjs-default-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        fs::write(root.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("package manifest is written");
+        fs::write(
+            root.join("dependency.cjs"),
+            "module.exports = { answer: 42 };\n",
+        )
+        .expect("CommonJS dependency is written");
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "const dependency = require('./dependency.cjs'); console.log(dependency.answer);\n",
+        )
+        .expect("CommonJS entry is written");
+
+        let result = run_node_against_expected_stdout(&entry, "42\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
+    fn node_parse_rejects_top_level_await_in_cjs() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-cjs-parse-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let entry = root.join("entry.cjs");
+        fs::write(&entry, "await Promise.resolve();\n").expect("CommonJS entry is written");
+
+        let result = run_node_against_expected_stdout(&entry, "", RunMode::Parse);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Fail, "{result:?}");
+        assert_eq!(
+            result.result.diagnostics[0].phase,
+            DiagnosticPhase::Parse,
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn node_mode_reclassifies_js_after_package_manifest_deletion() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-package-delete-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let package = root.join("package.json");
+        fs::write(&package, r#"{"type":"module"}"#).expect("package manifest is written");
+        fs::write(root.join("dependency.js"), "export const answer = 42;\n")
+            .expect("module dependency is written");
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "import { answer } from './dependency.js'; console.log(answer);\n",
+        )
+        .expect("module entry is written");
+
+        let module_result = run_node_against_expected_stdout(&entry, "42\n", RunMode::Node);
+        fs::remove_file(&package).expect("package manifest is deleted");
+        let commonjs_result = run_node_against_expected_stdout(&entry, "", RunMode::Parse);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            module_result.result.outcome,
+            Outcome::Pass,
+            "{module_result:?}"
+        );
+        assert_eq!(
+            commonjs_result.result.outcome,
+            Outcome::Fail,
+            "{commonjs_result:?}"
+        );
+        assert_eq!(
+            commonjs_result.result.diagnostics[0].phase,
+            DiagnosticPhase::Parse,
+            "{commonjs_result:?}"
+        );
     }
 }
