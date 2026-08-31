@@ -9,8 +9,8 @@ use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 use kiln_proto::{
-    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, SyncId, TestMode,
-    TestOutcome,
+    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, StepBudget, SyncId,
+    TestMode, TestOutcome,
 };
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -500,6 +500,7 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
         .request_at_view(
             &Request::Run {
                 node: false,
+                steps: StepBudget::Unmetered,
                 source_view: old_view,
                 path: "source.js".into(),
                 project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -749,6 +750,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         client
             .request(&Request::Run {
                 node: false,
+                steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: run_path,
                 project_root: run_root,
@@ -802,6 +804,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     let Response::Ran(second) = editor
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
             project_root,
@@ -868,6 +871,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         client
             .request(&Request::Run {
                 node: false,
+                steps: StepBudget::Unmetered,
                 source_view: initial_view,
                 path: old_entry,
                 project_root: old_root,
@@ -888,6 +892,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
     let Response::Ran(new) = setup
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: setup.source_view(),
             path: "./snapshot-entry.js".into(),
             project_root: root.clone(),
@@ -939,7 +944,8 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
     .expect("prepare unsaved buffer");
 
     engine.set_source(file, "console.log('new');\n".into());
-    let Response::Ran(summary) = execute_prepared_run(prepared, false) else {
+    let Response::Ran(summary) = execute_prepared_run(prepared, false, StepBudget::Unmetered)
+    else {
         panic!("expected run summary");
     };
     assert_eq!(summary.stdout, "old\n");
@@ -1098,6 +1104,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
     let Response::Ran(first) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
@@ -1117,6 +1124,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
     let Response::Ran(second) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
@@ -2083,6 +2091,7 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
         .expect("set Node source");
     let response = client
         .request(&Request::Run {
+            steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2120,6 +2129,7 @@ fn production_daemon_compiles_direct_eval_at_runtime() {
     let Response::Ran(summary) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2156,6 +2166,7 @@ fn production_daemon_compiles_function_constructor_at_runtime() {
     let Response::Ran(summary) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2212,6 +2223,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     let Response::Ran(first) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2234,6 +2246,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     let Response::Ran(second) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2266,6 +2279,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
     let Response::Ran(failed) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2351,6 +2365,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let response = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2385,6 +2400,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let Response::Ran(updated) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2421,6 +2437,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let Response::Ran(failed) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2458,6 +2475,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let Response::Ran(restored) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2476,6 +2494,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let Response::Ran(second) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2517,6 +2536,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     let Response::Ran(cycle) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2598,6 +2618,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
     let Response::Ran(first) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path.clone(),
             project_root: project_root.clone(),
@@ -2633,6 +2654,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
     let Response::Ran(second) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path,
             project_root,
@@ -2693,6 +2715,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         let Response::Ran(result) = client
             .request(&Request::Run {
                 node: false,
+                steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: canonical_entry.clone(),
                 project_root: root.clone(),
@@ -2726,6 +2749,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         let Response::Ran(repeated) = client
             .request(&Request::Run {
                 node: false,
+                steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: "overlay.js".into(),
                 project_root: root.clone(),
@@ -2751,6 +2775,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
     let Response::Ran(lexical) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: canonical_entry.clone(),
             project_root: root.clone(),
@@ -2787,6 +2812,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
     let Response::Ran(newest) = client
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: "overlay.js".into(),
             project_root: root,

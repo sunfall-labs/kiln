@@ -11,9 +11,29 @@ use kiln_digest::Digest;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// How long one execution may run, counted in bytecode steps.
+///
+/// A budget is a promise to *whoever is waiting*, not a property of the language. A conformance
+/// runner and a resident daemon both need a program that loops forever to fail rather than hang,
+/// because something else is queued behind it. A person running their own program is not in that
+/// position: node imposes no instruction budget, and the smallest schema `ajv` can compile costs
+/// more than a million steps on its own -- so a budget there does not protect anybody, it just
+/// answers "your program is too long" to a program that was not.
+///
+/// So the caller says which of the two it is, and the engine's `ExecutionLimits::default()` stays
+/// the bounded one that every test already relies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StepBudget {
+    /// Run to completion, as node would. Nothing else is waiting on this execution.
+    #[default]
+    Unmetered,
+    /// Refuse after this many steps, so a loop that never ends is reported rather than endured.
+    Limited(u64),
+}
+
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -463,6 +483,10 @@ pub enum Request {
         project_root: String,
         /// Install the explicit Tokio-owned Node Adapter for this execution.
         node: bool,
+        /// How long this execution may run. The client decides, because the answer depends on
+        /// who is waiting: a corpus runner needs a loop to fail, a person running their own
+        /// program does not.
+        steps: StepBudget,
         source_view: SourceView,
     },
     /// Emit, compile, and link one module through the native backend.
@@ -850,8 +874,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v23_node_native_build_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 23);
+    fn protocol_v24_run_step_budget_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 24);
 
         let requests = [
             (
@@ -907,12 +931,14 @@ mod tests {
                     path: "main.mjs".to_owned(),
                     project_root: "/project".to_owned(),
                     node: true,
+                    steps: StepBudget::Limited(1_000_000),
                     source_view: SourceView(12),
                 },
                 serde_json::json!({"Run": {
                     "path": "main.mjs",
                     "project_root": "/project",
                     "node": true,
+                    "steps": {"Limited": 1_000_000},
                     "source_view": 12
                 }}),
             ),

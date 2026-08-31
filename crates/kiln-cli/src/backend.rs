@@ -7,7 +7,7 @@
 use kiln_proto::{
     CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, ProjectSummary, Request, ResolutionMap, Response, RunSummary,
-    SourceHash, SourceView, Stats, SyncId, TestMode, TestSummary,
+    SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -123,12 +123,14 @@ pub trait Backend: Send {
         path: String,
         project_root: String,
         node: bool,
+        steps: StepBudget,
         source_view: SourceView,
     ) -> Result<SourceResponse<RunSummary>> {
         match self.request(Request::Run {
             path,
             project_root,
             node,
+            steps,
             source_view,
         })? {
             Response::Ran(summary) => Ok(SourceResponse::Ready(summary)),
