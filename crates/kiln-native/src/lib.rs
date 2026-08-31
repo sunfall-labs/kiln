@@ -46,7 +46,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 2;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 3;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -3553,7 +3553,7 @@ mod tests {
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         assert_eq!(module_abi_identity(), "host-2;c-1");
-        assert!(runtime_abi_identity().contains("async-2"));
+        assert!(runtime_abi_identity().contains("async-3"));
         assert_eq!(
             native_number_abi_identity(),
             "kiln-native-number-provider-12"

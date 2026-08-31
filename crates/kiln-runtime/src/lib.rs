@@ -57,7 +57,10 @@ pub enum RuntimeHttpEvent {
     Finish {
         id: u64,
     },
-    Error(String),
+    Error {
+        id: u64,
+        message: String,
+    },
     Closed,
 }
 
@@ -89,7 +92,10 @@ pub enum RuntimeHttpClientEvent {
     ResponseEnd {
         id: u64,
     },
-    Error(String),
+    Error {
+        id: u64,
+        message: String,
+    },
     Closed,
 }
 
@@ -794,6 +800,29 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Vec::new();
         };
         let mut events = Vec::new();
+        // Body events are drained first. Hyper can publish Closed immediately after consuming
+        // the final response body, but Node observes finish before connection close.
+        let mut finished_bodies = Vec::new();
+        for (&id, receiver) in &mut connection.body_events {
+            while let Ok(event) = receiver.try_recv() {
+                if event == BodyEvent::Finish {
+                    finished_bodies.push(id);
+                }
+                events.push(match event {
+                    BodyEvent::Drain => RuntimeHttpEvent::Drain { id },
+                    BodyEvent::Finish => {
+                        if connection.close_after_response.remove(&id) {
+                            connection.transport.close_requested();
+                        }
+                        RuntimeHttpEvent::Finish { id }
+                    }
+                });
+            }
+        }
+        for id in finished_bodies {
+            connection.response_bodies.remove(&id);
+            connection.body_events.remove(&id);
+        }
         let Some(receiver) = connection.events.as_mut() else {
             return events;
         };
@@ -809,22 +838,15 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                     RuntimeHttpEvent::RequestData { id, data }
                 }
                 hyper_http::EngineEvent::RequestEnd { id } => RuntimeHttpEvent::RequestEnd { id },
-                hyper_http::EngineEvent::Error(message) => RuntimeHttpEvent::Error(message),
+                hyper_http::EngineEvent::Error { id, message } => {
+                    if id != 0 {
+                        connection.response_bodies.remove(&id);
+                        connection.body_events.remove(&id);
+                    }
+                    RuntimeHttpEvent::Error { id, message }
+                }
                 hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
             });
-        }
-        for (&id, receiver) in &mut connection.body_events {
-            while let Ok(event) = receiver.try_recv() {
-                events.push(match event {
-                    BodyEvent::Drain => RuntimeHttpEvent::Drain { id },
-                    BodyEvent::Finish => {
-                        if connection.close_after_response.remove(&id) {
-                            connection.transport.close_requested();
-                        }
-                        RuntimeHttpEvent::Finish { id }
-                    }
-                });
-            }
         }
         events
     }
@@ -1029,11 +1051,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             connection.client_bodies.remove(&id);
             connection.client_body_events.remove(&id);
         }
-        let Some(receiver) = self
-            .http_connections
-            .get_mut(&resource)
-            .and_then(|connection| connection.client_events.as_mut())
-        else {
+        let Some(receiver) = connection.client_events.as_mut() else {
             return events;
         };
         while let Ok(event) = receiver.try_recv() {
@@ -1055,7 +1073,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 hyper_http::ClientEvent::ResponseEnd { id } => {
                     RuntimeHttpClientEvent::ResponseEnd { id }
                 }
-                hyper_http::ClientEvent::Error(message) => RuntimeHttpClientEvent::Error(message),
+                hyper_http::ClientEvent::Error { id, message } => {
+                    if id != 0 {
+                        connection.client_bodies.remove(&id);
+                        connection.client_body_events.remove(&id);
+                    }
+                    RuntimeHttpClientEvent::Error { id, message }
+                }
                 hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
             });
         }

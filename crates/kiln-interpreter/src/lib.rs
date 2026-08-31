@@ -1793,6 +1793,9 @@ struct NodeConnection {
     runtime_http: bool,
     request: Option<Value>,
     response: Option<Value>,
+    client_requests: std::collections::BTreeMap<u64, Value>,
+    client_responses: std::collections::BTreeMap<u64, Value>,
+    next_client_request_id: u64,
     http_responses: Vec<(u64, Value)>,
     close_after_finish: bool,
     closed: bool,
@@ -1818,6 +1821,7 @@ struct HttpClientRequestState {
     object: Option<Rc<RefCell<ObjectData>>>,
     ended: bool,
     started: bool,
+    request_id: u64,
 }
 
 #[derive(Debug)]
@@ -7228,6 +7232,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                     ended: false,
                     started: false,
+                    request_id: 0,
                 }));
                 let request_object = node_http_client_request_object(&state);
                 let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
@@ -7471,6 +7476,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     runtime_http: protocol == ServerProtocol::Http,
                     request: None,
                     response: None,
+                    client_requests: std::collections::BTreeMap::new(),
+                    client_responses: std::collections::BTreeMap::new(),
+                    next_client_request_id: 1,
                     http_responses: Vec::new(),
                     close_after_finish: false,
                     closed: false,
@@ -7912,7 +7920,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
-                RuntimeHttpEvent::Error(message) => {
+                RuntimeHttpEvent::Error { id: _, message } => {
                     let error = self.construct_error(ErrorKind::Error, &[Value::String(message)]);
                     self.emit_http_server(server, "clientError", vec![error], instruction)?;
                 }
@@ -7945,8 +7953,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
-                RuntimeHttpClientEvent::Drain { id: _ }
-                | RuntimeHttpClientEvent::Finish { id: _ } => {
+                RuntimeHttpClientEvent::Drain { id } | RuntimeHttpClientEvent::Finish { id } => {
                     let name = if matches!(event, RuntimeHttpClientEvent::Drain { .. }) {
                         "drain"
                     } else {
@@ -7957,7 +7964,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .streams
                         .iter()
                         .find(|stream| stream.resource() == resource)
-                        .and_then(|stream| stream.request.clone())
+                        .and_then(|stream| stream.client_requests.get(&id).cloned())
                         .unwrap_or(Value::Undefined);
                     self.dispatch_node_event(
                         Native::NodeEventEmit,
@@ -7967,7 +7974,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseHead {
-                    id: _,
+                    id,
                     status,
                     reason,
                     headers,
@@ -7975,6 +7982,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
+                        id,
                         HttpResponseEvent::Head(kiln_runtime::node_http::HttpResponseHead {
                             status,
                             reason,
@@ -7984,29 +7992,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
-                RuntimeHttpClientEvent::ResponseData { id: _, data: body } => {
+                RuntimeHttpClientEvent::ResponseData { id, data: body } => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
+                        id,
                         HttpResponseEvent::Data(body),
                         instruction,
                     )?;
                 }
-                RuntimeHttpClientEvent::ResponseEnd { id: _ } => {
+                RuntimeHttpClientEvent::ResponseEnd { id } => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
+                        id,
                         HttpResponseEvent::End,
                         instruction,
                     )?;
+                    if let Some(stream) = owner
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.resource() == resource)
+                    {
+                        stream.client_responses.remove(&id);
+                        stream.client_requests.remove(&id);
+                    }
                 }
-                RuntimeHttpClientEvent::Error(message) => {
+                RuntimeHttpClientEvent::Error { id, message } => {
                     let request = owner
                         .borrow()
                         .streams
                         .iter()
                         .find(|stream| stream.resource() == resource)
-                        .and_then(|stream| stream.request.clone())
+                        .and_then(|stream| {
+                            if id == 0 {
+                                stream.request.clone()
+                            } else {
+                                stream.client_requests.get(&id).cloned()
+                            }
+                        })
                         .unwrap_or(Value::Undefined);
                     let error = self.construct_error(ErrorKind::Error, &[Value::String(message)]);
                     self.dispatch_node_event(
@@ -8015,6 +8040,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &[Value::String("error".into()), error],
                         instruction,
                     )?;
+                    if id != 0
+                        && let Some(stream) = owner
+                            .borrow_mut()
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                    {
+                        stream.client_responses.remove(&id);
+                        stream.client_requests.remove(&id);
+                    }
                 }
                 RuntimeHttpClientEvent::Closed => {
                     let actions = {
@@ -8023,7 +8058,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .streams
                             .iter_mut()
                             .find(|stream| stream.resource() == resource)
-                            .map(|stream| stream.driver.close_actions())
+                            .map(|stream| {
+                                stream.client_responses.clear();
+                                stream.client_requests.clear();
+                                stream.driver.close_actions()
+                            })
                             .unwrap_or_default()
                     };
                     for action in actions {
@@ -8066,6 +8105,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         owner: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
+        request_id: u64,
         event: HttpResponseEvent,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
@@ -8076,7 +8116,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .streams
                     .iter()
                     .find(|stream| stream.resource() == resource)
-                    .and_then(|stream| stream.request.clone())
+                    .and_then(|stream| stream.client_requests.get(&request_id).cloned())
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "HTTP response lost its ClientRequest".into(),
@@ -8122,7 +8162,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .iter_mut()
                     .find(|stream| stream.resource() == resource)
                 {
-                    connection.response = Some(incoming.clone());
+                    connection
+                        .client_responses
+                        .insert(request_id, incoming.clone());
                 }
                 let callback = state.borrow().callback.clone();
                 if is_callable(&callback) {
@@ -8136,7 +8178,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .streams
                     .iter()
                     .find(|stream| stream.resource() == resource)
-                    .and_then(|stream| stream.response.clone())
+                    .and_then(|stream| stream.client_responses.get(&request_id).cloned())
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "HTTP response body arrived before its head".into(),
@@ -8162,7 +8204,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .streams
                     .iter()
                     .find(|stream| stream.resource() == resource)
-                    .and_then(|stream| stream.response.clone())
+                    .and_then(|stream| stream.client_responses.get(&request_id).cloned())
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "HTTP response ended before its head".into(),
@@ -8569,7 +8611,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             Native::NodeClientRequestWrite => {
                 let bytes = node_body_bytes(arguments.first())?;
-                let (resource, started) = {
+                let (resource, started, request_id) = {
                     let mut state = state.borrow_mut();
                     if state.ended {
                         return Ok(Value::Boolean(false));
@@ -8581,7 +8623,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if resource.is_none() || !state.started {
                         state.body.extend(bytes.clone());
                     }
-                    (resource, state.started)
+                    (resource, state.started, state.request_id)
                 };
                 if let Some(resource) = resource.filter(|_| started) {
                     let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
@@ -8589,7 +8631,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "node:http client requires the realm HTTP runtime".into(),
                     })?;
                     let disposition = unsafe {
-                        ActiveHttpRuntime::write_client_request(&mut *runtime, resource, 1, bytes)
+                        ActiveHttpRuntime::write_client_request(
+                            &mut *runtime,
+                            resource,
+                            request_id,
+                            bytes,
+                        )
                     }
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
@@ -8640,7 +8687,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "HTTP client request is not connected".into(),
             })?
         };
-        let (request, body, ended, already_started) = {
+        let (request, body, ended, already_started, request_id) = {
             let mut state = state.borrow_mut();
             let mut headers = state.headers.clone();
             if !headers
@@ -8649,19 +8696,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 headers.push(("host".into(), format!("{}:{}", state.host, state.port)));
             }
-            if !headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
-            {
-                headers.push(("connection".into(), "close".into()));
-            }
             let request = RuntimeHttpClientRequest {
                 method: state.method.clone(),
                 target: state.path.clone(),
                 headers,
             };
             let body = std::mem::take(&mut state.body);
-            (request, body, state.ended, state.started)
+            (request, body, state.ended, state.started, state.request_id)
         };
         if already_started {
             if ended {
@@ -8669,11 +8710,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http client requires the realm HTTP runtime".into(),
                 })?;
-                unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, 1, body) }
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "Hyper lost the HTTP client request body".into(),
-                    })?;
+                unsafe {
+                    ActiveHttpRuntime::end_client_request(&mut *runtime, resource, request_id, body)
+                }
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "Hyper lost the HTTP client request body".into(),
+                })?;
                 self.poll_runtime_http_writes(resource, instruction)?;
             }
             return Ok(());
@@ -8687,7 +8730,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 &mut *runtime,
                 resource,
                 request,
-                1,
+                request_id,
                 DEFAULT_HIGH_WATER_MARK,
             )
         } {
@@ -8697,18 +8740,57 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         state.borrow_mut().started = true;
+        let owner = socket
+            .borrow()
+            .owner
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP client request lost its connection owner".into(),
+            })?;
+        let request_object = state
+            .borrow()
+            .object
+            .as_ref()
+            .map(|object| Value::Object(Rc::clone(object)))
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP client request lost its JavaScript object".into(),
+            })?;
+        let inserted = owner
+            .borrow_mut()
+            .streams
+            .iter_mut()
+            .find(|stream| stream.resource() == resource)
+            .map(|connection| {
+                connection
+                    .client_requests
+                    .insert(request_id, request_object);
+            })
+            .is_some();
+        if !inserted {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "HTTP client request lost its runtime stream".into(),
+            });
+        }
         if ended {
-            unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, 1, body) }
-                .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "Hyper lost the HTTP client request body".into(),
-                })?;
+            unsafe {
+                ActiveHttpRuntime::end_client_request(&mut *runtime, resource, request_id, body)
+            }
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "Hyper lost the HTTP client request body".into(),
+            })?;
         } else if !body.is_empty() {
-            unsafe { ActiveHttpRuntime::write_client_request(&mut *runtime, resource, 1, body) }
-                .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "Hyper lost the HTTP client request body".into(),
-                })?;
+            unsafe {
+                ActiveHttpRuntime::write_client_request(&mut *runtime, resource, request_id, body)
+            }
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "Hyper lost the HTTP client request body".into(),
+            })?;
         }
         self.poll_runtime_http_writes(resource, instruction)?;
         Ok(())
@@ -9073,13 +9155,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let mut connection = NodeConnection {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                             runtime_http: protocol == ServerProtocol::HttpClient,
-                            request: Some(request),
+                            request: Some(request.clone()),
                             response: None,
+                            client_requests: std::collections::BTreeMap::new(),
+                            client_responses: std::collections::BTreeMap::new(),
+                            next_client_request_id: 1,
                             http_responses: Vec::new(),
                             close_after_finish: false,
                             closed: false,
                             applying_read_completion: false,
                         };
+                        if let PendingConnect::Http(state) = &target {
+                            let request_id = connection.next_client_request_id.max(1);
+                            connection.next_client_request_id = request_id.wrapping_add(1).max(1);
+                            state.borrow_mut().request_id = request_id;
+                            connection
+                                .client_requests
+                                .insert(request_id, request.clone());
+                        }
                         let actions = if protocol == ServerProtocol::HttpClient {
                             let runtime =
                                 self.http_runtime.ok_or_else(|| ExecutionError::Host {
