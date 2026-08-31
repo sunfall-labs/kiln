@@ -201,6 +201,10 @@ pub enum ErrorKind {
     Reference,
     Syntax,
     Uri,
+    /// `EvalError`, which nothing in the language throws any more -- `eval` stopped raising it
+    /// in ES5. It is still a realm intrinsic with a prototype and a constructor of its own, and
+    /// the corpus reaches for it constantly as *an* error type that is not one of the others.
+    Eval,
     /// `SuppressedError`, which explicit resource management raises when disposing one resource
     /// throws while another throw is already travelling. It is an error kind rather than a type
     /// of its own because that is exactly what it is: an `Error` with two extra fields naming
@@ -210,13 +214,14 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Every kind, in declaration order, so the realm can build all their prototypes.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Error,
         Self::Type,
         Self::Range,
         Self::Reference,
         Self::Syntax,
         Self::Uri,
+        Self::Eval,
         Self::Suppressed,
     ];
 
@@ -228,6 +233,7 @@ impl ErrorKind {
             Self::Reference => "ReferenceError",
             Self::Syntax => "SyntaxError",
             Self::Uri => "URIError",
+            Self::Eval => "EvalError",
             Self::Suppressed => "SuppressedError",
         }
     }
@@ -10499,6 +10505,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
                         kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
                         kiln_ir::Builtin::UriError => Native::Error(ErrorKind::Uri),
+                        kiln_ir::Builtin::EvalError => Native::Error(ErrorKind::Eval),
                         kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
                         kiln_ir::Builtin::String => Native::StringConstructor,
                         kiln_ir::Builtin::Set => Native::SetConstructor,
