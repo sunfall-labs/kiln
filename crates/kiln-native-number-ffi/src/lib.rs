@@ -105,7 +105,14 @@ mod realm {
         pub target_len: u64,
         pub headers: *const u8,
         pub headers_len: u64,
+        // The current HTTP client path does not need to read the body from this frame, but it is
+        // part of the C ABI layout and must remain present so the following fields (and future
+        // additions) stay at the offsets the generated C caller expects.
+        pub body: *const u8,
+        pub body_len: u64,
     }
+
+    const _: () = assert!(core::mem::size_of::<HttpRequestView>() == 64);
 
     #[repr(C)]
     pub struct HttpResponseView {
@@ -571,6 +578,8 @@ mod realm {
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
+        symbols: RefCell<HashMap<Vec<u8>, u64>>,
+        symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         entered: Cell<bool>,
     }
 
@@ -585,6 +594,8 @@ mod realm {
                 next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
+                symbols: RefCell::new(HashMap::new()),
+                symbol_keys: RefCell::new(HashMap::new()),
                 entered: Cell::new(false),
             })
         }
@@ -623,6 +634,7 @@ mod realm {
     }
 
     static NEXT_REALM: AtomicU64 = AtomicU64::new(1);
+    static NEXT_SYMBOL: AtomicU64 = AtomicU64::new(1);
 
     std::thread_local! {
         static REALMS: RefCell<HashMap<u64, Rc<NativeRealm>>> = RefCell::new(HashMap::new());
@@ -1209,6 +1221,18 @@ mod realm {
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
+            let next_tick = realm.work.borrow_mut().pop_next_tick();
+            if let Some(work) = next_tick {
+                let status = run_in_runtime(realm, || work.run(host, thrown));
+                if status != 0 {
+                    return status;
+                }
+                if let Err(status) = checkpoint_http(realm, false) {
+                    return status;
+                }
+                continue;
+            }
+
             let microtask = realm.work.borrow_mut().pop_microtask();
             if let Some(work) = microtask {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
@@ -1373,6 +1397,68 @@ mod realm {
         i32::from(ACTIVE_REALM.with(|active| active.get() != 0))
     }
 
+    /// Interns a registered-symbol key in the active Realm. The returned identity is stable for
+    /// that Realm and deliberately meaningless outside it; generated modules never own registry
+    /// state independently.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_symbol_for(
+        key: *const u8,
+        key_len: u64,
+        out_id: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_id.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(key) = (unsafe { borrowed_bytes(key, key_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            if let Some(id) = realm.symbols.borrow().get(key).copied() {
+                unsafe { out_id.write(id) };
+                return 0;
+            }
+            let Ok(id) = NEXT_SYMBOL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            }) else {
+                return RUNTIME_ERROR;
+            };
+            let owned = key.to_vec();
+            realm.symbols.borrow_mut().insert(owned.clone(), id);
+            realm.symbol_keys.borrow_mut().insert(id, owned);
+            unsafe { out_id.write(id) };
+            0
+        })
+    }
+
+    /// Borrows a registered-symbol key from the active Realm for the duration of this call.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_symbol_key_for(
+        id: u64,
+        out_key: *mut *const u8,
+        out_key_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_key.is_null() || out_key_len.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let keys = realm.symbol_keys.borrow();
+            let Some(key) = keys.get(&id) else {
+                return INVALID_ARGUMENT;
+            };
+            unsafe {
+                out_key.write(key.as_ptr());
+                out_key_len.write(key.len() as u64);
+            }
+            0
+        })
+    }
+
     /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
     ///
     /// # Safety
@@ -1456,6 +1542,35 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             queue.queue_microtask(work);
+            0
+        })
+    }
+
+    /// Queues one opaque FIFO Node next-tick callback on the active Realm.
+    ///
+    /// Next-tick work is a separate language lane, drained before Promise jobs while retaining
+    /// the same Realm owner, callback ABI, and disposal rules as ordinary microtasks.
+    ///
+    /// # Safety
+    ///
+    /// `work` must be owned storage accepted by `run` and `drop`. Ownership transfers on success.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_queue_next_tick(
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut queue) = realm.work.try_borrow_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let Some(work) = NativeWork::new(work, run, drop) else {
+                return INVALID_ARGUMENT;
+            };
+            queue.queue_next_tick(work);
             0
         })
     }
@@ -2174,6 +2289,66 @@ mod realm {
 
         static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+        unsafe extern "C" fn exercises_symbol_registry(context: *mut c_void) -> i32 {
+            let output = unsafe { &mut *context.cast::<[u64; 3]>() };
+            let key = b"fastify-error-generic";
+            let mut first = 0;
+            let mut second = 0;
+            let mut borrowed = std::ptr::null();
+            let mut borrowed_len = 0;
+            if unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut first) } != 0
+                || unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut second) }
+                    != 0
+                || first != second
+                || unsafe {
+                    kiln_realm_symbol_key_for(first, &raw mut borrowed, &raw mut borrowed_len)
+                } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            output[0] = first;
+            output[1] = second;
+            output[2] = borrowed_len;
+            0
+        }
+
+        #[test]
+        fn registered_symbols_are_realm_owned_and_stable() {
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            let mut first = [0; 3];
+            let mut second = [0; 3];
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(exercises_symbol_registry),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(exercises_symbol_registry),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(first[0], first[1]);
+            assert_eq!(second[0], second[1]);
+            assert_ne!(first[0], second[0]);
+            assert_eq!(first[2], b"fastify-error-generic".len() as u64);
+            assert_eq!(second[2], b"fastify-error-generic".len() as u64);
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
         struct RecordedWork {
             value: u8,
             order: *mut Vec<u8>,
@@ -2485,11 +2660,39 @@ mod realm {
             // Realm teardown invokes `drop_recorded_work`.
             unsafe {
                 (*(*work).order).push((*work).value);
+                if (*work).value == 5 {
+                    let nested = recorded_work(6, &mut *(*work).order, &mut *(*work).drops);
+                    let status = kiln_realm_queue_next_tick(
+                        Some(record_work),
+                        Some(drop_recorded_work),
+                        nested,
+                    );
+                    if status != 0 {
+                        drop_recorded_work(nested);
+                        return status;
+                    }
+                }
                 if (*work).clear != 0 {
                     return kiln_realm_clear_timer((*work).clear);
                 }
             }
             0
+        }
+
+        unsafe extern "C" fn fail_recorded_work(
+            work: *mut c_void,
+            _host: *mut c_void,
+            _thrown: *mut c_void,
+        ) -> i32 {
+            if work.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the test owns the record until Realm drive drops the popped payload.
+            let work = work.cast::<RecordedWork>();
+            unsafe {
+                (*(*work).order).push((*work).value);
+            }
+            RUNTIME_ERROR
         }
 
         unsafe extern "C" fn drop_recorded_work(work: *mut c_void) {
@@ -2519,9 +2722,19 @@ mod realm {
             }
             // SAFETY: the test passes live `(Vec<u8>, usize)` storage for this entry call.
             let (order, drops) = unsafe { &mut *context.cast::<(Vec<u8>, usize)>() };
-            let microtask = recorded_work(1, order, drops);
+            let next_tick = recorded_work(5, order, drops);
             // SAFETY: callbacks match the transferred allocation.
             let mut status = unsafe {
+                kiln_realm_queue_next_tick(Some(record_work), Some(drop_recorded_work), next_tick)
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_recorded_work(next_tick) };
+                return status;
+            }
+            let microtask = recorded_work(1, order, drops);
+            // SAFETY: callbacks match the transferred allocation.
+            status = unsafe {
                 kiln_realm_queue_microtask(Some(record_work), Some(drop_recorded_work), microtask)
             };
             if status != 0 {
@@ -2743,6 +2956,11 @@ mod realm {
             );
             // SAFETY: the null slot is intentionally rejected without dereferencing.
             assert_eq!(unsafe { kiln_realm_now(ptr::null_mut()) }, INVALID_ARGUMENT);
+            // SAFETY: no Realm is active, so the opaque callback cannot be accepted.
+            assert_eq!(
+                unsafe { kiln_realm_queue_next_tick(None, None, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
         }
 
         #[test]
@@ -3591,11 +3809,161 @@ mod realm {
                 },
                 0
             );
-            assert_eq!(observed.0, [1, 2, 3, 4]);
+            assert_eq!(observed.0, [5, 6, 1, 2, 3, 4]);
             assert_eq!(kiln_realm_destroy(handle), 0);
-            assert_eq!(observed.1, 4);
+            assert_eq!(observed.1, 6);
+        }
+
+        #[test]
+        fn thrown_next_tick_drops_its_payload_before_drive_returns() {
+            let mut handle = 0;
+            let mut observed = (Vec::<u8>::new(), 0_usize);
+            // SAFETY: handle and context are live for the calls that use them.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            unsafe extern "C" fn schedule(context: *mut c_void) -> i32 {
+                if context.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: the test keeps this context live through Realm entry and drive.
+                let (order, drops) = unsafe { &mut *context.cast::<(Vec<u8>, usize)>() };
+                let work = recorded_work(7, order, drops);
+                // SAFETY: callbacks match the transferred allocation.
+                let status = unsafe {
+                    kiln_realm_queue_next_tick(
+                        Some(fail_recorded_work),
+                        Some(drop_recorded_work),
+                        work,
+                    )
+                };
+                if status != 0 {
+                    // SAFETY: ownership did not transfer on failure.
+                    unsafe { drop_recorded_work(work) };
+                }
+                status
+            }
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(schedule), (&raw mut observed).cast::<c_void>())
+                },
+                0
+            );
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            // SAFETY: both opaque callback-context slots remain live for the complete drive.
+            assert_eq!(
+                unsafe {
+                    kiln_realm_drive(
+                        handle,
+                        (&raw mut host).cast::<c_void>(),
+                        (&raw mut thrown).cast::<c_void>(),
+                    )
+                },
+                RUNTIME_ERROR
+            );
+            assert_eq!(observed.0, [7]);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(observed.1, 1);
         }
     }
+
+    // Keep the exported Rust declarations honest against the registry.  These are deliberately
+    // function-pointer assignments rather than symbol-name checks: changing an argument width,
+    // callback view, or return value now fails this crate's compilation.
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (realm, kiln_realm_create, realm_create) => {
+            const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_create;
+        };
+        (realm, kiln_realm_enter, realm_enter) => {
+            const _: unsafe extern "C" fn(u64, Option<Entry>, *mut c_void) -> i32 = kiln_realm_enter;
+        };
+        (realm, kiln_realm_is_active, realm_is_active) => {
+            const _: extern "C" fn() -> i32 = kiln_realm_is_active;
+        };
+        (realm, kiln_realm_symbol_for, realm_symbol_for) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut u64) -> i32 = kiln_realm_symbol_for;
+        };
+        (realm, kiln_realm_symbol_key_for, realm_symbol_key_for) => {
+            const _: unsafe extern "C" fn(u64, *mut *const u8, *mut u64) -> i32 = kiln_realm_symbol_key_for;
+        };
+        (realm, kiln_realm_now, realm_now) => {
+            const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
+        };
+        (realm, kiln_realm_now_nanoseconds, realm_now_nanoseconds) => {
+            const _: unsafe extern "C" fn(*mut i64, *mut u64) -> i32 = kiln_realm_now_nanoseconds;
+        };
+        (realm, $name:ident, realm_queue_work) => {
+            const _: unsafe extern "C" fn(Option<RunWork>, Option<DropWork>, *mut c_void) -> i32 = $name;
+        };
+        (realm, $name:ident, realm_set_timer) => {
+            const _: unsafe extern "C" fn(f64, Option<RunWork>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = $name;
+        };
+        (realm, kiln_realm_clear_timer, realm_clear_timer) => {
+            const _: extern "C" fn(u64) -> i32 = kiln_realm_clear_timer;
+        };
+        (realm, kiln_realm_drive, realm_drive) => {
+            const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;
+        };
+        (realm, kiln_realm_destroy, realm_destroy) => {
+            const _: extern "C" fn(u64) -> i32 = kiln_realm_destroy;
+        };
+        (realm, kiln_realm_read_file, realm_read_file) => {
+            const _: unsafe extern "C" fn(u64, *const u8, u64, Option<RunCompletion>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = kiln_realm_read_file;
+        };
+        (realm, kiln_realm_start_host_op, realm_start_host_op) => {
+            const _: unsafe extern "C" fn(u64, *const HostOpView, Option<RunCompletion>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = kiln_realm_start_host_op;
+        };
+        (realm, kiln_realm_start_active_host_op, realm_start_active_host_op) => {
+            const _: unsafe extern "C" fn(*const HostOpView, Option<RunCompletion>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = kiln_realm_start_active_host_op;
+        };
+        (realm, kiln_realm_cancel_request, realm_cancel_request) => {
+            const _: unsafe extern "C" fn(u64, u64) -> i32 = kiln_realm_cancel_request;
+        };
+        (realm, kiln_realm_cancel_active_request, realm_cancel_active_request) => {
+            const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_cancel_active_request;
+        };
+        (realm, $name:ident, realm_http_attach) => {
+            const _: unsafe extern "C" fn(u64, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = $name;
+        };
+        (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options) => {
+            const _: unsafe extern "C" fn(u64, i32, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_http_server_attach_with_options_active;
+        };
+        (realm, kiln_realm_http_server_close_active, realm_http_close) => {
+            const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_http_server_close_active;
+        };
+        (realm, kiln_realm_http_client_request_id_active, realm_http_request_id) => {
+            const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_http_client_request_id_active;
+        };
+        (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, *mut u64) -> i32 = kiln_realm_http_agent_acquire_active;
+        };
+        (realm, kiln_realm_http_client_owner_active, realm_http_client_owner) => {
+            const _: unsafe extern "C" fn(u64, *mut *mut c_void) -> i32 = kiln_realm_http_client_owner_active;
+        };
+        (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, u64) -> i32 = kiln_realm_http_agent_connected_active;
+        };
+        (realm, kiln_realm_http_agent_release_active, realm_http_agent_release) => {
+            const _: unsafe extern "C" fn(u64, i32, *mut u64) -> i32 = kiln_realm_http_agent_release_active;
+        };
+        (realm, kiln_realm_http_client_start_active, realm_http_client_start) => {
+            const _: unsafe extern "C" fn(u64, u64, *const HttpRequestView, u64) -> i32 = kiln_realm_http_client_start_active;
+        };
+        (realm, $name:ident, realm_http_client_write) => {
+            const _: unsafe extern "C" fn(u64, u64, *const u8, u64) -> i32 = $name;
+        };
+        (realm, kiln_realm_http_response_start_active, realm_http_response_start) => {
+            const _: unsafe extern "C" fn(u64, u64, *const HttpResponseView, u64) -> i32 = kiln_realm_http_response_start_active;
+        };
+        (realm, $name:ident, realm_http_response_write) => {
+            const _: unsafe extern "C" fn(u64, u64, *const u8, u64) -> i32 = $name;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
 }
 
 /// The allocator the regexp engine runs on.
@@ -3719,6 +4087,21 @@ pub unsafe extern "C" fn kiln_string_to_number(bytes: *const u8, length: usize) 
     let input = unsafe { core::slice::from_raw_parts(bytes, length) };
     kiln_number_core::string_to_number(input)
 }
+
+macro_rules! assert_root_provider_export {
+    ($(($group:ident, $name:ident, $signature:ident);)*) => {
+        $(assert_root_provider_export!($group, $name, $signature);)*
+    };
+    (root, kiln_number_to_js_string, number_to_js_string) => {
+        const _: unsafe extern "C" fn(f64, *mut u8, usize) -> i32 = kiln_number_to_js_string;
+    };
+    (root, kiln_string_to_number, string_to_number) => {
+        const _: unsafe extern "C" fn(*const u8, usize) -> f64 = kiln_string_to_number;
+    };
+    ($group:ident, $name:ident, $signature:ident) => {};
+}
+
+kiln_native_number_abi::provider_abi_registry!(assert_root_provider_export);
 
 #[cfg(feature = "regexp")]
 mod regexp {
@@ -3956,6 +4339,30 @@ mod regexp {
     fn as_offset(value: usize) -> i64 {
         i64::try_from(value).unwrap_or(i64::MAX)
     }
+
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (regexp, kiln_regexp_compile, regexp_compile) => {
+            const _: unsafe extern "C" fn(*const u8, usize, *const u8, usize, *mut *mut KilnRegex) -> i32 = kiln_regexp_compile;
+        };
+        (regexp, kiln_regexp_free, regexp_free) => {
+            const _: unsafe extern "C" fn(*mut KilnRegex) = kiln_regexp_free;
+        };
+        (regexp, kiln_regexp_search, regexp_search) => {
+            const _: unsafe extern "C" fn(*mut KilnRegex, *const u16, usize, usize, *mut i64, usize) -> i32 = kiln_regexp_search;
+        };
+        (regexp, kiln_regexp_group_count, regexp_group_count) => {
+            const _: unsafe extern "C" fn(*const KilnRegex) -> usize = kiln_regexp_group_count;
+        };
+        (regexp, kiln_regexp_group_name, regexp_group_name) => {
+            const _: unsafe extern "C" fn(*const KilnRegex, usize, *mut u8, usize) -> i32 = kiln_regexp_group_name;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
 }
 
 /// Arbitrary-precision integers, exactly as the interpreter holds them.
@@ -4293,6 +4700,45 @@ mod bigint {
         unsafe { out.write(Box::into_raw(Box::new(negated))) };
         0
     }
+
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (bigint, kiln_bigint_parse, bigint_parse) => {
+            const _: unsafe extern "C" fn(*const u8, usize, u32, *mut *mut BigInt) -> i32 = kiln_bigint_parse;
+        };
+        (bigint, kiln_bigint_from_double, bigint_from_double) => {
+            const _: unsafe extern "C" fn(f64, *mut *mut BigInt) -> i32 = kiln_bigint_from_double;
+        };
+        (bigint, kiln_bigint_free, bigint_free) => {
+            const _: unsafe extern "C" fn(*mut BigInt) = kiln_bigint_free;
+        };
+        (bigint, kiln_bigint_to_double, bigint_to_double) => {
+            const _: unsafe extern "C" fn(*const BigInt) -> f64 = kiln_bigint_to_double;
+        };
+        (bigint, kiln_bigint_to_string, bigint_to_string) => {
+            const _: unsafe extern "C" fn(*const BigInt, u32, *mut u8, usize) -> i32 = kiln_bigint_to_string;
+        };
+        (bigint, kiln_bigint_binary, bigint_binary) => {
+            const _: unsafe extern "C" fn(u32, *const BigInt, *const BigInt, *mut *mut BigInt) -> i32 = kiln_bigint_binary;
+        };
+        (bigint, kiln_bigint_negate, bigint_negate) => {
+            const _: unsafe extern "C" fn(*const BigInt, *mut *mut BigInt) -> i32 = kiln_bigint_negate;
+        };
+        (bigint, kiln_bigint_compare, bigint_compare) => {
+            const _: unsafe extern "C" fn(*const BigInt, *const BigInt) -> i32 = kiln_bigint_compare;
+        };
+        (bigint, kiln_bigint_is_zero, bigint_is_zero) => {
+            const _: unsafe extern "C" fn(*const BigInt) -> i32 = kiln_bigint_is_zero;
+        };
+        (bigint, kiln_bigint_to_i128, bigint_to_i128) => {
+            const _: unsafe extern "C" fn(*const BigInt, *mut i64, *mut u64) -> i32 = kiln_bigint_to_i128;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
 }
 
 #[cfg(test)]
@@ -5410,4 +5856,55 @@ mod temporal {
             unsafe { emit(message, buffer, capacity) }
         })
     }
+
+    macro_rules! assert_provider_export {
+        ($(($group:ident, $name:ident, $signature:ident);)*) => {
+            $(assert_provider_export!($group, $name, $signature);)*
+        };
+        (temporal, kiln_temporal_from_fields, temporal_from_fields) => {
+            const _: unsafe extern "C" fn(u32, *const f64, usize, *const u8, *const i64, usize, *const u8, *const i64, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_from_fields;
+        };
+        (temporal, kiln_temporal_duration_from_fields, temporal_duration_from_fields) => {
+            const _: unsafe extern "C" fn(*const f64, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_duration_from_fields;
+        };
+        (temporal, kiln_temporal_parse, temporal_parse) => {
+            const _: unsafe extern "C" fn(u32, *const u8, usize, *const u8, *const i64, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_parse;
+        };
+        (temporal, kiln_temporal_now, temporal_now) => {
+            const _: unsafe extern "C" fn(u32, i64, u64, *const u8, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_now;
+        };
+        (temporal, kiln_temporal_instant_from_epoch_milliseconds, temporal_instant_ms) => {
+            const _: unsafe extern "C" fn(f64, *mut *mut TemporalValue) -> i32 = kiln_temporal_instant_from_epoch_milliseconds;
+        };
+        (temporal, kiln_temporal_instant_from_epoch_nanoseconds, temporal_instant_ns) => {
+            const _: unsafe extern "C" fn(i64, u64, *mut *mut TemporalValue) -> i32 = kiln_temporal_instant_from_epoch_nanoseconds;
+        };
+        (temporal, kiln_temporal_free, temporal_free) => {
+            const _: unsafe extern "C" fn(*mut TemporalValue) = kiln_temporal_free;
+        };
+        (temporal, kiln_temporal_kind, temporal_kind) => {
+            const _: unsafe extern "C" fn(*const TemporalValue) -> i32 = kiln_temporal_kind;
+        };
+        (temporal, kiln_temporal_get, temporal_get) => {
+            const _: unsafe extern "C" fn(*const TemporalValue, *const u8, usize, *mut f64, *mut u8, usize, *mut i32) -> i32 = kiln_temporal_get;
+        };
+        (temporal, kiln_temporal_to_string, temporal_to_string) => {
+            const _: unsafe extern "C" fn(*const TemporalValue, *mut u8, usize) -> i32 = kiln_temporal_to_string;
+        };
+        (temporal, kiln_temporal_compare, temporal_compare) => {
+            const _: unsafe extern "C" fn(*const TemporalValue, *const TemporalValue, *const TemporalValue, *const u8, *const i64, usize, *mut i32) -> i32 = kiln_temporal_compare;
+        };
+        (temporal, kiln_temporal_invoke, temporal_invoke) => {
+            const _: unsafe extern "C" fn(*const TemporalCall) -> i32 = kiln_temporal_invoke;
+        };
+        (temporal, kiln_temporal_to_kind, temporal_to_kind) => {
+            const _: unsafe extern "C" fn(*const TemporalValue, u32, *mut *mut TemporalValue) -> i32 = kiln_temporal_to_kind;
+        };
+        (temporal, kiln_temporal_last_error, temporal_last_error) => {
+            const _: unsafe extern "C" fn(*mut i32, *mut u8, usize) -> i32 = kiln_temporal_last_error;
+        };
+        ($group:ident, $name:ident, $signature:ident) => {};
+    }
+
+    kiln_native_number_abi::provider_abi_registry!(assert_provider_export);
 }

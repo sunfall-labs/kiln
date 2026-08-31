@@ -13,6 +13,7 @@ kiln-ir = { workspace = true }
 kiln-module-graph = { workspace = true }
 kiln-module-resolver = { workspace = true }
 kiln-native-number = { workspace = true }
+kiln-native-number-abi = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
 rayon = { workspace = true }

@@ -139,7 +139,7 @@ pub fn emit_module_with_policy(
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false);
+    let source = render_module(module, program_hash, &symbol, &policy, false, &symbol);
     Ok(CModule {
         symbol,
         source,
@@ -172,7 +172,7 @@ pub fn emit_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false);
+    let source = render_module(module, program_hash, &symbol, &policy, false, logical_path);
     Ok(CModule {
         symbol,
         source,
@@ -200,7 +200,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, true);
+    let source = render_module(module, program_hash, &symbol, &policy, true, logical_path);
     Ok(CModule {
         symbol,
         source,
@@ -268,7 +268,618 @@ fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
     Ok(())
 }
 
-const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
+#[derive(Clone, Copy)]
+struct MethodId {
+    name: &'static str,
+    value: u16,
+}
+
+macro_rules! method_ids {
+    ($(($name:ident, $value:literal)),* $(,)?) => {
+        macro_rules! emit_method_define {
+            $(($name) => {
+                concat!("#define ", stringify!($name), " ", stringify!($value), "\n")
+            };)*
+        }
+
+        const METHOD_IDS: &[MethodId] = &[
+            $(MethodId {
+                name: stringify!($name),
+                value: $value,
+            }),*
+        ];
+    };
+}
+
+const fn method_name_is(name: &str, expected: &str) -> bool {
+    let name = name.as_bytes();
+    let expected = expected.as_bytes();
+    if name.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < name.len() {
+        if name[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn method_name_starts_with(name: &str, prefix: &str) -> bool {
+    let name = name.as_bytes();
+    let prefix = prefix.as_bytes();
+    if name.len() < prefix.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < prefix.len() {
+        if name[index] != prefix[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn method_name_is_temporal_last(name: &str) -> bool {
+    method_name_is(name, "KILN_C99_METHOD_TEMPORAL_LAST")
+}
+
+const fn method_value(ids: &[MethodId], name: &str) -> u16 {
+    let mut index = 0;
+    while index < ids.len() {
+        if method_name_is(ids[index].name, name) {
+            return ids[index].value;
+        }
+        index += 1;
+    }
+    panic!("method ID is missing from the registry");
+}
+
+const fn assert_method_immediately_after(ids: &[MethodId], previous: &str, next: &str) {
+    let previous = method_value(ids, previous);
+    assert!(
+        previous < u16::MAX && previous + 1 == method_value(ids, next),
+        "Temporal method blocks must be ordered and adjacent"
+    );
+}
+
+const fn validate_method_ids(ids: &[MethodId]) {
+    let mut index = 0;
+    while index < ids.len() {
+        assert!(ids[index].value > 0, "method IDs must be positive");
+        let mut other = index + 1;
+        while other < ids.len() {
+            assert!(
+                !method_name_is(ids[index].name, ids[other].name),
+                "method names must be unique"
+            );
+            if ids[index].value == ids[other].value {
+                let alias = if method_name_is_temporal_last(ids[index].name) {
+                    method_name_is(
+                        ids[other].name,
+                        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                    )
+                } else if method_name_is_temporal_last(ids[other].name) {
+                    method_name_is(
+                        ids[index].name,
+                        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                    )
+                } else {
+                    false
+                };
+                assert!(
+                    alias
+                        && method_name_starts_with(ids[index].name, "KILN_C99_METHOD_TEMPORAL_")
+                        && method_name_starts_with(ids[other].name, "KILN_C99_METHOD_TEMPORAL_"),
+                    "method IDs must be unique except for the Instant nanoseconds alias"
+                );
+            }
+            other += 1;
+        }
+        index += 1;
+    }
+
+    // These are range-dispatched, so their endpoint constants must retain the width used by the
+    // generated call path. The individual operation IDs between those endpoints are intentionally
+    // not declared: the runtime derives their kind from the code itself.
+    assert!(
+        method_value(ids, "KILN_C99_METHOD_TEMPORAL_FROM_LAST")
+            - method_value(ids, "KILN_C99_METHOD_TEMPORAL_FROM")
+            == 7,
+        "Temporal.from range must contain eight kinds"
+    );
+    assert!(
+        method_value(ids, "KILN_C99_METHOD_TEMPORAL_COMPARE_LAST")
+            - method_value(ids, "KILN_C99_METHOD_TEMPORAL_COMPARE")
+            == 7,
+        "Temporal.compare range must contain eight kinds"
+    );
+    assert!(
+        method_value(ids, "KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST")
+            - method_value(ids, "KILN_C99_METHOD_TEMPORAL_NOW_READ")
+            == 7,
+        "Temporal.Now range must contain eight kinds"
+    );
+    assert!(
+        method_value(ids, "KILN_C99_METHOD_TEMPORAL_OP_LAST")
+            - method_value(ids, "KILN_C99_METHOD_TEMPORAL_OP")
+            == 22,
+        "Temporal operation range must contain 23 operations"
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_FROM_LAST",
+        "KILN_C99_METHOD_TEMPORAL_COMPARE",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_COMPARE_LAST",
+        "KILN_C99_METHOD_TEMPORAL_TO_STRING",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_TO_STRING",
+        "KILN_C99_METHOD_TEMPORAL_TO_JSON",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_TO_JSON",
+        "KILN_C99_METHOD_TEMPORAL_VALUE_OF",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_VALUE_OF",
+        "KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID",
+        "KILN_C99_METHOD_TEMPORAL_NOW_READ",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST",
+        "KILN_C99_METHOD_TEMPORAL_OP",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_OP_LAST",
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS",
+    );
+    assert_method_immediately_after(
+        ids,
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS",
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+    );
+
+    let mut temporal_low = u16::MAX;
+    let mut temporal_high = 0;
+    let mut index = 0;
+    while index < ids.len() {
+        if method_name_starts_with(ids[index].name, "KILN_C99_METHOD_TEMPORAL_")
+            && !method_name_is_temporal_last(ids[index].name)
+        {
+            if ids[index].value < temporal_low {
+                temporal_low = ids[index].value;
+            }
+            if ids[index].value > temporal_high {
+                temporal_high = ids[index].value;
+            }
+        }
+        index += 1;
+    }
+    assert!(temporal_low < temporal_high, "Temporal methods must exist");
+    assert!(
+        temporal_low == method_value(ids, "KILN_C99_METHOD_TEMPORAL_FROM")
+            && temporal_high
+                == method_value(
+                    ids,
+                    "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
+                ),
+        "Temporal range must begin at FROM and end at the final Instant constructor"
+    );
+    assert!(
+        method_value(ids, "KILN_C99_METHOD_TEMPORAL_LAST") == temporal_high,
+        "TEMPORAL_LAST must alias the highest Temporal method"
+    );
+    index = 0;
+    while index < ids.len() {
+        if !method_name_starts_with(ids[index].name, "KILN_C99_METHOD_TEMPORAL_") {
+            assert!(
+                ids[index].value < temporal_low || ids[index].value > temporal_high,
+                "non-Temporal method lies inside a Temporal dispatch range"
+            );
+        }
+        index += 1;
+    }
+
+    // IDs at and above the first Temporal.Instant constructor are append-only. This catches a
+    // merge that shifts the equality-dispatched tail into a hole or reuses an old value.
+    const APPEND_ONLY_BASE: u16 = 336;
+    let mut tail_high = 0;
+    index = 0;
+    while index < ids.len() {
+        if ids[index].value >= APPEND_ONLY_BASE && ids[index].value > tail_high {
+            tail_high = ids[index].value;
+        }
+        index += 1;
+    }
+    assert!(
+        tail_high >= APPEND_ONLY_BASE,
+        "append-only method tail must exist"
+    );
+    let mut value = APPEND_ONLY_BASE;
+    while value <= tail_high {
+        let mut found = false;
+        index = 0;
+        while index < ids.len() {
+            if ids[index].value == value {
+                found = true;
+                break;
+            }
+            index += 1;
+        }
+        assert!(found, "append-only method IDs must have no gaps");
+        value += 1;
+    }
+}
+
+method_ids! {
+    (KILN_C99_METHOD_ARRAY_AT, 200),
+    (KILN_C99_METHOD_ARRAY_FIND, 201),
+    (KILN_C99_METHOD_ARRAY_FIND_INDEX, 202),
+    (KILN_C99_METHOD_ARRAY_SOME, 203),
+    (KILN_C99_METHOD_ARRAY_EVERY, 204),
+    (KILN_C99_METHOD_ARRAY_SORT, 205),
+    (KILN_C99_METHOD_ARRAY_FLAT, 206),
+    (KILN_C99_METHOD_ARRAY_ENTRIES, 207),
+    (KILN_C99_METHOD_ARRAY_KEYS, 208),
+    (KILN_C99_METHOD_ARRAY_REVERSE, 209),
+    (KILN_C99_METHOD_ARRAY_SHIFT, 210),
+    (KILN_C99_METHOD_ARRAY_UNSHIFT, 211),
+    (KILN_C99_METHOD_ARRAY_FILL, 212),
+    (KILN_C99_METHOD_ARRAY_LAST_INDEX_OF, 213),
+    (KILN_C99_METHOD_ARRAY_SPLICE, 214),
+    (KILN_C99_METHOD_ARRAY_COPY_WITHIN, 215),
+    (KILN_C99_METHOD_ARRAY_TO_STRING, 216),
+    (KILN_C99_METHOD_ARRAY_FLAT_MAP, 217),
+    (KILN_C99_METHOD_ARRAY_FIND_LAST, 218),
+    (KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX, 219),
+    (KILN_C99_METHOD_ARRAY_REDUCE_RIGHT, 220),
+    (KILN_C99_METHOD_STRING_CODE_POINT_AT, 240),
+    (KILN_C99_METHOD_STRING_SUBSTR, 241),
+    (KILN_C99_METHOD_STRING_LOCALE_COMPARE, 242),
+    (KILN_C99_METHOD_STRING_NORMALIZE, 243),
+    (KILN_C99_METHOD_STRING_TO_STRING, 244),
+    (KILN_C99_METHOD_STRING_VALUE_OF, 245),
+    (KILN_C99_METHOD_STRING_MATCH, 246),
+    (KILN_C99_METHOD_STRING_MATCH_ALL, 247),
+    (KILN_C99_METHOD_STRING_SEARCH, 248),
+    (KILN_C99_METHOD_ERROR_TO_STRING, 249),
+    (KILN_C99_METHOD_PUSH, 1),
+    (KILN_C99_METHOD_POP, 2),
+    (KILN_C99_METHOD_JOIN, 3),
+    (KILN_C99_METHOD_INDEX_OF, 4),
+    (KILN_C99_METHOD_INCLUDES, 5),
+    (KILN_C99_METHOD_SLICE, 6),
+    (KILN_C99_METHOD_CONCAT, 7),
+    (KILN_C99_METHOD_MAP, 8),
+    (KILN_C99_METHOD_FILTER, 9),
+    (KILN_C99_METHOD_FOR_EACH, 10),
+    (KILN_C99_METHOD_REDUCE, 11),
+    (KILN_C99_METHOD_STRING_SLICE, 12),
+    (KILN_C99_METHOD_SUBSTRING, 13),
+    (KILN_C99_METHOD_STRING_INDEX_OF, 14),
+    (KILN_C99_METHOD_LAST_INDEX_OF, 15),
+    (KILN_C99_METHOD_STRING_INCLUDES, 16),
+    (KILN_C99_METHOD_STARTS_WITH, 17),
+    (KILN_C99_METHOD_ENDS_WITH, 18),
+    (KILN_C99_METHOD_CHAR_AT, 19),
+    (KILN_C99_METHOD_CHAR_CODE_AT, 20),
+    (KILN_C99_METHOD_STRING_AT, 21),
+    (KILN_C99_METHOD_TRIM, 22),
+    (KILN_C99_METHOD_TRIM_START, 23),
+    (KILN_C99_METHOD_TRIM_END, 24),
+    (KILN_C99_METHOD_SPLIT, 25),
+    (KILN_C99_METHOD_REPEAT, 26),
+    (KILN_C99_METHOD_PAD_START, 27),
+    (KILN_C99_METHOD_PAD_END, 28),
+    (KILN_C99_METHOD_TO_UPPER_CASE, 29),
+    (KILN_C99_METHOD_TO_LOWER_CASE, 30),
+    (KILN_C99_METHOD_REPLACE, 31),
+    (KILN_C99_METHOD_REPLACE_ALL, 32),
+    (KILN_C99_METHOD_STRING_CONCAT, 33),
+    (KILN_C99_METHOD_MATH_FLOOR, 34),
+    (KILN_C99_METHOD_MATH_CEIL, 35),
+    (KILN_C99_METHOD_MATH_ROUND, 36),
+    (KILN_C99_METHOD_MATH_TRUNC, 37),
+    (KILN_C99_METHOD_MATH_ABS, 38),
+    (KILN_C99_METHOD_MATH_SIGN, 39),
+    (KILN_C99_METHOD_MATH_SQRT, 40),
+    (KILN_C99_METHOD_MATH_CBRT, 41),
+    (KILN_C99_METHOD_MATH_POW, 42),
+    (KILN_C99_METHOD_MATH_MIN, 43),
+    (KILN_C99_METHOD_MATH_MAX, 44),
+    (KILN_C99_METHOD_MATH_LOG, 45),
+    (KILN_C99_METHOD_MATH_LOG2, 46),
+    (KILN_C99_METHOD_MATH_LOG10, 47),
+    (KILN_C99_METHOD_MATH_EXP, 48),
+    (KILN_C99_METHOD_MATH_HYPOT, 49),
+    (KILN_C99_METHOD_MATH_ATAN2, 50),
+    (KILN_C99_METHOD_MATH_SIN, 51),
+    (KILN_C99_METHOD_MATH_COS, 52),
+    (KILN_C99_METHOD_MATH_TAN, 53),
+    (KILN_C99_METHOD_MATH_ASIN, 54),
+    (KILN_C99_METHOD_MATH_ACOS, 55),
+    (KILN_C99_METHOD_MATH_ATAN, 56),
+    (KILN_C99_METHOD_IS_INTEGER, 57),
+    (KILN_C99_METHOD_IS_SAFE_INTEGER, 58),
+    (KILN_C99_METHOD_IS_NAN, 59),
+    (KILN_C99_METHOD_IS_FINITE, 60),
+    (KILN_C99_METHOD_OBJECT_KEYS, 61),
+    (KILN_C99_METHOD_OBJECT_VALUES, 62),
+    (KILN_C99_METHOD_OBJECT_ENTRIES, 63),
+    (KILN_C99_METHOD_OBJECT_ASSIGN, 64),
+    (KILN_C99_METHOD_HAS_OWN, 65),
+    (KILN_C99_METHOD_IS_ARRAY, 66),
+    (KILN_C99_METHOD_ARRAY_OF, 67),
+    (KILN_C99_METHOD_OBJECT_CREATE, 68),
+    (KILN_C99_METHOD_JSON_STRINGIFY, 69),
+    (KILN_C99_METHOD_JSON_PARSE, 70),
+    (KILN_C99_METHOD_GENERATOR_NEXT, 71),
+    (KILN_C99_METHOD_GENERATOR_RETURN, 72),
+    (KILN_C99_METHOD_GENERATOR_SELF, 73),
+    (KILN_C99_METHOD_GET_TIME, 74),
+    (KILN_C99_METHOD_GET_FULL_YEAR, 75),
+    (KILN_C99_METHOD_GET_MONTH, 76),
+    (KILN_C99_METHOD_GET_DATE, 77),
+    (KILN_C99_METHOD_GET_DAY, 78),
+    (KILN_C99_METHOD_GET_HOURS, 79),
+    (KILN_C99_METHOD_GET_MINUTES, 80),
+    (KILN_C99_METHOD_GET_SECONDS, 81),
+    (KILN_C99_METHOD_GET_MILLISECONDS, 82),
+    (KILN_C99_METHOD_GET_TIMEZONE_OFFSET, 83),
+    (KILN_C99_METHOD_TO_ISO_STRING, 84),
+    (KILN_C99_METHOD_TO_JSON, 85),
+    (KILN_C99_METHOD_DATE_TO_STRING, 86),
+    (KILN_C99_METHOD_DATE_NOW, 87),
+    (KILN_C99_METHOD_DATE_UTC, 88),
+    (KILN_C99_METHOD_DATE_PARSE, 89),
+    (KILN_C99_METHOD_HAS_OWN_PROPERTY, 90),
+    (KILN_C99_METHOD_OBJECT_TO_STRING, 91),
+    (KILN_C99_METHOD_OBJECT_VALUE_OF, 92),
+    (KILN_C99_METHOD_COLLECTION_GET, 93),
+    (KILN_C99_METHOD_COLLECTION_SET, 94),
+    (KILN_C99_METHOD_COLLECTION_ADD, 95),
+    (KILN_C99_METHOD_COLLECTION_HAS, 96),
+    (KILN_C99_METHOD_COLLECTION_DELETE, 97),
+    (KILN_C99_METHOD_COLLECTION_CLEAR, 98),
+    (KILN_C99_METHOD_COLLECTION_FOR_EACH, 99),
+    (KILN_C99_METHOD_COLLECTION_KEYS, 100),
+    (KILN_C99_METHOD_COLLECTION_VALUES, 101),
+    (KILN_C99_METHOD_COLLECTION_ENTRIES, 102),
+    (KILN_C99_METHOD_COLLECTION_SELF, 103),
+    (KILN_C99_METHOD_ITERATOR_NEXT, 104),
+    (KILN_C99_METHOD_ITERATOR_SELF, 105),
+    (KILN_C99_METHOD_ARRAY_VALUES, 106),
+    (KILN_C99_METHOD_THEN, 107),
+    (KILN_C99_METHOD_CATCH, 108),
+    (KILN_C99_METHOD_FINALLY, 109),
+    (KILN_C99_METHOD_PROMISE_RESOLVE, 110),
+    (KILN_C99_METHOD_PROMISE_REJECT, 111),
+    (KILN_C99_METHOD_PROMISE_ALL, 112),
+    (KILN_C99_METHOD_PROMISE_RACE, 113),
+    (KILN_C99_METHOD_ASYNC_RESUME, 114),
+    (KILN_C99_METHOD_ASYNC_THROW, 115),
+    (KILN_C99_METHOD_ALL_STEP, 116),
+    (KILN_C99_METHOD_PARSE_INT, 117),
+    (KILN_C99_METHOD_PARSE_FLOAT, 118),
+    (KILN_C99_METHOD_GLOBAL_IS_NAN, 119),
+    (KILN_C99_METHOD_GLOBAL_IS_FINITE, 120),
+    (KILN_C99_METHOD_NUMBER_TO_STRING, 121),
+    (KILN_C99_METHOD_NUMBER_TO_FIXED, 122),
+    (KILN_C99_METHOD_NUMBER_VALUE_OF, 123),
+    (KILN_C99_METHOD_ESCAPE, 124),
+    (KILN_C99_METHOD_UNESCAPE, 125),
+    (KILN_C99_METHOD_ENCODE_URI, 126),
+    (KILN_C99_METHOD_ENCODE_URI_COMPONENT, 127),
+    (KILN_C99_METHOD_DECODE_URI, 128),
+    (KILN_C99_METHOD_DECODE_URI_COMPONENT, 129),
+    (KILN_C99_METHOD_QUEUE_MICROTASK, 130),
+    (KILN_C99_METHOD_SET_TIMEOUT, 131),
+    (KILN_C99_METHOD_SET_INTERVAL, 132),
+    (KILN_C99_METHOD_CLEAR_TIMEOUT, 133),
+    (KILN_C99_METHOD_CLEAR_INTERVAL, 134),
+    (KILN_C99_METHOD_PROMISE_ALL_SETTLED, 135),
+    (KILN_C99_METHOD_PROMISE_ANY, 136),
+    (KILN_C99_METHOD_REJECT_STEP, 137),
+    (KILN_C99_METHOD_FINALLY_PASS, 138),
+    (KILN_C99_METHOD_FINALLY_RAISE, 139),
+    (KILN_C99_METHOD_FINALLY_RESTORE, 140),
+    (KILN_C99_METHOD_FINALLY_RERAISE, 141),
+    (KILN_C99_METHOD_ADOPT_STEP, 142),
+    (KILN_C99_METHOD_OBJECT_FREEZE, 143),
+    (KILN_C99_METHOD_OBJECT_IS_FROZEN, 144),
+    (KILN_C99_METHOD_FUNCTION_CALL, 145),
+    (KILN_C99_METHOD_FUNCTION_APPLY, 146),
+    (KILN_C99_METHOD_FUNCTION_BIND, 147),
+    (KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, 148),
+    (KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF, 149),
+    (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES, 150),
+    (KILN_C99_METHOD_OBJECT_FROM_ENTRIES, 151),
+    (KILN_C99_METHOD_ARRAY_FROM, 152),
+    (KILN_C99_METHOD_IS_PROTOTYPE_OF, 153),
+    (KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE, 154),
+    (KILN_C99_METHOD_STRING_RAW, 155),
+    (KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY, 156),
+    (KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES, 157),
+    (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR, 158),
+    (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS, 159),
+    (KILN_C99_METHOD_OBJECT_IS, 185),
+    (KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE, 186),
+    (KILN_C99_METHOD_REFLECT_OWN_KEYS, 187),
+    (KILN_C99_METHOD_REFLECT_GET, 188),
+    (KILN_C99_METHOD_REFLECT_SET, 189),
+    (KILN_C99_METHOD_REFLECT_HAS, 190),
+    (KILN_C99_METHOD_REFLECT_DELETE_PROPERTY, 191),
+    (KILN_C99_METHOD_REFLECT_APPLY, 192),
+    (KILN_C99_METHOD_REFLECT_CONSTRUCT, 193),
+    (KILN_C99_METHOD_PROXY_REVOCABLE, 194),
+    (KILN_C99_METHOD_PROXY_REVOKE, 195),
+    (KILN_C99_METHOD_MATH_RANDOM, 160),
+    (KILN_C99_METHOD_MATH_SINH, 161),
+    (KILN_C99_METHOD_MATH_COSH, 162),
+    (KILN_C99_METHOD_MATH_TANH, 163),
+    (KILN_C99_METHOD_MATH_ASINH, 164),
+    (KILN_C99_METHOD_MATH_ACOSH, 165),
+    (KILN_C99_METHOD_MATH_ATANH, 166),
+    (KILN_C99_METHOD_MATH_LOG1P, 167),
+    (KILN_C99_METHOD_MATH_EXPM1, 168),
+    (KILN_C99_METHOD_MATH_FROUND, 169),
+    (KILN_C99_METHOD_MATH_CLZ32, 170),
+    (KILN_C99_METHOD_MATH_IMUL, 171),
+    (KILN_C99_METHOD_REGEXP_TEST, 172),
+    (KILN_C99_METHOD_REGEXP_EXEC, 173),
+    (KILN_C99_METHOD_REGEXP_TO_STRING, 174),
+    (KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT, 175),
+    (KILN_C99_METHOD_PRIMITIVE_TO_STRING, 176),
+    (KILN_C99_METHOD_TYPED_SUBARRAY, 230),
+    (KILN_C99_METHOD_TYPED_SET, 231),
+    (KILN_C99_METHOD_TYPED_FILL, 232),
+    (KILN_C99_METHOD_TYPED_OF, 233),
+    (KILN_C99_METHOD_TYPED_FROM, 234),
+    (KILN_C99_METHOD_ARRAY_GENERIC_MAP, 235),
+    (KILN_C99_METHOD_ARRAY_GENERIC_FILTER, 236),
+    (KILN_C99_METHOD_NODE_EVENT_ON, 260),
+    (KILN_C99_METHOD_NODE_EVENT_ONCE, 261),
+    (KILN_C99_METHOD_NODE_EVENT_EMIT, 262),
+    (KILN_C99_METHOD_NODE_EVENT_LISTENERS, 263),
+    (KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER, 264),
+    (KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS, 265),
+    (KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS, 266),
+    (KILN_C99_METHOD_NODE_EVENT_EMITTER, 267),
+    (KILN_C99_METHOD_NODE_NET_CREATE_SERVER, 268),
+    (KILN_C99_METHOD_NODE_SERVER_LISTEN, 269),
+    (KILN_C99_METHOD_NODE_SERVER_CLOSE, 270),
+    (KILN_C99_METHOD_NODE_SERVER_ADDRESS, 271),
+    (KILN_C99_METHOD_NODE_SOCKET_WRITE, 272),
+    (KILN_C99_METHOD_NODE_SOCKET_END, 273),
+    (KILN_C99_METHOD_NODE_SOCKET_DESTROY, 274),
+    (KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER, 275),
+    (KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER, 276),
+    (KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD, 277),
+    (KILN_C99_METHOD_NODE_RESPONSE_WRITE, 278),
+    (KILN_C99_METHOD_NODE_RESPONSE_END, 279),
+    (KILN_C99_METHOD_NODE_HTTP_GET, 280),
+    (KILN_C99_METHOD_NODE_HTTP_REQUEST, 281),
+    (KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE, 282),
+    (KILN_C99_METHOD_NODE_CLIENT_REQUEST_END, 283),
+    (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284),
+    (KILN_C99_METHOD_NODE_NET_CONNECT, 338),
+    (KILN_C99_METHOD_URL_SEARCH_PARAMS_GET, 339),
+    (KILN_C99_METHOD_BUFFER_FROM, 340),
+    (KILN_C99_METHOD_BUFFER_ALLOC, 341),
+    (KILN_C99_METHOD_BUFFER_IS_BUFFER, 342),
+    (KILN_C99_METHOD_BUFFER_BYTE_LENGTH, 343),
+    (KILN_C99_METHOD_BUFFER_CONCAT, 344),
+    (KILN_C99_METHOD_BUFFER_TO_STRING, 345),
+    (KILN_C99_METHOD_NODE_UTIL_DEBUGLOG, 346),
+    (KILN_C99_METHOD_NODE_UTIL_NOOP, 347),
+    (KILN_C99_METHOD_NODE_UTIL_DEPRECATE, 348),
+    (KILN_C99_METHOD_NODE_UTIL_INSPECT, 349),
+    (KILN_C99_METHOD_NODE_UTIL_INHERITS, 350),
+    (KILN_C99_METHOD_NODE_UTIL_FORMAT, 351),
+    (KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL, 352),
+    (KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL, 353),
+    (KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH, 354),
+    (KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES, 355),
+    (KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER, 356),
+    (KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER, 357),
+    (KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER, 358),
+    (KILN_C99_METHOD_NODE_DNS_LOOKUP, 359),
+    (KILN_C99_METHOD_NODE_OS_HOSTNAME, 360),
+    (KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES, 361),
+    (KILN_C99_METHOD_NODE_STREAM, 362),
+    (KILN_C99_METHOD_NODE_READABLE, 363),
+    (KILN_C99_METHOD_NODE_WRITABLE, 364),
+    (KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL, 365),
+    (KILN_C99_METHOD_NODE_STREAM_FINISHED, 366),
+    (KILN_C99_METHOD_NODE_READABLE_PUSH, 367),
+    (KILN_C99_METHOD_NODE_READABLE_READ, 368),
+    (KILN_C99_METHOD_NODE_READABLE_DESTROY, 369),
+    (KILN_C99_METHOD_NODE_READABLE_PAUSE, 370),
+    (KILN_C99_METHOD_NODE_READABLE_RESUME, 371),
+    (KILN_C99_METHOD_NODE_READABLE_PIPE, 372),
+    (KILN_C99_METHOD_NODE_READABLE_UNPIPE, 373),
+    (KILN_C99_METHOD_NODE_WRITABLE_WRITE, 374),
+    (KILN_C99_METHOD_NODE_WRITABLE_END, 375),
+    (KILN_C99_METHOD_NODE_WRITABLE_DESTROY, 376),
+    (KILN_C99_METHOD_NODE_PERFORMANCE_NOW, 377),
+    (KILN_C99_METHOD_NODE_FS_EXISTS_SYNC, 378),
+    (KILN_C99_METHOD_NODE_FS_READ_FILE, 379),
+    (KILN_C99_METHOD_NODE_FS_STAT, 380),
+    (KILN_C99_METHOD_NODE_FS_WRITE_FILE, 381),
+    (KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE, 382),
+    (KILN_C99_METHOD_NODE_PATH_JOIN, 383),
+    (KILN_C99_METHOD_NODE_PATH_RESOLVE, 384),
+    (KILN_C99_METHOD_NODE_ASSERT_OK, 385),
+    (KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR, 386),
+    (KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE, 387),
+    (KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH, 388),
+    (KILN_C99_METHOD_NODE_URL_PARSE, 389),
+    (KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL, 390),
+    (KILN_C99_METHOD_NODE_ASYNC_RESOURCE, 391),
+    (KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND, 392),
+    (KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY, 393),
+    (KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID, 394),
+    (KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH, 395),
+    (KILN_C99_METHOD_PROCESS_NEXT_TICK, 396),
+    (KILN_C99_METHOD_PROCESS_HRTIME, 397),
+    (KILN_C99_METHOD_PROCESS_HRTIME_BIGINT, 398),
+    (KILN_C99_METHOD_PROCESS_CWD, 399),
+    (KILN_C99_METHOD_ATOMICS_UNAVAILABLE, 400),
+    (KILN_C99_METHOD_SET_IMMEDIATE, 401),
+    (KILN_C99_METHOD_CLEAR_IMMEDIATE, 402),
+    (KILN_C99_METHOD_NODE_HTTP_SERVER, 403),
+    (KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT, 404),
+    (KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER, 405),
+    (KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS, 406),
+    (KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER, 407),
+    (KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER, 408),
+    (KILN_C99_METHOD_SYMBOL_FOR, 409),
+    (KILN_C99_METHOD_SYMBOL_KEY_FOR, 410),
+    (KILN_C99_METHOD_TEMPORAL_FROM, 285),
+    (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292),
+    (KILN_C99_METHOD_TEMPORAL_COMPARE, 293),
+    (KILN_C99_METHOD_TEMPORAL_COMPARE_LAST, 300),
+    (KILN_C99_METHOD_TEMPORAL_TO_STRING, 301),
+    (KILN_C99_METHOD_TEMPORAL_TO_JSON, 302),
+    (KILN_C99_METHOD_TEMPORAL_VALUE_OF, 303),
+    (KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID, 304),
+    (KILN_C99_METHOD_TEMPORAL_NOW_READ, 305),
+    (KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST, 312),
+    (KILN_C99_METHOD_TEMPORAL_OP, 313),
+    (KILN_C99_METHOD_TEMPORAL_OP_LAST, 335),
+    (KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS, 336),
+    (KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS, 337),
+    (KILN_C99_METHOD_TEMPORAL_LAST, 337),
+    (KILN_C99_METHOD_SET_TIME, 177),
+    (KILN_C99_METHOD_SET_FULL_YEAR, 178),
+    (KILN_C99_METHOD_SET_MONTH, 179),
+    (KILN_C99_METHOD_SET_DATE, 180),
+    (KILN_C99_METHOD_SET_HOURS, 181),
+    (KILN_C99_METHOD_SET_MINUTES, 182),
+    (KILN_C99_METHOD_SET_SECONDS, 183),
+    (KILN_C99_METHOD_SET_MILLISECONDS, 184),
+}
+
+const _: () = validate_method_ids(METHOD_IDS);
+
+const HEADER: &str = concat!(
+    r#"/* Kiln C99 backend: deterministic scalar unit. */
 #include <ctype.h>
 #include <math.h>
 #include <stddef.h>
@@ -296,6 +907,7 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
  * unwinds.  The entry boundary renders this into its ordinary scalar result, so no private
  * runtime pointer or new public ABI type escapes. */
 static const char *kiln_c99_diagnostic_site = NULL;
+static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
@@ -481,49 +1093,53 @@ enum kiln_value_tag {
  * guards now end at `KILN_C99_METHOD_ARRAY_AT`, so a new receiver-free method goes below that
  * boundary and a new array method goes above it. The gap is deliberate: none of these codes
  * reaches a cache key, but renumbering the block would still be a diff nobody could review. */
-#define KILN_C99_METHOD_ARRAY_AT 200
-#define KILN_C99_METHOD_ARRAY_FIND 201
-#define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
-#define KILN_C99_METHOD_ARRAY_SOME 203
-#define KILN_C99_METHOD_ARRAY_EVERY 204
-#define KILN_C99_METHOD_ARRAY_SORT 205
-#define KILN_C99_METHOD_ARRAY_FLAT 206
-#define KILN_C99_METHOD_ARRAY_ENTRIES 207
-#define KILN_C99_METHOD_ARRAY_KEYS 208
-#define KILN_C99_METHOD_ARRAY_REVERSE 209
-#define KILN_C99_METHOD_ARRAY_SHIFT 210
-#define KILN_C99_METHOD_ARRAY_UNSHIFT 211
-#define KILN_C99_METHOD_ARRAY_FILL 212
-#define KILN_C99_METHOD_ARRAY_LAST_INDEX_OF 213
-#define KILN_C99_METHOD_ARRAY_SPLICE 214
-#define KILN_C99_METHOD_ARRAY_COPY_WITHIN 215
-#define KILN_C99_METHOD_ARRAY_TO_STRING 216
-#define KILN_C99_METHOD_ARRAY_FLAT_MAP 217
-#define KILN_C99_METHOD_ARRAY_FIND_LAST 218
-#define KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX 219
-#define KILN_C99_METHOD_ARRAY_REDUCE_RIGHT 220
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_ARRAY_AT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_INDEX),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_SOME),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_EVERY),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_SORT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_ENTRIES),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_KEYS),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_REVERSE),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_SHIFT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_UNSHIFT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FILL),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_LAST_INDEX_OF),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_SPLICE),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_COPY_WITHIN),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT_MAP),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_REDUCE_RIGHT),
+    r#"
 /* String methods, part two, numbered above the array block for the same reason the array block is
  * numbered above the namespace one: the guard that routes a code to a receiver kind is a range,
  * and a new range is cheaper than renumbering an old one. */
-#define KILN_C99_METHOD_STRING_CODE_POINT_AT 240
-#define KILN_C99_METHOD_STRING_SUBSTR 241
-#define KILN_C99_METHOD_STRING_LOCALE_COMPARE 242
-#define KILN_C99_METHOD_STRING_NORMALIZE 243
-#define KILN_C99_METHOD_STRING_TO_STRING 244
-#define KILN_C99_METHOD_STRING_VALUE_OF 245
-/* These three only ever take a pattern, so they are intercepted before the string block: they
+"#,
+    emit_method_define!(KILN_C99_METHOD_STRING_CODE_POINT_AT),
+    emit_method_define!(KILN_C99_METHOD_STRING_SUBSTR),
+    emit_method_define!(KILN_C99_METHOD_STRING_LOCALE_COMPARE),
+    emit_method_define!(KILN_C99_METHOD_STRING_NORMALIZE),
+    emit_method_define!(KILN_C99_METHOD_STRING_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_STRING_VALUE_OF),
+    r#"/* These three only ever take a pattern, so they are intercepted before the string block: they
  * need to call back into the program, and the string block has no interpreter to call with. */
-#define KILN_C99_METHOD_STRING_MATCH 246
-#define KILN_C99_METHOD_STRING_MATCH_ALL 247
-#define KILN_C99_METHOD_STRING_SEARCH 248
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_STRING_MATCH),
+    emit_method_define!(KILN_C99_METHOD_STRING_MATCH_ALL),
+    emit_method_define!(KILN_C99_METHOD_STRING_SEARCH),
+    r#"
 /* `Error.prototype.toString`, which every error inherits and no other object does. Deliberately
  * past the end of every range `kiln_c99_lookup_method` searches: it is not reached by name from a
  * table but handed out by the object read that recognises an error, because an ordinary object
  * with a `toString` of its own must not find this one. */
-#define KILN_C99_METHOD_ERROR_TO_STRING 249
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_ERROR_TO_STRING),
+    r#"
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
 /* The error constructors, contiguous so the kind is the offset: `new TypeError(m)` and
@@ -556,242 +1172,266 @@ enum kiln_value_tag {
 
 /* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
  * tags, none of these reaches a cache key. */
-#define KILN_C99_METHOD_PUSH 1
-#define KILN_C99_METHOD_POP 2
-#define KILN_C99_METHOD_JOIN 3
-#define KILN_C99_METHOD_INDEX_OF 4
-#define KILN_C99_METHOD_INCLUDES 5
-#define KILN_C99_METHOD_SLICE 6
-#define KILN_C99_METHOD_CONCAT 7
-#define KILN_C99_METHOD_MAP 8
-#define KILN_C99_METHOD_FILTER 9
-#define KILN_C99_METHOD_FOR_EACH 10
-#define KILN_C99_METHOD_REDUCE 11
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_PUSH),
+    emit_method_define!(KILN_C99_METHOD_POP),
+    emit_method_define!(KILN_C99_METHOD_JOIN),
+    emit_method_define!(KILN_C99_METHOD_INDEX_OF),
+    emit_method_define!(KILN_C99_METHOD_INCLUDES),
+    emit_method_define!(KILN_C99_METHOD_SLICE),
+    emit_method_define!(KILN_C99_METHOD_CONCAT),
+    emit_method_define!(KILN_C99_METHOD_MAP),
+    emit_method_define!(KILN_C99_METHOD_FILTER),
+    emit_method_define!(KILN_C99_METHOD_FOR_EACH),
+    emit_method_define!(KILN_C99_METHOD_REDUCE),
+    r#"
 /* String methods.  `slice` and `indexOf` are shared with the array table by name and told apart
  * by the receiver, exactly as the language does. */
-#define KILN_C99_METHOD_STRING_SLICE 12
-#define KILN_C99_METHOD_SUBSTRING 13
-#define KILN_C99_METHOD_STRING_INDEX_OF 14
-#define KILN_C99_METHOD_LAST_INDEX_OF 15
-#define KILN_C99_METHOD_STRING_INCLUDES 16
-#define KILN_C99_METHOD_STARTS_WITH 17
-#define KILN_C99_METHOD_ENDS_WITH 18
-#define KILN_C99_METHOD_CHAR_AT 19
-#define KILN_C99_METHOD_CHAR_CODE_AT 20
-#define KILN_C99_METHOD_STRING_AT 21
-#define KILN_C99_METHOD_TRIM 22
-#define KILN_C99_METHOD_TRIM_START 23
-#define KILN_C99_METHOD_TRIM_END 24
-#define KILN_C99_METHOD_SPLIT 25
-#define KILN_C99_METHOD_REPEAT 26
-#define KILN_C99_METHOD_PAD_START 27
-#define KILN_C99_METHOD_PAD_END 28
-#define KILN_C99_METHOD_TO_UPPER_CASE 29
-#define KILN_C99_METHOD_TO_LOWER_CASE 30
-#define KILN_C99_METHOD_REPLACE 31
-#define KILN_C99_METHOD_REPLACE_ALL 32
-#define KILN_C99_METHOD_STRING_CONCAT 33
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_STRING_SLICE),
+    emit_method_define!(KILN_C99_METHOD_SUBSTRING),
+    emit_method_define!(KILN_C99_METHOD_STRING_INDEX_OF),
+    emit_method_define!(KILN_C99_METHOD_LAST_INDEX_OF),
+    emit_method_define!(KILN_C99_METHOD_STRING_INCLUDES),
+    emit_method_define!(KILN_C99_METHOD_STARTS_WITH),
+    emit_method_define!(KILN_C99_METHOD_ENDS_WITH),
+    emit_method_define!(KILN_C99_METHOD_CHAR_AT),
+    emit_method_define!(KILN_C99_METHOD_CHAR_CODE_AT),
+    emit_method_define!(KILN_C99_METHOD_STRING_AT),
+    emit_method_define!(KILN_C99_METHOD_TRIM),
+    emit_method_define!(KILN_C99_METHOD_TRIM_START),
+    emit_method_define!(KILN_C99_METHOD_TRIM_END),
+    emit_method_define!(KILN_C99_METHOD_SPLIT),
+    emit_method_define!(KILN_C99_METHOD_REPEAT),
+    emit_method_define!(KILN_C99_METHOD_PAD_START),
+    emit_method_define!(KILN_C99_METHOD_PAD_END),
+    emit_method_define!(KILN_C99_METHOD_TO_UPPER_CASE),
+    emit_method_define!(KILN_C99_METHOD_TO_LOWER_CASE),
+    emit_method_define!(KILN_C99_METHOD_REPLACE),
+    emit_method_define!(KILN_C99_METHOD_REPLACE_ALL),
+    emit_method_define!(KILN_C99_METHOD_STRING_CONCAT),
+    r#"
 /* Namespace methods.  Unlike the array and string tables these take no receiver: `Math.floor` is
  * reached through `Math`, but `Math` contributes nothing to the answer. */
-#define KILN_C99_METHOD_MATH_FLOOR 34
-#define KILN_C99_METHOD_MATH_CEIL 35
-#define KILN_C99_METHOD_MATH_ROUND 36
-#define KILN_C99_METHOD_MATH_TRUNC 37
-#define KILN_C99_METHOD_MATH_ABS 38
-#define KILN_C99_METHOD_MATH_SIGN 39
-#define KILN_C99_METHOD_MATH_SQRT 40
-#define KILN_C99_METHOD_MATH_CBRT 41
-#define KILN_C99_METHOD_MATH_POW 42
-#define KILN_C99_METHOD_MATH_MIN 43
-#define KILN_C99_METHOD_MATH_MAX 44
-#define KILN_C99_METHOD_MATH_LOG 45
-#define KILN_C99_METHOD_MATH_LOG2 46
-#define KILN_C99_METHOD_MATH_LOG10 47
-#define KILN_C99_METHOD_MATH_EXP 48
-#define KILN_C99_METHOD_MATH_HYPOT 49
-#define KILN_C99_METHOD_MATH_ATAN2 50
-#define KILN_C99_METHOD_MATH_SIN 51
-#define KILN_C99_METHOD_MATH_COS 52
-#define KILN_C99_METHOD_MATH_TAN 53
-#define KILN_C99_METHOD_MATH_ASIN 54
-#define KILN_C99_METHOD_MATH_ACOS 55
-#define KILN_C99_METHOD_MATH_ATAN 56
-#define KILN_C99_METHOD_IS_INTEGER 57
-#define KILN_C99_METHOD_IS_SAFE_INTEGER 58
-#define KILN_C99_METHOD_IS_NAN 59
-#define KILN_C99_METHOD_IS_FINITE 60
-#define KILN_C99_METHOD_OBJECT_KEYS 61
-#define KILN_C99_METHOD_OBJECT_VALUES 62
-#define KILN_C99_METHOD_OBJECT_ENTRIES 63
-#define KILN_C99_METHOD_OBJECT_ASSIGN 64
-#define KILN_C99_METHOD_HAS_OWN 65
-#define KILN_C99_METHOD_IS_ARRAY 66
-#define KILN_C99_METHOD_ARRAY_OF 67
-#define KILN_C99_METHOD_OBJECT_CREATE 68
-#define KILN_C99_METHOD_JSON_STRINGIFY 69
-#define KILN_C99_METHOD_JSON_PARSE 70
-#define KILN_C99_METHOD_GENERATOR_NEXT 71
-#define KILN_C99_METHOD_GENERATOR_RETURN 72
-#define KILN_C99_METHOD_GENERATOR_SELF 73
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_MATH_FLOOR),
+    emit_method_define!(KILN_C99_METHOD_MATH_CEIL),
+    emit_method_define!(KILN_C99_METHOD_MATH_ROUND),
+    emit_method_define!(KILN_C99_METHOD_MATH_TRUNC),
+    emit_method_define!(KILN_C99_METHOD_MATH_ABS),
+    emit_method_define!(KILN_C99_METHOD_MATH_SIGN),
+    emit_method_define!(KILN_C99_METHOD_MATH_SQRT),
+    emit_method_define!(KILN_C99_METHOD_MATH_CBRT),
+    emit_method_define!(KILN_C99_METHOD_MATH_POW),
+    emit_method_define!(KILN_C99_METHOD_MATH_MIN),
+    emit_method_define!(KILN_C99_METHOD_MATH_MAX),
+    emit_method_define!(KILN_C99_METHOD_MATH_LOG),
+    emit_method_define!(KILN_C99_METHOD_MATH_LOG2),
+    emit_method_define!(KILN_C99_METHOD_MATH_LOG10),
+    emit_method_define!(KILN_C99_METHOD_MATH_EXP),
+    emit_method_define!(KILN_C99_METHOD_MATH_HYPOT),
+    emit_method_define!(KILN_C99_METHOD_MATH_ATAN2),
+    emit_method_define!(KILN_C99_METHOD_MATH_SIN),
+    emit_method_define!(KILN_C99_METHOD_MATH_COS),
+    emit_method_define!(KILN_C99_METHOD_MATH_TAN),
+    emit_method_define!(KILN_C99_METHOD_MATH_ASIN),
+    emit_method_define!(KILN_C99_METHOD_MATH_ACOS),
+    emit_method_define!(KILN_C99_METHOD_MATH_ATAN),
+    emit_method_define!(KILN_C99_METHOD_IS_INTEGER),
+    emit_method_define!(KILN_C99_METHOD_IS_SAFE_INTEGER),
+    emit_method_define!(KILN_C99_METHOD_IS_NAN),
+    emit_method_define!(KILN_C99_METHOD_IS_FINITE),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_KEYS),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUES),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_ENTRIES),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_ASSIGN),
+    emit_method_define!(KILN_C99_METHOD_HAS_OWN),
+    emit_method_define!(KILN_C99_METHOD_IS_ARRAY),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_OF),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_CREATE),
+    emit_method_define!(KILN_C99_METHOD_JSON_STRINGIFY),
+    emit_method_define!(KILN_C99_METHOD_JSON_PARSE),
+    emit_method_define!(KILN_C99_METHOD_GENERATOR_NEXT),
+    emit_method_define!(KILN_C99_METHOD_GENERATOR_RETURN),
+    emit_method_define!(KILN_C99_METHOD_GENERATOR_SELF),
+    r#"
 /* Date readers. Every one of these is UTC, because the realm has one zone and it is UTC
  * (ADR 0015) -- so the local reader and the UTC reader are the same function rather than two
  * that happen to agree. */
-#define KILN_C99_METHOD_GET_TIME 74
-#define KILN_C99_METHOD_GET_FULL_YEAR 75
-#define KILN_C99_METHOD_GET_MONTH 76
-#define KILN_C99_METHOD_GET_DATE 77
-#define KILN_C99_METHOD_GET_DAY 78
-#define KILN_C99_METHOD_GET_HOURS 79
-#define KILN_C99_METHOD_GET_MINUTES 80
-#define KILN_C99_METHOD_GET_SECONDS 81
-#define KILN_C99_METHOD_GET_MILLISECONDS 82
-#define KILN_C99_METHOD_GET_TIMEZONE_OFFSET 83
-#define KILN_C99_METHOD_TO_ISO_STRING 84
-#define KILN_C99_METHOD_TO_JSON 85
-#define KILN_C99_METHOD_DATE_TO_STRING 86
-#define KILN_C99_METHOD_DATE_NOW 87
-#define KILN_C99_METHOD_DATE_UTC 88
-#define KILN_C99_METHOD_DATE_PARSE 89
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_GET_TIME),
+    emit_method_define!(KILN_C99_METHOD_GET_FULL_YEAR),
+    emit_method_define!(KILN_C99_METHOD_GET_MONTH),
+    emit_method_define!(KILN_C99_METHOD_GET_DATE),
+    emit_method_define!(KILN_C99_METHOD_GET_DAY),
+    emit_method_define!(KILN_C99_METHOD_GET_HOURS),
+    emit_method_define!(KILN_C99_METHOD_GET_MINUTES),
+    emit_method_define!(KILN_C99_METHOD_GET_SECONDS),
+    emit_method_define!(KILN_C99_METHOD_GET_MILLISECONDS),
+    emit_method_define!(KILN_C99_METHOD_GET_TIMEZONE_OFFSET),
+    emit_method_define!(KILN_C99_METHOD_TO_ISO_STRING),
+    emit_method_define!(KILN_C99_METHOD_TO_JSON),
+    emit_method_define!(KILN_C99_METHOD_DATE_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_DATE_NOW),
+    emit_method_define!(KILN_C99_METHOD_DATE_UTC),
+    emit_method_define!(KILN_C99_METHOD_DATE_PARSE),
+    r#"
 /* The end of every chain is `Object.prototype`, and these are what it carries. */
-#define KILN_C99_METHOD_HAS_OWN_PROPERTY 90
-#define KILN_C99_METHOD_OBJECT_TO_STRING 91
-#define KILN_C99_METHOD_OBJECT_VALUE_OF 92
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_HAS_OWN_PROPERTY),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUE_OF),
+    r#"
 /* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
-#define KILN_C99_METHOD_COLLECTION_GET 93
-#define KILN_C99_METHOD_COLLECTION_SET 94
-#define KILN_C99_METHOD_COLLECTION_ADD 95
-#define KILN_C99_METHOD_COLLECTION_HAS 96
-#define KILN_C99_METHOD_COLLECTION_DELETE 97
-#define KILN_C99_METHOD_COLLECTION_CLEAR 98
-#define KILN_C99_METHOD_COLLECTION_FOR_EACH 99
-#define KILN_C99_METHOD_COLLECTION_KEYS 100
-#define KILN_C99_METHOD_COLLECTION_VALUES 101
-#define KILN_C99_METHOD_COLLECTION_ENTRIES 102
-#define KILN_C99_METHOD_COLLECTION_SELF 103
-#define KILN_C99_METHOD_ITERATOR_NEXT 104
-#define KILN_C99_METHOD_ITERATOR_SELF 105
-#define KILN_C99_METHOD_ARRAY_VALUES 106
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_GET),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_SET),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_ADD),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_HAS),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_DELETE),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_CLEAR),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_FOR_EACH),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_KEYS),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_VALUES),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_ENTRIES),
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_SELF),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_NEXT),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_SELF),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_VALUES),
+    r#"
 /* Promise, and the two halves of driving an async function. */
-#define KILN_C99_METHOD_THEN 107
-#define KILN_C99_METHOD_CATCH 108
-#define KILN_C99_METHOD_FINALLY 109
-#define KILN_C99_METHOD_PROMISE_RESOLVE 110
-#define KILN_C99_METHOD_PROMISE_REJECT 111
-#define KILN_C99_METHOD_PROMISE_ALL 112
-#define KILN_C99_METHOD_PROMISE_RACE 113
-#define KILN_C99_METHOD_ASYNC_RESUME 114
-#define KILN_C99_METHOD_ASYNC_THROW 115
-#define KILN_C99_METHOD_ALL_STEP 116
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_THEN),
+    emit_method_define!(KILN_C99_METHOD_CATCH),
+    emit_method_define!(KILN_C99_METHOD_FINALLY),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_RESOLVE),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECT),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_RACE),
+    emit_method_define!(KILN_C99_METHOD_ASYNC_RESUME),
+    emit_method_define!(KILN_C99_METHOD_ASYNC_THROW),
+    emit_method_define!(KILN_C99_METHOD_ALL_STEP),
+    r#"
 /* The global functions. They are namespace methods with no namespace: nothing is reached through
  * before them, so `LoadBuiltin` pushes the method value directly. Two of them share a name with a
  * `Number` method and not its behaviour -- `isNaN('x')` coerces where `Number.isNaN('x')` does
  * not -- so they are separate codes rather than the same one reached two ways. */
-#define KILN_C99_METHOD_PARSE_INT 117
-#define KILN_C99_METHOD_PARSE_FLOAT 118
-#define KILN_C99_METHOD_GLOBAL_IS_NAN 119
-#define KILN_C99_METHOD_GLOBAL_IS_FINITE 120
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_PARSE_INT),
+    emit_method_define!(KILN_C99_METHOD_PARSE_FLOAT),
+    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_NAN),
+    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_FINITE),
+    r#"
 /* Number methods. Read off the value rather than through a `Number.prototype` object, which is
  * what the interpreter does and for the same reason: there is no such object yet. */
-#define KILN_C99_METHOD_NUMBER_TO_STRING 121
-#define KILN_C99_METHOD_NUMBER_TO_FIXED 122
-#define KILN_C99_METHOD_NUMBER_VALUE_OF 123
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_FIXED),
+    emit_method_define!(KILN_C99_METHOD_NUMBER_VALUE_OF),
+    r#"
 /* The text-escaping globals. `escape`/`unescape` are Annex B and work in code units; the four URI
  * functions work in UTF-8 bytes and differ only in which characters they leave alone. */
-#define KILN_C99_METHOD_ESCAPE 124
-#define KILN_C99_METHOD_UNESCAPE 125
-#define KILN_C99_METHOD_ENCODE_URI 126
-#define KILN_C99_METHOD_ENCODE_URI_COMPONENT 127
-#define KILN_C99_METHOD_DECODE_URI 128
-#define KILN_C99_METHOD_DECODE_URI_COMPONENT 129
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_ESCAPE),
+    emit_method_define!(KILN_C99_METHOD_UNESCAPE),
+    emit_method_define!(KILN_C99_METHOD_ENCODE_URI),
+    emit_method_define!(KILN_C99_METHOD_ENCODE_URI_COMPONENT),
+    emit_method_define!(KILN_C99_METHOD_DECODE_URI),
+    emit_method_define!(KILN_C99_METHOD_DECODE_URI_COMPONENT),
+    r#"
 /* `queueMicrotask(fn)`: the queue promises already drain, reached directly. */
-#define KILN_C99_METHOD_QUEUE_MICROTASK 130
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_QUEUE_MICROTASK),
+    r#"
 /* The timer functions. `clearTimeout` and `clearInterval` do the same thing and are two codes
  * because they are two names: a program can print either one. */
-#define KILN_C99_METHOD_SET_TIMEOUT 131
-#define KILN_C99_METHOD_SET_INTERVAL 132
-#define KILN_C99_METHOD_CLEAR_TIMEOUT 133
-#define KILN_C99_METHOD_CLEAR_INTERVAL 134
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_SET_TIMEOUT),
+    emit_method_define!(KILN_C99_METHOD_SET_INTERVAL),
+    emit_method_define!(KILN_C99_METHOD_CLEAR_TIMEOUT),
+    emit_method_define!(KILN_C99_METHOD_CLEAR_INTERVAL),
+    r#"
 /* The two combinators that do not fail on the first rejection. Named outside the contiguous
  * `Promise` range because that range is how a namespace's methods are found, and it was already
  * closed. `@@rejectStep` is the rejection-side twin of `@@allStep`: `all` and `race` settle their
  * promise on any rejection and need no handler of their own, and these two do. */
-#define KILN_C99_METHOD_PROMISE_ALL_SETTLED 135
-#define KILN_C99_METHOD_PROMISE_ANY 136
-#define KILN_C99_METHOD_REJECT_STEP 137
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL_SETTLED),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_ANY),
+    emit_method_define!(KILN_C99_METHOD_REJECT_STEP),
+    r#"
 /* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
  * they were passing through, which is the whole difference from `then(f, f)`. */
-#define KILN_C99_METHOD_FINALLY_PASS 138
-#define KILN_C99_METHOD_FINALLY_RAISE 139
-/* ...and the two that put the outcome back once the handler's own result has settled. Bound to
+"#,
+    emit_method_define!(KILN_C99_METHOD_FINALLY_PASS),
+    emit_method_define!(KILN_C99_METHOD_FINALLY_RAISE),
+    r#"/* ...and the two that put the outcome back once the handler's own result has settled. Bound to
  * the outcome, so the pair needs no state object either. */
-#define KILN_C99_METHOD_FINALLY_RESTORE 140
-#define KILN_C99_METHOD_FINALLY_RERAISE 141
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_FINALLY_RESTORE),
+    emit_method_define!(KILN_C99_METHOD_FINALLY_RERAISE),
+    r#"
 /* Resolving a promise *with* a promise. The attach is a job of its own, which is a turn a program
  * can see -- so it is a step rather than something `settle` does on the spot. */
-#define KILN_C99_METHOD_ADOPT_STEP 142
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_ADOPT_STEP),
+    r#"
 /* `Object.freeze` and `Object.isFrozen`, outside the contiguous `Object` range because it was
  * already closed. */
-#define KILN_C99_METHOD_OBJECT_FREEZE 143
-#define KILN_C99_METHOD_OBJECT_IS_FROZEN 144
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_OBJECT_FREEZE),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_IS_FROZEN),
+    r#"
 /* What every callable answers to, whatever kind of callable it is:
  * `Object.prototype.hasOwnProperty.call(x, k)` is how a transpiled module asks whether a key is
  * own, and `Array.prototype.slice.call(arguments)` is how it makes an array. */
-#define KILN_C99_METHOD_FUNCTION_CALL 145
-#define KILN_C99_METHOD_FUNCTION_APPLY 146
-#define KILN_C99_METHOD_FUNCTION_BIND 147
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_FUNCTION_CALL),
+    emit_method_define!(KILN_C99_METHOD_FUNCTION_APPLY),
+    emit_method_define!(KILN_C99_METHOD_FUNCTION_BIND),
+    r#"
 /* The reflective statics, and the one instance method that walks a chain. */
-#define KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF 148
-#define KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF 149
-#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES 150
-#define KILN_C99_METHOD_OBJECT_FROM_ENTRIES 151
-#define KILN_C99_METHOD_ARRAY_FROM 152
-#define KILN_C99_METHOD_IS_PROTOTYPE_OF 153
-#define KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE 154
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_FROM_ENTRIES),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_FROM),
+    emit_method_define!(KILN_C99_METHOD_IS_PROTOTYPE_OF),
+    emit_method_define!(KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE),
+    r#"
 /* `String.raw`, the one built-in written to be used as a template tag. Numbered with the
  * receiver-less statics because that is what it is: the template object arrives as an argument,
  * not as `this`. */
-#define KILN_C99_METHOD_STRING_RAW 155
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_STRING_RAW),
+    r#"
 /* The descriptor half of the reflective statics: the operations that talk about a property
  * rather than through it. Numbered in the receiver-less range, because every one of them takes
  * its subject as an argument. */
-#define KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY 156
-#define KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES 157
-#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR 158
-#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS 159
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS),
+    r#"
 /* The global symbol registry. `Symbol.for` is deliberately separate from `Symbol()` because
  * equal registry keys must return one identity across every module in the realm. */
-#define KILN_C99_METHOD_SYMBOL_FOR 409
-#define KILN_C99_METHOD_SYMBOL_KEY_FOR 410
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_SYMBOL_FOR),
+    emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
+    r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
-#define KILN_C99_METHOD_OBJECT_IS 185
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_OBJECT_IS),
+    r#"
 /* `Error.captureStackTrace`. Present so `typeof` reports "function", which is what libraries
  * feature-detect on; calling it evaluates to undefined rather than inventing a stack this engine
  * does not record. The interpreter makes exactly that trade, and the two have to make it
  * together. */
-#define KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE 186
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE),
+    r#"
 /* `Reflect`: the operations a proxy handler forwards with, as ordinary functions.
  *
  * They are not aliases for the `Object` statics that look like them. `Reflect.get` takes a
@@ -799,202 +1439,216 @@ enum kiln_value_tag {
  * the proxy; `Reflect.set` and `Reflect.deleteProperty` answer with a boolean where the operator
  * forms answer with the value; and none of them coerces a primitive target -- `Reflect.get(1, k)`
  * is a TypeError where `(1)[k]` is a read off the string prototype. */
-#define KILN_C99_METHOD_REFLECT_OWN_KEYS 187
-#define KILN_C99_METHOD_REFLECT_GET 188
-#define KILN_C99_METHOD_REFLECT_SET 189
-#define KILN_C99_METHOD_REFLECT_HAS 190
-#define KILN_C99_METHOD_REFLECT_DELETE_PROPERTY 191
-#define KILN_C99_METHOD_REFLECT_APPLY 192
-#define KILN_C99_METHOD_REFLECT_CONSTRUCT 193
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_REFLECT_OWN_KEYS),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_GET),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_SET),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_HAS),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_APPLY),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_CONSTRUCT),
+    r#"
 /* `Proxy.revocable(target, handler)` and the function it hands back. The second is reached only
  * through the first, as a bound method whose receiver is the proxy it retires -- which is what
  * gives the returned function the one capability it needs and nothing else. */
-#define KILN_C99_METHOD_PROXY_REVOCABLE 194
-#define KILN_C99_METHOD_PROXY_REVOKE 195
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_PROXY_REVOCABLE),
+    emit_method_define!(KILN_C99_METHOD_PROXY_REVOKE),
+    r#"
 /* `Math`, part two -- numbered here rather than beside the first range because that range ends
  * where `Number`'s begins. Still below the array boundary, because these take no receiver. */
-#define KILN_C99_METHOD_MATH_RANDOM 160
-#define KILN_C99_METHOD_MATH_SINH 161
-#define KILN_C99_METHOD_MATH_COSH 162
-#define KILN_C99_METHOD_MATH_TANH 163
-#define KILN_C99_METHOD_MATH_ASINH 164
-#define KILN_C99_METHOD_MATH_ACOSH 165
-#define KILN_C99_METHOD_MATH_ATANH 166
-#define KILN_C99_METHOD_MATH_LOG1P 167
-#define KILN_C99_METHOD_MATH_EXPM1 168
-#define KILN_C99_METHOD_MATH_FROUND 169
-#define KILN_C99_METHOD_MATH_CLZ32 170
-#define KILN_C99_METHOD_MATH_IMUL 171
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_MATH_RANDOM),
+    emit_method_define!(KILN_C99_METHOD_MATH_SINH),
+    emit_method_define!(KILN_C99_METHOD_MATH_COSH),
+    emit_method_define!(KILN_C99_METHOD_MATH_TANH),
+    emit_method_define!(KILN_C99_METHOD_MATH_ASINH),
+    emit_method_define!(KILN_C99_METHOD_MATH_ACOSH),
+    emit_method_define!(KILN_C99_METHOD_MATH_ATANH),
+    emit_method_define!(KILN_C99_METHOD_MATH_LOG1P),
+    emit_method_define!(KILN_C99_METHOD_MATH_EXPM1),
+    emit_method_define!(KILN_C99_METHOD_MATH_FROUND),
+    emit_method_define!(KILN_C99_METHOD_MATH_CLZ32),
+    emit_method_define!(KILN_C99_METHOD_MATH_IMUL),
+    r#"
 /* What a regular expression answers to. Below the array boundary because they take a receiver
  * exactly as the number methods do. */
-#define KILN_C99_METHOD_REGEXP_TEST 172
-#define KILN_C99_METHOD_REGEXP_EXEC 173
-#define KILN_C99_METHOD_REGEXP_TO_STRING 174
-/* A collection's own `next`, distinct from the array iterator's because it walks the collection
+"#,
+    emit_method_define!(KILN_C99_METHOD_REGEXP_TEST),
+    emit_method_define!(KILN_C99_METHOD_REGEXP_EXEC),
+    emit_method_define!(KILN_C99_METHOD_REGEXP_TO_STRING),
+    r#"/* A collection's own `next`, distinct from the array iterator's because it walks the collection
  * itself rather than a copy of it -- which is the only way a delete during a loop can be seen.
  * Numbered here rather than beside the collection block because the guard that routes a code to
  * a receiver kind is a range, and this has to land inside the one that answers a method reached
  * through an object. */
-#define KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT 175
-/* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
+"#,
+    emit_method_define!(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT),
+    r#"/* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
  * Library code reaches for it constantly on values it has already coerced. */
-#define KILN_C99_METHOD_PRIMITIVE_TO_STRING 176
-#define KILN_C99_METHOD_TYPED_SUBARRAY 230
-#define KILN_C99_METHOD_TYPED_SET 231
-#define KILN_C99_METHOD_TYPED_FILL 232
-/* The two statics a concrete view constructor carries. Kept below the string block that
+"#,
+    emit_method_define!(KILN_C99_METHOD_PRIMITIVE_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_TYPED_SUBARRAY),
+    emit_method_define!(KILN_C99_METHOD_TYPED_SET),
+    emit_method_define!(KILN_C99_METHOD_TYPED_FILL),
+    r#"/* The two statics a concrete view constructor carries. Kept below the string block that
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
-#define KILN_C99_METHOD_TYPED_OF 233
-#define KILN_C99_METHOD_TYPED_FROM 234
-/* `Array.prototype.map/filter` keep their generic semantics when borrowed onto a typed array.
+"#,
+    emit_method_define!(KILN_C99_METHOD_TYPED_OF),
+    emit_method_define!(KILN_C99_METHOD_TYPED_FROM),
+    r#"/* `Array.prototype.map/filter` keep their generic semantics when borrowed onto a typed array.
  * They need distinct codes from the intrinsic typed-array methods, which return a typed view. */
-#define KILN_C99_METHOD_ARRAY_GENERIC_MAP 235
-#define KILN_C99_METHOD_ARRAY_GENERIC_FILTER 236
-/* Runtime-module methods. They use the same canonical call path as language intrinsics while
+"#,
+    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_MAP),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_FILTER),
+    r#"/* Runtime-module methods. They use the same canonical call path as language intrinsics while
  * keeping their state on ordinary backend objects. Appended outside every range-dispatch block
  * so adding a runtime facade never changes the meaning of an existing intrinsic code. */
-#define KILN_C99_METHOD_NODE_EVENT_ON 260
-#define KILN_C99_METHOD_NODE_EVENT_ONCE 261
-#define KILN_C99_METHOD_NODE_EVENT_EMIT 262
-#define KILN_C99_METHOD_NODE_EVENT_LISTENERS 263
-#define KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER 264
-#define KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS 265
-#define KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS 266
-#define KILN_C99_METHOD_NODE_EVENT_EMITTER 267
-#define KILN_C99_METHOD_NODE_NET_CREATE_SERVER 268
-#define KILN_C99_METHOD_NODE_SERVER_LISTEN 269
-#define KILN_C99_METHOD_NODE_SERVER_CLOSE 270
-#define KILN_C99_METHOD_NODE_SERVER_ADDRESS 271
-#define KILN_C99_METHOD_NODE_SOCKET_WRITE 272
-#define KILN_C99_METHOD_NODE_SOCKET_END 273
-#define KILN_C99_METHOD_NODE_SOCKET_DESTROY 274
-#define KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER 275
-#define KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER 276
-#define KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD 277
-#define KILN_C99_METHOD_NODE_RESPONSE_WRITE 278
-#define KILN_C99_METHOD_NODE_RESPONSE_END 279
-#define KILN_C99_METHOD_NODE_HTTP_GET 280
-#define KILN_C99_METHOD_NODE_HTTP_REQUEST 281
-#define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
-#define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
-#define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
-#define KILN_C99_METHOD_NODE_NET_CONNECT 338
-#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 339
-#define KILN_C99_METHOD_BUFFER_FROM 340
-#define KILN_C99_METHOD_BUFFER_ALLOC 341
-#define KILN_C99_METHOD_BUFFER_IS_BUFFER 342
-#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 343
-#define KILN_C99_METHOD_BUFFER_CONCAT 344
-#define KILN_C99_METHOD_BUFFER_TO_STRING 345
-#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 346
-#define KILN_C99_METHOD_NODE_UTIL_NOOP 347
-#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 348
-#define KILN_C99_METHOD_NODE_UTIL_INSPECT 349
-#define KILN_C99_METHOD_NODE_UTIL_INHERITS 350
-#define KILN_C99_METHOD_NODE_UTIL_FORMAT 351
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 352
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 353
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 354
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 355
-#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 356
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 357
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 358
-#define KILN_C99_METHOD_NODE_DNS_LOOKUP 359
-#define KILN_C99_METHOD_NODE_OS_HOSTNAME 360
-#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 361
-#define KILN_C99_METHOD_NODE_STREAM 362
-#define KILN_C99_METHOD_NODE_READABLE 363
-#define KILN_C99_METHOD_NODE_WRITABLE 364
-#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 365
-#define KILN_C99_METHOD_NODE_STREAM_FINISHED 366
-#define KILN_C99_METHOD_NODE_READABLE_PUSH 367
-#define KILN_C99_METHOD_NODE_READABLE_READ 368
-#define KILN_C99_METHOD_NODE_READABLE_DESTROY 369
-#define KILN_C99_METHOD_NODE_READABLE_PAUSE 370
-#define KILN_C99_METHOD_NODE_READABLE_RESUME 371
-#define KILN_C99_METHOD_NODE_READABLE_PIPE 372
-#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 373
-#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 374
-#define KILN_C99_METHOD_NODE_WRITABLE_END 375
-#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 376
-#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 377
-#define KILN_C99_METHOD_NODE_FS_EXISTS_SYNC 378
-#define KILN_C99_METHOD_NODE_FS_READ_FILE 379
-#define KILN_C99_METHOD_NODE_FS_STAT 380
-#define KILN_C99_METHOD_NODE_FS_WRITE_FILE 381
-#define KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE 382
-#define KILN_C99_METHOD_NODE_PATH_JOIN 383
-#define KILN_C99_METHOD_NODE_PATH_RESOLVE 384
-#define KILN_C99_METHOD_NODE_ASSERT_OK 385
-#define KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR 386
-#define KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE 387
-#define KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH 388
-#define KILN_C99_METHOD_NODE_URL_PARSE 389
-#define KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL 390
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE 391
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND 392
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY 393
-#define KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID 394
-#define KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH 395
-#define KILN_C99_METHOD_PROCESS_NEXT_TICK 396
-#define KILN_C99_METHOD_PROCESS_HRTIME 397
-#define KILN_C99_METHOD_PROCESS_HRTIME_BIGINT 398
-#define KILN_C99_METHOD_PROCESS_CWD 399
-#define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 400
-#define KILN_C99_METHOD_SET_IMMEDIATE 401
-#define KILN_C99_METHOD_CLEAR_IMMEDIATE 402
-#define KILN_C99_METHOD_NODE_HTTP_SERVER 403
-#define KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT 404
-#define KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER 405
-#define KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS 406
-#define KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER 407
-#define KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER 408
-/* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
+"#,
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ON),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ONCE),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMIT),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENERS),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS),
+    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMITTER),
+    emit_method_define!(KILN_C99_METHOD_NODE_NET_CREATE_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_LISTEN),
+    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_CLOSE),
+    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_ADDRESS),
+    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_WRITE),
+    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_END),
+    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_DESTROY),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_END),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_GET),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_REQUEST),
+    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE),
+    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING),
+    emit_method_define!(KILN_C99_METHOD_NODE_NET_CONNECT),
+    emit_method_define!(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_FROM),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_ALLOC),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_IS_BUFFER),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_BYTE_LENGTH),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_CONCAT),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_NOOP),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEPRECATE),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INSPECT),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INHERITS),
+    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_FORMAT),
+    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL),
+    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL),
+    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH),
+    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_DNS_LOOKUP),
+    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOSTNAME),
+    emit_method_define!(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES),
+    emit_method_define!(KILN_C99_METHOD_NODE_STREAM),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE),
+    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE),
+    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL),
+    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_FINISHED),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PUSH),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_READ),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_DESTROY),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PAUSE),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_RESUME),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PIPE),
+    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_UNPIPE),
+    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_WRITE),
+    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_END),
+    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_DESTROY),
+    emit_method_define!(KILN_C99_METHOD_NODE_PERFORMANCE_NOW),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_JOIN),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RESOLVE),
+    emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
+    emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
+    emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
+    emit_method_define!(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH),
+    emit_method_define!(KILN_C99_METHOD_NODE_URL_PARSE),
+    emit_method_define!(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL),
+    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE),
+    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND),
+    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY),
+    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID),
+    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_NEXT_TICK),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
+    emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
+    emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
+    emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER),
+    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER),
+    r#"/* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
 /* `from` and `compare` are one function per type in the language -- `Temporal.PlainDate.from`
  * accepts a different bag from `Temporal.Duration.from` -- and the call path carries only the
  * method code, not the value the method was reached through. So the kind rides in the code: the
  * eight are contiguous and the base is subtracted to recover it. */
-#define KILN_C99_METHOD_TEMPORAL_FROM 285
-#define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
-#define KILN_C99_METHOD_TEMPORAL_COMPARE 293
-#define KILN_C99_METHOD_TEMPORAL_COMPARE_LAST 300
-#define KILN_C99_METHOD_TEMPORAL_TO_STRING 301
-#define KILN_C99_METHOD_TEMPORAL_TO_JSON 302
-#define KILN_C99_METHOD_TEMPORAL_VALUE_OF 303
-#define KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID 304
-/* `Temporal.Now`'s five readers, contiguous so the kind rides in the code the way it does for
+"#,
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM_LAST),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE_LAST),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_JSON),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_VALUE_OF),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID),
+    r#"/* `Temporal.Now`'s five readers, contiguous so the kind rides in the code the way it does for
  * `from` and `compare`. The clock they read is the realm's, which ADR 0015 makes virtual and UTC.
  * The order is the eight-type order, restricted to the five the namespace offers. */
-#define KILN_C99_METHOD_TEMPORAL_NOW_READ 305
-#define KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST 312
-/* The arithmetic and conversion surface. One code per name, contiguous, because the call path
+"#,
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST),
+    r#"/* The arithmetic and conversion surface. One code per name, contiguous, because the call path
  * carries only the code -- and the provider is keyed by the name, so the two are the same table
  * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
-#define KILN_C99_METHOD_TEMPORAL_OP 313
-#define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
-/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
+"#,
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP_LAST),
+    r#"/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
  * rather than a kind-bearing range, because only `Instant` has them: an epoch count names a point
  * on the timeline, and no other one of the eight is a point on a timeline by itself. */
-#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS 336
-#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS 337
-#define KILN_C99_METHOD_TEMPORAL_LAST 337
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS),
+    emit_method_define!(KILN_C99_METHOD_TEMPORAL_LAST),
+    r#"
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
  * is full. */
-#define KILN_C99_METHOD_SET_TIME 177
-#define KILN_C99_METHOD_SET_FULL_YEAR 178
-#define KILN_C99_METHOD_SET_MONTH 179
-#define KILN_C99_METHOD_SET_DATE 180
-#define KILN_C99_METHOD_SET_HOURS 181
-#define KILN_C99_METHOD_SET_MINUTES 182
-#define KILN_C99_METHOD_SET_SECONDS 183
-#define KILN_C99_METHOD_SET_MILLISECONDS 184
-
+"#,
+    emit_method_define!(KILN_C99_METHOD_SET_TIME),
+    emit_method_define!(KILN_C99_METHOD_SET_FULL_YEAR),
+    emit_method_define!(KILN_C99_METHOD_SET_MONTH),
+    emit_method_define!(KILN_C99_METHOD_SET_DATE),
+    emit_method_define!(KILN_C99_METHOD_SET_HOURS),
+    emit_method_define!(KILN_C99_METHOD_SET_MINUTES),
+    emit_method_define!(KILN_C99_METHOD_SET_SECONDS),
+    emit_method_define!(KILN_C99_METHOD_SET_MILLISECONDS),
+    r#"
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -1353,13 +2007,6 @@ typedef struct kiln_symbol {
     size_t description_len;
 } kiln_symbol;
 
-typedef struct kiln_registered_symbol {
-    kiln_symbol *symbol;
-    struct kiln_registered_symbol *next;
-} kiln_registered_symbol;
-
-static kiln_registered_symbol *kiln_c99_symbol_registry;
-
 typedef struct kiln_bound {
     kiln_value target;
     kiln_value receiver;
@@ -1385,8 +2032,15 @@ typedef struct kiln_microtask {
     kiln_value argument;
     kiln_value derived;
     int rejected;
-    int passes_argument;
 } kiln_microtask;
+
+/* One process.nextTick callback. The Realm Runtime owns lane ordering; this payload contains
+ * only the language values its opaque work callback understands. */
+typedef struct kiln_next_tick {
+    kiln_value callback;
+    kiln_value *args;
+    size_t argc;
+} kiln_next_tick;
 
 /* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,
  * repeat policy and cancellation; this allocation contains only the language state its opaque
@@ -1544,7 +2198,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 3
+#define KILN_REALM_ASYNC_ABI_VERSION 4
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -1604,6 +2258,8 @@ int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
+int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
+int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
@@ -1615,6 +2271,7 @@ int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
 static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
+int kiln_realm_queue_next_tick(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                            void *work, uint64_t *out_id);
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
@@ -2055,9 +2712,11 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
                          kiln_value *out);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
-static int kiln_c99_enqueue_callback(kiln_value callback);
+static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
 static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
 static void kiln_c99_drop_microtask(void *work);
+static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
+static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
@@ -3629,6 +4288,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:
@@ -5062,7 +5722,7 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
 }
 
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
-    return (kiln_symbol *)(uintptr_t)value.bits;
+    return (kiln_symbol *)(uintptr_t)value.ptr;
 }
 
 /* The specification's own symbols. One instance each, so equality is the pointer's exactly as it
@@ -5123,42 +5783,49 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         symbol->description = text.ptr;
         symbol->description_len = text.len;
     }
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol, NULL, 0);
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol,
+                          (const char *)(uintptr_t)symbol, 0);
     return KILN_C99_OK;
 }
 
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     kiln_value text = kiln_c99_text(key);
-    kiln_registered_symbol *entry;
-    int status;
+    kiln_symbol *symbol;
+    const uint8_t *registered_key;
+    uint64_t registered_key_len;
+    char *property_key;
+    static const char property_prefix[] = "@@symbol-for:";
+    uint64_t id;
     if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
-        if (entry->symbol->description_len == text.len &&
-            (text.len == 0 || memcmp(entry->symbol->description, text.ptr, text.len) == 0)) {
-            *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)entry->symbol, NULL, 0);
-            return KILN_C99_OK;
-        }
+    if (kiln_realm_symbol_for((const uint8_t *)text.ptr, (uint64_t)text.len, &id) != KILN_C99_OK)
+        return KILN_C99_CONTROL_ERROR;
+    if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
+        registered_key_len > SIZE_MAX)
+        return KILN_C99_CONTROL_ERROR;
+    symbol = (kiln_symbol *)malloc(sizeof *symbol);
+    if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
+    property_key = (char *)malloc((sizeof property_prefix - 1) + sizeof id);
+    if (property_key == NULL) {
+        free(symbol);
+        return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_c99_new_symbol(out, text);
-    if (status != KILN_C99_OK) return status;
-    entry = (kiln_registered_symbol *)malloc(sizeof *entry);
-    if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
-    entry->symbol = kiln_c99_symbol_of(*out);
-    entry->next = kiln_c99_symbol_registry;
-    kiln_c99_symbol_registry = entry;
+    memcpy(property_key, property_prefix, sizeof property_prefix - 1);
+    memcpy(property_key + sizeof property_prefix - 1, &id, sizeof id);
+    symbol->key = property_key;
+    symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
+    symbol->description = (const char *)registered_key;
+    symbol->description_len = (size_t)registered_key_len;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, id, (const char *)(uintptr_t)symbol, 0);
     return KILN_C99_OK;
 }
 
 static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
-    kiln_registered_symbol *entry;
+    const uint8_t *key;
+    uint64_t key_len;
     if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
-    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
-        if (entry->symbol == kiln_c99_symbol_of(value)) {
-            return kiln_c99_copy_text(entry->symbol->description,
-                                      entry->symbol->description_len);
-        }
-    }
-    return kiln_c99_undefined();
+    if (kiln_realm_symbol_key_for(value.bits, &key, &key_len) != KILN_C99_OK)
+        return kiln_c99_undefined();
+    return kiln_c99_copy_text((const char *)key, (size_t)key_len);
 }
 
 /* `call`, `apply` and `bind`, which every callable answers to whatever kind of callable it is.
@@ -6186,6 +6853,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_instruction);
         (void)kiln_c99_text_append_c(&text, " instruction=");
         (void)kiln_c99_text_append(&text, number, written);
+    }
+    if (kiln_c99_diagnostic_operation != NULL) {
+        (void)kiln_c99_text_append_c(&text, " operation=");
+        (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_operation);
     }
     if (kiln_c99_diagnostic_has_method) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
@@ -8055,8 +8726,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             for (index = 0; index < sizeof names / sizeof *names; ++index) {
                 if (kiln_c99_same_name(key, key_len, names[index])) {
                     *out = kiln_c99_value(KILN_VALUE_SYMBOL,
-                                          (uint64_t)(uintptr_t)&kiln_c99_well_known[index], NULL,
-                                          0);
+                                          (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
+                                          (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
                     return KILN_C99_OK;
                 }
             }
@@ -12406,21 +13077,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_PROCESS_NEXT_TICK) {
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t extra = argc > 1 ? argc - 1 : 0;
-        kiln_value queued = callback;
         if (!kiln_c99_is_callable(callback))
             return kiln_c99_throw_not_a(thrown, callback, "function");
-        /* `nextTick(callback, ...args)` queues one invocation carrying all of the supplied
-         * arguments.  Promise reactions use the same realm-owned microtask queue, but their
-         * payload has exactly one settlement value; bind the variadic Node shape before it
-         * crosses that intentionally small queue ABI. */
-        if (extra != 0) {
-            status = kiln_c99_bind_with(&queued, callback, kiln_c99_undefined(), args + 1,
-                                        extra);
-            if (status != KILN_C99_OK) return status;
-        }
         *result = kiln_c99_undefined();
-        return kiln_c99_enqueue_callback(queued);
+        return kiln_c99_enqueue_next_tick(callback, argc > 1 ? args + 1 : NULL,
+                                          argc > 1 ? argc - 1 : 0);
     }
     if (code == KILN_C99_METHOD_PROCESS_CWD) {
         *result = kiln_c99_copy_text("/", 1);
@@ -12594,7 +13255,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         return KILN_C99_OK;
     }
     if ((code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) ||
-        code == KILN_C99_METHOD_SYMBOL_FOR || code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
+        code == KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY ||
+        code == KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES ||
+        code == KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR ||
+        code == KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS ||
+        code == KILN_C99_METHOD_OBJECT_IS || code == KILN_C99_METHOD_SYMBOL_FOR ||
+        code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
         double first = 0.0 / 0.0;
@@ -19145,7 +19811,6 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     task->argument = argument;
     task->derived = derived;
     task->rejected = rejected;
-    task->passes_argument = 1;
     status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
                                         task);
     if (status != KILN_C99_OK) {
@@ -19155,19 +19820,28 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     return KILN_C99_OK;
 }
 
-static int kiln_c99_enqueue_callback(kiln_value callback) {
-    kiln_microtask *task;
+static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
+    kiln_next_tick *task = (kiln_next_tick *)malloc(sizeof *task);
     int status;
-    task = (kiln_microtask *)malloc(sizeof *task);
     if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
-    task->handler = callback;
-    task->argument = kiln_c99_undefined();
-    task->derived = kiln_c99_undefined();
-    task->rejected = 0;
-    task->passes_argument = 0;
-    status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask, task);
+    task->callback = callback;
+    task->argc = argc;
+    task->args = NULL;
+    if (argc != 0) {
+        if (argc > SIZE_MAX / sizeof *task->args) {
+            free(task);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        task->args = (kiln_value *)malloc(argc * sizeof *task->args);
+        if (task->args == NULL) {
+            free(task);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        memcpy(task->args, args, argc * sizeof *task->args);
+    }
+    status = kiln_realm_queue_next_tick(kiln_c99_run_next_tick, kiln_c99_drop_next_tick, task);
     if (status != KILN_C99_OK) {
-        kiln_c99_drop_microtask(task);
+        kiln_c99_drop_next_tick(task);
         return status;
     }
     return KILN_C99_OK;
@@ -19318,8 +19992,7 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         return KILN_C99_OK;
     }
     status = kiln_c99_call(host, &produced, task->handler, kiln_c99_undefined(),
-                           task->passes_argument ? &task->argument : NULL,
-                           task->passes_argument ? 1 : 0, 0, thrown);
+                           &task->argument, 1, 0, thrown);
     if (status == KILN_C99_THROWN) {
         /* A handler that throws rejects the promise it was producing, rather than failing the
          * program: that is the whole reason `catch` exists further down the chain. */
@@ -19333,6 +20006,23 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         return kiln_c99_settle(task->derived, produced, 0);
     }
     return KILN_C99_OK;
+}
+
+static void kiln_c99_drop_next_tick(void *work) {
+    kiln_next_tick *task = (kiln_next_tick *)work;
+    if (task == NULL) return;
+    free(task->args);
+    free(task);
+}
+
+static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
+    kiln_next_tick *task = (kiln_next_tick *)work;
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    kiln_value produced;
+    if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
+                         task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
 }
 
 static void kiln_c99_drop_timer(void *work) {
@@ -20715,7 +21405,8 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 }
 
 
-"#;
+"#,
+);
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled
 /// function body in [`Program::functions`], in the same order.
@@ -21716,7 +22407,13 @@ fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
-fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
+fn render_functions(
+    output: &mut String,
+    program: &Program,
+    plan: &StackPlan,
+    symbol: &str,
+    diagnostic_site: &str,
+) {
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -21743,6 +22440,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
             plan.functions[index],
             index,
             symbol,
+            diagnostic_site,
         );
     }
 }
@@ -21819,6 +22517,7 @@ fn render_function(
     max_stack: usize,
     index: usize,
     symbol: &str,
+    diagnostic_site: &str,
 ) {
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is
@@ -21930,6 +22629,7 @@ fn render_function(
         frame_stacks,
         functions: &program.functions,
         symbol,
+        diagnostic_site,
         callables: produces_references(program),
         handlers,
         site: ReturnSite::Body,
@@ -22124,7 +22824,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol);
+    render_functions(&mut output, program, &plan, symbol, symbol);
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
@@ -22171,6 +22871,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
+        diagnostic_site: symbol,
         callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
@@ -22200,6 +22901,7 @@ fn render_module(
     symbol: &str,
     policy: &EmissionPolicy,
     commonjs: bool,
+    diagnostic_site: &str,
 ) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
@@ -22229,7 +22931,7 @@ fn render_module(
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol);
+    render_functions(&mut output, program, &plan, symbol, diagnostic_site);
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
@@ -22304,6 +23006,7 @@ fn render_module(
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
+        diagnostic_site,
         callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
@@ -22397,6 +23100,7 @@ struct Emitter<'a> {
     handlers: Vec<u32>,
     functions: &'a [FunctionProto],
     symbol: &'a str,
+    diagnostic_site: &'a str,
     /// Whether a value reaching the embedding boundary could be a callable and so has to be
     /// converted first. False for a scalar program, whose emitted bytes must not change.
     callables: bool,
@@ -22425,6 +23129,7 @@ fn emit_instruction(
         frame_stacks,
         functions,
         symbol,
+        diagnostic_site,
         callables,
         handlers,
         site,
@@ -22433,7 +23138,9 @@ fn emit_instruction(
     let before = output.len();
     writeln!(
         output,
-        "    kiln_c99_diagnostic_site = \"{symbol}\"; kiln_c99_diagnostic_instruction = (size_t){index};"
+        "    kiln_c99_diagnostic_site = {}; kiln_c99_diagnostic_instruction = (size_t){index}; kiln_c99_diagnostic_operation = \"{}\";",
+        c_string(diagnostic_site),
+        instruction_diagnostic(instruction, constants)
     )
     .unwrap();
     output.push_str("    kiln_c99_diagnostic_has_method = 0;\n");
@@ -23336,6 +24043,32 @@ fn emit_instruction(
         output.truncate(before);
         output.push_str(&replaced);
     }
+}
+
+fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
+    let debug = format!("{instruction:?}");
+    let mut operation = debug
+        .split([' ', '(', '{'])
+        .next()
+        .unwrap_or("Instruction")
+        .to_owned();
+    let named = match instruction {
+        Instruction::CallMethod { name, .. }
+        | Instruction::GetProperty(name)
+        | Instruction::SetProperty(name) => constants.get(*name as usize),
+        Instruction::SetPropertyStrict { name, .. } => constants.get(*name as usize),
+        _ => None,
+    };
+    if let Some(Constant::String(name)) = named {
+        operation.push('(');
+        operation.push_str(name);
+        operation.push(')');
+    }
+    operation
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric() || b"_.$:-()".contains(byte))
+        .map(char::from)
+        .collect()
 }
 
 fn c_string(value: &str) -> String {
@@ -24253,11 +24986,14 @@ int main(void) {{
         let wrapper = format!(
             r#"
 int main(void) {{
+    uint64_t realm;
     kiln_value key = kiln_c99_copy_text("fastify-error-generic", 21);
     kiln_value first;
     kiln_value second;
     kiln_value unique;
     kiln_value recovered;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_symbol_for(&first, key) != KILN_C99_OK) return 1;
     if (kiln_c99_symbol_for(&second, key) != KILN_C99_OK) return 2;
     if (!kiln_c99_strict_equal(first, second)) return 3;
@@ -24267,7 +25003,12 @@ int main(void) {{
     if (kiln_c99_new_symbol(&unique, key) != KILN_C99_OK) return 5;
     if (kiln_c99_strict_equal(first, unique)) return 6;
     if (kiln_c99_symbol_key_for(unique).tag != KILN_VALUE_UNDEFINED) return 7;
-    return 0;
+    if (kiln_c99_property_key(first).len == key.len &&
+        memcmp(kiln_c99_property_key(first).ptr, key.ptr, key.len) == 0) return 8;
+    if (kiln_c99_text(first).len != 29 ||
+        memcmp(kiln_c99_text(first).ptr, "Symbol(fastify-error-generic)", 29) != 0) return 9;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }}
 "#
         );
@@ -24277,6 +25018,81 @@ int main(void) {{
             "native symbol registry failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_reflective_object_statics_dispatch_without_a_receiver() {
+        let generated = emit(&program(
+            vec![Constant::Undefined],
+            vec![Instruction::Const(0), Instruction::Return],
+            0,
+        ))
+        .expect("reflective static probe emits");
+        let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_value target;
+    kiln_value descriptor;
+    kiln_value key = kiln_c99_copy_text("answer", 6);
+    kiln_value value = kiln_c99_number(42.0);
+    kiln_value args[3];
+    kiln_value result;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_new_object(&descriptor) != KILN_C99_OK) return 2;
+    if (kiln_c99_put(NULL, descriptor, "value", 5, value, 0, NULL) != KILN_C99_OK) return 3;
+    args[0] = target;
+    args[1] = key;
+    args[2] = descriptor;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_OK) return 4;
+    if (!kiln_c99_strict_equal(result, target)) return 5;
+    if (kiln_c99_get(NULL, target, "answer", 6, &result, 0, &thrown) != KILN_C99_OK) return 6;
+    if (result.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(result) != 42.0) return 7;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 8;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "object-define-property-static");
+        assert!(
+            run.status.success(),
+            "Object.defineProperty static dispatch failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn logical_path_diagnostics_name_source_and_operation() {
+        let module = ModuleProgram {
+            program: program(
+                vec![Constant::String("defineProperty".into())],
+                vec![
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::Object),
+                    Instruction::CallMethod { name: 0, argc: 0 },
+                    Instruction::Return,
+                ],
+                0,
+            ),
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let generated =
+            emit_module_with_logical_path(&module, "node_modules/@fastify/error/index.js")
+                .expect("logical module emits");
+        assert!(
+            generated
+                .source
+                .contains("kiln_c99_diagnostic_site = \"node_modules/@fastify/error/index.js\";")
+        );
+        assert!(
+            generated
+                .source
+                .contains("kiln_c99_diagnostic_operation = \"CallMethod(defineProperty)\";")
         );
     }
 
@@ -24432,6 +25248,9 @@ int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_
     const REALM_FIXTURE: &str = r#"
 static uint64_t kiln_test_next_timer_id = 1;
 static int kiln_test_realm_active = 0;
+static uint64_t kiln_test_symbol_id = 1;
+static char kiln_test_symbol_key[256];
+static uint64_t kiln_test_symbol_key_len = 0;
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -24460,6 +25279,31 @@ int kiln_realm_destroy(uint64_t realm) {
  * prelude declares and this fixture is the first text that follows the prelude. */
 int32_t kiln_temporal_invoke(const kiln_temporal_call *call) { (void)call; return -1; }
 int kiln_realm_is_active(void) { return kiln_test_realm_active; }
+int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
+    if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (kiln_test_symbol_key_len == 0) {
+        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
+        kiln_test_symbol_key_len = key_len;
+    } else if (key_len != kiln_test_symbol_key_len ||
+               memcmp(kiln_test_symbol_key, key, (size_t)key_len) != 0) {
+        ++kiln_test_symbol_id;
+        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
+        kiln_test_symbol_key_len = key_len;
+    }
+    *out_id = kiln_test_symbol_id;
+    return KILN_C99_OK;
+}
+int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len) {
+    if (!kiln_test_realm_active || id != kiln_test_symbol_id || out_key == NULL ||
+        out_key_len == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    *out_key = (const uint8_t *)kiln_test_symbol_key;
+    *out_key_len = kiln_test_symbol_key_len;
+    return KILN_C99_OK;
+}
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
@@ -24476,6 +25320,13 @@ int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low) {
     return KILN_C99_OK;
 }
 int kiln_realm_queue_microtask(kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work) {
+    (void)run;
+    if (drop != NULL) drop(work);
+    return KILN_C99_OK;
+}
+int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
                                kiln_realm_drop_fn drop,
                                void *work) {
     (void)run;
