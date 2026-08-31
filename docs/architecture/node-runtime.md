@@ -21,8 +21,9 @@ There is no event-loop driver trait and no second executor. There is one service
 facilities. Deterministic conformance implements it with a script of requests and completions. The
 script is a provider, not an executor: Tokio still owns polling and realm wakeups.
 
-`kiln run --node` is the explicit product boundary. It selects the Node resolver, typed builtin
-graph nodes, adapter surface, cache identity, and Tokio-backed host provider as one coherent mode.
+`kiln run --node` and `kiln build --node` are the explicit interpreted and standalone product
+boundaries. They select the Node resolver, typed builtin graph nodes, adapter surface, cache
+identity, and Tokio-backed host provider as one coherent mode.
 Without the flag, `node:` specifiers fail closed; with it, unknown builtins still fail closed. A
 module cannot accidentally acquire Node semantics because a dependency happened to use Node syntax.
 
@@ -216,6 +217,10 @@ evidence for a promoted server slice is:
 Native execution becomes another binding of the same slice, not a separate implementation target.
 No Node API is advertised on native merely because its synchronous facade compiles; it is advertised
 only when its continuations, resources, cancellation, and liveness enter the shared realm protocol.
+The canonical standalone acceptance case builds `conformance/server/s01-http-hello.mjs` through
+the public `kiln build --node` command, executes the emitted artifact, and requires the same output
+as interpreted Node mode. `bench/results/server-baseline.json` measures that artifact alongside
+Node, Deno, and Bun without making the comparison a CI gate.
 
 ## Migration sequence
 

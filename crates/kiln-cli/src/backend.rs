@@ -37,6 +37,7 @@ pub trait Backend: Send {
         match self.request(Request::NativeBuildAtRevision {
             path,
             project_root,
+            node: false,
             output,
             profile,
             source_view,
@@ -141,6 +142,7 @@ pub trait Backend: Send {
         project_root: String,
         output: Option<String>,
         profile: NativeProfile,
+        node: bool,
         source_view: SourceView,
     ) -> Result<SourceResponse<NativeBuildSummary>> {
         match self.request(Request::NativeBuild {
@@ -148,6 +150,7 @@ pub trait Backend: Send {
             project_root,
             output,
             profile,
+            node,
             source_view,
         })? {
             Response::NativeBuilt(summary) => Ok(SourceResponse::Ready(summary)),

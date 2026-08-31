@@ -1129,6 +1129,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     let stale = client
         .request(&Request::NativeBuildAtRevision {
+            node: false,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
@@ -1150,6 +1151,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
 
     let response = client
         .request(&Request::NativeBuildAtRevision {
+            node: false,
             source_view: SourceView(0),
             path,
             project_root,
@@ -2820,6 +2822,7 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
 
     let response = client
         .raw_request(&Request::NativeBuildAtRevision {
+            node: false,
             source_view: SourceView(0),
             path: "relative-snapshot.js".into(),
             project_root: fixture.dir.to_string_lossy().into_owned(),

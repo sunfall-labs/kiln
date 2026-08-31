@@ -224,8 +224,8 @@ standalone_target("bun", "bun", [
     "build", "--compile", "--outfile", os.path.join(work, "s01-bun"), os.path.abspath(probe),
 ], os.path.join(work, "s01-bun"), "the JavaScript engine is inside this file")
 
-# Node mode is currently an advertised interpreter path. Measure that honestly as a script; do
-# not relabel it standalone merely because the executable containing the interpreter is local.
+# Measure both advertised Node paths. The standalone form is built through the public CLI so the
+# number covers the same resolver, graph, cache identity, linker, and runtime ABI a user invokes.
 if not kiln_bin or not os.path.exists(kiln_bin):
     targets.append({
         "target": "kiln", "form": "script", "available": False,
@@ -245,10 +245,34 @@ else:
         kiln["reason"] = failure
     targets.append(kiln)
 
-targets.append({
-    "target": "kiln", "form": "standalone", "available": False,
-    "reason": "the native backend does not yet advertise Node mode; its async continuation ABI must use the same RealmRuntime before this form exists",
-})
+if not kiln_bin or not os.path.exists(kiln_bin):
+    targets.append({
+        "target": "kiln", "form": "standalone", "available": False,
+        "reason": "no kiln binary at target/debug/kiln; build one with `mbx build -p kiln-cli`",
+    })
+else:
+    artifact = os.path.join(work, "s01-kiln")
+    size, failure = build([
+        os.path.abspath(kiln_bin), "--one-shot", "build", os.path.abspath(probe),
+        "--node", "--profile", "native-release", "--output", artifact,
+    ], artifact)
+    if failure is not None:
+        targets.append({
+            "target": "kiln", "form": "standalone", "available": False,
+            "reason": failure,
+        })
+    else:
+        metrics, failure = measure([artifact])
+        entry = {
+            "target": "kiln", "form": "standalone", "available": failure is None,
+            "artifact_bytes": size,
+            "note": "native Node artifact; Tokio/Hyper runtime linked without a JavaScript engine",
+        }
+        if failure is None:
+            entry.update(metrics)
+        else:
+            entry["reason"] = failure
+        targets.append(entry)
 
 
 def version(binary, argv):
@@ -270,6 +294,7 @@ json.dump({
         "node": version("node", ["--version"]),
         "deno": version("deno", ["--version"]),
         "bun": version("bun", ["--version"]),
+        "kiln": version(kiln_bin, ["--version"]) if kiln_bin else None,
     },
     "targets": targets,
 }, sys.stdout, indent=2, sort_keys=False)

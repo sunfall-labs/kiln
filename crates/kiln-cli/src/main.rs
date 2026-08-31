@@ -130,6 +130,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             output,
             profile,
             shared,
+            node,
         } => {
             let mut backend = open(one_shot, &socket)?;
             report(commands::build(
@@ -139,6 +140,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 output.as_deref(),
                 profile,
                 shared,
+                node,
             )?)
         }
         Command::Check { path } => {
