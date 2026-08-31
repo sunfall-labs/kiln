@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn node_run_is_explicit_and_native_does_not_claim_it() {
+    fn node_run_is_explicit_and_composes_with_native() {
         assert!(matches!(
             run(&["run", "server.mjs", "--node"]).command,
             Command::Run {
@@ -601,8 +601,7 @@ mod tests {
                 ..
             }
         ));
-        // Parsing retains both facts so dispatch can issue the precise backend-capability error;
-        // neither flag is silently dropped or made to imply the other.
+        // Node policy and execution backend remain independent explicit choices.
         assert!(matches!(
             run(&["run", "server.mjs", "--node", "--native"]).command,
             Command::Run {

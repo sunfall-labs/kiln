@@ -20,13 +20,16 @@ extend the same upstream API slice with Node-shaped assertions needed to cover K
 Adapter boundary. They are derived compatibility probes rather than byte-for-byte upstream files;
 the manifest labels every exercised behavior so the supported surface is explicit.
 
-Node mode currently has one supported executor: the bytecode interpreter selected by
+Node mode's complete corpus currently runs through the bytecode interpreter selected by
 `kiln test --node`. Script cases use the direct program entrypoint; `.mjs` cases deliberately use
 the production Node resolver, typed builtin graph, linker, shared realm session, and Tokio Adapter.
 That second path is where server compatibility is gated, so a test-only loader cannot make the
-corpus greener than a real module graph. The native backend does not accept or silently emulate
-Node mode yet; when its private continuation ABI grows asynchronous HostOps, this corpus becomes
-the shared interpreter/native gate. Run today's pinned gate with:
+corpus greener than a real module graph. Native Node mode is also explicit (`kiln run --node
+--native`) and uses the same typed resolver plus active-realm asynchronous HostOps, but advertises
+only the native materializers that have vertical coverage (`node:events`, `node:net`, and the
+server subset of `node:http`). Unsupported builtins still fail before emission. The inventory
+becomes a shared interpreter/native gate case by case as each adapted test's complete surface is
+materialized. Run the complete interpreted pinned gate with:
 
 ```sh
 mbx run -p kiln-cli -- --one-shot test conformance/node --node

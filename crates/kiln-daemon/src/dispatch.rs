@@ -147,7 +147,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, resolutions, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root, false) {
                 Ok(Some(graph)) => native_build_graph(&graph, path, project_root, output, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => {
@@ -172,7 +172,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
         } => (
-            match native_graph(engine, resolutions, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root, false) {
                 Ok(Some(graph)) if graph.module_count() > 1 => {
                     native_build_shared_graph(&graph, path, project_root, output, profile)
                 }
@@ -190,9 +190,10 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             path,
             project_root,
             profile,
+            node,
             source_view: _,
         } => (
-            match native_graph(engine, resolutions, &path, &project_root) {
+            match native_graph(engine, resolutions, &path, &project_root, node) {
                 Ok(Some(graph)) => native_run_graph(&graph, path, project_root, profile),
                 Ok(None) => match native_program(engine, &path) {
                     Ok(program) => native_run_program(program, path, project_root, profile),
@@ -766,13 +767,14 @@ pub(crate) fn native_graph<E: QueryEngine>(
     resolutions: Option<&ResolutionMap>,
     path: &str,
     project_root: &str,
+    node: bool,
 ) -> Result<Option<ModuleGraph>, String> {
     let Some(entry) = resolve_source_path(path, project_root) else {
         ensure_source(engine, path)?;
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    build_graph(engine, resolutions, &entry, project_root, false)
+    build_graph(engine, resolutions, &entry, project_root, node)
         .map(Some)
         .map_err(|error| error.to_string())
 }

@@ -397,16 +397,12 @@ pub fn native_run(
     path: &Path,
     project_root: &Path,
     profile: NativeProfile,
+    node: bool,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let (mut project_notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(
-            backend,
-            project_root,
-            Some((&canonical, &text)),
-            false,
-        )?;
+        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)), node)?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
             backend,
@@ -421,6 +417,7 @@ pub fn native_run(
         canonical.clone(),
         project_root_text.clone(),
         profile,
+        node,
         source_view,
     )? {
         SourceResponse::Ready(summary) => summary,
@@ -428,7 +425,13 @@ pub fn native_run(
             let snapshot = establish_snapshot(backend, project_root, &canonical, &text, false)?;
             project_notes.extend(snapshot.notes);
             source_view = snapshot.source_view;
-            match backend.native_run_at_view(canonical, project_root_text, profile, source_view)? {
+            match backend.native_run_at_view(
+                canonical,
+                project_root_text,
+                profile,
+                node,
+                source_view,
+            )? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
                     return Err(Error::Protocol(format!("stale source view {}", current.0)));
@@ -1714,7 +1717,7 @@ mod tests {
         let canonical = canonical_path(&entry).expect("canonical native run entry");
 
         let mut backend = RemoveEntryDuringSync::new(entry.clone());
-        let output = native_run(&mut backend, &entry, &root, NativeProfile::Dev)
+        let output = native_run(&mut backend, &entry, &root, NativeProfile::Dev, false)
             .expect("native run keeps its captured entry snapshot");
 
         assert_eq!(output.text, "native hello\n");

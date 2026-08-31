@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -499,6 +499,8 @@ pub enum Request {
         path: String,
         project_root: String,
         profile: NativeProfile,
+        /// Enable the typed Node resolver and native runtime-module materializers.
+        node: bool,
         source_view: SourceView,
     },
     /// Discover, select, and execute a conformance corpus in this resident process.
@@ -841,8 +843,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v21_sync_source_view_and_cache_gc_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 21);
+    fn protocol_v22_sync_source_view_and_cache_gc_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 22);
 
         let requests = [
             (

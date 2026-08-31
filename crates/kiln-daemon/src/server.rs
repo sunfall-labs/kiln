@@ -764,11 +764,17 @@ fn handle<E: QueryEngine>(
             profile,
             source_view,
         } => {
-            let prepared =
-                match prepare_native_snapshot(state, &path, &project_root, source_view, false) {
-                    Ok(prepared) => prepared,
-                    Err(response) => return (response, Next::Continue),
-                };
+            let prepared = match prepare_native_snapshot(
+                state,
+                &path,
+                &project_root,
+                source_view,
+                false,
+                false,
+            ) {
+                Ok(prepared) => prepared,
+                Err(response) => return (response, Next::Continue),
+            };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
                     native_build_graph(&graph, path, project_root, output, profile)
@@ -785,11 +791,17 @@ fn handle<E: QueryEngine>(
             profile,
             source_view,
         } => {
-            let prepared =
-                match prepare_native_snapshot(state, &path, &project_root, source_view, true) {
-                    Ok(prepared) => prepared,
-                    Err(response) => return (response, Next::Continue),
-                };
+            let prepared = match prepare_native_snapshot(
+                state,
+                &path,
+                &project_root,
+                source_view,
+                true,
+                false,
+            ) {
+                Ok(prepared) => prepared,
+                Err(response) => return (response, Next::Continue),
+            };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
                     native_build_shared_graph(&graph, path, project_root, output, profile)
@@ -803,13 +815,20 @@ fn handle<E: QueryEngine>(
             path,
             project_root,
             profile,
+            node,
             source_view,
         } => {
-            let prepared =
-                match prepare_native_snapshot(state, &path, &project_root, source_view, false) {
-                    Ok(prepared) => prepared,
-                    Err(response) => return (response, Next::Continue),
-                };
+            let prepared = match prepare_native_snapshot(
+                state,
+                &path,
+                &project_root,
+                source_view,
+                false,
+                node,
+            ) {
+                Ok(prepared) => prepared,
+                Err(response) => return (response, Next::Continue),
+            };
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
                     native_run_graph(&graph, path, project_root, profile)
@@ -932,6 +951,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
                 resolutions.as_ref(),
                 &path,
                 &project_root,
+                false,
             )?;
             match graph {
                 Some(graph) => Ok(PreparedNative::Graph(graph.into())),
@@ -1063,6 +1083,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
     project_root: &str,
     source_view: SourceView,
     prefer_program_for_small_graph: bool,
+    node: bool,
 ) -> Result<PreparedNative, Response> {
     let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
     if guard.source_view != source_view {
@@ -1073,7 +1094,13 @@ fn prepare_native_snapshot<E: QueryEngine>(
     let revision = guard.engine.revision().0;
     let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        let graph = native_graph(&mut guard.engine, resolutions.as_ref(), path, project_root)?;
+        let graph = native_graph(
+            &mut guard.engine,
+            resolutions.as_ref(),
+            path,
+            project_root,
+            node,
+        )?;
         match graph {
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
                 Ok(PreparedNative::Graph(graph.into()))

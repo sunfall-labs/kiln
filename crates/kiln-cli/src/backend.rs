@@ -160,12 +160,14 @@ pub trait Backend: Send {
         path: String,
         project_root: String,
         profile: NativeProfile,
+        node: bool,
         source_view: SourceView,
     ) -> Result<SourceResponse<NativeRunSummary>> {
         match self.request(Request::NativeRun {
             path,
             project_root,
             profile,
+            node,
             source_view,
         })? {
             Response::NativeRan(summary) => Ok(SourceResponse::Ready(summary)),

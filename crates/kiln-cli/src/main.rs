@@ -112,7 +112,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
         }
         Command::Run {
             path,
-            node: false,
+            node,
             native: true,
             profile,
         } => {
@@ -122,15 +122,9 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &path,
                 &root,
                 profile,
+                node,
             )?)
         }
-        Command::Run {
-            node: true,
-            native: true,
-            ..
-        } => Err(Error::usage(
-            "--node cannot be combined with `kiln run --native`: the native backend does not advertise Node compatibility",
-        )),
         Command::Build {
             path,
             output,
