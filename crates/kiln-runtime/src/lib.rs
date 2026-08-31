@@ -870,6 +870,18 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .map(|connection| connection.transport.pump_write())
     }
 
+    /// Poll every realm-owned HTTP task once before the event loop blocks on HostOps.
+    ///
+    /// A protocol task can become runnable without another socket completion: supplying the
+    /// response head for one HTTP/1 request lets Hyper dispatch the next request already buffered
+    /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
+    /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
+    pub fn poll_http_tasks(&mut self) {
+        self.local.block_on(&self.runtime, async {
+            tokio::task::yield_now().await;
+        });
+    }
+
     /// Retire an HTTP transport after Hyper has completed its connection future.
     pub fn close_http_connection(
         &mut self,
@@ -928,6 +940,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         while let Ok(event) = receiver.try_recv() {
             if matches!(event, hyper_http::EngineEvent::Closed) {
                 connection.protocol_closed = true;
+                // Hyper has finished the HTTP/1 state machine. Retire the portable TCP resource
+                // after any bytes it already selected are acknowledged so the peer observes EOF
+                // and raw `node:net` clients can complete their natural `end`/`close` lifecycle.
+                connection.transport.close_requested();
             }
             events.push(match event {
                 hyper_http::EngineEvent::RequestHead { id, request } => {

@@ -4026,6 +4026,80 @@ socket.on("end", () => console.log(reply));
     }
 
     #[test]
+    fn native_node_http_server_handles_two_pipelined_requests_on_one_socket() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native HTTP pipelining integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-http-pipelining");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            include_str!(
+                "../../../conformance/node/upstream-adapted/http-pipelined-request-identity.mjs"
+            ),
+        )
+        .expect("write HTTP pipelining fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native HTTP pipelining fixture builds");
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run native HTTP pipelining fixture");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll native fixture") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stuck native fixture");
+                break child.wait().expect("reap stuck native fixture");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("capture stdout")
+            .read_to_string(&mut stdout)
+            .expect("read stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert!(
+            status.success(),
+            "status={status} stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert_eq!(stdout, "pass\n");
+    }
+
+    #[test]
     fn native_node_http_source_graph_serves_one_live_tokio_request() {
         use kiln_module_resolver::NodeRuntimeResolver;
         use std::io::{BufRead, Read, Write};

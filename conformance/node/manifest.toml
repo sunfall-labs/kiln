@@ -188,6 +188,13 @@ features = ["node:http", "tokio-net", "http-client", "request-identity", "resour
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/http/pipelined-request-identity"
+source = "upstream-adapted/http-pipelined-request-identity.mjs"
+status = "runnable"
+features = ["node:http", "node:net", "tokio-net", "hyper", "pipelining", "request-identity", "timers", "resource-lifecycle", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/buffer/concat-core"
 source = "upstream-adapted/buffer-concat-core.mjs"
 status = "runnable"

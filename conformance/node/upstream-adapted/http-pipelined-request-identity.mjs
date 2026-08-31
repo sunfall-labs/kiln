@@ -19,8 +19,10 @@ server.listen(0, "127.0.0.1", () => {
     if (bytes.includes("/first") && bytes.includes("/second")) socket.end();
   });
   socket.on("close", () => {
-    const first = bytes.indexOf("\r\n\r\n/first");
-    const second = bytes.indexOf("\r\n\r\n/second");
+    // HTTP/1 may frame these bodies with Content-Length or chunked encoding. The upstream
+    // invariant is request identity and response ordering, not a particular legal framing.
+    const first = bytes.indexOf("/first");
+    const second = bytes.indexOf("/second");
     if (first < 0 || second < 0 || first >= second) {
       throw new Error(`pipelined response order: ${first},${second},${bytes.length}`);
     }
