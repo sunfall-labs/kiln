@@ -167,6 +167,13 @@ features = ["node:http", "node:net", "tokio-net", "streams", "timers", "module-g
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/http/server-invalid-options"
+source = "upstream-adapted/http-server-invalid-options.mjs"
+status = "runnable"
+features = ["node:http", "node-errors", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/http/server-allow-half-open"
 source = "upstream-adapted/http-server-allow-half-open.mjs"
 status = "runnable"

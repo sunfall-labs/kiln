@@ -1867,6 +1867,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message);
 static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
                                 const char *key, size_t key_len);
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role);
@@ -17334,6 +17335,21 @@ static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *m
     return KILN_C99_THROWN;
 }
 
+static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
+    int status = kiln_c99_new_error(
+        thrown, KILN_C99_BUILTIN_TYPE_ERROR, kiln_c99_copy_text(message, strlen(message)));
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, *thrown, "code", 4,
+                              kiln_c99_copy_text("ERR_INVALID_ARG_TYPE", 20), 0, NULL);
+    }
+    if (status != KILN_C99_OK) return status;
+    {
+        kiln_object *object = kiln_c99_object_of(*thrown);
+        object->properties[object->count - 1].enumerable = 0;
+    }
+    return KILN_C99_THROWN;
+}
+
 /* Generated code owns each work payload because only it understands `kiln_value`. The Realm
  * Runtime owns queueing, ordering, virtual time, cancellation and disposal timing through opaque
  * pointers; no language value layout crosses the private ABI. */
@@ -17870,10 +17886,20 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_throw_not_a(thrown, callee, "constructor");
     }
     if (callee.tag == KILN_VALUE_METHOD &&
-        callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+        (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER ||
+         callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)) {
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer. */
+        if (callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER) {
+            if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED &&
+                !kiln_c99_is_callable(args[0]) && args[0].tag != KILN_VALUE_OBJECT) {
+                return kiln_c99_throw_node_invalid_arg_type(
+                    thrown, "The \"options\" argument must be of type object");
+            }
+            return kiln_c99_node_http(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                      depth, thrown);
+        }
         return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                    depth, thrown);
     }

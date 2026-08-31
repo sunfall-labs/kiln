@@ -1989,6 +1989,7 @@ impl Compiler {
         let iterator = format!("%iterated{index}");
         let done = format!("%drained{index}");
         let step = format!("%stepped{index}");
+        let next_method = format!("%nextof{index}");
 
         // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
         // pattern reads what the value yields, not what its indices hold.
@@ -1998,6 +1999,14 @@ impl Compiler {
             argc: 0,
         });
         self.declare_hidden(&iterator, span);
+        // The rest of the iterator record. `GetIteratorFromMethod` reads `next` once, before any
+        // element is taken, and every step calls what it captured -- which is why `const [] = it`
+        // reads `next` even though it steps nothing, and why a three-element pattern reads it
+        // once rather than three times.
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.load_hidden(&iterator);
+        self.code.push(Instruction::GetProperty(next));
+        self.declare_hidden(&next_method, span);
         self.push_constant(Constant::Boolean(false));
         self.declare_hidden(&done, span);
         // The slot the step results land in, bound once here so each element can store into it.
@@ -2012,17 +2021,17 @@ impl Compiler {
             match element {
                 // A hole steps the iterator and reads nothing -- not even `value`, which is why
                 // it is not the same as binding a name no one looks at.
-                None => self.emit_iterator_step(&iterator, &done, &step, false),
+                None => self.emit_iterator_step(&iterator, &next_method, &done, &step, false),
                 Some(element) => {
                     self.destructure_element(leaf, element, span, |compiler| {
-                        compiler.emit_iterator_step(&iterator, &done, &step, true);
+                        compiler.emit_iterator_step(&iterator, &next_method, &done, &step, true);
                     });
                 }
             }
         }
         if let Some(rest) = rest {
             self.destructure_element(leaf, rest, span, |compiler| {
-                compiler.emit_iterator_drain(&iterator, &done, &step, span);
+                compiler.emit_iterator_drain(&iterator, &next_method, &done, &step, span);
             });
         }
 
@@ -2052,7 +2061,14 @@ impl Compiler {
     ///
     /// An exhausted iterator yields `undefined` rather than stopping the walk: `var [a, b] = [1]`
     /// binds `b` to undefined, and a default on it applies.
-    fn emit_iterator_step(&mut self, iterator: &str, done: &str, step: &str, want_value: bool) {
+    fn emit_iterator_step(
+        &mut self,
+        iterator: &str,
+        next_method: &str,
+        done: &str,
+        step: &str,
+        want_value: bool,
+    ) {
         self.load_hidden(done);
         let exhausted = self.emit_jump(Instruction::JumpIfTruthy(0));
         // Marked done *before* the call, and cleared only after a value is in hand: a `next` or
@@ -2061,11 +2077,9 @@ impl Compiler {
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
         self.load_hidden(iterator);
-        let next = self.constant_index(Constant::String("next".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: next,
-            argc: 0,
-        });
+        self.load_hidden(next_method);
+        self.code.push(Instruction::NewArray { count: 0 });
+        self.code.push(Instruction::Apply);
         self.store_hidden(step);
         self.load_hidden(step);
         let finished_key = self.constant_index(Constant::String("done".to_owned()));
@@ -2093,7 +2107,14 @@ impl Compiler {
     /// Written with an index and `SetComputed` rather than with `push`, because
     /// `Array.prototype.push` is a property a program can replace and the language defines this
     /// as a plain data property on a fresh array.
-    fn emit_iterator_drain(&mut self, iterator: &str, done: &str, step: &str, span: Span) {
+    fn emit_iterator_drain(
+        &mut self,
+        iterator: &str,
+        next_method: &str,
+        done: &str,
+        step: &str,
+        span: Span,
+    ) {
         let index = self.hidden_bindings;
         self.hidden_bindings += 1;
         let collected = format!("%collected{index}");
@@ -2109,11 +2130,9 @@ impl Compiler {
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
         self.load_hidden(iterator);
-        let next = self.constant_index(Constant::String("next".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: next,
-            argc: 0,
-        });
+        self.load_hidden(next_method);
+        self.code.push(Instruction::NewArray { count: 0 });
+        self.code.push(Instruction::Apply);
         self.store_hidden(step);
         self.load_hidden(step);
         let finished_key = self.constant_index(Constant::String("done".to_owned()));
@@ -3235,6 +3254,8 @@ impl Compiler {
         let iterator_binding = format!("%iter{}", self.hidden_bindings);
         let result_binding = format!("%step{}", self.hidden_bindings);
         let asynchronous_binding = format!("%async{}", self.hidden_bindings);
+        let next_binding = format!("%next{}", self.hidden_bindings);
+        let method_binding = format!("%method{}", self.hidden_bindings);
         self.hidden_bindings += 1;
 
         self.scopes.push(HashMap::new());
@@ -3250,12 +3271,18 @@ impl Compiler {
             self.expression(iterable);
             self.declare_hidden(&subject, span);
 
+            // `GetMethod(obj, @@asyncIterator)` is *one* read, and the method it answers with is
+            // the one that gets called. Reading the symbol to decide and then reading it again to
+            // call it asked an accessor twice and let a program hand back two different methods,
+            // one of which was never invoked. It also missed `null`, which `GetMethod` treats as
+            // absent exactly as it treats `undefined`.
             let asynchronous = self.constant_index(Constant::String("@@asyncIterator".to_owned()));
             self.load_hidden(&subject);
             self.code.push(Instruction::GetProperty(asynchronous));
-            self.push_constant(Constant::Undefined);
-            self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
-            let use_async = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.declare_hidden(&method_binding, span);
+
+            self.load_hidden(&method_binding);
+            let use_async = self.emit_jump(Instruction::JumpIfNotNullish(0));
 
             self.load_hidden(&subject);
             self.code.push(Instruction::CallMethod {
@@ -3267,10 +3294,9 @@ impl Compiler {
 
             self.patch_jump(use_async);
             self.load_hidden(&subject);
-            self.code.push(Instruction::CallMethod {
-                name: asynchronous,
-                argc: 0,
-            });
+            self.load_hidden(&method_binding);
+            self.code.push(Instruction::NewArray { count: 0 });
+            self.code.push(Instruction::Apply);
             self.push_constant(Constant::Boolean(true));
 
             self.patch_jump(chosen);
@@ -3287,17 +3313,24 @@ impl Compiler {
             self.declare_hidden(&iterator_binding, span);
         }
 
+        // `GetIteratorFromMethod` reads `next` once and the record keeps it, so every step calls
+        // the method the opening captured. Reading it per step is a `Get` the language does not
+        // perform: a three-element loop asked a proxy four times where it asks once, and an
+        // accessor that answers differently the second time was followed rather than pinned.
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.load_hidden(&iterator_binding);
+        self.code.push(Instruction::GetProperty(next));
+        self.declare_hidden(&next_binding, span);
+
         // One handler for the whole loop rather than one per iteration: the guarded region is
         // the same every time round, and pushing it once keeps `continue` an ordinary jump.
         let handler_jump = self.emit_jump(Instruction::PushHandler(0));
 
         let start = self.code.len();
         self.load_hidden(&iterator_binding);
-        let next = self.constant_index(Constant::String("next".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: next,
-            argc: 0,
-        });
+        self.load_hidden(&next_binding);
+        self.code.push(Instruction::NewArray { count: 0 });
+        self.code.push(Instruction::Apply);
         if awaiting {
             // An async iterator hands back a promise of the result object; a sync one hands back
             // the object itself and has nothing to wait for here.
@@ -3410,6 +3443,8 @@ impl Compiler {
         let step_binding = format!("%step{}", self.hidden_bindings);
         let wrapped_binding = format!("%wrapped{}", self.hidden_bindings);
         let subject_binding = format!("%subject{}", self.hidden_bindings);
+        let next_binding = format!("%next{}", self.hidden_bindings);
+        let method_binding = format!("%method{}", self.hidden_bindings);
         self.hidden_bindings += 1;
 
         self.scopes.push(HashMap::new());
@@ -3432,8 +3467,13 @@ impl Compiler {
             self.declare_hidden(&subject_binding, span);
             let asynchronous_key =
                 self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+            // Read once and kept: `GetMethod` performs a single `Get`, and the method it answers
+            // with is the one that is called. Reading the symbol to decide and again to call it
+            // ran an accessor twice and let a program hand back a method that was never invoked.
             self.load_hidden(&subject_binding);
             self.code.push(Instruction::GetProperty(asynchronous_key));
+            self.declare_hidden(&method_binding, span);
+            self.load_hidden(&method_binding);
             let is_async = self.emit_jump(Instruction::JumpIfNotNullish(0));
 
             // Absent: the sync iterator, whose steps the specification wraps in an
@@ -3450,10 +3490,9 @@ impl Compiler {
 
             self.patch_jump(is_async);
             self.load_hidden(&subject_binding);
-            self.code.push(Instruction::CallMethod {
-                name: asynchronous_key,
-                argc: 0,
-            });
+            self.load_hidden(&method_binding);
+            self.code.push(Instruction::NewArray { count: 0 });
+            self.code.push(Instruction::Apply);
             self.push_constant(Constant::Boolean(false));
 
             self.patch_jump(chosen);
@@ -3467,17 +3506,23 @@ impl Compiler {
             self.declare_hidden(&iterator_binding, span);
         }
 
+        // The iterator record's `next`, read once when the delegate was opened. Every step calls
+        // what was captured, which is what the specification does and what a re-read per step
+        // could not be: `yield*` over three values asked for `next` four times.
+        let next = self.constant_index(Constant::String("next".to_owned()));
+        self.load_hidden(&iterator_binding);
+        self.code.push(Instruction::GetProperty(next));
+        self.declare_hidden(&next_binding, span);
+
         self.push_constant(Constant::Undefined);
         self.declare_hidden(&sent_binding, span);
 
         let start = self.code.len();
         self.load_hidden(&iterator_binding);
+        self.load_hidden(&next_binding);
         self.load_hidden(&sent_binding);
-        let next = self.constant_index(Constant::String("next".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: next,
-            argc: 1,
-        });
+        self.code.push(Instruction::NewArray { count: 1 });
+        self.code.push(Instruction::Apply);
         if asynchronous {
             // An async iterator answers with a promise of the step, so the step object itself
             // is what has to be awaited. A wrapped sync iterator answers with the step directly
