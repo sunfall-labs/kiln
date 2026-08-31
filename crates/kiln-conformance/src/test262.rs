@@ -951,6 +951,11 @@ fn runtime_error_type_verdict(expected: &str, error: &ExecutionError) -> Runtime
     // A type outside the constructors this interpreter exposes cannot be checked, even though a
     // thrown primitive or a different built-in would prove the test wrong if the constructor were
     // known. Keep those cases visible as Unsupported until that constructor exists in the realm.
+    //
+    // `Test262Error` is on the list although it is not an intrinsic: the harness declares it in
+    // the case's own source, so the constructor found above really is the one the test named --
+    // and a case that promises one is proving that the line throwing it was reached at all,
+    // which is the whole of what it asks.
     if !matches!(
         expected,
         "Error"
@@ -961,6 +966,7 @@ fn runtime_error_type_verdict(expected: &str, error: &ExecutionError) -> Runtime
             | "URIError"
             | "EvalError"
             | "SuppressedError"
+            | "Test262Error"
     ) {
         return RuntimeErrorTypeVerdict::Unsupported;
     }
