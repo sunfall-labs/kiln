@@ -511,6 +511,8 @@ pub enum Builtin {
     AsyncDisposableStack,
     /// The error kind nothing throws any more. Appended for the same reason.
     EvalError,
+    /// The shared-memory namespace. Appended for the same reason.
+    Atomics,
 }
 
 impl Builtin {
@@ -582,6 +584,7 @@ impl Builtin {
             "SuppressedError" => Some(Self::SuppressedError),
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
             "EvalError" => Some(Self::EvalError),
+            "Atomics" => Some(Self::Atomics),
 
             _ => None,
         }
@@ -651,6 +654,7 @@ impl Builtin {
             Self::SuppressedError => "SuppressedError",
             Self::AsyncDisposableStack => "AsyncDisposableStack",
             Self::EvalError => "EvalError",
+            Self::Atomics => "Atomics",
         }
     }
 }
