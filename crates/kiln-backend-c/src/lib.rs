@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 6;
+pub const C_GENERATOR_VERSION: u32 = 8;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -1088,6 +1088,16 @@ method_ids! {
     (KILN_C99_METHOD_SYMBOL_KEY_FOR, 410, Direct),
     (KILN_C99_METHOD_NODE_STAT_IS_FILE, 414, Direct),
     (KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY, 415, Direct),
+    (KILN_C99_METHOD_ABORT_CONTROLLER_ABORT, 416, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_ABORT, 417, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_LISTEN, 418, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN, 419, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_THROW, 420, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT, 421, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_ANY, 422, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_SETTLE, 423, Generic),
+    (KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW, 424, Generic),
+    (KILN_C99_METHOD_TEXT_ENCODER_ENCODE, 425, Generic),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1397,6 +1407,9 @@ enum kiln_value_tag {
  * its first argument and this runtime has no `IterableToList` to do it with. A refusal is the
  * honest state; naming the global without the iteration would make the two engines disagree. */
 #define KILN_C99_BUILTIN_AGGREGATE_ERROR 70
+#define KILN_C99_BUILTIN_ABORT_CONTROLLER 71
+#define KILN_C99_BUILTIN_ABORT_SIGNAL 72
+#define KILN_C99_BUILTIN_TEXT_ENCODER 73
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -1668,6 +1681,16 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
     emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_FILE),
     emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY),
+    emit_method_define!(KILN_C99_METHOD_ABORT_CONTROLLER_ABORT),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ABORT),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_LISTEN),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_THROW),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ANY),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
+    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
+    emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
@@ -2861,6 +2884,11 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_array(kiln_value *out);
+static int kiln_c99_new_abort_signal(kiln_value *out);
+static int kiln_c99_new_abort_controller(kiln_value *out);
+static int kiln_c99_new_text_encoder(kiln_value *out);
+static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
+                          kiln_value *thrown);
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
@@ -3404,6 +3432,118 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* Cancellation is ordinary object state, not a new value kind. That keeps the hot value layout
+ * and every host boundary unchanged: only the controller owns the method that can transition its
+ * signal, while consumers receive the signal object and its read/listen surface. */
+static int kiln_c99_new_abort_signal(kiln_value *out) {
+    kiln_value listeners;
+    int status = kiln_c99_new_object(out);
+    if (status == KILN_C99_OK) status = kiln_c99_new_array(&listeners);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "aborted", 7, kiln_c99_boolean(0), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "reason", 6, kiln_c99_undefined(), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "onabort", 7, kiln_c99_null(), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "addEventListener", 16,
+                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_LISTEN));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "removeEventListener", 19,
+                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "throwIfAborted", 14,
+                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_THROW));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "@@abort-listeners", 17, listeners, 0, NULL);
+    if (status == KILN_C99_OK) {
+        kiln_object *object = kiln_c99_object_of(*out);
+        size_t index;
+        for (index = 0; index < object->count; ++index) object->properties[index].enumerable = 0;
+    }
+    return status;
+}
+
+static int kiln_c99_new_abort_controller(kiln_value *out) {
+    kiln_value signal;
+    int status = kiln_c99_new_abort_signal(&signal);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(out);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "signal", 6, signal, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "abort", 5,
+                                        kiln_c99_method(KILN_C99_METHOD_ABORT_CONTROLLER_ABORT));
+    if (status == KILN_C99_OK) {
+        kiln_object *object = kiln_c99_object_of(*out);
+        size_t index;
+        for (index = 0; index < object->count; ++index) object->properties[index].enumerable = 0;
+    }
+    return status;
+}
+
+static int kiln_c99_new_text_encoder(kiln_value *out) {
+    int status = kiln_c99_new_object(out);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "encoding", 8, kiln_c99_copy_text("utf-8", 5), 0,
+                              NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "encode", 6,
+                                        kiln_c99_method(KILN_C99_METHOD_TEXT_ENCODER_ENCODE));
+    if (status == KILN_C99_OK) {
+        kiln_object *object = kiln_c99_object_of(*out);
+        size_t index;
+        for (index = 0; index < object->count; ++index) object->properties[index].enumerable = 0;
+    }
+    return status;
+}
+
+static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
+                          kiln_value *thrown) {
+    kiln_value aborted;
+    kiln_value listeners;
+    kiln_value handler;
+    kiln_value event;
+    size_t index;
+    int status;
+    if (signal.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+    status = kiln_c99_get(host, signal, "aborted", 7, &aborted, depth, thrown);
+    if (status != KILN_C99_OK || kiln_c99_truthy(aborted)) return status;
+    if (reason.tag == KILN_VALUE_UNDEFINED) {
+        status = kiln_c99_new_error(&reason, KILN_C99_BUILTIN_ERROR,
+                                    kiln_c99_copy_text("This operation was aborted", 26));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, reason, "name", 4,
+                                  kiln_c99_copy_text("AbortError", 10), 0, NULL);
+        if (status != KILN_C99_OK) return status;
+    }
+    status = kiln_c99_put(NULL, signal, "aborted", 7, kiln_c99_boolean(1), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, signal, "reason", 6, reason, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_get(host, signal, "@@abort-listeners", 17, &listeners, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_get(host, signal, "onabort", 7, &handler, depth, thrown);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&event);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, event, "type", 4, kiln_c99_copy_text("abort", 5), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, event, "target", 6, signal, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    if (kiln_c99_is_callable(handler)) {
+        kiln_value ignored;
+        status = kiln_c99_call(host, &ignored, handler, signal, &event, 1, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (listeners.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
+    for (index = 0; index < kiln_c99_array_of(listeners)->count; ++index) {
+        kiln_value ignored;
+        kiln_value listener = kiln_c99_array_of(listeners)->elements[index];
+        status = kiln_c99_call(host, &ignored, listener, signal, &event, 1, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
     return KILN_C99_OK;
 }
 
@@ -5645,7 +5785,10 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"RangeError", KILN_C99_BUILTIN_RANGE_ERROR},
                         {"ReferenceError", KILN_C99_BUILTIN_REFERENCE_ERROR},
                         {"SyntaxError", KILN_C99_BUILTIN_SYNTAX_ERROR},
-                        {"URIError", KILN_C99_BUILTIN_URI_ERROR}};
+                        {"URIError", KILN_C99_BUILTIN_URI_ERROR},
+                        {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
+                        {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
+                        {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER}};
     static const struct {
         const char *name;
         uint64_t code;
@@ -6503,6 +6646,17 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_PROXY:
         if (kiln_c99_same_name(key, key_len, "revocable")) {
             return KILN_C99_METHOD_PROXY_REVOCABLE;
+        }
+        return 0;
+    case KILN_C99_BUILTIN_ABORT_SIGNAL:
+        if (kiln_c99_same_name(key, key_len, "abort")) {
+            return KILN_C99_METHOD_ABORT_SIGNAL_ABORT;
+        }
+        if (kiln_c99_same_name(key, key_len, "timeout")) {
+            return KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT;
+        }
+        if (kiln_c99_same_name(key, key_len, "any")) {
+            return KILN_C99_METHOD_ABORT_SIGNAL_ANY;
         }
         return 0;
     case KILN_C99_BUILTIN_REFLECT:
@@ -14224,6 +14378,164 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             return kiln_c99_to_fixed(result, kiln_c99_as_number(receiver), (int)digits);
         }
+        case KILN_C99_METHOD_ABORT_CONTROLLER_ABORT: {
+            kiln_value signal;
+            status = kiln_c99_get(host, receiver, "signal", 6, &signal, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_abort(host, signal,
+                                    argc > 0 ? args[0] : kiln_c99_undefined(), depth, thrown);
+            if (status == KILN_C99_OK) *result = kiln_c99_undefined();
+            return status;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_ABORT: {
+            status = kiln_c99_new_abort_signal(result);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_abort(host, *result,
+                                    argc > 0 ? args[0] : kiln_c99_undefined(), depth, thrown);
+            return status;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_LISTEN:
+        case KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN: {
+            kiln_value listeners;
+            kiln_value listener = argc > 1 ? args[1] : kiln_c99_undefined();
+            size_t index;
+            if (argc == 0 || args[0].tag != KILN_VALUE_STRING ||
+                !kiln_c99_same_name(args[0].ptr, args[0].len, "abort")) {
+                *result = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_get(host, receiver, "@@abort-listeners", 17, &listeners, depth,
+                                  thrown);
+            if (status != KILN_C99_OK || listeners.tag != KILN_VALUE_ARRAY) return status;
+            if (code == KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN) {
+                kiln_array *held = kiln_c99_array_of(listeners);
+                size_t write = 0;
+                for (index = 0; index < held->count; ++index) {
+                    if (!kiln_c99_strict_equal(held->elements[index], listener))
+                        held->elements[write++] = held->elements[index];
+                }
+                held->count = write;
+            } else if (kiln_c99_is_callable(listener)) {
+                kiln_array *held = kiln_c99_array_of(listeners);
+                for (index = 0; index < held->count; ++index)
+                    if (kiln_c99_strict_equal(held->elements[index], listener)) break;
+                if (index == held->count) {
+                    status = kiln_c99_array_push(listeners, listener);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_THROW: {
+            kiln_value aborted;
+            status = kiln_c99_get(host, receiver, "aborted", 7, &aborted, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (kiln_c99_truthy(aborted)) {
+                status = kiln_c99_get(host, receiver, "reason", 6, thrown, depth, thrown);
+                return status == KILN_C99_OK ? KILN_C99_THROWN : status;
+            }
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_SETTLE: {
+            status = kiln_c99_abort(host, receiver,
+                                    argc > 0 ? args[0] : kiln_c99_undefined(), depth, thrown);
+            if (status == KILN_C99_OK) *result = kiln_c99_undefined();
+            return status;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW: {
+            kiln_value reason;
+            kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+            status = kiln_c99_get(host, source, "reason", 6, &reason, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_abort(host, receiver, reason, depth, thrown);
+            if (status == KILN_C99_OK) *result = kiln_c99_undefined();
+            return status;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT: {
+            kiln_timer *entry;
+            kiln_value reason;
+            kiln_value callback;
+            double delay = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+            uint64_t id = 0;
+            status = kiln_c99_new_abort_signal(result);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_new_error(&reason, KILN_C99_BUILTIN_ERROR,
+                                            kiln_c99_copy_text(
+                                                "The operation was aborted due to timeout", 40));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, reason, "name", 4,
+                                      kiln_c99_copy_text("TimeoutError", 12), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_bind(&callback,
+                                       kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
+                                       *result);
+            if (status != KILN_C99_OK) return status;
+            entry = (kiln_timer *)malloc(sizeof *entry);
+            if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
+            entry->callback = callback;
+            entry->argc = 1;
+            entry->args = (kiln_value *)malloc(sizeof *entry->args);
+            if (entry->args == NULL) { free(entry); return KILN_C99_OUT_OF_MEMORY; }
+            entry->args[0] = reason;
+            if (!(isfinite(delay) && delay > 0.0)) delay = 0.0;
+            status = kiln_realm_set_timeout(delay, kiln_c99_run_timer, kiln_c99_drop_timer,
+                                            entry, &id);
+            if (status != KILN_C99_OK) kiln_c99_drop_timer(entry);
+            return status;
+        }
+        case KILN_C99_METHOD_ABORT_SIGNAL_ANY: {
+            kiln_value sources;
+            kiln_array *items;
+            status = kiln_c99_new_abort_signal(result);
+            if (status == KILN_C99_OK) status = kiln_c99_new_array(&sources);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_iterate(host, sources,
+                                          argc > 0 ? args[0] : kiln_c99_undefined(), depth,
+                                          thrown);
+            if (status != KILN_C99_OK) return status;
+            items = kiln_c99_array_of(sources);
+            for (index = 0; index < items->count; ++index) {
+                kiln_value aborted;
+                kiln_value reason;
+                kiln_value follower;
+                kiln_value listen;
+                kiln_value listen_args[2];
+                status = kiln_c99_get(host, items->elements[index], "aborted", 7, &aborted,
+                                      depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (kiln_c99_truthy(aborted)) {
+                    status = kiln_c99_get(host, items->elements[index], "reason", 6, &reason,
+                                          depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    return kiln_c99_abort(host, *result, reason, depth, thrown);
+                }
+                status = kiln_c99_bind_with(&follower,
+                                            kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
+                                            *result, &items->elements[index], 1);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_get(host, items->elements[index], "addEventListener", 16,
+                                          &listen, depth, thrown);
+                listen_args[0] = kiln_c99_copy_text("abort", 5);
+                listen_args[1] = follower;
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_call(host, &reason, listen, items->elements[index],
+                                           listen_args, 2, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_TEXT_ENCODER_ENCODE: {
+            kiln_value text = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_from_units(NULL, 0);
+            size_t byte;
+            status = kiln_c99_typed_alloc(result, KILN_TYPED_UINT8, text.len);
+            if (status != KILN_C99_OK) return status;
+            for (byte = 0; byte < text.len; ++byte)
+                kiln_c99_typed_set(kiln_c99_typed_array_of(*result), byte,
+                                   (double)(unsigned char)text.ptr[byte]);
+            return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL:
         case KILN_C99_METHOD_SET_IMMEDIATE: {
@@ -21654,6 +21966,17 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         }
         return kiln_c99_new_date(result, time);
     }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        callee.bits == KILN_C99_BUILTIN_ABORT_CONTROLLER) {
+        return kiln_c99_new_abort_controller(result);
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ABORT_SIGNAL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Illegal constructor");
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_ENCODER) {
+        return kiln_c99_new_text_encoder(result);
+    }
     if (callee.tag != KILN_VALUE_FUNCTION) {
         return KILN_C99_CONTROL_ERROR;
     }
@@ -22741,7 +23064,10 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Process
             | kiln_ir::Builtin::Atomics
             | kiln_ir::Builtin::SetImmediate
-            | kiln_ir::Builtin::ClearImmediate,
+            | kiln_ir::Builtin::ClearImmediate
+            | kiln_ir::Builtin::AbortController
+            | kiln_ir::Builtin::AbortSignal
+            | kiln_ir::Builtin::TextEncoder,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -23789,6 +24115,13 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (kiln_realm_is_active())
         return {symbol}_body(host, result, imports, import_count, exports, export_count);
+    kiln_c99_diagnostic_site = NULL;
+    kiln_c99_diagnostic_operation = NULL;
+    kiln_c99_diagnostic_instruction = 0;
+    kiln_c99_diagnostic_method = 0;
+    kiln_c99_diagnostic_receiver_tag = 0;
+    kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
     context.host = host;
     context.result = result;
     context.imports = imports;
@@ -24174,7 +24507,7 @@ fn emit_instruction(
     // A public/module entry instruction starts a fresh diagnostic attempt. Function bodies do
     // not clear this state: when one calls another, the deepest failing body owns the refusal
     // provenance and every caller preserves it while unwinding.
-    if matches!(site, ReturnSite::Entry { .. }) {
+    if matches!(site, ReturnSite::Entry { exports: None, .. }) {
         output.push_str(
             "    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL;\n",
         );
@@ -24183,7 +24516,7 @@ fn emit_instruction(
     let instruction_site = c_string(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
     let control_refusal = format!(
-        "if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation});"
+        "if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation});"
     );
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
@@ -24981,6 +25314,15 @@ fn emit_instruction(
                 kiln_ir::Builtin::Buffer => "kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
+                kiln_ir::Builtin::AbortController => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_CONTROLLER)"
+                }
+                kiln_ir::Builtin::AbortSignal => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_SIGNAL)"
+                }
+                kiln_ir::Builtin::TextEncoder => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)"
+                }
                 _ => unreachable!("verification rejects every other builtin before emission"),
             };
             writeln!(output, "    stack[sp++] = {pushed};").unwrap();
