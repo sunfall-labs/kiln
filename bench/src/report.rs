@@ -627,11 +627,11 @@ pub struct Regression {
 
 /// Compare a run against a baseline, returning the rendered comparison and any regressions.
 ///
-/// Three independent gates. Wall clock has a threshold and a noise floor because it is a noisy
-/// measurement; recompute counts have neither, because they are exact and an edit that starts
-/// recomputing more work has regressed no matter what the clock says. Both sides must also be
-/// steady-state measurements: comparing timings that describe different work is invalid even if
-/// their first-iteration counters happen to match.
+/// Wall clock has a threshold and a noise floor because it is a noisy measurement; query and
+/// graph-cache work have neither, because they are exact and an edit that starts recomputing more
+/// work has regressed no matter what the clock says. Both sides must also be steady-state
+/// measurements: comparing timings that describe different work is invalid even if their
+/// first-iteration counters happen to match.
 pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<Regression>) {
     let mut out = String::new();
     let mut regressions = Vec::new();
@@ -669,16 +669,32 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
         let base_recomputed = base.recomputes();
         let unstable = !m.steady_state || !base.steady_state;
 
+        let graph_misses = m.stats.graph_cache_misses;
+        let base_graph_misses = base.stats.graph_cache_misses;
+        let graph_evictions = m.stats.graph_cache_evictions;
+        let base_graph_evictions = base.stats.graph_cache_evictions;
+        let graph_invalidations = m.stats.graph_cache_invalidations;
+        let base_graph_invalidations = base.stats.graph_cache_invalidations;
+        let graph_regressed = graph_misses > base_graph_misses
+            || graph_evictions > base_graph_evictions
+            || graph_invalidations > base_graph_invalidations;
+
         let _ = writeln!(
             out,
-            "  {:<34} {:>10} vs {:>10}  {:>+7.1}%   recompute {} vs {}   {}",
+            "  {:<34} {:>10} vs {:>10}  {:>+7.1}%   recompute {} vs {}   graph misses {} vs {}, evictions {} vs {}, invalidations {} vs {}   {}",
             m.id,
             ms(m.median_ms),
             ms(base.median_ms),
             pct * 100.0,
             recomputed,
             base_recomputed,
-            if slower || recomputed > base_recomputed || unstable {
+            graph_misses,
+            base_graph_misses,
+            graph_evictions,
+            base_graph_evictions,
+            graph_invalidations,
+            base_graph_invalidations,
+            if slower || recomputed > base_recomputed || graph_regressed || unstable {
                 "REGRESSION"
             } else {
                 "ok"
@@ -704,6 +720,26 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
                     "recomputed {recomputed} queries vs {base_recomputed} in the baseline"
                 ),
             });
+        }
+        for (label, current, previous) in [
+            ("graph cache misses", graph_misses, base_graph_misses),
+            (
+                "graph cache evictions",
+                graph_evictions,
+                base_graph_evictions,
+            ),
+            (
+                "graph cache invalidations",
+                graph_invalidations,
+                base_graph_invalidations,
+            ),
+        ] {
+            if current > previous {
+                regressions.push(Regression {
+                    id: m.id.clone(),
+                    detail: format!("{label} {current} vs {previous} in the baseline"),
+                });
+            }
         }
         if !m.steady_state {
             regressions.push(Regression {
@@ -803,6 +839,23 @@ mod tests {
             regressions[0].detail.contains("recomputed 5"),
             "{regressions:?}"
         );
+    }
+
+    #[test]
+    fn a_graph_cache_miss_is_a_regression_even_when_queries_and_clock_improve() {
+        let mut run = report(1.0, 1);
+        run.measurements[0].stats.graph_cache_misses = 1;
+        let mut baseline = report(10.0, 1);
+        baseline.measurements[0].stats.graph_cache_hits = 1;
+
+        let (text, regressions) = compare(&run, &baseline, 0.15);
+
+        assert_eq!(regressions.len(), 1, "{regressions:?}");
+        assert!(
+            regressions[0].detail.contains("graph cache misses 1 vs 0"),
+            "{regressions:?}"
+        );
+        assert!(text.contains("graph misses 1 vs 0"), "{text}");
     }
 
     #[test]

@@ -644,14 +644,15 @@ fn module_payload<E: QueryEngine>(
     }
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let source = engine.source(module_file).expect("source checked above");
-        let hir = frontend_oxc::parse_commonjs(module_path_string, source);
+        let (hir, static_requires) =
+            frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
         let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
             kiln_module_graph::ModuleGraphError::Compile {
                 path: module_path.to_path_buf(),
                 diagnostics,
             }
         })?;
-        program.dependencies = kiln_hir::commonjs_literal_requires(&hir);
+        program.dependencies = static_requires;
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
     engine

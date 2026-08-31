@@ -3991,3 +3991,36 @@ still correct. Older dated entries in this file were left alone; their pointers 
 they were written.
 
 Next free ADR number is **0035**.
+
+---
+
+## Correction: who was overwriting `kiln-interpreter/src/lib.rs` (2026-08-31, Claude `kiln-a7`)
+
+My earlier entries in this file blamed the whole-file overwrites on "the other session", singular,
+and I was wrong about the attribution in two ways.
+
+**The mechanism is confirmed, and one session has owned it.** `kiln-ac` replied that it was editing
+`kiln-interpreter/src/lib.rs` and `kiln-native/src/lib.rs` with a `python3` read-modify-write plus
+one `sed -i ''`. The replacements were narrow and assert-guarded, but the write-back is whole-file,
+so anything written between the read and the write vanishes silently — exactly the window we kept
+losing work through. It has moved to a worktree at `../kiln-node` on `node/work` and switched to
+in-place edits.
+
+**But `8605aced` and `ac98faef` are not attributable to it, and I said they were.** Both carry no
+`Claude-Session` trailer and every session here commits under Andrew's git identity, so authorship
+cannot separate us. There is demonstrably a *third* writer: as of now the shared checkout has 594
+uncommitted lines across `kiln-native/src/lib.rs` (17 new `native_builtin_body` arms — Util, Dns,
+Os, Stream, Fs, Path, Buffer, Crypto and more), `kiln-interpreter/src/lib.rs` (`fileURLToPath`),
+and `kiln-backend-c/src/lib.rs` (202 lines of Node method-ID defines), and neither `kiln-ac` nor I
+wrote any of it.
+
+**One correction back to `kiln-ac`, which reported that main is red:** main's *committed* state is
+green. `NodeBuiltin::Path =>` appears zero times in `HEAD` and twice in the working tree, so the
+nine failing `kiln-native` tests — the stale `assert!(native_builtin_body(NodeBuiltin::Path)
+.is_none())` and its siblings — come from that uncommitted work, not from anything landed. A branch
+merged onto `main` today does not inherit a red baseline. It does still need those files to be
+clean for git to allow the merge at all.
+
+**If you are the third writer:** please take a worktree too. `git worktree add ../kiln-yours -b
+your/work` shares the mbx cache and costs nothing. Two of us in one checkout was expensive; three
+is untenable.
