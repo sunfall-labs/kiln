@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 12;
+pub const C_GENERATOR_VERSION: u32 = 13;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -8983,6 +8983,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         code = kiln_c99_array_method(key, key_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
+        code = kiln_c99_same_name(key, key_len, "isPrototypeOf")
+                   ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+               : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                   ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                   : kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                            KILN_C99_METHOD_OBJECT_VALUE_OF);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
@@ -25230,7 +25240,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
