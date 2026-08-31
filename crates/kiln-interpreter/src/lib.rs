@@ -5037,6 +5037,14 @@ pub enum ExecutionError {
     TypeErrorMessage {
         message: String,
     },
+    /// A `ReferenceError` with wording of its own, for the same reason as the pair above.
+    ///
+    /// Rare, because almost every reference error names an identifier the machine already has.
+    /// A disposed `DisposableStack` is the exception: the receiver is the right kind of thing,
+    /// and what is missing is the resources it used to name.
+    ReferenceErrorMessage {
+        message: String,
+    },
     /// `next()`, `return()` or `throw()` on a generator that is already executing.
     GeneratorAlreadyRunning,
     /// A byte buffer larger than [`MAX_BUFFER_BYTES`]. Like [`Self::ArrayTooLarge`] this is a
@@ -5389,7 +5397,9 @@ impl fmt::Display for ExecutionError {
             Self::GlobalOutOfBounds { index } => {
                 write!(formatter, "module slot {index} is out of bounds")
             }
-            Self::TypeErrorMessage { message } => write!(formatter, "{message}"),
+            Self::TypeErrorMessage { message } | Self::ReferenceErrorMessage { message } => {
+                write!(formatter, "{message}")
+            }
             Self::Host {
                 instruction,
                 message,
@@ -5435,6 +5445,7 @@ impl ExecutionError {
             Self::TemporalFailure { kind, message } => (*kind, message.clone()),
             Self::IntlFailure { kind, message } => (*kind, message.clone()),
             Self::TypeErrorMessage { message } => (ErrorKind::Type, message.clone()),
+            Self::ReferenceErrorMessage { message } => (ErrorKind::Reference, message.clone()),
             Self::BufferNotResizable => (
                 ErrorKind::Type,
                 "Cannot resize a non-resizable ArrayBuffer".to_owned(),
@@ -7731,8 +7742,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
+                let referenced = !matches!(
+                    operation,
+                    AsyncHostOp::SetResourceReferenced {
+                        referenced: false,
+                        ..
+                    }
+                );
                 let request =
-                    unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), true) };
+                    unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), referenced) };
                 let accepted = if runtime_http {
                     let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                         instruction,
@@ -20913,8 +20931,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         what: &str,
     ) -> Result<Rc<ArrayData>, ExecutionError> {
         let entries = self.disposable_entries(receiver, what)?;
+        // A `ReferenceError`, not a `TypeError`: the receiver is the right kind of thing and the
+        // resources it named are simply no longer there to be reached, which is exactly what a
+        // reference error reports.
         if Self::disposable_is_disposed(receiver) {
-            return Err(ExecutionError::TypeErrorMessage {
+            return Err(ExecutionError::ReferenceErrorMessage {
                 message: format!("{what} called on an already-disposed stack"),
             });
         }
@@ -33308,6 +33329,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::RegExpSymbol(RegExpSymbol::Replace | RegExpSymbol::Split)
         | N::ArrayCopy(ArrayCopy::With)
         | N::ArrayCopy(ArrayCopy::ToSpliced)
+        | N::DisposableStackAdopt
         | N::ArraySlice
         | N::ArraySplice
         | N::ArrayCopyWithin
