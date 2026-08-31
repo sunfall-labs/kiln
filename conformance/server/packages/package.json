@@ -2,8 +2,9 @@
   "name": "kiln-conformance-server-packages",
   "private": true,
   "type": "module",
-  "description": "Pins the framework the s04 probe imports by bare specifier. See conformance/server/README.md.",
+  "description": "Pins the frameworks the server probes import by bare specifier. See conformance/server/README.md.",
   "dependencies": {
+    "express": "5.2.1",
     "fastify": "5.12.1"
   }
 }

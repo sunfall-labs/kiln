@@ -215,9 +215,15 @@ pub(crate) fn include_reachable_dependencies(
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
                 continue;
             }
-            let resolved = resolver
-                .resolve_with_metadata_for_request(&specifier, &importer, request)
-                .map_err(|error| Error::BadInput(error.to_string()))?;
+            let resolved =
+                match resolver.resolve_with_metadata_for_request(&specifier, &importer, request) {
+                    Ok(resolved) => resolved,
+                    // A CommonJS `require()` resolves when execution reaches it. Leaving an
+                    // unresolved literal out of the pinned map lets the runtime throw inside the
+                    // program's own `try/catch`; ESM imports remain strict graph dependencies.
+                    Err(_) if commonjs => continue,
+                    Err(error) => return Err(Error::BadInput(error.to_string())),
+                };
             let target = resolved.module.path.clone();
             if node {
                 let format = resolver
@@ -617,6 +623,35 @@ mod tests {
         )
         .expect_err("unknown builtin must fail closed");
         assert!(error.to_string().contains("node:not-real"));
+    }
+
+    #[test]
+    fn node_commonjs_missing_require_is_left_for_runtime_catch() {
+        let tree = Tree::new("commonjs-optional-require");
+        tree.file("main.cjs");
+        let entry = tree.0.join("main.cjs");
+        std::fs::write(
+            &entry,
+            "try { require('not-installed'); } catch { console.log('caught'); }",
+        )
+        .expect("write entry");
+        let canonical = entry.canonicalize().expect("canonical entry");
+        let mut texts = vec![(
+            canonical.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, node_formats) = include_reachable_dependencies(
+            &tree.0,
+            canonical.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("missing CommonJS target is runtime work");
+
+        assert!(resolutions.is_empty());
+        assert_eq!(node_formats.len(), 1);
+        assert_eq!(texts.len(), 1);
     }
 
     /// The loop `read_all` replaced: one `realpath` and one read per file.

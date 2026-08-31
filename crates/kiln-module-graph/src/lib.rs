@@ -1540,14 +1540,23 @@ where
                             NodeRequestKind::Import
                         };
                         for specifier in &program.dependencies {
-                            let resolved = self
+                            let resolved = match self
                                 .resolver
                                 .resolve_for_request(specifier, &path, request)
-                                .map_err(|error| ModuleGraphError::Resolve {
-                                    importer: path.clone(),
-                                    specifier: specifier.clone(),
-                                    error,
-                                })?;
+                            {
+                                Ok(resolved) => resolved,
+                                // CommonJS resolution is synchronous execution, not linking.
+                                // Keep unresolved literals out of the captured target map so an
+                                // executed `require()` throws where JavaScript can catch it.
+                                Err(_) if source == ModuleSource::CommonJs => continue,
+                                Err(error) => {
+                                    return Err(ModuleGraphError::Resolve {
+                                        importer: path.clone(),
+                                        specifier: specifier.clone(),
+                                        error,
+                                    });
+                                }
+                            };
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if !self.typed_sources {
@@ -2469,6 +2478,40 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute lazy CommonJS graph");
         assert_eq!(host.output, ["1"]);
+    }
+
+    #[test]
+    fn node_commonjs_missing_require_throws_at_execution_and_can_be_caught() {
+        let project = TempProject::new();
+        let bridge = project.write(
+            "bridge.cjs",
+            "try { require('not-installed'); } catch { module.exports = 42; }",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import value from './bridge.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("an unresolved CommonJS require is runtime work");
+        assert!(
+            graph
+                .module(&bridge)
+                .expect("bridge node")
+                .dependencies
+                .is_empty()
+        );
+
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("JavaScript catches the missing require");
+        assert_eq!(host.output, ["42"]);
     }
 
     #[test]

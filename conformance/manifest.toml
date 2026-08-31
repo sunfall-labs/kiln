@@ -1043,3 +1043,36 @@ expected_stdout = """
 200 {"got":{"hello":"kiln"}}
 404 {"error":"not found"}
 """
+
+[[test]]
+id = "server/s05-express"
+group = "server"
+source = "server/packages/s05-express.mjs"
+status = "needs-packages"
+features = ["modules", "builtin-modules", "node-http", "node-packages", "commonjs", "cjs-esm-interop", "middleware", "route-params", "querystring", "streams", "buffer", "json"]
+catches = """
+The second ecosystem gate. Express exercises the classic Connect middleware model, request and \
+response prototype augmentation, route parameters, query parsing, body-parser streams, header \
+helpers, status helpers, and its CommonJS dependency graph. It complements Fastify rather than \
+repeating it: both must run over the same Tokio-owned transport while presenting different \
+JavaScript-visible framework abstractions.\
+"""
+notes = """
+Express 5.2.1 is pinned beside Fastify in packages/package-lock.json. The probe remains unbundled \
+so package resolution and CommonJS interop remain part of the maintained compatibility claim.\
+"""
+expected_stdout = """
+200 express {"ok":true}
+200 express {"id":"7","q":"kiln"}
+201 express {"got":{"hello":"kiln"}}
+404 express <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot GET /missing</pre>
+</body>
+</html>
+"""

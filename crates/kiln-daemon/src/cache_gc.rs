@@ -40,37 +40,30 @@
 //! that reports the build. A failed sweep is logged and otherwise ignored: the artifacts are on
 //! disk and usable either way.
 //!
-//! # Why no identity is declared live
+//! # Native identity policy
 //!
 //! `EvictionPolicy::live_identities` drives the tier that collects records no key this toolchain
-//! can construct will ever address again. It is left **empty**, which disables that tier - the
-//! safe direction, since an empty set can only cost the collection of unreachable records, while
-//! a wrong set evicts live ones and charges a rebuild for each.
+//! can construct again. `kiln-native` is the sole authority for that set: after a native builder
+//! completes, its full stage/profile identity catalogue is remembered here and supplied to later
+//! explicit or opportunistic sweeps. The daemon never reconstructs compiler, backend, ABI, target,
+//! or profile tuples itself.
 //!
-//! Empty is the honest answer here rather than a shortcut. An identity digest covers the compiler
-//! version, backend, runtime ABI, target, CPU policy, profile and compatibility mode of a key, so
-//! declaring one means reconstructing, exactly, every `(compiler, backend, abi, target, profile)`
-//! tuple `kiln-native` builds under. Those tuples are assembled by private functions in that
-//! crate - `compiler_identity`, `target_identity`, `module_abi_identity`, `runtime_abi_identity`,
-//! `native_number_abi_identity` - over private constants such as the number provider's ABI
-//! version, and there are more than a dozen of them: one per stage, each with its own synthetic
-//! compiler string and its own profile. None of it is reachable from here, and a copy would be a
-//! second definition of an identity whose first definition is free to change without telling this
-//! module. Drift between the two would not fail a build; it would silently evict live records.
-//!
-//! The tier becomes available the moment `kiln-native` exposes the identities it can build under -
-//! one method returning the digests, which is also the only place that can compute them
-//! correctly - at which point they go into the policy in `sweep` and nothing else changes.
+//! Before this process has used a native builder the remembered set is empty, which safely disables
+//! identity-stale eviction. That keeps interpreter-only `cache gc` independent of a C-toolchain
+//! probe. Budget eviction still works, and the first native build enables the stronger tier for the
+//! rest of the resident process.
 //!
 //! The daemon depends directly on `kiln-artifact-cache` because cache maintenance must not probe
 //! the native C toolchain. A developer using interpreter-only mode should still be able to sweep
 //! old native artifacts.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 
-use kiln_artifact_cache::{ArtifactCache, EvictionPolicy};
+use kiln_artifact_cache::{ArtifactCache, Digest, EvictionPolicy};
 use kiln_proto::{CacheGcSummary, CacheLayerSweep};
 
 /// Bytes one writable cache layer may hold. See the module documentation for the measurement.
@@ -85,6 +78,27 @@ const SWEEP_THRESHOLD_BYTES: u64 = BUDGET_BYTES / 100 * SWEEP_THRESHOLD_PERCENT;
 /// Process-wide rather than per-project, like the toolchain probe: a daemon serves one project,
 /// and a counter per cache root would be a map that never shrinks.
 static PUBLISHED_SINCE_SWEEP: AtomicU64 = AtomicU64::new(0);
+static LIVE_IDENTITIES: OnceLock<Mutex<BTreeSet<Digest>>> = OnceLock::new();
+
+fn live_identities() -> &'static Mutex<BTreeSet<Digest>> {
+    LIVE_IDENTITIES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn remember_live_identities(identities: BTreeSet<Digest>) {
+    if identities.is_empty() {
+        return;
+    }
+    *live_identities()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = identities;
+}
+
+fn current_live_identities() -> BTreeSet<Digest> {
+    live_identities()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
 
 /// Where a project keeps its artifacts. The same derivation the native build path uses.
 pub(crate) fn cache_root(project_root: &Path) -> PathBuf {
@@ -106,12 +120,25 @@ pub(crate) fn sweep_to_budget(
     dry_run: bool,
     budget_bytes: u64,
 ) -> Result<CacheGcSummary, String> {
+    sweep_to_budget_with_identities(
+        project_root,
+        dry_run,
+        budget_bytes,
+        current_live_identities(),
+    )
+}
+
+fn sweep_to_budget_with_identities(
+    project_root: &Path,
+    dry_run: bool,
+    budget_bytes: u64,
+    identities: BTreeSet<Digest>,
+) -> Result<CacheGcSummary, String> {
     let root = cache_root(project_root);
     let cache = ArtifactCache::new(root.clone());
     let mut policy = EvictionPolicy::with_budget(budget_bytes);
     policy.dry_run = dry_run;
-    // `live_identities` is deliberately left empty, which disables the identity-stale tier: see
-    // the module documentation on why this module cannot declare one correctly.
+    policy.live_identities = identities;
     let reports = cache.sweep(&policy).map_err(|error| error.to_string())?;
 
     Ok(CacheGcSummary {
@@ -143,17 +170,21 @@ pub(crate) fn sweep_to_budget(
 /// This is the opportunistic path. It is called after a build has produced its report, so the
 /// compile it would otherwise delay is already over, and the sweep itself is detached from the
 /// request thread entirely.
-pub(crate) fn record_publication(project_root: &Path, bytes: u64) {
+pub(crate) fn record_publication(project_root: &Path, bytes: u64, identities: BTreeSet<Digest>) {
+    remember_live_identities(identities);
     if bytes == 0 || !elect_sweeper(bytes) {
         return;
     }
     let project_root = project_root.to_path_buf();
+    let identities = current_live_identities();
     // A sweep that fails, or a daemon that exits mid-sweep, costs nothing: `unlink` is atomic,
     // in-flight temporaries are never touched, and a record that survives is simply still cached.
     if let Err(error) = thread::Builder::new()
         .name("kiln-cache-sweep".to_owned())
         .spawn(move || {
-            if let Err(error) = sweep(&project_root, false) {
+            if let Err(error) =
+                sweep_to_budget_with_identities(&project_root, false, BUDGET_BYTES, identities)
+            {
                 eprintln!("kiln-daemon: cache sweep failed: {error}");
             }
         })
@@ -232,6 +263,7 @@ fn missed_bytes(stages: impl IntoIterator<Item = (bool, u64)>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_artifact_cache::{ArtifactKey, ArtifactKind, Backend, BuildProfile};
     use std::fs::{self, FileTimes, OpenOptions};
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime};
@@ -264,6 +296,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(cache_root(&dir)).expect("create cache root");
         dir
+    }
+
+    fn key(compiler: &str) -> ArtifactKey {
+        ArtifactKey::new(
+            ArtifactKind::GeneratedC,
+            compiler,
+            Backend::C,
+            "host-2;c-1",
+            "test-target",
+            "generic",
+            BuildProfile::Debug,
+            "none",
+            Digest::hash(b"options"),
+            [Digest::hash(b"input")],
+        )
+    }
+
+    fn age_record_and_marker(path: &Path) {
+        let old = SystemTime::now() - Duration::from_secs(7200);
+        let mut marker = path.as_os_str().to_os_string();
+        marker.push(".id");
+        for path in [path.to_path_buf(), PathBuf::from(marker)] {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open cache record or identity marker");
+            file.set_times(FileTimes::new().set_modified(old))
+                .expect("age cache record or identity marker");
+        }
     }
 
     #[test]
@@ -316,6 +377,42 @@ mod tests {
         assert!(
             runtime.exists(),
             "the shared runtime is the last thing to go"
+        );
+
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn authoritative_identity_set_evicts_only_an_unreachable_toolchain_family() {
+        let project = scratch("identity");
+        let cache = ArtifactCache::new(cache_root(&project));
+        let live = key("current compiler");
+        let stale = key("superseded compiler");
+        let live_record = cache.put(&live, b"live").expect("store live record").path;
+        let stale_record = cache
+            .put(&stale, b"stale")
+            .expect("store stale record")
+            .path;
+        age_record_and_marker(&live_record);
+        age_record_and_marker(&stale_record);
+
+        let summary = sweep_to_budget_with_identities(
+            &project,
+            false,
+            u64::MAX,
+            BTreeSet::from([live.identity_digest()]),
+        )
+        .expect("identity-aware sweep succeeds");
+        let layer = &summary.layers[0];
+        assert_eq!(layer.records_evicted, 1);
+        assert_eq!(layer.identity_stale_evicted, 1);
+        assert!(
+            live_record.exists(),
+            "the current toolchain family stays live"
+        );
+        assert!(
+            !stale_record.exists(),
+            "a superseded compiler family is unreachable regardless of budget"
         );
 
         let _ = fs::remove_dir_all(&project);

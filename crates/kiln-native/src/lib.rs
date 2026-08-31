@@ -6,6 +6,7 @@
 
 mod number_provider;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -514,6 +515,121 @@ impl NativeBuilder {
         &self.cache
     }
 
+    /// Every artifact identity this configured native toolchain can still produce.
+    ///
+    /// Cache eviction deliberately asks the producer for this set instead of reconstructing the
+    /// native build matrix in the daemon. The identity digest excludes per-program inputs and
+    /// options, so one representative key covers every artifact in a stage/profile family.
+    /// Keeping the catalogue here also means ABI, backend, or profile additions must change the
+    /// same Module that constructs the real keys.
+    pub fn live_cache_identities(&self) -> Result<BTreeSet<Digest>, NativeError> {
+        let tool = self.toolchain.identity();
+        let target = target_identity(tool);
+        let compiler = compiler_identity(tool);
+        let module_abi = module_abi_identity();
+        let runtime_abi = runtime_abi_identity();
+        let embedding_abi = shared_embedding_abi_identity();
+        let provider = self.number_provider()?;
+        let mut identities = BTreeSet::new();
+
+        let mut allow = |compiler: String, backend: Backend, abi: &str, profile| {
+            identities.insert(cache_identity(compiler, backend, abi, &target, profile));
+        };
+
+        // Deterministic generated sources are always stored under the debug cache profile. Graph
+        // module sources share the ordinary module-source identity byte-for-byte.
+        allow(
+            format!("kiln-c-abi-{C_ABI_VERSION}"),
+            Backend::C,
+            &module_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-runtime-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-runtime-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-launcher-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
+            Backend::Custom("native-graph-launcher-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!("kiln-c-abi-{C_ABI_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"),
+            Backend::Custom("native-shared-library-source".to_owned()),
+            &embedding_abi,
+            CacheProfile::Debug,
+        );
+        allow(
+            format!(
+                "kiln-shared-graph-wrapper-{NATIVE_RUNTIME_VERSION}-module-api-{EMBEDDING_MODULE_API_VERSION}"
+            ),
+            Backend::Custom("native-shared-graph-wrapper-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+
+        // The Rust number provider is profile-independent and is cached as one release archive.
+        allow(
+            provider.identity,
+            Backend::Custom("rust-native-number-provider".to_owned()),
+            &native_number_abi_identity(),
+            CacheProfile::Release,
+        );
+
+        for profile in [
+            NativeProfile::Dev,
+            NativeProfile::Check,
+            NativeProfile::Release,
+        ] {
+            let profile = profile.cache();
+            for (backend, abi) in [
+                (Backend::C, module_abi.as_str()),
+                (
+                    Backend::Custom("native-runtime".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-launcher".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (Backend::C, runtime_abi.as_str()),
+                (
+                    Backend::Custom("native-shared-library".to_owned()),
+                    embedding_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph-module".to_owned()),
+                    module_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph-wrapper".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-graph".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-graph-launcher".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+            ] {
+                allow(compiler.clone(), backend, abi, profile.clone());
+            }
+        }
+
+        Ok(identities)
+    }
+
     fn number_provider(&self) -> Result<NumberProvider, NativeError> {
         self.number_provider
             .get_or_init(|| {
@@ -713,7 +829,7 @@ impl NativeBuilder {
             ],
         );
         let (executable, executable_digest, executable_hit, link_elapsed) =
-            match self.cache.lookup(&executable_key)? {
+            match self.lookup(&executable_key)? {
                 Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
                 Lookup::Miss => {
                     materialize(&paths.module_o, &application, false)?;
@@ -932,7 +1048,7 @@ impl NativeBuilder {
             link_options_digest,
             link_inputs,
         );
-        let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
+        let (library, library_hit, link_elapsed) = match self.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
                 materialize(&paths.module_o, &object, false)?;
@@ -1224,7 +1340,7 @@ impl NativeBuilder {
             link_options_digest,
             link_inputs.iter().copied(),
         );
-        let (library, library_hit, link_elapsed) = match self.cache.lookup(&library_key)? {
+        let (library, library_hit, link_elapsed) = match self.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
                 let mut objects = Vec::with_capacity(modules.len() + 1);
@@ -1677,7 +1793,26 @@ impl NativeBuilder {
         key: &ArtifactKey,
         expected: &[u8],
     ) -> Result<(Vec<u8>, Digest, bool), NativeError> {
+        #[cfg(test)]
+        self.assert_live_cache_identity(key);
         cached_payload(&self.cache, key, expected)
+    }
+
+    fn lookup(&self, key: &ArtifactKey) -> Result<Lookup, NativeError> {
+        #[cfg(test)]
+        self.assert_live_cache_identity(key);
+        Ok(self.cache.lookup(key)?)
+    }
+
+    #[cfg(test)]
+    fn assert_live_cache_identity(&self, key: &ArtifactKey) {
+        let identities = self
+            .live_cache_identities()
+            .expect("a build that constructs cache keys can enumerate its live identities");
+        assert!(
+            identities.contains(&key.identity_digest()),
+            "native cache identity catalogue omitted key family: {key:?}"
+        );
     }
 
     fn object(
@@ -1688,7 +1823,7 @@ impl NativeBuilder {
         object_path: &Path,
         options: &CompileOptions,
     ) -> Result<(Vec<u8>, Digest, bool, Duration), NativeError> {
-        match self.cache.lookup(key)? {
+        match self.lookup(key)? {
             Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true, Duration::ZERO)),
             Lookup::Miss => {
                 materialize(source_path, source, false)?;
@@ -1871,6 +2006,26 @@ fn key(
     ArtifactKey::new(
         kind, compiler, backend, abi, target, "generic", profile, "none", options, inputs,
     )
+}
+
+fn cache_identity(
+    compiler: impl Into<String>,
+    backend: Backend,
+    abi: &str,
+    target: &str,
+    profile: CacheProfile,
+) -> Digest {
+    key(
+        ArtifactKind::GeneratedC,
+        compiler,
+        backend,
+        abi,
+        target,
+        profile,
+        Digest::hash(b"identity representative"),
+        [],
+    )
+    .identity_digest()
 }
 
 fn module_abi_identity() -> String {
@@ -3673,6 +3828,60 @@ mod tests {
             native_number_abi_identity(),
             "kiln-native-number-provider-13"
         );
+    }
+
+    #[test]
+    fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native cache identity catalogue: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-cache-identities");
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let identities = builder
+            .live_cache_identities()
+            .expect("current native identities are enumerable");
+
+        assert_eq!(
+            identities.len(),
+            34,
+            "six generated-source families, one number provider, and nine stage families across three profiles"
+        );
+
+        let tool = builder.toolchain().identity();
+        let target = target_identity(tool);
+        let compiler = compiler_identity(tool);
+        for profile in [
+            CacheProfile::Debug,
+            CacheProfile::Check,
+            CacheProfile::Release,
+        ] {
+            for identity in [
+                cache_identity(
+                    compiler.clone(),
+                    Backend::C,
+                    &module_abi_identity(),
+                    &target,
+                    profile,
+                ),
+                cache_identity(
+                    compiler.clone(),
+                    Backend::Custom("native-runtime".to_owned()),
+                    &runtime_abi_identity(),
+                    &target,
+                    profile,
+                ),
+                cache_identity(
+                    compiler.clone(),
+                    Backend::Custom("native-shared-graph".to_owned()),
+                    &runtime_abi_identity(),
+                    &target,
+                    profile,
+                ),
+            ] {
+                assert!(identities.contains(&identity));
+            }
+        }
     }
 
     #[test]
