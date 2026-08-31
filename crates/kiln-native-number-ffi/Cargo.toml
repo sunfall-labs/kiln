@@ -22,6 +22,7 @@ bigint = ["dep:num-bigint", "dep:num-traits"]
 
 [dependencies]
 kiln-number-core = { workspace = true }
+kiln-host-abi = { workspace = true }
 kiln-runtime = { workspace = true, optional = true }
 # The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.

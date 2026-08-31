@@ -989,6 +989,7 @@ dependencies = [
 name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
+ "kiln-host-abi",
  "kiln-number-core",
  "kiln-runtime",
  "num-bigint 0.4.8",
