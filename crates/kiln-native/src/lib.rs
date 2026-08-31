@@ -1918,7 +1918,10 @@ fn native_builtin_supports_export(
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
         NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
-        NodeBuiltin::Net => matches!(export_name, "connect" | "createConnection" | "createServer"),
+        NodeBuiltin::Net => matches!(
+            export_name,
+            "connect" | "createConnection" | "createServer" | "default"
+        ),
         NodeBuiltin::Http => {
             matches!(
                 export_name,
@@ -1964,9 +1967,19 @@ exports[1] = constructor;"#,
         NodeBuiltin::Net => Some(
             r#"kiln_value connect = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT);
 kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "connect", 7, connect, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createConnection", 16, connect, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = connect;
 exports[1] = connect;
-exports[2] = create_server;"#,
+exports[2] = create_server;
+exports[3] = namespace;"#,
         ),
         // Slots are positions in `node_builtin_export_names("http")`, which lives in
         // kiln-interpreter and is shared with the interpreter and `process.getBuiltinModule`.

@@ -975,9 +975,10 @@ with `a function is not a request options object`. A wrong answer wearing a plau
 diagnostic - the class regress/r07 exists to catch. \
 `native_builtin_slots_match_the_shared_export_table` now pins the coupling.
 
-One divergence outstanding, and it is the interpreter's rather than the backend's: `typeof http` \
-is still `function` in `--node` interpreted mode, where both node and the native backend now say \
-`object`.\
+The interpreter and native backend now agree with node that object-shaped builtin defaults such \
+as `http`, `net`, `async_hooks`, `string_decoder` and `perf_hooks` have `typeof` `object`, while \
+the genuinely callable defaults (`assert`, `events`, `module` and `stream`) remain functions. A \
+focused interpreter test pins that split, and the native export-slot test pins materialization.\
 """
 extension_finding = """
 The probes are `.mjs` rather than `.js`, and that exposed a real harness boundary. The first \
