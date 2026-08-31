@@ -7265,6 +7265,66 @@ static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
     return kiln_c99_text_append(text, literal, strlen(literal));
 }
 
+/* Node decodes a `readFile(..., "utf8")` result with replacement semantics rather than exposing
+ * malformed bytes as a JavaScript string. Match Rust's `String::from_utf8_lossy`: consume the
+ * valid prefix of an otherwise malformed sequence, leave the offending byte to be reconsidered,
+ * and collapse a truncated continuation suffix into one U+FFFD. */
+static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
+    static const char replacement[] = "\xEF\xBF\xBD";
+    kiln_text decoded = {NULL, 0, 0};
+    size_t at = 0;
+    if (length == 0) return kiln_c99_copy_text(NULL, 0);
+    while (at < length) {
+        unsigned char first = bytes[at];
+        size_t width = 0;
+        size_t continuation;
+        if (first < 0x80) {
+            width = 1;
+        } else if (first >= 0xC2 && first <= 0xDF) {
+            width = 2;
+        } else if (first >= 0xE0 && first <= 0xEF) {
+            width = 3;
+        } else if (first >= 0xF0 && first <= 0xF4) {
+            width = 4;
+        }
+        if (width == 0) {
+            if (kiln_c99_text_append(&decoded, replacement, 3) != KILN_C99_OK) goto oom;
+            at += 1;
+            continue;
+        }
+        if (width > 1 && at + 1 < length) {
+            unsigned char second = bytes[at + 1];
+            if ((second & 0xC0) != 0x80 || (first == 0xE0 && second < 0xA0) ||
+                (first == 0xED && second >= 0xA0) || (first == 0xF0 && second < 0x90) ||
+                (first == 0xF4 && second > 0x8F)) {
+                if (kiln_c99_text_append(&decoded, replacement, 3) != KILN_C99_OK) goto oom;
+                at += 1;
+                continue;
+            }
+        }
+        for (continuation = 1; continuation < width; ++continuation) {
+            if (at + continuation >= length) {
+                if (kiln_c99_text_append(&decoded, replacement, 3) != KILN_C99_OK) goto oom;
+                at = length;
+                break;
+            }
+            if ((bytes[at + continuation] & 0xC0) != 0x80) {
+                if (kiln_c99_text_append(&decoded, replacement, 3) != KILN_C99_OK) goto oom;
+                at += continuation;
+                break;
+            }
+        }
+        if (continuation != width) continue;
+        if (kiln_c99_text_append(&decoded, (const char *)bytes + at, width) != KILN_C99_OK)
+            goto oom;
+        at += width;
+    }
+    return kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+oom:
+    free(decoded.bytes);
+    return kiln_c99_undefined();
+}
+
 static kiln_value kiln_c99_text(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
@@ -11937,7 +11997,7 @@ static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *
     length = (size_t)completion->bytes_len;
     if (length != 0 && completion->bytes == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (work->utf8) {
-        value = kiln_c99_copy_text((const char *)completion->bytes, length);
+        value = kiln_c99_copy_utf8_lossy(completion->bytes, length);
     } else {
         status = kiln_c99_typed_alloc(&value, KILN_TYPED_UINT8, length);
         if (status != KILN_C99_OK) return status;
@@ -15641,6 +15701,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
             }
+            if (kiln_c99_is_node_hidden_key(key.ptr, key.len)) {
+                *result = kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
             if (receiver.tag == KILN_VALUE_ARRAY) {
                 /* An array's own properties are its live indices, its `length`, and whatever a
                  * program put in the store beside them -- the same three the descriptor path
@@ -16721,6 +16785,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             int found = 0;
             if (argc == 0 || key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
+            }
+            if (kiln_c99_is_node_hidden_key(key.ptr, key.len)) {
+                *result = kiln_c99_boolean(0);
+                return KILN_C99_OK;
             }
             if (args[0].tag == KILN_VALUE_PROXY) {
                 /* The same question `hasOwnProperty` asks, and the same trap answers it. */
@@ -17966,6 +18034,9 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
     kiln_value current = target;
     size_t steps;
     *answer = 0;
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_has_computed(host, target,
                                      kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), answer,
@@ -18816,6 +18887,9 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     kiln_value store = target;
     *found = 0;
     *out = kiln_c99_undefined();
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_describe(host, target,
                                        kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), out,
