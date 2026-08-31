@@ -375,6 +375,57 @@ fn method_dispatch_membership_is_generated_from_registry() {
     assert!(!prelude.contains("code <= KILN_C99_METHOD_ARRAY_AT"));
 }
 
+/// A method that belongs to more than one dispatch group cannot be routed by group: whichever
+/// group is tested first wins, and that order is a property of how the ifs were written rather
+/// than of the call. `setEncoding` is the only such name -- a `net.Socket`, an
+/// `http.IncomingMessage` and a `stream.Readable` all own it -- and when group order decided it,
+/// every HTTP response's `setEncoding` was answered by the socket handler and threw
+/// `is not a Socket`, with every live-request test still green.
+///
+/// So the generated dispatch must ask the receiver first. This is the cheap guard on that
+/// ordering; `native_node_http_client_response_set_encoding_delivers_text_chunks` in
+/// `kiln-native` is the one that runs the program.
+#[test]
+fn set_encoding_is_routed_by_receiver_before_any_dispatch_group() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    // The last one, because the prelude forward-declares the dispatcher long before it defines
+    // it and the declaration would put the whole runtime inside the window.
+    let dispatch = prelude
+        .rsplit_once("static int kiln_c99_invoke_method(")
+        .expect("the prelude defines the method dispatcher")
+        .1;
+    assert!(
+        dispatch.starts_with("kiln_host *host"),
+        "the anchor found a call rather than the definition"
+    );
+    let routed = dispatch
+        .find("code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING")
+        .expect("setEncoding is routed explicitly rather than by group");
+    for group in [
+        "KILN_C99_GROUP_NODE_NET",
+        "KILN_C99_GROUP_NODE_HTTP",
+        "KILN_C99_GROUP_NODE_STREAM",
+    ] {
+        let tested = dispatch
+            .find(&format!("kiln_c99_method_in_group(code, {group})"))
+            .unwrap_or_else(|| panic!("{group} is tested in the dispatcher"));
+        assert!(
+            routed < tested,
+            "setEncoding must be routed by receiver before {group} claims it"
+        );
+    }
+    // And the registry must still declare all three, so the entry reads as what it is rather
+    // than as a method that happens to live in two of the three handlers.
+    assert!(
+        prelude.contains(
+            "case KILN_C99_METHOD_NODE_READABLE_SET_ENCODING: \
+             return UINT32_C(8192) | UINT32_C(2048) | UINT32_C(262144);"
+        ),
+        "setEncoding must declare its NodeHttp, NodeNet and NodeStream membership"
+    );
+}
+
 #[test]
 fn runtime_prelude_size() {
     // A guard on the half that is not snapshotted verbatim: the surface above would not notice a
