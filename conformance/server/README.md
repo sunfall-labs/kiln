@@ -1,7 +1,7 @@
 # The Node-server probes
 
-Four vertical server programs. The first three now run under explicit interpreted Node mode; the
-framework gap stays visible, and native standalone remains a separate gate.
+Four vertical server programs. All four now run under explicit interpreted Node mode when the
+Fastify fixture's reproducible packages are installed; native standalone remains a separate gate.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
 step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and
@@ -99,17 +99,13 @@ something tried to be a server.
 `--node` product boundary. Node mode now selects the production Node resolver and typed builtin
 graph; ordinary mode still rejects `node:` and unknown builtins fail closed in either path.
 
-**The `fastify` gap is CommonJS evaluation, not package resolution or default-export synthesis.**
-The production resolver reaches `node_modules/fastify/fastify.js` and reads its package's
-`"type": "commonjs"`. That file immediately uses `require`, `module.exports`, relative CommonJS
-dependencies, and Node builtins. Wrapping only its final value as an ESM `default` would make the
-linker greener without executing Fastify. The required seam is therefore a typed CommonJS graph
-node with wrapper bindings, dependency discovery, cache/cycle behavior, and ESM interop.
-
-The authored `s04` probe also uses top-level await. Kiln currently refuses that before graph
-execution; wrapping the same body in an async `main()` reaches the CommonJS missing-default error
-above. Top-level await remains a separate ESM graph-evaluation requirement and must not be confused
-with the framework's module format.
+**Fastify now exercises the production CommonJS graph rather than a compatibility shim.** The
+resolver reaches `node_modules/fastify/fastify.js`, executes its CommonJS dependency closure with
+cache/cycle behavior and ESM interop, and projects builtin namespaces through the same typed graph.
+Its async handlers and request-body parser then run on the realm's shared scheduler and Tokio-owned
+transport. The fixture uses an async `main()` so top-level-await graph evaluation remains an
+independent language feature rather than being accidentally required by the server compatibility
+gate.
 
 ## And one that changed the harness
 
