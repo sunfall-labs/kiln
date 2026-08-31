@@ -66,6 +66,21 @@ mod http {
 
     pub struct ResponseEvents(Vec<HttpResponseEvent>);
 
+    fn checked_header_field_len(name_len: usize, value_len: usize) -> Option<usize> {
+        name_len
+            .checked_add(1)?
+            .checked_add(value_len)?
+            .checked_add(1)
+    }
+
+    fn checked_advance(offset: &mut usize, amount: usize) -> bool {
+        let Some(next) = offset.checked_add(amount) else {
+            return false;
+        };
+        *offset = next;
+        true
+    }
+
     /// Allocate an opaque incremental HTTP/1 decoder. The handle never exposes Rust layout.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_http1_decoder_create(out: *mut *mut Http1Decoder) -> i32 {
@@ -295,11 +310,15 @@ mod http {
         };
         match event {
             HttpResponseEvent::Head(head) => {
-                let header_len = head
-                    .headers
-                    .iter()
-                    .map(|(name, value)| name.len() + 1 + value.len() + 1)
-                    .sum::<usize>();
+                let Some(header_len) =
+                    head.headers
+                        .iter()
+                        .try_fold(0usize, |total, (name, value)| {
+                            total.checked_add(checked_header_field_len(name.len(), value.len())?)
+                        })
+                else {
+                    return INVALID_ARGUMENT;
+                };
                 view.status = head.status;
                 view.reason_len = head.reason.len();
                 view.headers_len = header_len;
@@ -326,9 +345,13 @@ mod http {
                             name.len(),
                         );
                     }
-                    at += name.len();
+                    if !checked_advance(&mut at, name.len()) {
+                        return INVALID_ARGUMENT;
+                    }
                     unsafe { view.headers.add(at).write(0) };
-                    at += 1;
+                    if !checked_advance(&mut at, 1) {
+                        return INVALID_ARGUMENT;
+                    }
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             value.as_ptr(),
@@ -336,9 +359,13 @@ mod http {
                             value.len(),
                         );
                     }
-                    at += value.len();
+                    if !checked_advance(&mut at, value.len()) {
+                        return INVALID_ARGUMENT;
+                    }
                     unsafe { view.headers.add(at).write(0) };
-                    at += 1;
+                    if !checked_advance(&mut at, 1) {
+                        return INVALID_ARGUMENT;
+                    }
                 }
             }
             HttpResponseEvent::Data(data) => {
@@ -357,6 +384,24 @@ mod http {
     pub unsafe extern "C" fn kiln_http1_response_events_free(events: *mut ResponseEvents) {
         if !events.is_null() {
             drop(unsafe { Box::from_raw(events) });
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{checked_advance, checked_header_field_len};
+
+        #[test]
+        fn response_view_lengths_fail_closed_at_usize_boundary() {
+            assert_eq!(checked_header_field_len(0, 0), Some(2));
+            assert_eq!(checked_header_field_len(usize::MAX, 0), None);
+            assert_eq!(checked_header_field_len(0, usize::MAX), None);
+
+            let mut offset = usize::MAX - 1;
+            assert!(checked_advance(&mut offset, 1));
+            assert_eq!(offset, usize::MAX);
+            assert!(!checked_advance(&mut offset, 1));
+            assert_eq!(offset, usize::MAX);
         }
     }
 }
