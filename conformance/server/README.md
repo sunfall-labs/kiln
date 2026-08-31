@@ -99,10 +99,17 @@ something tried to be a server.
 `--node` product boundary. Node mode now selects the production Node resolver and typed builtin
 graph; ordinary mode still rejects `node:` and unknown builtins fail closed in either path.
 
-**The `fastify` gap is CommonJS interop, not package resolution.** A probe importing only
-`fastify` answers `imports missing export 'default'`, naming
-`node_modules/fastify/fastify.js` — so ADR 0027's `NodePackageResolver` already found the real
-file on disk. What is missing is the interop that synthesizes a `default` for a CommonJS module.
+**The `fastify` gap is CommonJS evaluation, not package resolution or default-export synthesis.**
+The production resolver reaches `node_modules/fastify/fastify.js` and reads its package's
+`"type": "commonjs"`. That file immediately uses `require`, `module.exports`, relative CommonJS
+dependencies, and Node builtins. Wrapping only its final value as an ESM `default` would make the
+linker greener without executing Fastify. The required seam is therefore a typed CommonJS graph
+node with wrapper bindings, dependency discovery, cache/cycle behavior, and ESM interop.
+
+The authored `s04` probe also uses top-level await. Kiln currently refuses that before graph
+execution; wrapping the same body in an async `main()` reaches the CommonJS missing-default error
+above. Top-level await remains a separate ESM graph-evaluation requirement and must not be confused
+with the framework's module format.
 
 ## And one that changed the harness
 

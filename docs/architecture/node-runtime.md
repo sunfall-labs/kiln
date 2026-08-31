@@ -111,6 +111,13 @@ realm, communicate over loopback, decode a streamed UTF-8 response, close the li
 realm terminate. Passing it proves the production module graph and runtime path, not merely codec
 units or a test-only loader.
 
+CommonJS is a module-graph source kind, not a resolver alias and not an ESM default-export patch.
+The Node resolver selects the file and its nearest package type; the graph records CommonJS
+identity; evaluation supplies `require`, `module`, `exports`, `__filename`, and `__dirname` with a
+per-realm module cache that inserts before execution for cycles. ESM import observes
+`module.exports` as the default namespace value. This keeps package policy, linkage, execution,
+and cache lifetime explicit and prevents framework-specific source rewriting.
+
 ## Non-goals
 
 - Reimplementing an executor, reactor, TCP stack, or TLS library.
