@@ -1144,7 +1144,10 @@ typedef struct kiln_timer {
     kiln_value *args;
     size_t argc;
 } kiln_timer;
-typedef struct kiln_node_server {
+typedef struct kiln_node_server kiln_node_server;
+typedef struct kiln_node_socket kiln_node_socket;
+
+struct kiln_node_server {
     kiln_host *host;
     kiln_value object;
     kiln_value connection_listener;
@@ -1156,11 +1159,13 @@ typedef struct kiln_node_server {
     uint32_t port;
     int protocol_http;
     int closing;
-} kiln_node_server;
+    kiln_node_socket *sockets;
+};
 
-typedef struct kiln_node_socket {
+struct kiln_node_socket {
     kiln_host *host;
     kiln_value object;
+    kiln_node_socket *next;
     uint64_t resource;
     uint64_t read_request;
     uint64_t write_request;
@@ -1171,7 +1176,7 @@ typedef struct kiln_node_socket {
     int close_after_write;
     int http_dispatched;
     int closing;
-} kiln_node_socket;
+};
 
 typedef struct kiln_node_response {
     kiln_node_socket *socket;
@@ -7893,6 +7898,35 @@ static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t a
     return status;
 }
 
+static void kiln_c99_node_cancel_request(uint64_t *request) {
+    if (*request != 0) {
+        (void)kiln_realm_cancel_active_request(*request);
+        *request = 0;
+    }
+}
+
+static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
+    kiln_node_completion *work;
+    if (socket->close_request != 0) return KILN_C99_OK;
+    socket->closing = 1;
+    kiln_c99_node_cancel_request(&socket->read_request);
+    /* HTTP response.end() owns a write that must reach the peer before server.close() tears down
+     * the accepted socket. The write completion already knows how to start the final close. */
+    if (!force && socket->server != NULL && socket->server->protocol_http &&
+        socket->write_request != 0) {
+        socket->close_after_write = 1;
+        return KILN_C99_OK;
+    }
+    kiln_c99_node_cancel_request(&socket->write_request);
+    kiln_c99_node_cancel_request(&socket->shutdown_request);
+    work = (kiln_node_completion *)calloc(1, sizeof *work);
+    if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+    work->kind = KILN_REALM_OP_CLOSE_RESOURCE;
+    work->socket = socket;
+    return kiln_c99_node_start(work->kind, socket->resource, 0, NULL, 0, NULL, 0, work,
+                               &socket->close_request);
+}
+
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
     kiln_value ignored;
     int status = kiln_c99_new_object(&socket->object);
@@ -8033,6 +8067,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             socket = (kiln_node_socket *)calloc(1, sizeof *socket);
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = server->host;
+            socket->next = server->sockets;
+            server->sockets = socket;
             socket->resource = completion->resource;
             socket->server = server;
             status = kiln_c99_node_socket_object(socket, exception);
@@ -8042,6 +8078,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                          : kiln_c99_call(server->host, &ignored, server->connection_listener,
                                          server->object, &socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
+            if (server->closing || socket->closing) return KILN_C99_OK;
             read = (kiln_node_completion *)calloc(1, sizeof *read);
             if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
             read->kind = KILN_REALM_OP_TCP_READ;
@@ -8208,7 +8245,12 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         }
         if (code == KILN_C99_METHOD_NODE_SERVER_CLOSE) {
             kiln_node_completion *work;
+            kiln_node_socket *socket;
             int status;
+            if (server->closing) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
             if (argc > 0 && kiln_c99_is_callable(args[0])) {
                 kiln_value once_args[2] = {kiln_c99_copy_text("close", 5), args[0]};
                 kiln_value ignored;
@@ -8218,8 +8260,11 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             }
             server->closing = 1;
             if (server->accept_request != 0) {
-                (void)kiln_realm_cancel_active_request(server->accept_request);
-                server->accept_request = 0;
+                kiln_c99_node_cancel_request(&server->accept_request);
+            }
+            for (socket = server->sockets; socket != NULL; socket = socket->next) {
+                status = kiln_c99_node_close_socket(socket, !server->protocol_http);
+                if (status != KILN_C99_OK) return status;
             }
             if (server->listener != 0) {
                 work = (kiln_node_completion *)calloc(1, sizeof *work);
@@ -8260,6 +8305,12 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         kiln_node_completion *work;
         int status;
         if (socket == NULL) return kiln_c99_throw_not_a(thrown, receiver, "Socket");
+        if (code == KILN_C99_METHOD_NODE_SOCKET_DESTROY) {
+            status = kiln_c99_node_close_socket(socket, 1);
+            if (status != KILN_C99_OK) return status;
+            *result = receiver;
+            return KILN_C99_OK;
+        }
         work = (kiln_node_completion *)calloc(1, sizeof *work);
         if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
         work->socket = socket;
@@ -8274,12 +8325,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             return KILN_C99_OK;
         }
         socket->closing = 1;
-        work->kind = code == KILN_C99_METHOD_NODE_SOCKET_END
-                         ? KILN_REALM_OP_TCP_SHUTDOWN : KILN_REALM_OP_CLOSE_RESOURCE;
+        work->kind = KILN_REALM_OP_TCP_SHUTDOWN;
         status = kiln_c99_node_start(
             work->kind, socket->resource, 0, NULL, 0, NULL, 0, work,
-            code == KILN_C99_METHOD_NODE_SOCKET_END ? &socket->shutdown_request
-                                                    : &socket->close_request);
+            &socket->shutdown_request);
         if (status != KILN_C99_OK) return status;
         *result = receiver;
         return KILN_C99_OK;

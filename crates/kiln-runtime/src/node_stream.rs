@@ -31,6 +31,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamAction {
     Start(AsyncHostOp),
+    Cancel(RequestId),
     Data(Vec<u8>),
     Event(StreamEvent),
     Error(AsyncHostError),
@@ -52,6 +53,7 @@ pub struct StreamDriver {
     state: DuplexState<Vec<u8>>,
     requests: Vec<(RequestId, PendingKind)>,
     reading: bool,
+    closing: bool,
     read_size: usize,
 }
 
@@ -62,6 +64,7 @@ impl StreamDriver {
             state: DuplexState::new(high_water_mark),
             requests: Vec::new(),
             reading: false,
+            closing: false,
             read_size: high_water_mark.max(1),
         }
     }
@@ -151,6 +154,30 @@ impl StreamDriver {
         StreamAction::Start(AsyncHostOp::CloseResource {
             resource: self.resource,
         })
+    }
+
+    /// Cancel all in-flight operations before closing this resource.
+    ///
+    /// The close action can be selected synchronously from a language callback while a read is
+    /// still waiting on the peer. Retiring those request identities is part of close: otherwise
+    /// the realm's host drive keeps waiting for a completion that can no longer be observed.
+    pub fn close_actions(&mut self) -> Vec<StreamAction> {
+        if self.closing {
+            return Vec::new();
+        }
+        self.closing = true;
+        let mut actions: Vec<_> = self
+            .requests
+            .iter()
+            .map(|(request, _)| StreamAction::Cancel(*request))
+            .collect();
+        self.requests.clear();
+        actions.push(self.close());
+        actions
+    }
+
+    pub const fn is_closing(&self) -> bool {
+        self.closing
     }
 
     /// Associate the request identity returned for a selected host operation.
@@ -277,6 +304,7 @@ impl StreamDriver {
 
     fn next_read_action(&self) -> Option<StreamAction> {
         (self.reading
+            && !self.closing
             && !self.state.read_closed
             && !self.state.resource_closed
             && !self
@@ -585,6 +613,28 @@ mod tests {
             Some(vec![StreamAction::Event(StreamEvent::End)])
         );
         assert!(driver.state().read_closed());
+    }
+
+    #[test]
+    fn close_actions_cancel_in_flight_read_before_closing_resource() {
+        let resource = ResourceId::new(6);
+        let mut driver = StreamDriver::new(resource, 8);
+        let actions = driver.start_reading();
+        start(&mut driver, &actions[0], 13);
+        assert_eq!(
+            driver.close_actions(),
+            vec![
+                StreamAction::Cancel(RequestId::new(13)),
+                StreamAction::Start(AsyncHostOp::CloseResource { resource }),
+            ]
+        );
+        assert!(driver.is_closing());
+        assert!(driver.close_actions().is_empty());
+        assert!(driver.start_reading().is_empty());
+        assert_eq!(
+            driver.completed(completion(13, AsyncHostValue::Bytes(b"stale".to_vec()))),
+            None
+        );
     }
 
     #[test]
