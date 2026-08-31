@@ -12,7 +12,7 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 11;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 12;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
@@ -486,7 +486,13 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-native-number-ffi/Cargo.toml",
         "crates/kiln-native-number-ffi/src/lib.rs",
         "crates/kiln-runtime/Cargo.toml",
+        "crates/kiln-runtime/src/http_body.rs",
+        "crates/kiln-runtime/src/http_transport.rs",
+        "crates/kiln-runtime/src/hyper_http.rs",
         "crates/kiln-runtime/src/lib.rs",
+        "crates/kiln-runtime/src/node_http.rs",
+        "crates/kiln-runtime/src/node_net.rs",
+        "crates/kiln-runtime/src/node_stream.rs",
     ];
     let mut identity = Vec::new();
     for relative in paths {
@@ -709,7 +715,13 @@ mod tests {
                 b"ffi\n".as_slice(),
             ),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
+            ("crates/kiln-runtime/src/http_transport.rs", b"transport\n"),
+            ("crates/kiln-runtime/src/hyper_http.rs", b"hyper\n"),
             ("crates/kiln-runtime/src/lib.rs", b"runtime\n"),
+            ("crates/kiln-runtime/src/node_http.rs", b"http\n"),
+            ("crates/kiln-runtime/src/node_net.rs", b"net\n"),
+            ("crates/kiln-runtime/src/node_stream.rs", b"stream\n"),
         ] {
             let path = root.0.join(relative);
             fs::create_dir_all(path.parent().expect("fixture path has parent"))
@@ -719,7 +731,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("b6aed0411d52b0be489c9c565d8d51a23be1d4f77fdc53787aea1ca686926fe1")
+            Digest::from_hex("fb0939463d8cd5e50c3a2afc865825ca7e8c251d09403dee10ffb27b650dc9a8")
                 .expect("fixture digest")
         );
     }

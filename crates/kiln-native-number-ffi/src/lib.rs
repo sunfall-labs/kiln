@@ -676,7 +676,12 @@ mod realm {
     fn run_in_runtime(realm: &NativeRealm, work: impl FnOnce() -> i32) -> i32 {
         let runtime = realm.runtime.as_ptr();
         let _active = ActiveRuntime::enter(runtime);
-        realm.runtime.borrow_mut().enter(work)
+        // `RealmRuntime::enter` may synchronously call generated language code. That code can
+        // re-enter the private active-runtime ABI (for example, an HTTP response callback can
+        // call `ClientRequest.end`). Keep ownership explicit through `ACTIVE_RUNTIME`, but do not
+        // hold the RefCell guard across the callback: active-runtime operations exclusively use
+        // this pointer while `entered` prevents a nested realm drive.
+        unsafe { &mut *runtime }.enter(work)
     }
 
     unsafe fn borrowed_bytes<'a>(pointer: *const u8, length: u64) -> Option<&'a [u8]> {
@@ -1005,28 +1010,36 @@ mod realm {
                                 .take_http1_client_events(resource)
                         };
                         for event in events {
-                            let (kind, status, reason, headers, data) = match event {
-                                RuntimeHttpClientEvent::Drain => {
-                                    (HTTP_EVENT_DRAIN, 0, Vec::new(), Vec::new(), Vec::new())
+                            let (id, kind, status, reason, headers, data) = match event {
+                                RuntimeHttpClientEvent::Drain { id } => {
+                                    (id, HTTP_EVENT_DRAIN, 0, Vec::new(), Vec::new(), Vec::new())
                                 }
-                                RuntimeHttpClientEvent::Finish => {
-                                    (HTTP_EVENT_FINISH, 0, Vec::new(), Vec::new(), Vec::new())
+                                RuntimeHttpClientEvent::Finish { id } => {
+                                    (id, HTTP_EVENT_FINISH, 0, Vec::new(), Vec::new(), Vec::new())
                                 }
                                 RuntimeHttpClientEvent::ResponseHead {
+                                    id,
                                     status,
                                     reason,
                                     headers,
                                 } => (
+                                    id,
                                     HTTP_EVENT_RESPONSE_HEAD,
                                     status,
                                     reason.into_bytes(),
                                     flatten_headers(&headers),
                                     Vec::new(),
                                 ),
-                                RuntimeHttpClientEvent::ResponseData(data) => {
-                                    (HTTP_EVENT_RESPONSE_DATA, 0, Vec::new(), Vec::new(), data)
-                                }
-                                RuntimeHttpClientEvent::ResponseEnd => (
+                                RuntimeHttpClientEvent::ResponseData { id, data } => (
+                                    id,
+                                    HTTP_EVENT_RESPONSE_DATA,
+                                    0,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    data,
+                                ),
+                                RuntimeHttpClientEvent::ResponseEnd { id } => (
+                                    id,
                                     HTTP_EVENT_RESPONSE_END,
                                     0,
                                     Vec::new(),
@@ -1034,6 +1047,7 @@ mod realm {
                                     Vec::new(),
                                 ),
                                 RuntimeHttpClientEvent::Error(message) => (
+                                    0,
                                     HTTP_EVENT_ERROR,
                                     0,
                                     Vec::new(),
@@ -1042,14 +1056,14 @@ mod realm {
                                 ),
                                 RuntimeHttpClientEvent::Closed => {
                                     close_transport = true;
-                                    (HTTP_EVENT_CLOSED, 0, Vec::new(), Vec::new(), Vec::new())
+                                    (0, HTTP_EVENT_CLOSED, 0, Vec::new(), Vec::new(), Vec::new())
                                 }
                             };
                             payloads.push(HttpEventPayload {
                                 owner: Rc::clone(&owner),
                                 kind,
                                 flags: 0,
-                                id: 0,
+                                id,
                                 status,
                                 version_minor: 0,
                                 method: Vec::new(),
@@ -1229,10 +1243,7 @@ mod realm {
             };
             let _active_runtime = ActiveRuntime::enter(realm.runtime.as_ptr());
             // SAFETY: the C caller owns `context` and the callback contract for this call.
-            realm
-                .runtime
-                .borrow_mut()
-                .enter(|| unsafe { entry(context) })
+            unsafe { &mut *realm.runtime.as_ptr() }.enter(|| unsafe { entry(context) })
         })
     }
 
@@ -1562,6 +1573,7 @@ mod realm {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_start_active(
         resource: u64,
+        id: u64,
         request: *const HttpRequestView,
         high_water_mark: u64,
     ) -> i32 {
@@ -1611,6 +1623,7 @@ mod realm {
                     target: target.to_owned(),
                     headers,
                 },
+                id,
                 high_water_mark,
             ) {
                 0
@@ -1620,7 +1633,13 @@ mod realm {
         })
     }
 
-    fn write_http_client_request(resource: u64, data: *const u8, data_len: u64, end: bool) -> i32 {
+    fn write_http_client_request(
+        resource: u64,
+        id: u64,
+        data: *const u8,
+        data_len: u64,
+        end: bool,
+    ) -> i32 {
         ffi(|| {
             let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
                 return INVALID_ARGUMENT;
@@ -1633,11 +1652,13 @@ mod realm {
             let disposition = if end {
                 unsafe { &mut *runtime }.end_http1_client_request(
                     kiln_host_abi::ResourceId::new(resource),
+                    id,
                     data.to_vec(),
                 )
             } else {
                 unsafe { &mut *runtime }.write_http1_client_request(
                     kiln_host_abi::ResourceId::new(resource),
+                    id,
                     data.to_vec(),
                 )
             };
@@ -1651,19 +1672,21 @@ mod realm {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_write_active(
         resource: u64,
+        id: u64,
         data: *const u8,
         data_len: u64,
     ) -> i32 {
-        write_http_client_request(resource, data, data_len, false)
+        write_http_client_request(resource, id, data, data_len, false)
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_end_active(
         resource: u64,
+        id: u64,
         data: *const u8,
         data_len: u64,
     ) -> i32 {
-        write_http_client_request(resource, data, data_len, true)
+        write_http_client_request(resource, id, data, data_len, true)
     }
 
     #[unsafe(no_mangle)]

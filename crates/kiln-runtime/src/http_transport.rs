@@ -298,7 +298,15 @@ impl HttpTransportDriver {
                 StreamAction::Data(bytes) => self.transport.feed_read(bytes),
                 StreamAction::Event(StreamEvent::End) => self.transport.finish_read(),
                 StreamAction::Error(error) => {
-                    if !self.close_started {
+                    // Once Hyper has completed the connection, a peer may close its socket while
+                    // a final transport write completion is still queued. That is normal HTTP/1
+                    // shutdown, not a language-visible stream failure.
+                    if !self.close_requested
+                        && !self.close_started
+                        && error.code != "EPIPE"
+                        && error.code != "EBADF"
+                        && !(error.syscall == "write" && error.message.contains("Broken pipe"))
+                    {
                         self.fail_transport(&error);
                         outward.push(StreamAction::Error(error));
                     }
@@ -310,7 +318,7 @@ impl HttpTransportDriver {
                 action => outward.push(action),
             }
         }
-        if write_succeeded && self.close_requested && !self.close_started {
+        if write_completed && self.close_requested && !self.close_started {
             self.close_started = true;
             outward.extend(self.stream.close_actions());
             return Some(outward);

@@ -7945,8 +7945,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
-                RuntimeHttpClientEvent::Drain | RuntimeHttpClientEvent::Finish => {
-                    let name = if matches!(event, RuntimeHttpClientEvent::Drain) {
+                RuntimeHttpClientEvent::Drain { id: _ }
+                | RuntimeHttpClientEvent::Finish { id: _ } => {
+                    let name = if matches!(event, RuntimeHttpClientEvent::Drain { .. }) {
                         "drain"
                     } else {
                         "finish"
@@ -7966,6 +7967,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseHead {
+                    id: _,
                     status,
                     reason,
                     headers,
@@ -7982,7 +7984,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
-                RuntimeHttpClientEvent::ResponseData(body) => {
+                RuntimeHttpClientEvent::ResponseData { id: _, data: body } => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -7990,7 +7992,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
-                RuntimeHttpClientEvent::ResponseEnd => {
+                RuntimeHttpClientEvent::ResponseEnd { id: _ } => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -8587,7 +8589,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "node:http client requires the realm HTTP runtime".into(),
                     })?;
                     let disposition = unsafe {
-                        ActiveHttpRuntime::write_client_request(&mut *runtime, resource, bytes)
+                        ActiveHttpRuntime::write_client_request(&mut *runtime, resource, 1, bytes)
                     }
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
@@ -8667,7 +8669,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http client requires the realm HTTP runtime".into(),
                 })?;
-                unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, body) }
+                unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, 1, body) }
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "Hyper lost the HTTP client request body".into(),
@@ -8685,6 +8687,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 &mut *runtime,
                 resource,
                 request,
+                1,
                 DEFAULT_HIGH_WATER_MARK,
             )
         } {
@@ -8695,13 +8698,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         state.borrow_mut().started = true;
         if ended {
-            unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, body) }
+            unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, 1, body) }
                 .ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "Hyper lost the HTTP client request body".into(),
                 })?;
         } else if !body.is_empty() {
-            unsafe { ActiveHttpRuntime::write_client_request(&mut *runtime, resource, body) }
+            unsafe { ActiveHttpRuntime::write_client_request(&mut *runtime, resource, 1, body) }
                 .ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "Hyper lost the HTTP client request body".into(),
