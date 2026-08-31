@@ -18,11 +18,9 @@ use crate::node_http::{HttpRequest, HttpVersion};
 
 #[derive(Debug)]
 pub(crate) enum EngineEvent {
-    Request {
-        id: u64,
-        request: HttpRequest,
-        body: Vec<u8>,
-    },
+    RequestHead { id: u64, request: HttpRequest },
+    RequestData { id: u64, data: Vec<u8> },
+    RequestEnd { id: u64 },
     Error(String),
     Closed,
 }
@@ -44,12 +42,13 @@ pub(crate) struct ClientRequestCommand {
 
 #[derive(Debug)]
 pub(crate) enum ClientEvent {
-    Response {
+    ResponseHead {
         status: u16,
         reason: String,
         headers: Vec<(String, String)>,
-        body: Vec<u8>,
     },
+    ResponseData(Vec<u8>),
+    ResponseEnd,
     Error(String),
     Closed,
 }
@@ -81,7 +80,7 @@ where
                 }
             };
             match sender.send_request(request).await {
-                Ok(response) => {
+                Ok(mut response) => {
                     let status = response.status();
                     let headers = response
                         .headers()
@@ -93,17 +92,20 @@ where
                                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
                         })
                         .collect();
-                    let body = response
-                        .into_body()
-                        .collect()
-                        .await
-                        .map(|body| body.to_bytes().to_vec())?;
-                    let _ = events.send(ClientEvent::Response {
+                    let _ = events.send(ClientEvent::ResponseHead {
                         status: status.as_u16(),
                         reason: status.canonical_reason().unwrap_or_default().to_owned(),
                         headers,
-                        body,
                     });
+                    while let Some(frame) = response.body_mut().frame().await {
+                        let frame = frame?;
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            let _ = events.send(ClientEvent::ResponseData(data.to_vec()));
+                        }
+                    }
+                    let _ = events.send(ClientEvent::ResponseEnd);
                 }
                 Err(error) => {
                     let _ = events.send(ClientEvent::Error(error.to_string()));
@@ -154,14 +156,28 @@ where
             let events = service_events.clone();
             let responses = std::rc::Rc::clone(&responses);
             async move {
-                let (parts, body) = request.into_parts();
-                let body = body
-                    .collect()
-                    .await
-                    .map(|body| body.to_bytes().to_vec())
-                    .unwrap_or_default();
+                let (parts, mut body) = request.into_parts();
                 let request = kiln_request_parts(&parts);
-                let _ = events.send(EngineEvent::Request { id, request, body });
+                let _ = events.send(EngineEvent::RequestHead { id, request });
+                while let Some(frame) = body.frame().await {
+                    match frame {
+                        Ok(frame) => {
+                            if let Ok(data) = frame.into_data()
+                                && !data.is_empty()
+                            {
+                                let _ = events.send(EngineEvent::RequestData {
+                                    id,
+                                    data: data.to_vec(),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            let _ = events.send(EngineEvent::Error(error.to_string()));
+                            break;
+                        }
+                    }
+                }
+                let _ = events.send(EngineEvent::RequestEnd { id });
                 let response = loop {
                     match responses.lock().await.recv().await {
                         Some(command) if command.id == id => break command,
@@ -268,13 +284,16 @@ mod tests {
                     .body(Full::<Bytes>::default())
                     .expect("request is valid"),
             );
-            let event = event_receiver.recv().await.expect("request event arrives");
-            let EngineEvent::Request { id, request, body } = event else {
-                panic!("expected request event")
+            let event = event_receiver.recv().await.expect("request head arrives");
+            let EngineEvent::RequestHead { id, request } = event else {
+                panic!("expected request head")
             };
             assert_eq!(request.method, "GET");
             assert_eq!(request.target, "/health");
-            assert!(body.is_empty());
+            assert!(matches!(
+                event_receiver.recv().await,
+                Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+            ));
             let mut body = crate::http_body::ResponseBodyDriver::default();
             body.end(b"kiln".to_vec());
             let (body_event_sender, _) = tokio::sync::mpsc::unbounded_channel();
@@ -323,11 +342,15 @@ mod tests {
 
             realm.feed_read(b"GET / HTTP/1.1\r\nhost: kiln\r\n\r\n".to_vec());
             tokio::task::yield_now().await;
-            let EngineEvent::Request { id, .. } =
+            let EngineEvent::RequestHead { id, .. } =
                 event_receiver.recv().await.expect("request event arrives")
             else {
                 panic!("expected request event")
             };
+            assert!(matches!(
+                event_receiver.recv().await,
+                Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+            ));
             let mut body = crate::http_body::ResponseBodyDriver::default();
             body.end(b"kiln".to_vec());
             let (body_event_sender, _) = tokio::sync::mpsc::unbounded_channel();
