@@ -261,6 +261,18 @@ pub enum Native {
     /// One variant with a payload for the reason `Temporal` has one: the six services answer
     /// to overlapping method names and the receiver decides what a name means.
     Intl(intl::Op),
+    /// `RegExp.escape(text)`: the text as a pattern that matches it literally.
+    RegExpEscape,
+    /// `Error.isError(value)`: whether a value really is an error rather than an object shaped
+    /// like one. The distinction cannot be made from JavaScript, which is why it exists.
+    ErrorIsError,
+    /// `Map.prototype.getOrInsert` and its three siblings. `weak` says which collection this is
+    /// reached through and `computed` whether the value is a callback's result, because the two
+    /// differ only in where the value comes from and when it is asked for.
+    CollectionGetOrInsert {
+        weak: bool,
+        computed: bool,
+    },
     /// The `Atomics` namespace, and one operation on it; the payload says which.
     ///
     /// A namespace rather than a constructor: there is nothing to make one of. Every operation
@@ -1305,6 +1317,8 @@ impl Native {
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
+            (Self::RegExpConstructor, "escape") => Some(Value::Native(Self::RegExpEscape)),
+            (Self::Error(ErrorKind::Error), "isError") => Some(Value::Native(Self::ErrorIsError)),
             (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
             (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
             (Self::ArrayConstructor, "fromAsync") => Some(Value::Native(Self::ArrayFromAsync)),
@@ -10028,6 +10042,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         runtime: &mut RealmRuntime,
     ) -> Result<(), ExecutionError> {
+        // Response commands and body wakeups can make Hyper runnable without another HostOps
+        // completion. Let Tokio advance those tasks before inspecting their per-connection
+        // outputs; otherwise a pipelined request already buffered by Hyper can sit behind an
+        // unrelated pending socket read forever.
+        runtime.poll_http_tasks();
         let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
         let servers = shared
             .as_ref()
@@ -13941,6 +13960,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.read_computed_with_receiver(&target, &key, &receiver, instruction)
             }
             Native::AtomicsOp(op) => self.atomics(op, arguments, instruction),
+            Native::CollectionGetOrInsert { weak, computed } => {
+                self.collection_get_or_insert(weak, computed, receiver, arguments, instruction)
+            }
             Native::ReflectSet => {
                 let target = self.reflect_target(arguments.first(), "set")?;
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -22312,7 +22334,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // surfaces after the stack that produced it is gone, and that is exactly the case
             // where a trace is worth having.
             object.set(
-                "@@trace",
+                ERROR_TRACE,
                 Value::Array(ArrayData::new(
                     self.trace().into_iter().map(Value::String).collect(),
                 )),
@@ -25635,6 +25657,72 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `Map.prototype.getOrInsert` and its three siblings: read a key, and write it if it was
+    /// not there.
+    ///
+    /// The point of the pair is that they look the key up *once*. `m.has(k) || m.set(k, v)` is
+    /// two walks and a race with anything the intervening code does, and the computed spelling
+    /// is the one that cannot be written correctly outside: its callback runs only on a miss and
+    /// may itself touch the map, so the key is looked for again afterwards rather than the
+    /// earlier answer being trusted.
+    fn collection_get_or_insert(
+        &mut self,
+        weak: bool,
+        computed: bool,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let native = Native::CollectionGetOrInsert { weak, computed };
+        let (entries, is_map) = require_collection(receiver, native)?;
+        let key = canonical_key(arguments.first().cloned().unwrap_or(Value::Undefined));
+        if weak && !self.can_be_held_weakly(&key) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Invalid value used as weak map key".to_owned(),
+            });
+        }
+        let supplied = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        if computed && !is_callable(&supplied) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "getOrInsertComputed: callbackfn must be a function".to_owned(),
+            });
+        }
+        if let Some(found) = Self::collection_value(&entries, &key, is_map) {
+            return Ok(found);
+        }
+        let value = if computed {
+            self.call_value(&supplied, Value::Undefined, vec![key.clone()], instruction)?
+        } else {
+            supplied
+        };
+        // The callback may have inserted the key itself, or emptied the map, or both. What the
+        // specification does here is look again rather than trust the miss above -- so a
+        // callback that inserted the key sees its entry *updated* instead of duplicated.
+        if let Some(index) = find_entry(&entries.borrow(), &key, is_map) {
+            if let Some(Value::Array(pair)) = entries.borrow().get(index) {
+                pair.borrow_mut()[1] = value.clone();
+            }
+            return Ok(value);
+        }
+        entries
+            .borrow_mut()
+            .push(Value::Array(ArrayData::new(vec![key, value.clone()])));
+        bump_size(receiver, 1.0);
+        Ok(value)
+    }
+
+    /// The value a map holds under `key`, if it holds one.
+    fn collection_value(entries: &Rc<ArrayData>, key: &Value, is_map: bool) -> Option<Value> {
+        let entries = entries.borrow();
+        let index = find_entry(&entries, key, is_map)?;
+        match entries.get(index) {
+            Some(Value::Array(pair)) => {
+                Some(pair.borrow().get(1).cloned().unwrap_or(Value::Undefined))
+            }
+            _ => None,
+        }
+    }
+
     /// One `Atomics` operation.
     ///
     /// On the machine rather than in [`call_native`] because the order the arguments are
@@ -28752,6 +28840,9 @@ fn call_native(
         Native::Atomics | Native::AtomicsOp(_) => {
             unreachable!("the atomics operations are dispatched by the interpreter")
         }
+        Native::CollectionGetOrInsert { .. } => {
+            unreachable!("the upsert methods are dispatched by the interpreter")
+        }
         Native::ArrayCopy(_) => {
             unreachable!("the copying array methods are dispatched by the interpreter")
         }
@@ -29843,6 +29934,23 @@ fn call_native(
         Native::StringIteratorNext => {
             call_native(intrinsics, Native::ArrayIteratorNext, receiver, arguments)?
         }
+        // `Error.isError`: whether this value carries the internal slot every error is built
+        // with. The realm records the trace under a reserved key at construction, so a plain
+        // object wearing `Error.prototype`, an `Error` name and a `stack` is still not one --
+        // which is exactly the distinction a program cannot draw for itself.
+        Native::ErrorIsError => Value::Boolean(matches!(
+            arguments.first(),
+            Some(Value::Object(object)) if object.borrow().get_own(ERROR_TRACE).is_some()
+        )),
+        // `RegExp.escape(text)`: the same characters, as a pattern that matches them literally.
+        Native::RegExpEscape => {
+            let Some(Value::String(text)) = arguments.first() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "RegExp.escape requires a string".to_owned(),
+                });
+            };
+            Value::String(escape_regexp_source(text))
+        }
         Native::SetAdd | Native::MapSet | Native::WeakSetAdd | Native::WeakMapSet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -30298,7 +30406,7 @@ fn captured_trace(thrown: &Value) -> Vec<String> {
     let Value::Object(object) = thrown else {
         return Vec::new();
     };
-    match object.borrow().get_own("@@trace") {
+    match object.borrow().get_own(ERROR_TRACE) {
         Some(Value::Array(frames)) => frames
             .borrow()
             .iter()
@@ -30802,6 +30910,14 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
                     .unwrap_or_else(|| unreachable!("the guard just found it")),
             ))
         }
+        (true, "getOrInsert") => Value::Native(Native::CollectionGetOrInsert {
+            weak,
+            computed: false,
+        }),
+        (true, "getOrInsertComputed") => Value::Native(Native::CollectionGetOrInsert {
+            weak,
+            computed: true,
+        }),
         (true, "set") => Value::Native(Native::MapSet),
         (true, "get") => Value::Native(Native::MapGet),
         (true, "has") => Value::Native(Native::MapHas),
@@ -30881,6 +30997,12 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
 /// `dispose` and `[Symbol.dispose]` answer with the *same* value, which is what the
 /// specification says they are -- a program that stores one and compares it with the other has
 /// to find them equal, and that is the whole of how `using` reaches a stack.
+/// Where an error records the stack it was made on.
+///
+/// Reserved, so it never enumerates -- and it is also the only mark that separates a real error
+/// from an object shaped like one, which is what `Error.isError` answers from.
+const ERROR_TRACE: &str = "@@trace";
+
 /// The reserved slots a `DisposableStack` carries.
 const DISPOSE_ENTRIES: &str = "@@disposeEntries";
 const DISPOSE_DONE: &str = "@@disposeDone";
@@ -31348,6 +31470,7 @@ fn require_collection(
         Native::WeakMapSet | Native::WeakMapGet | Native::WeakMapHas | Native::WeakMapDelete => {
             Some((true, true))
         }
+        Native::CollectionGetOrInsert { weak, .. } => Some((true, weak)),
         // `clear`, `forEach` and the three iteration methods share an implementation between
         // Map and Set, and the payload is which of the two this one is: a weak collection
         // carries none of them, and a Set is not a Map.
@@ -31700,6 +31823,78 @@ fn atomics_combine(kind: TypedKind, op: AtomicsOp, old: &Value, operand: &Value)
         _ => right,
     } as f64;
     Value::Number(combined)
+}
+
+/// `RegExp.escape`: a string as a pattern that matches exactly it.
+///
+/// More is escaped than the grammar strictly needs, and deliberately: the result has to be safe
+/// to *paste*, so punctuation that a regexp gives no meaning to is escaped anyway, and every
+/// whitespace character becomes a numeric escape rather than staying a space that a later reader
+/// might trim. A leading letter or digit is escaped too, so that concatenating the result after
+/// something else can never continue an identifier or a back-reference.
+fn escape_regexp_source(text: &str) -> String {
+    /// The characters the grammar itself gives meaning to, plus `/`, which ends a literal.
+    const SYNTAX: &str = "^$\\.*+?()[]{}|/";
+    /// Punctuation the grammar gives no meaning to, escaped so the result is safe to paste.
+    const PUNCTUATORS: &str = ",-=<>#&!%:;@~\'`\"";
+    let mut escaped = String::new();
+    for character in text.chars() {
+        // Only the *first* code point: the rule exists so the result cannot be read as the tail
+        // of a name, and only the first position can be.
+        if escaped.is_empty() && character.is_ascii_alphanumeric() {
+            escaped.push_str(&format!("\\x{:02x}", character as u32));
+            continue;
+        }
+        if SYNTAX.contains(character) {
+            escaped.push('\\');
+            escaped.push(character);
+            continue;
+        }
+        if let Some(control) = match character {
+            '\t' => Some("\\t"),
+            '\n' => Some("\\n"),
+            '\u{b}' => Some("\\v"),
+            '\u{c}' => Some("\\f"),
+            '\r' => Some("\\r"),
+            _ => None,
+        } {
+            escaped.push_str(control);
+            continue;
+        }
+        if !PUNCTUATORS.contains(character) && !is_pattern_whitespace(character) {
+            escaped.push(character);
+            continue;
+        }
+        let point = character as u32;
+        if point <= 0xff {
+            escaped.push_str(&format!("\\x{point:02x}"));
+        } else {
+            for unit in character.encode_utf16(&mut [0; 2]) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    escaped
+}
+
+/// Whitespace and the line terminators, which `RegExp.escape` turns into numeric escapes so that
+/// a pattern carrying one cannot be silently reformatted.
+fn is_pattern_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\t' | '\u{b}'
+            | '\u{c}'
+            | ' '
+            | '\u{a0}'
+            | '\u{feff}'
+            | '\n'
+            | '\r'
+            | '\u{2028}'
+            | '\u{2029}'
+    ) || matches!(
+        character,
+        '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
 }
 
 /// A typed array integer index, accepting a numeric key or its canonical decimal spelling.
@@ -35208,6 +35403,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayCopy(ArrayCopy::ToSpliced)
         | N::DisposableStackAdopt
         | N::AsyncDisposableStackAdopt
+        | N::CollectionGetOrInsert { .. }
         | N::ArraySlice
         | N::ArraySplice
         | N::ArrayCopyWithin
@@ -35744,7 +35940,17 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         }
         PrototypeTable::Promise => &["then", "catch", "finally"],
         PrototypeTable::Map => &[
-            "set", "get", "has", "delete", "clear", "forEach", "values", "keys", "entries",
+            "get",
+            "getOrInsert",
+            "getOrInsertComputed",
+            "set",
+            "has",
+            "delete",
+            "clear",
+            "forEach",
+            "values",
+            "keys",
+            "entries",
         ],
         PrototypeTable::Set => &[
             "add",
@@ -35763,7 +35969,14 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             "isSupersetOf",
             "isDisjointFrom",
         ],
-        PrototypeTable::WeakMap => &["set", "get", "has", "delete"],
+        PrototypeTable::WeakMap => &[
+            "get",
+            "getOrInsert",
+            "getOrInsertComputed",
+            "set",
+            "has",
+            "delete",
+        ],
         PrototypeTable::WeakSet => &["add", "has", "delete"],
         PrototypeTable::WeakRef => &["deref"],
         PrototypeTable::DisposableStack => &["use", "adopt", "defer", "move", "dispose"],
@@ -36064,6 +36277,7 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
         ],
         Value::Native(Native::ProxyConstructor) => &["revocable"],
         Value::Native(Native::ArrayBufferConstructor) => &["isView"],
+        Value::Native(Native::Error(ErrorKind::Error)) => &["isError", "captureStackTrace"],
         Value::Native(Native::BigIntConstructor) => &["asIntN", "asUintN"],
         Value::Native(Native::MapConstructor) => &["groupBy"],
         Value::Native(Native::TypedArrayIntrinsic) => &["@@species"],
@@ -36540,6 +36754,10 @@ fn native_js_name(native: &Native) -> String {
         // The derivation strips a leading type name, which for these three takes a word that is
         // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
         Native::AtomicsOp(op) => op.property_key().to_owned(),
+        Native::CollectionGetOrInsert {
+            computed: false, ..
+        } => "getOrInsert".to_owned(),
+        Native::CollectionGetOrInsert { computed: true, .. } => "getOrInsertComputed".to_owned(),
         Native::WeakRefDeref => "deref".to_owned(),
         Native::DisposableStackUse => "use".to_owned(),
         Native::DisposableStackAdopt => "adopt".to_owned(),
