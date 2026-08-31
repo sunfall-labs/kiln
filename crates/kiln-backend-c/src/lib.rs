@@ -18535,10 +18535,25 @@ static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 }
 
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
-    /* A BigInt stays one under negation and bitwise-not; `+x` is the exception, and is a
-     * TypeError in the specification precisely so that `+` cannot silently narrow one. */
+    /* A BigInt stays one under negation, bitwise-not and the two updates; `+x` is the exception,
+     * and is a TypeError in the specification precisely so that `+` cannot silently narrow one.
+     * That refusal lives in `kiln_c99_unary_checked`, which has somewhere to put it. */
     if (value.tag == KILN_VALUE_BIGINT) {
         void *answer = NULL;
+        if (operation == 7) {
+            /* `ToNumeric` of a BigInt is the BigInt: the conversion an update performs keeps the
+             * type, which is the whole difference from the `ToNumber` that unary plus applies. */
+            return value;
+        }
+        if (operation == 8 || operation == 9) {
+            const void *one = kiln_c99_bigint_one();
+            void *stepped = NULL;
+            if (one != NULL &&
+                kiln_bigint_binary(operation == 8 ? 1 : 2, (const void *)(uintptr_t)value.bits,
+                                   one, &stepped) == 0) {
+                return kiln_c99_bigint_value(stepped);
+            }
+        }
         if (operation == 2 && kiln_bigint_negate((const void *)(uintptr_t)value.bits, &answer) == 0) {
             return kiln_c99_bigint_value(answer);
         }
@@ -18557,16 +18572,21 @@ static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
     /* Only the numeric operators coerce.  `typeof` reports a type, `void` discards, and `!` asks
      * whether the value is truthy -- a function always is. */
     if (kiln_c99_is_reference(value) &&
-        (operation == 1 || operation == 2 || operation == 5)) {
+        (operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
+         operation == 8 || operation == 9)) {
         value = kiln_c99_text(value);
     }
     switch (operation) {
-    case 1: return kiln_c99_number(kiln_c99_as_number(value));
+    case 1: case 7: return kiln_c99_number(kiln_c99_as_number(value));
     case 2: return kiln_c99_number(-kiln_c99_as_number(value));
     case 3: return kiln_c99_boolean(!kiln_c99_truthy(value));
     case 4: return kiln_c99_typeof(value);
     case 5: return kiln_c99_number(kiln_c99_signed32(~kiln_c99_to_uint32(kiln_c99_as_number(value))));
     case 6: return kiln_c99_undefined();
+    /* `x++` is `ToNumeric(x) + 1`, not `x + 1`: the conversion happens first, which is why
+     * `x = "5"; x++` leaves 6 rather than "51". */
+    case 8: return kiln_c99_number(kiln_c99_as_number(value) + 1.0);
+    case 9: return kiln_c99_number(kiln_c99_as_number(value) - 1.0);
     default: return kiln_c99_undefined();
     }
 }
@@ -18756,11 +18776,24 @@ static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double 
  * the value they were given. */
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown) {
-    if ((operation == 1 || operation == 2 || operation == 5) && kiln_c99_is_reference(value)) {
+    int numeric = operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
+                  operation == 8 || operation == 9;
+    if (numeric && kiln_c99_is_reference(value)) {
         int status = kiln_c99_to_primitive(host, value, 0, &value, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
+    }
+    /* A symbol has no number of its own, and a BigInt refuses the one narrowing conversion --
+     * unary plus -- that would take it out of its own type. Both were answering with a value
+     * instead: `NaN` for the symbol and the narrowed number for the BigInt. */
+    if (numeric && value.tag == KILN_VALUE_SYMBOL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a Symbol value to a number");
+    }
+    if (operation == 1 && value.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a BigInt value to a number");
     }
     *out = kiln_c99_unary(operation, value);
     return KILN_C99_OK;
@@ -18780,6 +18813,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
                                    kiln_value *thrown) {
     int left_big;
     int right_big;
+    int numeric;
     if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
         /* Strict equality is identity and never coerces, `in` and `instanceof` take their
          * operands as they are, and a nullish `==` is answered without any conversion at all --
@@ -18812,6 +18846,25 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
             }
         }
     }
+    /* A symbol has no number and no string, and the operators that need one say so rather than
+     * inventing a value: reading `Symbol() - 1` as `NaN` is the kind of plausible answer that
+     * hides the mistake it came from. `+` is told apart because it decides between the two
+     * conversions, and both refuse a symbol with a different message; `==` converts nothing. */
+    numeric = (operation >= 2 && operation <= 6) || (operation >= 9 && operation <= 12) ||
+              (operation >= 17 && operation <= 22);
+    if (left.tag == KILN_VALUE_SYMBOL || right.tag == KILN_VALUE_SYMBOL) {
+        if (numeric) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot convert a Symbol value to a number");
+        }
+        if (operation == 1) {
+            return kiln_c99_throw_error(
+                thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                (left.tag == KILN_VALUE_STRING || right.tag == KILN_VALUE_STRING)
+                    ? "Cannot convert a Symbol value to a string"
+                    : "Cannot convert a Symbol value to a number");
+        }
+    }
     left_big = left.tag == KILN_VALUE_BIGINT;
     right_big = right.tag == KILN_VALUE_BIGINT;
     const void *a;
@@ -18824,9 +18877,17 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
         return KILN_C99_OK;
     }
     if (!left_big || !right_big) {
+        /* `"n = " + 1n` is a *string* operation: `+` concatenates when either side is a string,
+         * and a BigInt has a string spelling like any other value. Only the numeric addition
+         * mixes the two. */
+        int concatenating = operation == 1 &&
+                            (left.tag == KILN_VALUE_STRING || right.tag == KILN_VALUE_STRING);
         /* Comparison across the two *is* allowed -- only arithmetic is not -- and so is `==`.
-         * Both are answered by the ordinary numeric path, which reads a BigInt as a double. */
-        if (operation >= 1 && operation <= 6) {
+         * Both are answered by the ordinary numeric path, which reads a BigInt as a double.
+         * A shift and a bitwise operator are arithmetic here too: `1n << 1` had fallen through
+         * to the 32-bit path and answered the *number* 2, which is a BigInt silently narrowed. */
+        if (!concatenating && ((operation >= 1 && operation <= 6) ||
+                               (operation >= 17 && operation <= 22))) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Cannot mix BigInt and other types, use explicit conversions");
         }
@@ -18847,19 +18908,31 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
     case 17: provider_op = 7; break;
     case 18: provider_op = 8; break;
     case 19: provider_op = 9; break;
+    case 20: provider_op = 10; break;
+    case 21: provider_op = 11; break;
+    /* There is no unsigned shift on a BigInt, and it is refused rather than approximated: `>>>`
+     * fills from a *fixed* width and a BigInt has none, so there is no answer to give. */
+    case 22:
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "BigInts have no unsigned right shift, use >> instead");
     default:
-        /* `in`, `instanceof` and the shifts are not BigInt operators here; the numeric path
-         * answers them the way it answers any other value. */
+        /* `in` and `instanceof` are not BigInt operators here; the numeric path answers them the
+         * way it answers any other value. */
         *out = kiln_c99_binary(operation, left, right);
         return KILN_C99_OK;
     }
     status = kiln_bigint_binary(provider_op, a, b, &answer);
     if (status != 0) {
         /* Division truncates toward zero and by zero is a RangeError, neither of which matches
-         * what a number would do. A negative exponent is the other one. */
+         * what a number would do. A negative exponent is the other one, and a shift that would
+         * widen past what any allocation could hold is the third. */
         if (provider_op == 6) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                         "Exponent must be non-negative");
+        }
+        if (provider_op == 10 || provider_op == 11) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Maximum BigInt size exceeded");
         }
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Division by zero");
     }
@@ -21342,6 +21415,9 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::TypeOf => 4,
         UnaryOp::BitwiseNot => 5,
         UnaryOp::Void => 6,
+        UnaryOp::ToNumeric => 7,
+        UnaryOp::Increment => 8,
+        UnaryOp::Decrement => 9,
     }
 }
 

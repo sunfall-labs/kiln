@@ -5,6 +5,7 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
+use digest::Digest;
 use kiln_host_abi::{
     ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOp, HostOps, HostValue,
     RequestId,
@@ -63,6 +64,7 @@ pub enum WellKnown {
     IsConcatSpreadable,
     Dispose,
     AsyncDispose,
+    NodeInspectCustom,
 }
 
 impl WellKnown {
@@ -83,6 +85,7 @@ impl WellKnown {
             Self::IsConcatSpreadable => "@@isConcatSpreadable",
             Self::Dispose => "@@dispose",
             Self::AsyncDispose => "@@asyncDispose",
+            Self::NodeInspectCustom => "@@nodeInspectCustom",
         }
     }
 
@@ -133,6 +136,7 @@ impl WellKnown {
             Self::IsConcatSpreadable => "Symbol.isConcatSpreadable",
             Self::Dispose => "Symbol.dispose",
             Self::AsyncDispose => "Symbol.asyncDispose",
+            Self::NodeInspectCustom => "Symbol(nodejs.util.inspect.custom)",
         }
     }
 }
@@ -189,6 +193,45 @@ impl PartialEq for Symbol {
 /// Any string key beginning with this is the VM's own: a symbol-keyed property or an internal
 /// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 const RESERVED_KEY_PREFIX: &str = "@@";
+
+/// Node's public HTTP method catalogue. Kept here as semantic data rather than sourced from
+/// Hyper: Hyper parses method tokens, while this list is a JavaScript compatibility contract.
+const HTTP_METHODS: &[&str] = &[
+    "ACL",
+    "BIND",
+    "CHECKOUT",
+    "CONNECT",
+    "COPY",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "LINK",
+    "LOCK",
+    "M-SEARCH",
+    "MERGE",
+    "MKACTIVITY",
+    "MKCALENDAR",
+    "MKCOL",
+    "MOVE",
+    "NOTIFY",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PROPFIND",
+    "PROPPATCH",
+    "PURGE",
+    "PUT",
+    "REBIND",
+    "REPORT",
+    "SEARCH",
+    "SOURCE",
+    "SUBSCRIBE",
+    "TRACE",
+    "UNBIND",
+    "UNLINK",
+    "UNLOCK",
+    "UNSUBSCRIBE",
+];
 
 /// The reservation a private name is stored under, ahead of its scope number and its spelling.
 ///
@@ -306,7 +349,10 @@ pub enum Native {
     NodeUtilDebuglog,
     NodeUtilDebugNoop,
     NodeUtilDeprecate,
+    NodeUtilInspect,
     NodeUtilFormat,
+    ConsoleLog,
+    ConsoleError,
     NodeAssert,
     NodeAssertOk,
     NodeAsyncHooks,
@@ -315,6 +361,13 @@ pub enum Native {
     NodeAsyncResourceEmitDestroy,
     NodeCrypto,
     NodeCryptoRandomUuid,
+    NodeCryptoCreateHash,
+    NodeHashUpdate,
+    NodeHashDigest,
+    NodeStringDecoder,
+    NodeStringDecoderConstructor,
+    NodeStringDecoderWrite,
+    NodeStringDecoderEnd,
     NodeStream,
     NodeReadable,
     NodeReadablePush,
@@ -333,6 +386,8 @@ pub enum Native {
     NodeOsHostname,
     NodeTty,
     NodeTtyIsatty,
+    NodeZlib,
+    NodeZlibCreateDecompress,
     NodePerfHooks,
     NodeHttps,
     NodeHttpsCreateServer,
@@ -343,6 +398,7 @@ pub enum Native {
     NodeModuleCreateRequire,
     NodePath,
     NodePathJoin,
+    NodePathResolve,
     NodePathIsAbsolute,
     NodeWorkerThreads,
     NodeWorkerConstructor,
@@ -350,6 +406,8 @@ pub enum Native {
     NodeQueryStringParse,
     NodeUrl,
     NodeUrlParse,
+    TextDecoderConstructor,
+    TextDecoderDecode,
     NodeEventEmitter,
     NodeEventOn,
     NodeEventOnce,
@@ -368,6 +426,8 @@ pub enum Native {
     NodeReadablePause,
     NodeReadableResume,
     NodeReadableSetEncoding,
+    NodeReadablePipe,
+    NodeReadableUnpipe,
     NodeHttp,
     NodeHttpServer,
     NodeHttpCreateServer,
@@ -497,12 +557,14 @@ pub enum Native {
     ArrayJoinDefault,
     SetTimeout,
     SetInterval,
+    SetImmediate,
     /// `clearTimeout` and `clearInterval` are one operation: both remove a scheduled callback by
     /// the id it was given, and the language does not distinguish which kind it was.
     /// `clearTimeout` and `clearInterval` do the same thing and are two variants because they
     /// are two functions: a program can print either name, and `f === g` must be false for them.
     ClearTimeout,
     ClearInterval,
+    ClearImmediate,
     QueueMicrotask,
     ProcessNextTick,
     DateConstructor,
@@ -936,9 +998,19 @@ pub enum Native {
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
     /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
     ArrayValues,
-    /// A V8 extension the corpus checks for. Present, and a no-op: kiln has no frames to capture,
-    /// so the honest implementation is one that exists and does nothing.
+    /// V8's stack-capture extension, implemented by the VM because it needs logical frames and
+    /// may call a program-provided `Error.prepareStackTrace` hook.
     ErrorCaptureStackTrace,
+    CallSiteGetFileName,
+    CallSiteGetLineNumber,
+    CallSiteGetColumnNumber,
+    CallSiteGetFunctionName,
+    CallSiteGetMethodName,
+    CallSiteGetTypeName,
+    CallSiteGetThis,
+    CallSiteGetEvalOrigin,
+    CallSiteIsEval,
+    CallSiteToString,
     /// `Error.prototype.toString`, which renders `name: message`.
     ErrorToString,
 }
@@ -1197,6 +1269,10 @@ impl Native {
             (Self::NodeUtil, "inherits") => Some(Value::Native(Self::NodeUtilInherits)),
             (Self::NodeUtil, "debuglog") => Some(Value::Native(Self::NodeUtilDebuglog)),
             (Self::NodeUtil, "deprecate") => Some(Value::Native(Self::NodeUtilDeprecate)),
+            (Self::NodeUtil, "inspect") => Some(Value::Native(Self::NodeUtilInspect)),
+            (Self::NodeUtilInspect, "custom") => Some(Value::Symbol(Symbol::WellKnown(
+                WellKnown::NodeInspectCustom,
+            ))),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
             (Self::NodeAssert, "default" | "ok" | "strict") => {
                 Some(Value::Native(Self::NodeAssertOk))
@@ -1205,6 +1281,10 @@ impl Native {
                 Some(Value::Native(Self::NodeAsyncResource))
             }
             (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
+            (Self::NodeCrypto, "createHash") => Some(Value::Native(Self::NodeCryptoCreateHash)),
+            (Self::NodeStringDecoder, "StringDecoder" | "default") => {
+                Some(Value::Native(Self::NodeStringDecoderConstructor))
+            }
             (Self::NodeStream, "Readable") => Some(Value::Native(Self::NodeReadable)),
             (Self::NodeStream, "Writable") => Some(Value::Native(Self::NodeWritable)),
             (Self::NodeStream, "addAbortSignal") => {
@@ -1226,6 +1306,9 @@ impl Native {
             }
             (Self::NodeOs, "hostname") => Some(Value::Native(Self::NodeOsHostname)),
             (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty)),
+            (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => {
+                Some(Value::Native(Self::NodeZlibCreateDecompress))
+            }
             (Self::NodePerfHooks, "performance" | "default") => {
                 Some(Value::Native(Self::Performance))
             }
@@ -1238,6 +1321,7 @@ impl Native {
                 Some(Value::Native(Self::NodeModuleCreateRequire))
             }
             (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin)),
+            (Self::NodePath, "resolve") => Some(Value::Native(Self::NodePathResolve)),
             (Self::NodePath, "isAbsolute") => Some(Value::Native(Self::NodePathIsAbsolute)),
             (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
             (Self::NodeWorkerThreads, "Worker") => Some(Value::Native(Self::NodeWorkerConstructor)),
@@ -1257,9 +1341,16 @@ impl Native {
             }
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeHttp, "Server") => Some(Value::Native(Self::NodeHttpServer)),
+            (Self::NodeHttp, "IncomingMessage") => Some(Value::Native(Self::NodeReadable)),
             (Self::NodeHttp, "request") => Some(Value::Native(Self::NodeHttpRequest)),
             (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
             (Self::NodeHttp, "ServerResponse") => Some(Value::Native(Self::NodeHttpServerResponse)),
+            (Self::NodeHttp, "METHODS") => Some(Value::Array(ArrayData::new(
+                HTTP_METHODS
+                    .iter()
+                    .map(|method| Value::String((*method).to_owned()))
+                    .collect(),
+            ))),
             (Self::NodeBuffer, "from") => Some(Value::Native(Self::NodeBufferFrom)),
             (Self::NodeBuffer, "alloc" | "allocUnsafe" | "allocUnsafeSlow") => {
                 Some(Value::Native(Self::NodeBufferAlloc))
@@ -1326,6 +1417,12 @@ impl Native {
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "setEncoding") => {
                 Some(Value::Native(Self::NodeReadableSetEncoding))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "pipe") => {
+                Some(Value::Native(Self::NodeReadablePipe))
+            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "unpipe") => {
+                Some(Value::Native(Self::NodeReadableUnpipe))
             }
             (Self::PrototypeOf(PrototypeTable::Writable), "constructor") => {
                 Some(Value::Native(Self::NodeWritable))
@@ -1865,6 +1962,28 @@ enum NodeObject {
     Writable(Rc<RefCell<WritableState>>),
     Url(Rc<UrlState>),
     UrlSearchParams(Rc<UrlState>),
+    Hash(Rc<RefCell<HashState>>),
+    StringDecoder(Rc<RefCell<StringDecoderState>>),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HashAlgorithm {
+    Md5,
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+#[derive(Debug)]
+struct HashState {
+    algorithm: HashAlgorithm,
+    bytes: Vec<u8>,
+    digested: bool,
+}
+
+#[derive(Debug, Default)]
+struct StringDecoderState {
+    pending: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -1878,6 +1997,7 @@ struct ReadableState {
     flowing: bool,
     destroyed: bool,
     encoding: Option<String>,
+    pipes: Vec<Value>,
     public: Rc<RefCell<ObjectData>>,
 }
 
@@ -2017,6 +2137,15 @@ impl Default for ObjectData {
 /// nothing stops an object graph from being deep -- and the alternative to a bound is exhausting
 /// the Rust stack, which aborts the process instead of reporting anything.
 const MAX_PROTOTYPE_DEPTH: usize = 10_000;
+
+/// How far `<<` may widen a BigInt, in bits.
+///
+/// The language puts no bound on the type -- an implementation is expected to run out of memory
+/// eventually -- but "out of memory" is not an outcome a program can catch, and `1n << (2n ** 64n)`
+/// is a shift count no allocation could ever satisfy. Every engine answers it with a `RangeError`
+/// rather than an attempt, so this is where that answer is decided: sixteen million bits is two
+/// megabytes, which is far past any use and far short of a machine.
+const MAX_BIGINT_SHIFT: u64 = 1 << 24;
 
 impl ObjectData {
     /// An own property slot, ignoring the prototype chain.
@@ -5077,7 +5206,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "assert" | "assert/strict" => &["default", "ok", "strict"],
         "buffer" => &["Buffer", "constants", "default"],
         "async_hooks" => &["AsyncResource", "default"],
-        "crypto" => &["default", "randomUUID"],
+        "crypto" => &["createHash", "default", "randomUUID"],
         "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
         "dns" => &["default", "lookup"],
         "events" => &["EventEmitter", "default"],
@@ -5085,6 +5214,8 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "fs" => &["default", "existsSync", "promises"],
         "net" => &["connect", "createConnection", "createServer"],
         "http" => &[
+            "IncomingMessage",
+            "METHODS",
             "Server",
             "ServerResponse",
             "createServer",
@@ -5095,11 +5226,17 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "https" => &["createServer", "default"],
         "http2" => &["createSecureServer", "createServer", "default"],
         "module" => &["createRequire", "default"],
-        "path" => &["default", "isAbsolute", "join", "sep"],
+        "path" => &["default", "isAbsolute", "join", "resolve", "sep"],
         "worker_threads" => &["Worker", "default"],
         "perf_hooks" => &["default", "performance"],
         "os" => &["default", "hostname", "networkInterfaces"],
         "tty" => &["default", "isatty"],
+        "zlib" => &[
+            "createBrotliDecompress",
+            "createGunzip",
+            "createInflate",
+            "default",
+        ],
         "stream" => &[
             "Readable",
             "Writable",
@@ -5107,7 +5244,15 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
             "default",
             "finished",
         ],
-        "util" => &["debuglog", "default", "deprecate", "format", "inherits"],
+        "string_decoder" => &["StringDecoder", "default"],
+        "util" => &[
+            "debuglog",
+            "default",
+            "deprecate",
+            "format",
+            "inherits",
+            "inspect",
+        ],
         "querystring" => &["decode", "default", "parse"],
         "url" => &["URL", "default", "parse"],
         _ => return None,
@@ -5136,7 +5281,9 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "perf_hooks" => Native::NodePerfHooks,
             "os" => Native::NodeOs,
             "tty" => Native::NodeTty,
+            "zlib" => Native::NodeZlib,
             "stream" => Native::NodeStream,
+            "string_decoder" => Native::NodeStringDecoder,
             "querystring" => Native::NodeQueryString,
             "util" => Native::NodeUtil,
             "url" => Native::NodeUrl,
@@ -5864,7 +6011,7 @@ pub enum ExecutionError {
     /// `new` on something that is not a constructor.
     NotConstructable {
         instruction: usize,
-        value: &'static str,
+        value: String,
     },
     /// Arithmetic mixing a BigInt with a number.
     ///
@@ -6179,6 +6326,8 @@ pub enum ExecutionError {
     },
     GlobalOutOfBounds {
         index: usize,
+        available: usize,
+        function: Option<String>,
     },
 }
 
@@ -6375,8 +6524,19 @@ impl fmt::Display for ExecutionError {
             Self::CallDepthExceeded { limit } => {
                 write!(formatter, "call depth exceeded {limit} frames")
             }
-            Self::GlobalOutOfBounds { index } => {
-                write!(formatter, "module slot {index} is out of bounds")
+            Self::GlobalOutOfBounds {
+                index,
+                available,
+                function,
+            } => {
+                write!(
+                    formatter,
+                    "module slot {index} is out of bounds for {available} slots"
+                )?;
+                if let Some(function) = function {
+                    write!(formatter, " while running {function}")?;
+                }
+                Ok(())
             }
             Self::TypeErrorMessage { message }
             | Self::RangeErrorMessage { message }
@@ -6861,6 +7021,46 @@ pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Va
         data.set(&name, value);
     }
     Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn call_site_object(name: String) -> Value {
+    ordinary_object([
+        (CALL_SITE_NAME.to_owned(), Value::String(name)),
+        (
+            "getFileName".to_owned(),
+            Value::Native(Native::CallSiteGetFileName),
+        ),
+        (
+            "getLineNumber".to_owned(),
+            Value::Native(Native::CallSiteGetLineNumber),
+        ),
+        (
+            "getColumnNumber".to_owned(),
+            Value::Native(Native::CallSiteGetColumnNumber),
+        ),
+        (
+            "getFunctionName".to_owned(),
+            Value::Native(Native::CallSiteGetFunctionName),
+        ),
+        (
+            "getMethodName".to_owned(),
+            Value::Native(Native::CallSiteGetMethodName),
+        ),
+        (
+            "getTypeName".to_owned(),
+            Value::Native(Native::CallSiteGetTypeName),
+        ),
+        ("getThis".to_owned(), Value::Native(Native::CallSiteGetThis)),
+        (
+            "getEvalOrigin".to_owned(),
+            Value::Native(Native::CallSiteGetEvalOrigin),
+        ),
+        ("isEval".to_owned(), Value::Native(Native::CallSiteIsEval)),
+        (
+            "toString".to_owned(),
+            Value::Native(Native::CallSiteToString),
+        ),
+    ])
 }
 
 /// Read one own data property from an interpreter object without invoking program code.
@@ -8372,6 +8572,57 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 state.borrow_mut().encoding = Some("utf8".into());
                 return Ok(receiver.clone());
             }
+            Native::NodeReadablePipe => {
+                let destination = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_reflect_target(&destination) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The destination must be a writable stream".into(),
+                    });
+                }
+                state.borrow_mut().pipes.push(destination.clone());
+                // `pipe()` switches a readable into flowing mode. Existing buffered chunks are
+                // delivered through the destination's ordinary `write`, preserving overrides
+                // and backpressure hooks rather than reaching into writable state directly.
+                let chunks = {
+                    let mut state = state.borrow_mut();
+                    state.flowing = true;
+                    state.buffered_bytes = 0;
+                    std::mem::take(&mut state.buffer)
+                };
+                for chunk in chunks {
+                    let write = self.read_property(&destination, "write", instruction)?;
+                    if is_callable(&write) {
+                        self.call_value(&write, destination.clone(), vec![chunk], instruction)?;
+                    }
+                }
+                sync_readable_public_state(receiver, &state.borrow());
+                return Ok(destination);
+            }
+            Native::NodeReadableUnpipe => {
+                let destination = arguments.first();
+                let removed = {
+                    let mut state = state.borrow_mut();
+                    let before = state.pipes.len();
+                    match destination {
+                        Some(destination) if !matches!(destination, Value::Undefined) => {
+                            state.pipes.retain(|pipe| pipe != destination);
+                        }
+                        _ => state.pipes.clear(),
+                    }
+                    state.flowing = false;
+                    before != state.pipes.len()
+                };
+                if removed {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("unpipe".into())],
+                        instruction,
+                    )?;
+                }
+                sync_readable_public_state(receiver, &state.borrow());
+                return Ok(receiver.clone());
+            }
             Native::NodeReadablePause | Native::NodeReadableResume => {
                 let resume = matches!(native, Native::NodeReadableResume);
                 let buffered = {
@@ -9637,6 +9888,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )))),
                     ..Default::default()
                 };
+                incoming
+                    .set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
                 incoming.set("statusCode", Value::Number(f64::from(head.status)));
                 incoming.set("statusMessage", Value::String(head.reason.clone()));
                 incoming.set("on", Value::Native(Native::NodeEventOn));
@@ -9757,6 +10010,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )))),
             ..Default::default()
         };
+        incoming.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
         incoming.set("on", Value::Native(Native::NodeEventOn));
@@ -10363,10 +10617,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Object(object) = receiver else {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "EventEmitter method called on an incompatible receiver".into(),
-            });
+        let object: &RefCell<ObjectData> = match receiver {
+            Value::Object(object) => object.as_ref(),
+            Value::Function(closure) => &closure.properties,
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "EventEmitter method called on an incompatible receiver".into(),
+                });
+            }
         };
         match native {
             Native::NodeEventOn | Native::NodeEventOnce => {
@@ -11177,7 +11435,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // and run the program's code for no reason.
                     let value = if matches!(
                         operator,
-                        UnaryOp::Negate | UnaryOp::Plus | UnaryOp::BitwiseNot
+                        UnaryOp::Negate
+                            | UnaryOp::Plus
+                            | UnaryOp::BitwiseNot
+                            | UnaryOp::ToNumeric
+                            | UnaryOp::Increment
+                            | UnaryOp::Decrement
                     ) {
                         // Through `catchable`, because reducing can fail in a way the program is
                         // allowed to catch: an object with no route to a primitive is a
@@ -11190,7 +11453,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         value
                     };
-                    self.stack.push(unary(*operator, value));
+                    let computed = unary(*operator, value);
+                    // Through `catchable` for the same reason the reduction above is: `+1n` and
+                    // `-Symbol()` are `TypeError`s the program is entitled to catch.
+                    let Some(computed) = self.catchable(computed, current)? else {
+                        continue;
+                    };
+                    self.stack.push(computed);
                 }
                 // `in` consults a proxy's `has` trap, so it cannot go through the pure operator
                 // table the way the arithmetic ones do.
@@ -11781,6 +12050,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         kiln_ir::Builtin::Buffer => Native::NodeBuffer,
                         kiln_ir::Builtin::Url => Native::UrlConstructor,
+                        kiln_ir::Builtin::TextDecoder => Native::TextDecoderConstructor,
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
@@ -11803,6 +12073,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::ClearTimeout => Native::ClearTimeout,
                         kiln_ir::Builtin::ClearInterval => Native::ClearInterval,
                         kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
+                        kiln_ir::Builtin::SetImmediate => Native::SetImmediate,
+                        kiln_ir::Builtin::ClearImmediate => Native::ClearImmediate,
                         kiln_ir::Builtin::Promise => Native::PromiseConstructor,
                         kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
                         kiln_ir::Builtin::Date => Native::DateConstructor,
@@ -13216,6 +13488,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Native::Date(method) = native {
             return self.date_dispatch(method, receiver, arguments, instruction);
         }
+        if native == Native::ErrorCaptureStackTrace {
+            return self.capture_stack_trace(arguments, instruction);
+        }
         // A write through a view onto an immutable buffer is refused before its arguments are
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
         // must not run, because there was never a write for it to prepare. Here rather than in
@@ -13515,6 +13790,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeUtilDeprecate => {
                 return Ok(arguments.first().cloned().unwrap_or(Value::Undefined));
             }
+            Native::NodeUtilInspect => {
+                return Ok(Value::String(inspect(
+                    arguments.first().unwrap_or(&Value::Undefined),
+                )));
+            }
             Native::NodeUtilInherits => {
                 let constructor = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let super_constructor = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -13544,6 +13824,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeUtilFormat => {
                 return Ok(Value::String(node_util_format(arguments)));
+            }
+            Native::ConsoleLog | Native::ConsoleError => {
+                let arguments = arguments
+                    .iter()
+                    .cloned()
+                    .map(HostValue::from)
+                    .collect::<Vec<_>>();
+                self.host
+                    .call(HostOp::WriteStdout, &arguments)
+                    .map_err(|error| ExecutionError::Host {
+                        instruction,
+                        message: error.to_string(),
+                    })?;
+                return Ok(Value::Undefined);
             }
             Native::NodeAssertOk => {
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -13605,6 +13899,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     bytes[14],
                     bytes[15]
                 )));
+            }
+            Native::NodeCryptoCreateHash => return node_hash(arguments),
+            Native::NodeHashUpdate => {
+                let state = node_hash_state(receiver)?;
+                let mut state = state.borrow_mut();
+                if state.digested {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Digest already called".into(),
+                    });
+                }
+                state.bytes.extend(node_body_bytes(arguments.first())?);
+                return Ok(receiver.clone());
+            }
+            Native::NodeHashDigest => {
+                let state = node_hash_state(receiver)?;
+                let mut state = state.borrow_mut();
+                if state.digested {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Digest already called".into(),
+                    });
+                }
+                state.digested = true;
+                let bytes = node_hash_digest(state.algorithm, &state.bytes);
+                let encoding = arguments.first().map(Value::to_display_string);
+                return match encoding.as_deref() {
+                    None => Ok(node_bytes_value(bytes)),
+                    Some("hex") => Ok(Value::String(to_hex_text(&bytes))),
+                    Some("base64") => Ok(Value::String(to_base64_text(&bytes, false, false))),
+                    Some("base64url") => Ok(Value::String(to_base64_text(&bytes, true, true))),
+                    Some(encoding) => Err(ExecutionError::TypeErrorMessage {
+                        message: format!("Unknown encoding: {encoding}"),
+                    }),
+                };
+            }
+            Native::NodeStringDecoderWrite | Native::NodeStringDecoderEnd => {
+                let state = node_string_decoder_state(receiver)?;
+                let bytes = node_body_bytes(arguments.first())?;
+                let text = decode_utf8_chunk(
+                    &mut state.borrow_mut().pending,
+                    &bytes,
+                    matches!(native, Native::NodeStringDecoderEnd),
+                );
+                return Ok(Value::String(text));
             }
             Native::NodeStreamFinished => {
                 let stream = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -13723,6 +14060,51 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Kiln captures the realm's standard streams. They are therefore not terminals,
             // regardless of whether the embedding process happens to have an ambient TTY.
             Native::NodeTtyIsatty => return Ok(Value::Boolean(false)),
+            Native::NodeZlibCreateDecompress => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message:
+                        "node:zlib streaming decompression requires the async-compression provider"
+                            .to_owned(),
+                });
+            }
+            Native::TextDecoderConstructor => {
+                let label = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined))
+                    .map_or_else(|| "utf-8".to_owned(), Value::to_display_string)
+                    .to_ascii_lowercase();
+                if !matches!(label.as_str(), "utf-8" | "utf8" | "unicode-1-1-utf-8") {
+                    return Err(ExecutionError::RangeErrorMessage {
+                        message: format!("The encoding label provided ('{label}') is invalid"),
+                    });
+                }
+                return Ok(ordinary_object([
+                    ("encoding".to_owned(), Value::String("utf-8".to_owned())),
+                    ("fatal".to_owned(), Value::Boolean(false)),
+                    ("ignoreBOM".to_owned(), Value::Boolean(false)),
+                    (
+                        "decode".to_owned(),
+                        Value::Native(Native::TextDecoderDecode),
+                    ),
+                ]));
+            }
+            Native::TextDecoderDecode => {
+                let bytes = match arguments.first() {
+                    None | Some(Value::Undefined) => Vec::new(),
+                    Some(Value::TypedArray(view)) => view.bytes(),
+                    Some(Value::ArrayBuffer(buffer)) => buffer.bytes.borrow().clone(),
+                    Some(other) => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "The provided value is not of type ArrayBuffer or ArrayBufferView: {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                };
+                return Ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+            }
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -13760,6 +14142,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect::<Vec<_>>()
                     .join("/");
                 return Ok(Value::String(normalize_posix_path(&joined)));
+            }
+            Native::NodePathResolve => {
+                let mut resolved = String::new();
+                for part in arguments.iter().map(Value::to_display_string) {
+                    if part.starts_with('/') {
+                        resolved = part;
+                    } else if !part.is_empty() {
+                        if !resolved.ends_with('/') {
+                            resolved.push('/');
+                        }
+                        resolved.push_str(&part);
+                    }
+                }
+                if !resolved.starts_with('/') {
+                    resolved.insert(0, '/');
+                }
+                return Ok(Value::String(normalize_posix_path(&resolved)));
             }
             Native::NodePathIsAbsolute => {
                 return Ok(Value::Boolean(
@@ -14286,7 +14685,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::MathRandom => Ok(Value::Number(self.random_double(instruction)?)),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
-            Native::SetTimeout | Native::SetInterval => {
+            Native::SetTimeout | Native::SetInterval | Native::SetImmediate => {
                 let delay = match arguments.get(1).map(Value::as_number) {
                     // A negative, missing or NaN delay is zero: "as soon as possible", which is
                     // still after everything already queued.
@@ -14304,12 +14703,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if matches!(native, Native::SetInterval) {
                         realm.set_interval(delay, timer)
                     } else {
-                        realm.set_timeout(delay, timer)
+                        // The realm scheduler owns the turn and identity. An immediate is a
+                        // zero-delay one-shot in the check lane; until that lane is represented
+                        // separately this preserves FIFO, cancellation, next-tick/microtask
+                        // checkpoints, and deterministic execution without ambient drivers.
+                        realm.set_timeout(
+                            if matches!(native, Native::SetImmediate) {
+                                std::time::Duration::ZERO
+                            } else {
+                                delay
+                            },
+                            timer,
+                        )
                     }
                 });
                 Ok(Value::Number(id.get() as f64))
             }
-            Native::ClearTimeout | Native::ClearInterval => {
+            Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
                 let id = argument_number(arguments);
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
                     self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));
@@ -14505,7 +14915,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The deterministic realm has no ambient working directory. Graph execution may
             // later supply its captured project root as a realm capability; until then `/` is
             // the stable virtual root and never consults the embedding process.
-            Native::ProcessCwd => return Ok(Value::String("/".to_owned())),
+            Native::ProcessCwd => Ok(Value::String("/".to_owned())),
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
@@ -19213,10 +19623,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// copying module locals into each callee is what makes a module binding shared: an
     /// assignment from inside a function has to be visible to the next call that reads it.
     fn global(&self, slot: usize) -> Result<Value, ExecutionError> {
-        self.module_locals()
+        let locals = self.module_locals();
+        locals
             .get(slot)
             .cloned()
-            .ok_or(ExecutionError::GlobalOutOfBounds { index: slot })
+            .ok_or_else(|| ExecutionError::GlobalOutOfBounds {
+                index: slot,
+                available: locals.len(),
+                function: self
+                    .function
+                    .as_ref()
+                    .and_then(|closure| closure.name.as_deref())
+                    .map(str::to_owned),
+            })
     }
 
     fn set_global(&mut self, slot: usize, value: Value) -> Result<(), ExecutionError> {
@@ -19224,9 +19643,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(module) => &mut module.locals,
             None => &mut self.locals,
         };
+        let available = locals.len();
         *locals
             .get_mut(slot)
-            .ok_or(ExecutionError::GlobalOutOfBounds { index: slot })? = value;
+            .ok_or_else(|| ExecutionError::GlobalOutOfBounds {
+                index: slot,
+                available,
+                function: self
+                    .function
+                    .as_ref()
+                    .and_then(|closure| closure.name.as_deref())
+                    .map(str::to_owned),
+            })? = value;
         Ok(())
     }
 
@@ -19500,7 +19928,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(built) = self.construct_exotic(parent, &arguments, current)? else {
                     return Err(ExecutionError::NotConstructable {
                         instruction: current,
-                        value: "native",
+                        value: format!("native {parent:?}"),
                     });
                 };
                 // A native parent leaves no frame, so the expression's value has to be pushed
@@ -19528,7 +19956,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             other => {
                 return Err(ExecutionError::NotConstructable {
                     instruction: current,
-                    value: other.type_name(),
+                    value: other.type_name().to_owned(),
                 });
             }
         }
@@ -22206,6 +22634,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("setInterval", Value::Native(Native::SetInterval));
         globals.set_non_enumerable("clearTimeout", Value::Native(Native::ClearTimeout));
         globals.set_non_enumerable("clearInterval", Value::Native(Native::ClearInterval));
+        globals.set_non_enumerable("setImmediate", Value::Native(Native::SetImmediate));
+        globals.set_non_enumerable("clearImmediate", Value::Native(Native::ClearImmediate));
+        let mut console = ObjectData::default();
+        console.set_non_enumerable("log", Value::Native(Native::ConsoleLog));
+        // Host ABI v2 exposes one captured standard-output operation. Keep error delivery on the
+        // same explicit boundary until stderr receives its own versioned op; this preserves the
+        // realm's no-ambient-I/O guarantee while making console an ordinary cross-module value.
+        console.set_non_enumerable("error", Value::Native(Native::ConsoleError));
+        console.set_non_enumerable("warn", Value::Native(Native::ConsoleError));
+        console.set_non_enumerable("info", Value::Native(Native::ConsoleLog));
+        globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
         globals.set_non_enumerable("NaN", Value::Number(f64::NAN));
         globals.set_non_enumerable("Infinity", Value::Number(f64::INFINITY));
         let object = Rc::new(RefCell::new(globals));
@@ -22302,6 +22741,53 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => "<module>".to_owned(),
             })
             .collect()
+    }
+
+    /// V8-compatible stack capture over Kiln's logical frames.
+    ///
+    /// Kiln does not retain source-map locations in the VM, so CallSites deliberately use one
+    /// deterministic virtual filename and zero locations. Their function names are real: they
+    /// come from the same closures used by uncaught-error traces.
+    fn capture_stack_trace(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let Value::Object(target_object) = &target else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "invalid argument to Error.captureStackTrace".to_owned(),
+            });
+        };
+        let mut names = self.trace();
+        // The capture helper itself is a native call rather than a JavaScript frame. V8's
+        // constructorOpt removes frames through the named constructor; approximating that rule
+        // by dropping the first matching name keeps library helper frames out deterministically.
+        if let Some(Value::Function(constructor)) = arguments.get(1)
+            && let Some(name) = constructor.name.as_deref()
+            && let Some(index) = names.iter().position(|candidate| candidate == name)
+        {
+            names.drain(..=index);
+        }
+        let sites = Value::Array(ArrayData::new(
+            names.into_iter().map(call_site_object).collect(),
+        ));
+        let error_constructor = Value::Native(Native::Error(ErrorKind::Error));
+        let prepare = self.read_property(&error_constructor, "prepareStackTrace", instruction)?;
+        let stack = if is_callable(&prepare) {
+            self.call_value(
+                &prepare,
+                error_constructor,
+                vec![target.clone(), sites],
+                instruction,
+            )?
+        } else {
+            Value::String("Error".to_owned())
+        };
+        target_object
+            .borrow_mut()
+            .set_non_enumerable("stack", stack);
+        Ok(Value::Undefined)
     }
 
     fn throw_error(
@@ -22424,6 +22910,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Some(match parent {
             Native::Error(kind) => self.construct_error(kind, arguments),
             Native::NodeEventEmitter => node_event_emitter(),
+            Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
             Native::NodeWritable => node_writable(arguments, None),
             Native::NodeHttpServerResponse => node_writable(arguments, None),
@@ -22441,6 +22928,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.construct_finalization_registry(arguments, current)?
             }
             Native::DateConstructor | Native::RegExpConstructor => {
+                self.dispatch_native(parent, &Value::Undefined, arguments, current)?
+            }
+            Native::TextDecoderConstructor => {
                 self.dispatch_native(parent, &Value::Undefined, arguments, current)?
             }
             // `class T extends Boolean {}` gets a wrapper from `super()`, exactly as
@@ -22641,6 +23131,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(built);
             }
+            Value::Native(Native::TextDecoderConstructor) => {
+                let built = self.dispatch_native(
+                    Native::TextDecoderConstructor,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::NodeStringDecoderConstructor) => {
+                self.stack.push(node_string_decoder());
+            }
             // `new Object(v)` and `Object(v)` are the same operation: the specification routes
             // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
             // use for.  Sharing the call behaviour keeps them from drifting apart.
@@ -22825,7 +23327,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             other => {
                 return Err(ExecutionError::NotConstructable {
                     instruction: current,
-                    value: other.type_name(),
+                    value: other.type_name().to_owned(),
                 });
             }
         }
@@ -28225,6 +28727,7 @@ fn new_readable_state(
         flowing: false,
         destroyed: false,
         encoding,
+        pipes: Vec::new(),
         public,
     }))
 }
@@ -28644,6 +29147,112 @@ fn node_bytes_value(bytes: Vec<u8>) -> Value {
     }))
 }
 
+fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let name = arguments
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace('-', "");
+    let algorithm = match name.as_str() {
+        "md5" => HashAlgorithm::Md5,
+        "sha1" => HashAlgorithm::Sha1,
+        "sha256" => HashAlgorithm::Sha256,
+        "sha512" => HashAlgorithm::Sha512,
+        _ => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("Digest method not supported: {name}"),
+            });
+        }
+    };
+    let mut data = ObjectData {
+        node_object: Some(NodeObject::Hash(Rc::new(RefCell::new(HashState {
+            algorithm,
+            bytes: Vec::new(),
+            digested: false,
+        })))),
+        ..Default::default()
+    };
+    data.set("update", Value::Native(Native::NodeHashUpdate));
+    data.set("digest", Value::Native(Native::NodeHashDigest));
+    Ok(Value::Object(Rc::new(RefCell::new(data))))
+}
+
+fn node_hash_state(receiver: &Value) -> Result<Rc<RefCell<HashState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Hash method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::Hash(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "Hash method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn node_hash_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
+    match algorithm {
+        HashAlgorithm::Md5 => md5::Md5::digest(bytes).to_vec(),
+        HashAlgorithm::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
+        HashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
+        HashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
+    }
+}
+
+fn node_string_decoder() -> Value {
+    let mut data = ObjectData {
+        node_object: Some(NodeObject::StringDecoder(Rc::new(RefCell::new(
+            StringDecoderState::default(),
+        )))),
+        ..Default::default()
+    };
+    data.set("write", Value::Native(Native::NodeStringDecoderWrite));
+    data.set("end", Value::Native(Native::NodeStringDecoderEnd));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn node_string_decoder_state(
+    receiver: &Value,
+) -> Result<Rc<RefCell<StringDecoderState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "StringDecoder method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::StringDecoder(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "StringDecoder method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+/// Decode every complete UTF-8 sequence, retaining only a trailing incomplete sequence. Invalid
+/// interior bytes are replaced exactly as Node's decoder does; an incomplete tail is held for
+/// the next write so chunk boundaries cannot change the text.
+fn decode_utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8], end: bool) -> String {
+    pending.extend_from_slice(bytes);
+    if end {
+        return String::from_utf8_lossy(std::mem::take(pending).as_slice()).into_owned();
+    }
+    let mut keep = 0;
+    for length in 1..=pending.len().min(3) {
+        let start = pending.len() - length;
+        if let Err(error) = std::str::from_utf8(&pending[start..])
+            && error.valid_up_to() == 0
+            && error.error_len().is_none()
+        {
+            keep = length;
+        }
+    }
+    let split = pending.len() - keep;
+    let tail = pending.split_off(split);
+    let complete = std::mem::replace(pending, tail);
+    String::from_utf8_lossy(&complete).into_owned()
+}
+
 fn url_object(state: UrlState) -> Value {
     let state = Rc::new(state);
     let object = ObjectData {
@@ -28835,7 +29444,7 @@ fn node_querystring_parse(input: &str) -> Value {
     Value::Object(Rc::new(RefCell::new(object)))
 }
 
-fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEventListener> {
+fn node_listeners(object: &RefCell<ObjectData>, event: &str) -> Vec<NodeEventListener> {
     object
         .borrow()
         .node_events
@@ -28845,7 +29454,7 @@ fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEven
         .unwrap_or_default()
 }
 
-fn remove_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, listener: &Value) {
+fn remove_node_listener(object: &RefCell<ObjectData>, event: &str, listener: &Value) {
     let mut data = object.borrow_mut();
     let Some(buckets) = data.node_events.as_mut() else {
         return;
@@ -28862,7 +29471,7 @@ fn remove_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, listener:
     }
 }
 
-fn remove_last_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, listener: &Value) {
+fn remove_last_node_listener(object: &RefCell<ObjectData>, event: &str, listener: &Value) {
     let mut data = object.borrow_mut();
     let Some(buckets) = data.node_events.as_mut() else {
         return;
@@ -28882,19 +29491,50 @@ fn remove_last_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, list
     }
 }
 
-fn unary(operator: UnaryOp, value: Value) -> Value {
-    // A BigInt stays one under negation and bitwise-not; `+x` is the exception, and is a
-    // TypeError in the specification precisely so that `+` cannot silently narrow one.
-    if let Value::BigInt(value) = &value {
-        match operator {
-            UnaryOp::Negate => return Value::BigInt(Rc::new(-value.as_ref().clone())),
-            UnaryOp::BitwiseNot => return Value::BigInt(Rc::new(!value.as_ref().clone())),
-            _ => {}
-        }
+fn unary(operator: UnaryOp, value: Value) -> Result<Value, ExecutionError> {
+    // A BigInt stays one under negation, bitwise-not and the two updates; `+x` is the exception,
+    // and is a TypeError in the specification precisely so that `+` cannot silently narrow one.
+    // It was answering with the narrowed number instead, which is the wrong answer the type
+    // exists to make impossible.
+    if let Value::BigInt(number) = &value {
+        let one = || num_bigint::BigInt::from(1_u8);
+        return Ok(match operator {
+            UnaryOp::Negate => Value::BigInt(Rc::new(-number.as_ref().clone())),
+            UnaryOp::BitwiseNot => Value::BigInt(Rc::new(!number.as_ref().clone())),
+            UnaryOp::Increment => Value::BigInt(Rc::new(number.as_ref().clone() + one())),
+            UnaryOp::Decrement => Value::BigInt(Rc::new(number.as_ref().clone() - one())),
+            UnaryOp::ToNumeric => value.clone(),
+            UnaryOp::Plus => return Err(ExecutionError::BigIntIsNotANumber),
+            _ => unary_of_number(operator, &value),
+        });
     }
+    // A symbol has no number of its own, and every numeric operator here says so rather than
+    // answering the `NaN` that `ToNumber` would otherwise invent.
+    if matches!(value, Value::Symbol(_))
+        && matches!(
+            operator,
+            UnaryOp::Plus
+                | UnaryOp::Negate
+                | UnaryOp::BitwiseNot
+                | UnaryOp::Increment
+                | UnaryOp::Decrement
+                | UnaryOp::ToNumeric
+        )
+    {
+        return Err(ExecutionError::SymbolIsNotANumber);
+    }
+    Ok(unary_of_number(operator, &value))
+}
+
+/// The rest of [`unary`], once neither numeric type is in play.
+fn unary_of_number(operator: UnaryOp, value: &Value) -> Value {
     match operator {
-        UnaryOp::Plus => Value::Number(value.as_number()),
+        UnaryOp::Plus | UnaryOp::ToNumeric => Value::Number(value.as_number()),
         UnaryOp::Negate => Value::Number(-value.as_number()),
+        // `x++` is `ToNumeric(x) + 1`, not `x + 1`: the conversion happens first, which is why
+        // `x = "5"; x++` leaves 6 rather than "51".
+        UnaryOp::Increment => Value::Number(value.as_number() + 1.0),
+        UnaryOp::Decrement => Value::Number(value.as_number() - 1.0),
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
         // `typeof` never coerces and never throws; it reports the type tag directly.
         UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
@@ -28976,6 +29616,15 @@ fn bigint_binary(
     use num_bigint::BigInt as Big;
     let (a, b) = match (left, right) {
         (Value::BigInt(a), Value::BigInt(b)) => (a.as_ref().clone(), b.as_ref().clone()),
+        // `"n = " + 1n` is a *string* operation: `+` reduces both sides first and concatenates
+        // when either is a string, and a BigInt has a string spelling like any other value. Only
+        // the numeric addition mixes the two, and refusing the concatenation as well made the
+        // ordinary way of printing one a TypeError.
+        (Value::BigInt(_), Value::String(_)) | (Value::String(_), Value::BigInt(_))
+            if matches!(operator, BinaryOp::Add) =>
+        {
+            return None;
+        }
         // Comparison across the two *is* allowed -- only arithmetic is not -- and so is `==`,
         // both of which are handled by the ordinary paths on the numeric value.
         (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -28985,7 +29634,16 @@ fn bigint_binary(
                 | BinaryOp::Multiply
                 | BinaryOp::Divide
                 | BinaryOp::Remainder
-                | BinaryOp::Exponentiate => Some(Err(ExecutionError::MixedBigInt)),
+                | BinaryOp::Exponentiate
+                // A shift and a bitwise operator are numeric operators too, and were falling
+                // through to the 32-bit path: `1n << 1` answered the *number* 2, which is a
+                // BigInt silently narrowed -- the one thing the type exists to prevent.
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::UnsignedShiftRight
+                | BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor => Some(Err(ExecutionError::MixedBigInt)),
                 _ => None,
             };
         }
@@ -29017,6 +29675,48 @@ fn bigint_binary(
         BinaryOp::BitwiseAnd => Value::BigInt(Rc::new(a & b)),
         BinaryOp::BitwiseOr => Value::BigInt(Rc::new(a | b)),
         BinaryOp::BitwiseXor => Value::BigInt(Rc::new(a ^ b)),
+        // There is no unsigned shift on a BigInt, and it is refused rather than approximated:
+        // `>>>` fills from a *fixed* width and a BigInt has none, so there is no answer to give.
+        BinaryOp::UnsignedShiftRight => {
+            return Some(Err(ExecutionError::TypeErrorMessage {
+                message: "BigInts have no unsigned right shift, use >> instead".to_owned(),
+            }));
+        }
+        // One operation with a sign rather than two: a negative count shifts the other way, so
+        // `1n << -1n` is `1n >> 1n`. Both had been answering with a 32-bit *number*.
+        BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+            let negative = b < zero;
+            let widening = matches!(operator, BinaryOp::ShiftLeft) != negative;
+            let count = if negative { -b } else { b };
+            let count = num_traits::ToPrimitive::to_u64(&count);
+            match count {
+                // A shift that would build a number no allocation could hold is refused before
+                // anything is allocated. The bound is this engine's rather than the language's,
+                // which has none -- but "out of memory" is not an answer a program can catch and
+                // a `RangeError` is exactly what every engine raises here.
+                Some(count) if widening && count > MAX_BIGINT_SHIFT => {
+                    return Some(Err(ExecutionError::RangeErrorMessage {
+                        message: "Maximum BigInt size exceeded".to_owned(),
+                    }));
+                }
+                None if widening => {
+                    return Some(Err(ExecutionError::RangeErrorMessage {
+                        message: "Maximum BigInt size exceeded".to_owned(),
+                    }));
+                }
+                // Narrowing past the end of the value leaves 0 or -1 depending on its sign, which
+                // is what an arithmetic shift converges on -- so the count is clamped to the
+                // width rather than handed to an allocator as a length.
+                Some(count) if !widening => {
+                    let clamped = count.min(a.bits().saturating_add(1));
+                    Value::BigInt(Rc::new(a >> usize::try_from(clamped).unwrap_or(usize::MAX)))
+                }
+                None => Value::BigInt(Rc::new(a >> usize::MAX)),
+                Some(count) => {
+                    Value::BigInt(Rc::new(a << usize::try_from(count).unwrap_or(usize::MAX)))
+                }
+            }
+        }
         BinaryOp::StrictEqual | BinaryOp::LooseEqual => Value::Boolean(a == b),
         BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Value::Boolean(a != b),
         BinaryOp::LessThan => Value::Boolean(a < b),
@@ -29027,14 +29727,63 @@ fn bigint_binary(
     }))
 }
 
+/// Whether this operator reduces its operands to numbers, which a symbol refuses to become.
+///
+/// `+` is not on the list because it decides between two conversions -- a string on either side
+/// makes it concatenation -- and both refuse a symbol, with different messages. Every other
+/// operator here converts unconditionally, which is why `Symbol() - 1` is a `TypeError` rather
+/// than the `NaN` that `ToNumber` would have invented for it. Equality is absent for the opposite
+/// reason: `Symbol() == 1` converts nothing and is simply false.
+fn coerces_to_number(operator: BinaryOp) -> bool {
+    matches!(
+        operator,
+        BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Remainder
+            | BinaryOp::Exponentiate
+            | BinaryOp::BitwiseAnd
+            | BinaryOp::BitwiseOr
+            | BinaryOp::BitwiseXor
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight
+            | BinaryOp::UnsignedShiftRight
+            | BinaryOp::LessThan
+            | BinaryOp::LessThanOrEqual
+            | BinaryOp::GreaterThan
+            | BinaryOp::GreaterThanOrEqual
+    )
+}
+
 fn binary(
     intrinsics: &Intrinsics,
     operator: BinaryOp,
     left: Value,
     right: Value,
 ) -> Result<Value, ExecutionError> {
+    // A symbol has no number and no string, and the operators that need one say so rather than
+    // inventing a value: reading `Symbol() - 1` as `NaN` is the kind of plausible answer that
+    // hides the mistake it came from.
+    if (matches!(left, Value::Symbol(_)) || matches!(right, Value::Symbol(_)))
+        && coerces_to_number(operator)
+    {
+        return Err(ExecutionError::SymbolIsNotANumber);
+    }
     Ok(match operator {
         BinaryOp::Add => {
+            if matches!(left, Value::Symbol(_)) || matches!(right, Value::Symbol(_)) {
+                // `+` has already reduced both sides, so a symbol here is one the program wrote:
+                // it is a string operation when either side is a string and a numeric one
+                // otherwise, and a symbol is refused by both -- differently, which is why the
+                // two refusals are told apart rather than shared.
+                return Err(
+                    if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
+                        ExecutionError::SymbolIsNotAString
+                    } else {
+                        ExecutionError::SymbolIsNotANumber
+                    },
+                );
+            }
             if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
                 // A loop that concatenates is the ordinary way a program builds a large string,
                 // and the ordinary way it asks for one no engine will give it.
@@ -30059,7 +30808,7 @@ fn call_native(
         Native::IteratorConstructor => {
             return Err(ExecutionError::NotConstructable {
                 instruction: 0,
-                value: "abstract iterator intrinsic",
+                value: "abstract iterator intrinsic".into(),
             });
         }
         // `rab.resize(n)` moves the length; a buffer with no ceiling has no length to move.
@@ -30224,7 +30973,7 @@ fn call_native(
         Native::TypedArrayIntrinsic => {
             return Err(ExecutionError::NotConstructable {
                 instruction: 0,
-                value: "abstract typed array intrinsic",
+                value: "abstract typed array intrinsic".into(),
             });
         }
         // `of` takes its elements as arguments where the constructor takes one list, which is
@@ -30609,8 +31358,10 @@ fn call_native(
         // not have one.
         Native::SetTimeout
         | Native::SetInterval
+        | Native::SetImmediate
         | Native::ClearTimeout
         | Native::ClearInterval
+        | Native::ClearImmediate
         | Native::QueueMicrotask
         | Native::ProcessNextTick
         // ...and `Math.random` advances state that lives on the machine.
@@ -31101,6 +31852,20 @@ fn call_native(
         // Present so `typeof` reports "function", which is what the corpus checks. Calling it
         // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
+        Native::CallSiteGetFileName => Value::String("<kiln>".to_owned()),
+        Native::CallSiteGetLineNumber | Native::CallSiteGetColumnNumber => Value::Number(0.0),
+        Native::CallSiteGetFunctionName | Native::CallSiteGetMethodName => {
+            own_data_property(receiver, CALL_SITE_NAME).unwrap_or(Value::Null)
+        }
+        Native::CallSiteGetTypeName => Value::String("Function".to_owned()),
+        Native::CallSiteGetThis => Value::Undefined,
+        Native::CallSiteGetEvalOrigin => Value::Undefined,
+        Native::CallSiteIsEval => Value::Boolean(false),
+        Native::CallSiteToString => {
+            let name = own_data_property(receiver, CALL_SITE_NAME)
+                .map_or_else(|| "<anonymous>".to_owned(), |value| value.to_display_string());
+            Value::String(format!("{name} (<kiln>:0:0)"))
+        }
         // Array and typed-array iterators retain their receiver rather than snapshotting it.
         // State lives in reserved properties on the iterator itself, so `next` can observe a
         // write that happened after iterator creation, as the language requires.
@@ -31845,6 +32610,7 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
+        Native::NodeStringDecoderConstructor => node_string_decoder(),
         Native::NodeReadable => node_readable(arguments, Some(receiver)),
         Native::NodeWritable => node_writable(arguments, Some(receiver)),
         Native::NodeHttpServerResponse => node_writable(arguments, Some(receiver)),
@@ -31858,7 +32624,10 @@ fn call_native(
         | Native::NodeUtilDebuglog
         | Native::NodeUtilDebugNoop
         | Native::NodeUtilDeprecate
+        | Native::NodeUtilInspect
         | Native::NodeUtilFormat
+        | Native::ConsoleLog
+        | Native::ConsoleError
         | Native::NodeAssert
         | Native::NodeAssertOk
         | Native::NodeAsyncHooks
@@ -31867,6 +32636,12 @@ fn call_native(
         | Native::NodeAsyncResourceEmitDestroy
         | Native::NodeCrypto
         | Native::NodeCryptoRandomUuid
+        | Native::NodeCryptoCreateHash
+        | Native::NodeHashUpdate
+        | Native::NodeHashDigest
+        | Native::NodeStringDecoder
+        | Native::NodeStringDecoderWrite
+        | Native::NodeStringDecoderEnd
         | Native::NodeStream
         | Native::NodeStreamFinished
         | Native::NodeDns
@@ -31876,6 +32651,8 @@ fn call_native(
         | Native::NodeOsHostname
         | Native::NodeTty
         | Native::NodeTtyIsatty
+        | Native::NodeZlib
+        | Native::NodeZlibCreateDecompress
         | Native::NodePerfHooks
         | Native::NodeHttps
         | Native::NodeHttpsCreateServer
@@ -31886,6 +32663,7 @@ fn call_native(
         | Native::NodeModuleCreateRequire
         | Native::NodePath
         | Native::NodePathJoin
+        | Native::NodePathResolve
         | Native::NodePathIsAbsolute
         | Native::NodeWorkerThreads
         | Native::NodeWorkerConstructor
@@ -31909,6 +32687,8 @@ fn call_native(
         | Native::NodeReadablePause
         | Native::NodeReadableResume
         | Native::NodeReadableSetEncoding
+        | Native::NodeReadablePipe
+        | Native::NodeReadableUnpipe
         | Native::NodeHttp
         | Native::NodeHttpServer
         | Native::NodeHttpCreateServer
@@ -31928,6 +32708,8 @@ fn call_native(
         | Native::ProcessCwd
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
+        | Native::TextDecoderConstructor
+        | Native::TextDecoderDecode
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
@@ -32711,6 +33493,7 @@ fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
 /// Reserved, so it never enumerates -- and it is also the only mark that separates a real error
 /// from an object shaped like one, which is what `Error.isError` answers from.
 const ERROR_TRACE: &str = "@@trace";
+const CALL_SITE_NAME: &str = "@@call-site-name";
 
 /// The reserved slots a `DisposableStack` carries.
 const DISPOSE_ENTRIES: &str = "@@disposeEntries";
@@ -36292,7 +37075,10 @@ fn native_is_constructor(native: Native) -> bool {
     match native {
         // `Proxy` is the one constructor with no `prototype` of its own -- a proxy inherits the
         // target's chain -- so the rule below cannot see it.
-        Native::ProxyConstructor => true,
+        Native::ProxyConstructor
+        | Native::TextDecoderConstructor
+        | Native::NodeStringDecoderConstructor
+        | Native::NodeAsyncResource => true,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
         Native::Error(_) => true,
@@ -38167,6 +38953,16 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
             "unscopables",
         ],
         Value::Native(Native::IteratorConstructor) => &["from", "concat", "zip", "zipKeyed"],
+        Value::Native(Native::NodeBuffer) => &[
+            "from",
+            "alloc",
+            "allocUnsafe",
+            "allocUnsafeSlow",
+            "isBuffer",
+            "byteLength",
+            "concat",
+            "constants",
+        ],
         Value::Native(Native::Atomics) => &[
             "add",
             "and",
@@ -38438,6 +39234,12 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native) = target else {
         return None;
     };
+    if matches!(native, Native::NodeBuffer)
+        && intrinsic_static_property_names(target).contains(&key)
+        && native.property(key).is_some()
+    {
+        return Some(Attributes::DEFAULT);
+    }
     // An accessor carries no `writable` at all -- the flag is not part of its descriptor -- so
     // the `false` here is the absence of one rather than a claim about assignment.
     if intrinsic_accessor(target, key).is_some() {
@@ -38681,6 +39483,8 @@ fn native_js_name(native: &Native) -> String {
         // the one thing a name derived from a variant cannot get right on its own.
         Native::SetTimeout => "setTimeout".to_owned(),
         Native::SetInterval => "setInterval".to_owned(),
+        Native::SetImmediate => "setImmediate".to_owned(),
+        Native::ClearImmediate => "clearImmediate".to_owned(),
         Native::EncodeUri => "encodeURI".to_owned(),
         Native::EncodeUriComponent => "encodeURIComponent".to_owned(),
         Native::DecodeUri => "decodeURI".to_owned(),
@@ -42388,5 +43192,53 @@ mod tests {
         assert_eq!(typed.get(0), None);
         assert!(data_view.out_of_bounds());
         assert_eq!(data_view.byte_length(), None);
+    }
+
+    #[test]
+    fn node_crypto_hashes_with_rustcrypto_and_node_encodings() {
+        let hash = node_hash(&[Value::String("sha1".into())]).expect("supported hash");
+        let state = node_hash_state(&hash).expect("branded hash");
+        state.borrow_mut().bytes.extend_from_slice(b"abc");
+        let digest = node_hash_digest(state.borrow().algorithm, &state.borrow().bytes);
+        assert_eq!(
+            to_hex_text(&digest),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            to_base64_text(&digest, false, false),
+            "qZk+NkcGgWq6PiVxeFDCbJzQ2J0="
+        );
+        assert!(matches!(
+            node_hash(&[Value::String("made-up".into())]),
+            Err(ExecutionError::TypeErrorMessage { .. })
+        ));
+    }
+
+    #[test]
+    fn node_string_decoder_preserves_split_utf8_sequences() {
+        let mut state = StringDecoderState::default();
+        assert_eq!(
+            decode_utf8_chunk(&mut state.pending, &[0xf0, 0x9f], false),
+            ""
+        );
+        assert_eq!(
+            decode_utf8_chunk(&mut state.pending, &[0x92, 0xa9, b'!'], false),
+            "💩!"
+        );
+        assert!(state.pending.is_empty());
+        assert_eq!(decode_utf8_chunk(&mut state.pending, &[0xe2], true), "�");
+    }
+
+    #[test]
+    fn node_buffer_statics_are_enumerable_own_properties() {
+        let intrinsics = Intrinsics::default();
+        let buffer = Value::Native(Native::NodeBuffer);
+        let keys = own_property_keys(&intrinsics, &buffer);
+        assert!(keys.contains(&"from".to_owned()));
+        assert!(keys.contains(&"isBuffer".to_owned()));
+        assert_eq!(
+            own_attributes(&intrinsics, &buffer, "isBuffer"),
+            Some(Attributes::DEFAULT)
+        );
     }
 }

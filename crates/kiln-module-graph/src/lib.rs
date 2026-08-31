@@ -1967,6 +1967,178 @@ mod tests {
     }
 
     #[test]
+    fn commonjs_prototype_method_carries_module_bindings_across_the_graph() {
+        let project = TempProject::new();
+        let package_dir = project.root.join("node_modules/router");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"router","main":"layer.js","type":"commonjs"}"#,
+        )
+        .unwrap();
+        let layer = project.write(
+            "node_modules/router/layer.js",
+            r#"
+                const MODULE_RE = /x/;
+                module.exports = Layer;
+                function Layer() {}
+                Layer.prototype.match = function match(path) {
+                    return MODULE_RE.exec(path);
+                };
+            "#,
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import Layer from 'router'; new Layer().match('x');",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS graph");
+        let module = &graph.module(&layer).expect("layer node").program;
+        let method = module
+            .program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("match"))
+            .expect("match proto");
+        assert!(
+            method.code.contains(&Instruction::LoadUpvalue(0)),
+            "{method:?}"
+        );
+        assert!(
+            !method
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "{method:?}"
+        );
+    }
+
+    #[test]
+    fn express_router_match_has_no_caller_relative_module_reads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/server/packages/node_modules/router/lib/layer.js");
+        if !path.exists() {
+            return;
+        }
+        let source = fs::read_to_string(&path).expect("read pinned router layer");
+        let hir = frontend_oxc::parse_commonjs(path.to_str().unwrap(), &source);
+        assert!(hir.diagnostics.is_empty(), "{:?}", hir.diagnostics);
+        let module = kiln_ir::compile_commonjs(&hir).expect("compile pinned router layer");
+        let methods = module
+            .program
+            .functions
+            .iter()
+            .filter(|proto| proto.name.as_deref() == Some("match"))
+            .collect::<Vec<_>>();
+        assert!(!methods.is_empty(), "match proto");
+        for method in methods {
+            let globals = method
+                .code
+                .iter()
+                .filter_map(|instruction| match instruction {
+                    Instruction::LoadGlobal(slot) | Instruction::StoreGlobal(slot) => Some(*slot),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                globals.is_empty(),
+                "caller-relative module slots: {globals:?}; {method:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_to_regexp_parameter_defaults_capture_the_module_delimiter() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/server/packages/node_modules/path-to-regexp/dist/index.js");
+        if !path.exists() {
+            return;
+        }
+        let source = fs::read_to_string(&path).expect("read pinned path-to-regexp");
+        let hir = frontend_oxc::parse_commonjs(path.to_str().unwrap(), &source);
+        let function = hir
+            .body
+            .iter()
+            .find_map(|statement| match &statement.kind {
+                kiln_hir::StatementKind::Function(function)
+                    if function.name.as_deref() == Some("match") =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .expect("match declaration");
+        assert_eq!(function.parameters.len(), 2, "{function:#?}");
+        let module = kiln_ir::compile_commonjs(&hir).expect("compile path-to-regexp");
+        let proto = module
+            .program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("match"))
+            .expect("match proto");
+        assert!(
+            proto
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadUpvalue(_))),
+            "parameter {:?}; proto {proto:?}",
+            function.parameters[1].pattern
+        );
+    }
+
+    #[test]
+    fn pinned_express_graph_has_no_function_with_caller_relative_globals() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = root.join("conformance/server/packages/s05-express.mjs");
+        if !entry.exists() {
+            return;
+        }
+        let resolver = NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build pinned Express graph");
+        let mut offenders = Vec::new();
+        for (path, node) in graph.modules.iter() {
+            let module_globals = node.program.program.local_count;
+            for proto in &node.program.program.functions {
+                let globals = proto
+                    .code
+                    .iter()
+                    .filter_map(|instruction| match instruction {
+                        Instruction::LoadGlobal(slot) | Instruction::StoreGlobal(slot) => {
+                            Some(slot)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !globals.is_empty() {
+                    offenders.push((
+                        path.strip_prefix(&root).unwrap_or(path).to_path_buf(),
+                        proto.name.clone(),
+                        module_globals,
+                        globals,
+                        proto.code.clone(),
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "caller-relative globals: {offenders:#?}"
+        );
+    }
+
+    #[test]
     fn node_graph_selects_dual_package_exports_for_import_and_require() {
         let project = TempProject::new();
         let package_dir = project.root.join("node_modules/pkg");

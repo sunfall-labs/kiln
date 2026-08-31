@@ -72,7 +72,9 @@ pub enum NodeBuiltin {
     PerfHooks,
     Os,
     Tty,
+    Zlib,
     Stream,
+    StringDecoder,
     QueryString,
     Url,
     Util,
@@ -100,7 +102,9 @@ impl NodeBuiltin {
             "perf_hooks" => Self::PerfHooks,
             "os" => Self::Os,
             "tty" => Self::Tty,
+            "zlib" => Self::Zlib,
             "stream" => Self::Stream,
+            "string_decoder" => Self::StringDecoder,
             "querystring" => Self::QueryString,
             "url" => Self::Url,
             "util" => Self::Util,
@@ -129,7 +133,9 @@ impl NodeBuiltin {
             Self::PerfHooks => "node:perf_hooks",
             Self::Os => "node:os",
             Self::Tty => "node:tty",
+            Self::Zlib => "node:zlib",
             Self::Stream => "node:stream",
+            Self::StringDecoder => "node:string_decoder",
             Self::QueryString => "node:querystring",
             Self::Url => "node:url",
             Self::Util => "node:util",
@@ -1918,6 +1924,8 @@ mod tests {
             ("node:module", NodeBuiltin::Module),
             ("node:path", NodeBuiltin::Path),
             ("node:tty", NodeBuiltin::Tty),
+            ("node:zlib", NodeBuiltin::Zlib),
+            ("node:string_decoder", NodeBuiltin::StringDecoder),
             ("node:worker_threads", NodeBuiltin::WorkerThreads),
         ] {
             let resolved = resolver
@@ -1955,6 +1963,8 @@ mod tests {
             "module",
             "path",
             "tty",
+            "zlib",
+            "string_decoder",
             "worker_threads",
         ] {
             assert_eq!(
@@ -1974,6 +1984,8 @@ mod tests {
             NodeBuiltin::Module,
             NodeBuiltin::Path,
             NodeBuiltin::Tty,
+            NodeBuiltin::Zlib,
+            NodeBuiltin::StringDecoder,
             NodeBuiltin::WorkerThreads,
         ] {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));

@@ -93,7 +93,7 @@ the mock event driver's virtual time rather than by real sleeping, and the tests
 id = "guard/g01-spread-symbols"
 group = "guard"
 source = "guard/g01-spread-symbols.js"
-status = "runnable"
+status = "needs-packages"
 features = ["object-spread", "object-rest", "symbol-keys", "well-known-symbols", "object-statics"]
 catches = """
 Object spread and rest dropping symbol-keyed own properties. Effect builds every prototype by \
@@ -928,20 +928,47 @@ node's write coalescing would be over-specification. Reassembling the chunks is 
 being asserted; how many there were is not.\
 """
 observed_refusal = """
-Observed on 2026-08-30 with `kiln --one-shot test conformance`. The runner refuses all four \
-during lowering, and the distribution is the whole point of recording it: three want \
-`module dependency `node:http` is not supported by this execution backend`, and s04 separately \
-wants `module dependency `fastify``. So the group already ranks its own backlog - builtin \
-modules first, packages second - rather than collapsing to one blocker.
+Superseded by observation. Kept as the record of what these four said before anything ran, \
+because the point of the group was always the refusal rather than the pass, and a backlog that \
+deletes its own history cannot show that it was worked.
 
-Two by-hand observations sit behind those, from `kiln --one-shot run`, and they are worth more \
-than the runner's summary. `node:http` refuses earlier and differently there - \
-`invalid module specifier `node:http`: URL schemes are not supported` - so the `node:` scheme is \
-rejected by the resolver before any backend is consulted, and builtin-module resolution is a \
-prerequisite for the graft rather than a consequence of it. And a probe importing only \
-`fastify` gets `imports missing export `default`` naming `node_modules/fastify/fastify.js`, \
-which means ADR 0027's NodePackageResolver already resolves the bare specifier to its real file \
-on disk: the gap there is CommonJS interop, not package resolution.\
+On 2026-08-30 all four refused during lowering: three wanted `module dependency `node:http` is \
+not supported by this execution backend`, s04 wanted the same for `fastify`. By hand, \
+`kiln run` refused `node:http` earlier still - `invalid module specifier: URL schemes are not \
+supported` - while a probe importing only `fastify` reached `imports missing export `default``, \
+naming `node_modules/fastify/fastify.js`, which showed ADR 0027's resolver already found the \
+real file and located the gap in CommonJS interop rather than in package resolution.
+
+On 2026-08-31, with `--node`, all four pass. `kiln --one-shot test conformance --node` reports \
+43 of 43, including the twelve Effect bundles. Ordinary mode still refuses `node:` specifiers, \
+which is a product boundary rather than a gap: the node surface is opt-in.\
+"""
+observed_native = """
+The compiled form, which is what the group exists for. `s01` builds through `kiln build --node` \
+and the resulting executable serves the recorded bytes, at 8ms to first response, 3.3 MiB \
+resident and 4.6 MiB on disk - against 24ms/24.4/60.9 for `bun build --compile` and \
+27ms/34.7/64.3 for `deno compile`, measured by scripts/server-baseline.sh on the same file.
+
+The other three now refuse with named backlog entries rather than a generic control error, \
+which is the distribution doing its job:
+
+    s02  unsupported native emission: the `Url` builtin in the native backend
+    s03  unsupported native emission: the `Buffer` builtin in the native backend
+    s04  native Node execution does not yet materialize the `node:util` builtin
+
+Getting `s01` there needed one fix, recorded because the shape of it will recur. The native \
+`node:http` materializer writes `exports[]` by position, and the positions are declared by \
+`node_builtin_export_names` in another crate. That list grew `IncomingMessage`, `METHODS` and \
+`ServerResponse` at the front after the materializer was written, shifting every slot by two \
+with nothing failing to compile: `default` bound to `request`, so `typeof http` was "function" \
+where node says "object", and `createServer` bound to `get`, so the first real server refused \
+with `a function is not a request options object`. A wrong answer wearing a plausible \
+diagnostic - the class regress/r07 exists to catch. \
+`native_builtin_slots_match_the_shared_export_table` now pins the coupling.
+
+One divergence outstanding, and it is the interpreter's rather than the backend's: `typeof http` \
+is still `function` in `--node` interpreted mode, where both node and the native backend now say \
+`object`.\
 """
 extension_finding = """
 The probes are `.mjs` rather than `.js`, and that exposed a real harness boundary. The first \
@@ -1048,7 +1075,7 @@ expected_stdout = """
 id = "server/s05-express"
 group = "server"
 source = "server/packages/s05-express.mjs"
-status = "needs-packages"
+status = "runnable"
 features = ["modules", "builtin-modules", "node-http", "node-packages", "commonjs", "cjs-esm-interop", "middleware", "route-params", "querystring", "streams", "buffer", "json"]
 catches = """
 The second ecosystem gate. Express exercises the classic Connect middleware model, request and \
@@ -1075,4 +1102,5 @@ expected_stdout = """
 <pre>Cannot GET /missing</pre>
 </body>
 </html>
+
 """

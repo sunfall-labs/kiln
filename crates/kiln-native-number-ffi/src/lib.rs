@@ -3990,6 +3990,16 @@ mod bigint {
     const BITWISE_AND: u32 = 7;
     const BITWISE_OR: u32 = 8;
     const BITWISE_XOR: u32 = 9;
+    const SHIFT_LEFT: u32 = 10;
+    const SHIFT_RIGHT: u32 = 11;
+
+    /// How far `<<` may widen a BigInt, in bits.
+    ///
+    /// The language puts no bound on the type -- an implementation is expected to run out of
+    /// memory eventually -- but "out of memory" is not an outcome a program can catch, and
+    /// `1n << (2n ** 64n)` is a count no allocation could ever satisfy. The caller turns this
+    /// refusal into the `RangeError` every engine raises there.
+    const MAX_SHIFT: u64 = 1 << 24;
 
     /// Parse a digit string in `radix`, with an optional leading sign.
     ///
@@ -4185,6 +4195,33 @@ mod bigint {
             BITWISE_AND => left & right,
             BITWISE_OR => left | right,
             BITWISE_XOR => left ^ right,
+            // One operation with a sign rather than two: a negative count shifts the other way,
+            // so `1n << -1n` is `1n >> 1n`. A widening shift past the bound is refused before
+            // anything is allocated; a narrowing one is clamped to the value's own width, since
+            // shifting further only converges on 0 or -1.
+            SHIFT_LEFT | SHIFT_RIGHT => {
+                let negative = right.is_negative();
+                let widening = (operation == SHIFT_LEFT) != negative;
+                let count = if negative {
+                    -right.clone()
+                } else {
+                    right.clone()
+                };
+                match count.to_u64() {
+                    Some(count) if widening => {
+                        if count > MAX_SHIFT {
+                            return OUT_OF_RANGE;
+                        }
+                        left.clone() << usize::try_from(count).unwrap_or(usize::MAX)
+                    }
+                    Some(count) => {
+                        let clamped = count.min(left.bits().saturating_add(1));
+                        left.clone() >> usize::try_from(clamped).unwrap_or(usize::MAX)
+                    }
+                    None if widening => return OUT_OF_RANGE,
+                    None => left.clone() >> usize::MAX,
+                }
+            }
             _ => return INVALID_ARGUMENT,
         };
         // SAFETY: `out` is a writable slot by the caller contract.
