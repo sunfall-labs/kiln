@@ -133,6 +133,35 @@ pub fn emit_module_with_logical_path(
     })
 }
 
+/// Emit one typed runtime-provided module inside the backend's own value representation.
+///
+/// `body` runs after the ordinary module ABI validation and receives the canonical `exports`
+/// array. It may use private `kiln_c99_*` helpers because it is appended inside the same
+/// translation unit; callers never construct or inspect a `kiln_value`. This is the narrow seam
+/// used by virtual modules whose values cannot be represented by bytecode alone.
+pub fn emit_runtime_module_with_logical_path(
+    module: &ModuleProgram,
+    logical_path: &str,
+    body: &str,
+) -> Result<CModule, EmitError> {
+    validate_logical_path(logical_path)?;
+    validate_module(module)?;
+    if body.as_bytes().contains(&0) {
+        return Err(EmitError::InvalidProgram {
+            message: "runtime module body contains an embedded NUL".to_owned(),
+        });
+    }
+    let (program_hash, _) = hash_module_pair(module);
+    let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
+    let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
+    let source = render_runtime_module(module, program_hash, &symbol, body);
+    Ok(CModule {
+        symbol,
+        source,
+        program_hash,
+    })
+}
+
 fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
     let invalid = |message: &str| {
         Err(EmitError::InvalidProgram {
@@ -16544,6 +16573,50 @@ fn render_module(module: &ModuleProgram, program_hash: u64, symbol: &str) -> Str
     output
 }
 
+fn render_runtime_module(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    body: &str,
+) -> String {
+    let mut output = String::with_capacity(HEADER.len() + body.len() + 1024);
+    output.push_str(HEADER);
+    writeln!(
+        output,
+        "/* Runtime module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
+        module.imports.len(),
+        module.exports.len()
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static int {symbol}_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{"
+    )
+    .unwrap();
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    writeln!(
+        output,
+        "    if (import_count != (size_t){} || (import_count != 0 && imports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+        module.imports.len()
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    if (export_count != (size_t){} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;",
+        module.exports.len()
+    )
+    .unwrap();
+    output.push_str("    (void)host;\n    (void)imports;\n");
+    for line in body.lines() {
+        output.push_str("    ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
+    render_module_realm_wrapper(&mut output, symbol);
+    output
+}
+
 /// Where a `Return` lands.
 ///
 /// The entry point's value crosses the embedding boundary and a function body's does not, which
@@ -17796,6 +17869,40 @@ mod tests {
     use kiln_ir::Builtin;
     use std::io::Write as _;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
+        let module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![kiln_ir::ExportBinding {
+                exported: "probe".to_owned(),
+                local_slot: 0,
+            }],
+        };
+        let emitted = emit_runtime_module_with_logical_path(
+            &module,
+            ".kiln/builtins/probe.builtin",
+            "exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);",
+        )
+        .expect("runtime module emits");
+
+        assert!(
+            emitted
+                .source
+                .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);")
+        );
+        assert!(emitted.source.contains("static int kiln_module_path_"));
+        assert!(emitted.source.contains("kiln_realm_enter"));
+        assert!(!emitted.source.contains("extern kiln_value"));
+    }
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
         Program {
