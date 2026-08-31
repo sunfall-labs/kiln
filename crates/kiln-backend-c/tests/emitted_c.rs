@@ -360,6 +360,22 @@ fn numeric_id_parser_rejects_malformed_definitions() {
 }
 
 #[test]
+fn method_dispatch_membership_is_generated_from_registry() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    assert!(prelude.contains("static uint32_t kiln_c99_method_groups(uint64_t code)"));
+    assert!(prelude.contains("case KILN_C99_METHOD_ARRAY_AT: return UINT32_C(2);"));
+    assert!(
+        prelude
+            .contains("case KILN_C99_METHOD_MATH_FLOOR: return UINT32_C(8) | UINT32_C(1048576);")
+    );
+    assert!(prelude.contains("kiln_c99_method_in_group(code, KILN_C99_GROUP_GENERIC)"));
+    assert!(prelude.contains("kiln_c99_method_in_group(code, KILN_C99_GROUP_STRING_DISPATCH)"));
+    assert!(!prelude.contains("code < KILN_C99_METHOD_ARRAY_AT"));
+    assert!(!prelude.contains("code <= KILN_C99_METHOD_ARRAY_AT"));
+}
+
+#[test]
 fn runtime_prelude_size() {
     // A guard on the half that is not snapshotted verbatim: the surface above would not notice a
     // rewritten function body, and this notices that something moved without pretending to say

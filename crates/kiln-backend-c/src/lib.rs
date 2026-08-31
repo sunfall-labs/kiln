@@ -276,27 +276,69 @@ struct MethodId {
 }
 
 macro_rules! method_group_bit {
-    (Direct) => { 1u32 << 0 };
-    (ArrayLookup) => { 1u32 << 1 };
-    (StringDispatch) => { 1u32 << 2 };
-    (Generic) => { 1u32 << 3 };
-    (Temporal) => { 1u32 << 4 };
-    (TemporalFrom) => { 1u32 << 5 };
-    (TemporalCompare) => { 1u32 << 6 };
-    (TemporalNowRead) => { 1u32 << 7 };
-    (TemporalOp) => { 1u32 << 8 };
-    (DateSetter) => { 1u32 << 9 };
-    (NodeEvent) => { 1u32 << 10 };
-    (NodeNet) => { 1u32 << 11 };
-    (NodeServer) => { 1u32 << 12 };
-    (NodeHttp) => { 1u32 << 13 };
-    (NodeResponse) => { 1u32 << 14 };
-    (Buffer) => { 1u32 << 15 };
-    (NodeUtil) => { 1u32 << 16 };
-    (NodeDiagnostics) => { 1u32 << 17 };
-    (NodeStream) => { 1u32 << 18 };
-    (NodePath) => { 1u32 << 19 };
-    (MathNumber) => { 1u32 << 20 };
+    (Direct) => {
+        1u32 << 0
+    };
+    (ArrayLookup) => {
+        1u32 << 1
+    };
+    (StringDispatch) => {
+        1u32 << 2
+    };
+    (Generic) => {
+        1u32 << 3
+    };
+    (Temporal) => {
+        1u32 << 4
+    };
+    (TemporalFrom) => {
+        1u32 << 5
+    };
+    (TemporalCompare) => {
+        1u32 << 6
+    };
+    (TemporalNowRead) => {
+        1u32 << 7
+    };
+    (TemporalOp) => {
+        1u32 << 8
+    };
+    (DateSetter) => {
+        1u32 << 9
+    };
+    (NodeEvent) => {
+        1u32 << 10
+    };
+    (NodeNet) => {
+        1u32 << 11
+    };
+    (NodeServer) => {
+        1u32 << 12
+    };
+    (NodeHttp) => {
+        1u32 << 13
+    };
+    (NodeResponse) => {
+        1u32 << 14
+    };
+    (Buffer) => {
+        1u32 << 15
+    };
+    (NodeUtil) => {
+        1u32 << 16
+    };
+    (NodeDiagnostics) => {
+        1u32 << 17
+    };
+    (NodeStream) => {
+        1u32 << 18
+    };
+    (NodePath) => {
+        1u32 << 19
+    };
+    (MathNumber) => {
+        1u32 << 20
+    };
 }
 
 macro_rules! method_group_bits {
@@ -306,27 +348,69 @@ macro_rules! method_group_bits {
 }
 
 macro_rules! method_group_c_bit {
-    (Direct) => { "UINT32_C(1)" };
-    (ArrayLookup) => { "UINT32_C(2)" };
-    (StringDispatch) => { "UINT32_C(4)" };
-    (Generic) => { "UINT32_C(8)" };
-    (Temporal) => { "UINT32_C(16)" };
-    (TemporalFrom) => { "UINT32_C(32)" };
-    (TemporalCompare) => { "UINT32_C(64)" };
-    (TemporalNowRead) => { "UINT32_C(128)" };
-    (TemporalOp) => { "UINT32_C(256)" };
-    (DateSetter) => { "UINT32_C(512)" };
-    (NodeEvent) => { "UINT32_C(1024)" };
-    (NodeNet) => { "UINT32_C(2048)" };
-    (NodeServer) => { "UINT32_C(4096)" };
-    (NodeHttp) => { "UINT32_C(8192)" };
-    (NodeResponse) => { "UINT32_C(16384)" };
-    (Buffer) => { "UINT32_C(32768)" };
-    (NodeUtil) => { "UINT32_C(65536)" };
-    (NodeDiagnostics) => { "UINT32_C(131072)" };
-    (NodeStream) => { "UINT32_C(262144)" };
-    (NodePath) => { "UINT32_C(524288)" };
-    (MathNumber) => { "UINT32_C(1048576)" };
+    (Direct) => {
+        "UINT32_C(1)"
+    };
+    (ArrayLookup) => {
+        "UINT32_C(2)"
+    };
+    (StringDispatch) => {
+        "UINT32_C(4)"
+    };
+    (Generic) => {
+        "UINT32_C(8)"
+    };
+    (Temporal) => {
+        "UINT32_C(16)"
+    };
+    (TemporalFrom) => {
+        "UINT32_C(32)"
+    };
+    (TemporalCompare) => {
+        "UINT32_C(64)"
+    };
+    (TemporalNowRead) => {
+        "UINT32_C(128)"
+    };
+    (TemporalOp) => {
+        "UINT32_C(256)"
+    };
+    (DateSetter) => {
+        "UINT32_C(512)"
+    };
+    (NodeEvent) => {
+        "UINT32_C(1024)"
+    };
+    (NodeNet) => {
+        "UINT32_C(2048)"
+    };
+    (NodeServer) => {
+        "UINT32_C(4096)"
+    };
+    (NodeHttp) => {
+        "UINT32_C(8192)"
+    };
+    (NodeResponse) => {
+        "UINT32_C(16384)"
+    };
+    (Buffer) => {
+        "UINT32_C(32768)"
+    };
+    (NodeUtil) => {
+        "UINT32_C(65536)"
+    };
+    (NodeDiagnostics) => {
+        "UINT32_C(131072)"
+    };
+    (NodeStream) => {
+        "UINT32_C(262144)"
+    };
+    (NodePath) => {
+        "UINT32_C(524288)"
+    };
+    (MathNumber) => {
+        "UINT32_C(1048576)"
+    };
 }
 
 macro_rules! method_group_c_bits {
@@ -432,7 +516,10 @@ const fn validate_method_ids(ids: &[MethodId]) {
     let mut index = 0;
     while index < ids.len() {
         assert!(ids[index].value > 0, "method IDs must be positive");
-        assert!(ids[index].groups != 0, "every method must have a dispatch category");
+        assert!(
+            ids[index].groups != 0,
+            "every method must have a dispatch category"
+        );
         let mut other = index + 1;
         while other < ids.len() {
             assert!(
