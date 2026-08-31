@@ -52,29 +52,41 @@ pub struct ResolvedModule {
 /// Builtins supported by Kiln's Node compatibility adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeBuiltin {
+    Assert,
+    AsyncHooks,
+    DiagnosticsChannel,
     Events,
     FsPromises,
     Net,
     Http,
+    Util,
 }
 
 impl NodeBuiltin {
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "assert" | "assert/strict" => Self::Assert,
+            "async_hooks" => Self::AsyncHooks,
+            "diagnostics_channel" => Self::DiagnosticsChannel,
             "events" => Self::Events,
             "fs/promises" => Self::FsPromises,
             "net" => Self::Net,
             "http" => Self::Http,
+            "util" => Self::Util,
             _ => return None,
         })
     }
 
     pub const fn specifier(self) -> &'static str {
         match self {
+            Self::Assert => "node:assert",
+            Self::AsyncHooks => "node:async_hooks",
+            Self::DiagnosticsChannel => "node:diagnostics_channel",
             Self::Events => "node:events",
             Self::FsPromises => "node:fs/promises",
             Self::Net => "node:net",
             Self::Http => "node:http",
+            Self::Util => "node:util",
         }
     }
 
@@ -442,7 +454,8 @@ impl NodePackageResolver {
                 .iter()
                 .map(|extension| format!(".{extension}"))
                 .collect(),
-            main_files: Vec::new(),
+            // Node's package and directory fallback when no `exports` or `main` target wins.
+            main_files: vec!["index".to_owned()],
             node_path: false,
             builtin_modules: true,
             ..oxc_resolver::ResolveOptions::default()
@@ -480,6 +493,24 @@ impl NodePackageResolver {
                 ..
             })
         ) {
+            if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
+                let canonical_importer = canonical_importer(importer, self.project_root())?;
+                let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
+                let resolution = self
+                    .packages
+                    .resolve(importer_directory, specifier)
+                    .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
+                let package_json = resolution
+                    .package_json()
+                    .map(|manifest| manifest.path().to_path_buf());
+                let canonical_target = resolution.into_path_buf();
+                return validate_node_target(
+                    canonical_target,
+                    ResolutionKind::Relative,
+                    package_json,
+                    self.project_root(),
+                );
+            }
             return self
                 .explicit
                 .resolve(specifier, importer)
@@ -499,11 +530,26 @@ impl NodePackageResolver {
             .package_json()
             .map(|manifest| manifest.path().to_path_buf());
         let canonical_target = resolution.into_path_buf();
+        validate_node_target(
+            canonical_target,
+            ResolutionKind::Package,
+            package_json,
+            self.project_root(),
+        )
+    }
+}
+
+fn validate_node_target(
+    canonical_target: PathBuf,
+    kind: ResolutionKind,
+    package_json: Option<PathBuf>,
+    project_root: &Path,
+) -> Result<ResolvedRequest, ResolveError> {
         ensure_utf8(&canonical_target, PathRole::Target)?;
-        if !canonical_target.starts_with(self.project_root()) {
+        if !canonical_target.starts_with(project_root) {
             return Err(ResolveError::OutsideProject {
                 path: canonical_target,
-                project_root: self.project_root().to_path_buf(),
+                project_root: project_root.to_path_buf(),
             });
         }
         if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
@@ -518,10 +564,9 @@ impl NodePackageResolver {
             });
         }
         Ok(ResolvedRequest {
-            module: ResolvedModule::new(canonical_target, ResolutionKind::Package),
+            module: ResolvedModule::new(canonical_target, kind),
             package_json,
         })
-    }
 }
 
 impl ResolutionPolicy for NodePackageResolver {

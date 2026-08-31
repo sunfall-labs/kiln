@@ -51,7 +51,9 @@ pub fn run_node_against_expected_stdout(
 ) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
-        result: if source_goal(path) == SourceGoal::Module {
+        result: if source_goal(path) == SourceGoal::Module
+            || path.extension().is_some_and(|extension| extension == "cjs")
+        {
             run_node_module(path, expected, mode)
         } else {
             run_with_executor(path, expected, mode, true)
@@ -271,7 +273,9 @@ fn source_goal(path: &Path) -> SourceGoal {
 fn out_of_process_build_requirement(path: &Path) -> Option<&'static str> {
     let is_javascript = path
         .extension()
-        .is_some_and(|extension| extension == "js" || extension == "mjs");
+        .is_some_and(|extension| {
+            extension == "js" || extension == "mjs" || extension == "cjs"
+        });
     (!is_javascript).then_some(
         "TypeScript entry point: this program runs only as a single-file bundle, which \
          conformance/effect/build.sh produces out of process",

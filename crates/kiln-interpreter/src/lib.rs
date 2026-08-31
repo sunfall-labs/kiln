@@ -247,6 +247,22 @@ pub enum Native {
     NodeStatIsFile,
     NodeStatIsDirectory,
     NodeEvents,
+    NodeDiagnosticsChannel,
+    NodeDiagnosticsChannelCreate,
+    NodeDiagnosticsTracingChannel,
+    NodeDiagnosticsPublish,
+    NodeDiagnosticsRunStores,
+    NodeUtil,
+    NodeUtilInherits,
+    NodeUtilDebuglog,
+    NodeUtilDebugNoop,
+    NodeUtilFormat,
+    NodeAssert,
+    NodeAssertOk,
+    NodeAsyncHooks,
+    NodeAsyncResource,
+    NodeAsyncResourceBind,
+    NodeAsyncResourceEmitDestroy,
     NodeEventEmitter,
     NodeEventOn,
     NodeEventOnce,
@@ -974,6 +990,24 @@ impl Native {
             (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
             (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
             (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
+            (Self::NodeDiagnosticsChannel, "channel") => {
+                Some(Value::Native(Self::NodeDiagnosticsChannelCreate))
+            }
+            (Self::NodeDiagnosticsChannel, "tracingChannel") => {
+                Some(Value::Native(Self::NodeDiagnosticsTracingChannel))
+            }
+            (Self::NodeDiagnosticsChannel, "hasSubscribers") => {
+                Some(Value::Boolean(false))
+            }
+            (Self::NodeUtil, "inherits") => Some(Value::Native(Self::NodeUtilInherits)),
+            (Self::NodeUtil, "debuglog") => Some(Value::Native(Self::NodeUtilDebuglog)),
+            (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
+            (Self::NodeAssert, "default" | "ok" | "strict") => {
+                Some(Value::Native(Self::NodeAssertOk))
+            }
+            (Self::NodeAsyncHooks, "AsyncResource" | "default") => {
+                Some(Value::Native(Self::NodeAsyncResource))
+            }
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
@@ -3543,10 +3577,19 @@ pub enum Value {
 /// implementations.
 pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+        "assert" | "assert/strict" => &["default", "ok", "strict"],
+        "async_hooks" => &["AsyncResource", "default"],
+        "diagnostics_channel" => &[
+            "channel",
+            "default",
+            "hasSubscribers",
+            "tracingChannel",
+        ],
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
         "net" => &["connect", "createConnection", "createServer"],
         "http" => &["createServer", "default", "get", "request"],
+        "util" => &["debuglog", "default", "format", "inherits"],
         _ => return None,
     })
 }
@@ -3554,10 +3597,14 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
 fn node_builtin_namespace(specifier: &str) -> Option<Value> {
     Some(Value::Native(
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "assert" | "assert/strict" => Native::NodeAssert,
+            "async_hooks" => Native::NodeAsyncHooks,
+            "diagnostics_channel" => Native::NodeDiagnosticsChannel,
             "events" => Native::NodeEvents,
             "fs/promises" => Native::NodeFsPromises,
             "net" => Native::NodeNet,
             "http" => Native::NodeHttp,
+            "util" => Native::NodeUtil,
             _ => return None,
         },
     ))
@@ -4942,6 +4989,84 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
         return None;
     };
     object.borrow().get_own(name).cloned()
+}
+
+fn diagnostics_channel() -> Value {
+    ordinary_object([
+        ("hasSubscribers".to_owned(), Value::Boolean(false)),
+        (
+            "publish".to_owned(),
+            Value::Native(Native::NodeDiagnosticsPublish),
+        ),
+        (
+            "runStores".to_owned(),
+            Value::Native(Native::NodeDiagnosticsRunStores),
+        ),
+    ])
+}
+
+fn diagnostics_tracing_channel() -> Value {
+    let start = diagnostics_channel();
+    let end = diagnostics_channel();
+    let async_start = diagnostics_channel();
+    let async_end = diagnostics_channel();
+    let error = diagnostics_channel();
+    ordinary_object([
+        ("hasSubscribers".to_owned(), Value::Boolean(false)),
+        ("start".to_owned(), start),
+        ("end".to_owned(), end),
+        ("asyncStart".to_owned(), async_start),
+        ("asyncEnd".to_owned(), async_end),
+        ("error".to_owned(), error),
+    ])
+}
+
+fn node_util_format(arguments: &[Value]) -> String {
+    let Some(first) = arguments.first() else {
+        return String::new();
+    };
+    let Value::String(template) = first else {
+        return arguments.iter().map(inspect).collect::<Vec<_>>().join(" ");
+    };
+    let mut out = String::new();
+    let mut values = arguments.iter().skip(1);
+    let mut chars = template.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            out.push(character);
+            continue;
+        }
+        let Some(specifier) = chars.peek().copied() else {
+            out.push('%');
+            break;
+        };
+        if specifier == '%' {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+        let Some(value) = values.next() else {
+            out.push('%');
+            continue;
+        };
+        chars.next();
+        match specifier {
+            's' => out.push_str(&value.to_display_string()),
+            'd' | 'i' => out.push_str(&number_string(value.as_number())),
+            'j' => out.push_str(&inspect(value)),
+            'o' | 'O' => out.push_str(&inspect(value)),
+            'f' => out.push_str(&value.as_number().to_string()),
+            _ => {
+                out.push('%');
+                out.push(specifier);
+            }
+        }
+    }
+    for value in values {
+        out.push(' ');
+        out.push_str(&inspect(value));
+    }
+    out
 }
 
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
@@ -9175,6 +9300,90 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeFsReadFile | Native::NodeFsWriteFile | Native::NodeFsStat
         ) {
             return self.dispatch_node_native(native, arguments, instruction);
+        }
+        match native {
+            Native::NodeDiagnosticsChannelCreate => return Ok(diagnostics_channel()),
+            Native::NodeDiagnosticsTracingChannel => {
+                return Ok(diagnostics_tracing_channel());
+            }
+            Native::NodeDiagnosticsPublish => return Ok(Value::Undefined),
+            Native::NodeDiagnosticsRunStores => {
+                let callback = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
+                let this_value = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                let forwarded = arguments.iter().skip(3).cloned().collect();
+                return self.call_value(&callback, this_value, forwarded, instruction);
+            }
+            Native::NodeUtilDebuglog => {
+                return Ok(Value::Native(Native::NodeUtilDebugNoop));
+            }
+            Native::NodeUtilDebugNoop => return Ok(Value::Undefined),
+            Native::NodeUtilInherits => {
+                let constructor = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let super_constructor = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&constructor) || !is_callable(&super_constructor) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The constructor and super constructor must be functions"
+                            .to_owned(),
+                    });
+                }
+                let super_prototype = self.read_property(
+                    &super_constructor,
+                    "prototype",
+                    instruction,
+                )?;
+                let constructor_prototype = self.read_property(
+                    &constructor,
+                    "prototype",
+                    instruction,
+                )?;
+                match &constructor_prototype {
+                    Value::Object(object) => {
+                        object.borrow_mut().set_prototype(super_prototype);
+                    }
+                    Value::Function(function) => {
+                        function.properties.borrow_mut().set_prototype(super_prototype);
+                    }
+                    _ => {}
+                }
+                return Ok(Value::Undefined);
+            }
+            Native::NodeUtilFormat => {
+                return Ok(Value::String(node_util_format(arguments)));
+            }
+            Native::NodeAssertOk => {
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !value.is_truthy() {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: arguments
+                            .get(1)
+                            .map(Value::to_display_string)
+                            .unwrap_or_else(|| "The expression evaluated to a falsy value".to_owned()),
+                    });
+                }
+                return Ok(Value::Undefined);
+            }
+            Native::NodeAsyncResourceBind => {
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
+                return Ok(Value::Bound(Rc::new(BoundFunction {
+                    target: callback,
+                    this_value: arguments.get(1).cloned().unwrap_or(Value::Undefined),
+                    arguments: Vec::new(),
+                })));
+            }
+            Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
+            _ => {}
         }
         if matches!(
             native,
@@ -15525,6 +15734,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::NodeEventEmitter) => {
                 self.stack.push(node_event_emitter());
             }
+            Value::Native(Native::NodeAsyncResource) => {
+                self.stack.push(ordinary_object([
+                    (
+                        "bind".to_owned(),
+                        Value::Native(Native::NodeAsyncResourceBind),
+                    ),
+                    (
+                        "emitDestroy".to_owned(),
+                        Value::Native(Native::NodeAsyncResourceEmitDestroy),
+                    ),
+                ]));
+            }
             Value::Native(Native::UrlConstructor) => {
                 let built = self.dispatch_native(
                     Native::UrlConstructor,
@@ -21472,7 +21693,23 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
-        Native::NodeNet
+        Native::NodeDiagnosticsChannel
+        | Native::NodeDiagnosticsChannelCreate
+        | Native::NodeDiagnosticsTracingChannel
+        | Native::NodeDiagnosticsPublish
+        | Native::NodeDiagnosticsRunStores
+        | Native::NodeUtil
+        | Native::NodeUtilInherits
+        | Native::NodeUtilDebuglog
+        | Native::NodeUtilDebugNoop
+        | Native::NodeUtilFormat
+        | Native::NodeAssert
+        | Native::NodeAssertOk
+        | Native::NodeAsyncHooks
+        | Native::NodeAsyncResource
+        | Native::NodeAsyncResourceBind
+        | Native::NodeAsyncResourceEmitDestroy
+        | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect
         | Native::NodeSocketWrite
