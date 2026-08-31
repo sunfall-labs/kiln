@@ -778,6 +778,11 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR 158
 #define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS 159
 
+/* The global symbol registry. `Symbol.for` is deliberately separate from `Symbol()` because
+ * equal registry keys must return one identity across every module in the realm. */
+#define KILN_C99_METHOD_SYMBOL_FOR 409
+#define KILN_C99_METHOD_SYMBOL_KEY_FOR 410
+
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 #define KILN_C99_METHOD_OBJECT_IS 185
 
@@ -1347,6 +1352,13 @@ typedef struct kiln_symbol {
     const char *description;
     size_t description_len;
 } kiln_symbol;
+
+typedef struct kiln_registered_symbol {
+    kiln_symbol *symbol;
+    struct kiln_registered_symbol *next;
+} kiln_registered_symbol;
+
+static kiln_registered_symbol *kiln_c99_symbol_registry;
 
 typedef struct kiln_bound {
     kiln_value target;
@@ -5115,6 +5127,40 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
+    kiln_value text = kiln_c99_text(key);
+    kiln_registered_symbol *entry;
+    int status;
+    if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
+        if (entry->symbol->description_len == text.len &&
+            (text.len == 0 || memcmp(entry->symbol->description, text.ptr, text.len) == 0)) {
+            *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)entry->symbol, NULL, 0);
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_new_symbol(out, text);
+    if (status != KILN_C99_OK) return status;
+    entry = (kiln_registered_symbol *)malloc(sizeof *entry);
+    if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
+    entry->symbol = kiln_c99_symbol_of(*out);
+    entry->next = kiln_c99_symbol_registry;
+    kiln_c99_symbol_registry = entry;
+    return KILN_C99_OK;
+}
+
+static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
+    kiln_registered_symbol *entry;
+    if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
+    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
+        if (entry->symbol == kiln_c99_symbol_of(value)) {
+            return kiln_c99_copy_text(entry->symbol->description,
+                                      entry->symbol->description_len);
+        }
+    }
+    return kiln_c99_undefined();
+}
+
 /* `call`, `apply` and `bind`, which every callable answers to whatever kind of callable it is.
  * Not a range lookup, because the three are not contiguous with anything and a function's *own*
  * property of the same name has to win -- so each caller asks after its own store. */
@@ -5388,6 +5434,10 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         if (kiln_c99_same_name(key, key_len, "raw")) {
             return KILN_C99_METHOD_STRING_RAW;
         }
+        return 0;
+    case KILN_C99_BUILTIN_SYMBOL:
+        if (kiln_c99_same_name(key, key_len, "for")) return KILN_C99_METHOD_SYMBOL_FOR;
+        if (kiln_c99_same_name(key, key_len, "keyFor")) return KILN_C99_METHOD_SYMBOL_KEY_FOR;
         return 0;
     case KILN_C99_BUILTIN_PROXY:
         if (kiln_c99_same_name(key, key_len, "revocable")) {
@@ -12125,9 +12175,6 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_array *array;
     size_t index;
     int status;
-    kiln_c99_diagnostic_method = code;
-    kiln_c99_diagnostic_receiver_tag = receiver.tag;
-    kiln_c99_diagnostic_has_method = 1;
     if (code >= KILN_C99_METHOD_NODE_EVENT_ON &&
         code <= KILN_C99_METHOD_NODE_EVENT_EMITTER) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
@@ -12185,6 +12232,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_NODE_DNS_LOOKUP) {
         return kiln_c99_node_dns_lookup(host, result, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_SYMBOL_FOR) {
+        return kiln_c99_symbol_for(result, argc > 0 ? args[0] : kiln_c99_undefined());
+    }
+    if (code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
+        *result = kiln_c99_symbol_key_for(argc > 0 ? args[0] : kiln_c99_undefined());
+        return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_OS_HOSTNAME) {
         *result = kiln_c99_copy_text("kiln", 4);
@@ -12539,7 +12593,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         return KILN_C99_OK;
     }
-    if (code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) {
+    if ((code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) ||
+        code == KILN_C99_METHOD_SYMBOL_FOR || code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
         double first = 0.0 / 0.0;
@@ -15125,7 +15180,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             /* `Object.create(null)` records the absence, which is not the same as recording
              * nothing: an object with no link at all inherits `Object.prototype`. */
-            if (argc > 0 && (args[0].tag == KILN_VALUE_OBJECT || args[0].tag == KILN_VALUE_NULL)) {
+            if (argc > 0 &&
+                (args[0].tag == KILN_VALUE_NULL || kiln_c99_can_be_prototype(args[0]))) {
                 kiln_c99_object_of(built)->prototype = args[0];
             } else if (argc > 0) {
                 return KILN_C99_CONTROL_ERROR;
@@ -23256,7 +23312,7 @@ fn emit_instruction(
         let emitted = &mut output[before..];
         let replaced = emitted.replace(
             "if (status != KILN_C99_OK) return status;",
-            "if (status == KILN_C99_CONTROL_ERROR) goto kiln_refusal; if (status != KILN_C99_OK) return status;",
+            "if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; goto kiln_refusal; } if (status != KILN_C99_OK) return status;",
         );
         output.truncate(before);
         output.push_str(&replaced);
@@ -24164,6 +24220,44 @@ int main(void) {{
                 String::from_utf8_lossy(&run.stderr)
             );
         }
+    }
+
+    #[test]
+    fn executable_symbol_registry_is_shared_and_distinct_from_unique_symbols() {
+        let generated = emit(&program(
+            vec![Constant::String("fastify-error-generic".into())],
+            vec![Instruction::Return],
+            0,
+        ))
+        .expect("symbol registry probe emits");
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    kiln_value key = kiln_c99_copy_text("fastify-error-generic", 21);
+    kiln_value first;
+    kiln_value second;
+    kiln_value unique;
+    kiln_value recovered;
+    if (kiln_c99_symbol_for(&first, key) != KILN_C99_OK) return 1;
+    if (kiln_c99_symbol_for(&second, key) != KILN_C99_OK) return 2;
+    if (!kiln_c99_strict_equal(first, second)) return 3;
+    recovered = kiln_c99_symbol_key_for(first);
+    if (recovered.tag != KILN_VALUE_STRING || recovered.len != key.len ||
+        memcmp(recovered.ptr, key.ptr, key.len) != 0) return 4;
+    if (kiln_c99_new_symbol(&unique, key) != KILN_C99_OK) return 5;
+    if (kiln_c99_strict_equal(first, unique)) return 6;
+    if (kiln_c99_symbol_key_for(unique).tag != KILN_VALUE_UNDEFINED) return 7;
+    return 0;
+}}
+"#
+        );
+        let run = run_with_main(&generated, &wrapper, "symbol-registry");
+        assert!(
+            run.status.success(),
+            "native symbol registry failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
