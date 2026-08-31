@@ -3415,6 +3415,20 @@ pub struct Closure {
 /// the enclosing function after they run.
 pub type Cell = Rc<RefCell<Value>>;
 
+/// Runtime hook used by a CommonJS `require` call to evaluate a not-yet-loaded target.
+///
+/// The graph owns the loader and cache policy; the interpreter only invokes this hook at the
+/// point the JavaScript call actually occurs. Keeping the hook outside [`CommonJsRequire`] means
+/// a statically discovered edge does not become an eager execution obligation.
+pub trait CommonJsModuleLoader {
+    fn load(
+        &mut self,
+        require: &CommonJsRequire,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError>;
+}
+
 /// One statically resolved CommonJS `require` environment.
 ///
 /// Targets are cells rather than copied values so insertion-before-evaluation and reassignment
@@ -3443,6 +3457,19 @@ impl CommonJsRequire {
             .iter()
             .find(|(candidate, _, _)| candidate == specifier)
             .map(|(_, target, _)| target.clone())
+    }
+
+    /// Return the cache cell selected by one statically discovered specifier.
+    pub fn target_cell(&self, specifier: &str) -> Option<Cell> {
+        self.targets
+            .iter()
+            .find(|(candidate, _, _)| candidate == specifier)
+            .map(|(_, _, value)| Rc::clone(value))
+    }
+
+    /// Return the currently cached value for a statically discovered specifier.
+    pub fn cached_value(&self, specifier: &str) -> Option<Value> {
+        self.get(specifier)
     }
 }
 
@@ -5510,6 +5537,28 @@ pub fn execute_module_in_runtime<H: HostOps + ?Sized>(
     execute_module_in_runtime_mode(module, import_values, host, limits, runtime, false)
 }
 
+/// Execute one module while allowing graph-owned CommonJS targets to load on demand.
+pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+    loader: &mut dyn CommonJsModuleLoader,
+    enter_runtime: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_in_runtime_mode_with_session(
+        module,
+        import_values,
+        host,
+        limits,
+        runtime,
+        None,
+        Some(loader),
+        enter_runtime,
+    )
+}
+
 /// Execute one linked module with the realm-owned Node host explicitly installed.
 ///
 /// This is the module-graph counterpart of [`execute_node`]. Keeping it separate from
@@ -5551,6 +5600,33 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
         limits,
         runtime,
         Some((session, drain)),
+        None,
+        true,
+    )
+}
+
+/// Execute one Node module with a graph-owned lazy CommonJS loader installed.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+    session: &mut ModuleRealmSession,
+    drain: bool,
+    loader: &mut dyn CommonJsModuleLoader,
+    enter_runtime: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_in_runtime_mode_with_session(
+        module,
+        import_values,
+        host,
+        limits,
+        runtime,
+        Some((session, drain)),
+        Some(loader),
+        enter_runtime,
     )
 }
 
@@ -5571,6 +5647,8 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             limits,
             runtime,
             Some((&mut session, true)),
+            None,
+            true,
         )
     } else {
         execute_module_in_runtime_mode_with_session(
@@ -5580,17 +5658,22 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             limits,
             runtime,
             None,
+            None,
+            true,
         )
     }
 }
 
-fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
+#[allow(clippy::too_many_arguments)]
+fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     module: &ModuleProgram,
     import_values: &[Value],
-    host: &mut H,
+    host: &'host mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
     session: Option<(&mut ModuleRealmSession, bool)>,
+    commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
+    enter_runtime: bool,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
@@ -5631,17 +5714,26 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     }
+    if let Some(loader) = commonjs_loader {
+        vm.commonjs_loader = Some(loader as *mut dyn CommonJsModuleLoader);
+    }
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
     if let Some((session, _)) = session.as_ref() {
         vm.module_realm = Some(Rc::clone(&session.shared));
     }
-    let execution = runtime.enter(|| vm.run())?;
+    let execution = if enter_runtime {
+        runtime.enter(|| vm.run())
+    } else {
+        vm.run()
+    }?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
-    if drain {
-        vm.run_node_event_loop(runtime)?;
-    } else if vm.async_host.is_none() {
-        vm.run_event_loop(runtime)?;
+    if enter_runtime {
+        if drain {
+            vm.run_node_event_loop(runtime)?;
+        } else if vm.async_host.is_none() {
+            vm.run_event_loop(runtime)?;
+        }
     }
     let execution = ExecutionResult {
         steps: vm.steps,
@@ -5999,6 +6091,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     module_realm: Option<Rc<RefCell<ModuleRealmShared>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
     async_host: Option<*mut dyn ActiveAsyncHostOps>,
+    /// Graph-owned lazy CommonJS loader, installed only while evaluating a module graph.
+    commonjs_loader: Option<*mut (dyn CommonJsModuleLoader + 'host)>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -6123,6 +6217,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             node_servers: Vec::new(),
             module_realm: None,
             async_host: None,
+            commonjs_loader: None,
             caught: None,
             unhandled: None,
             symbol_registry: Vec::new(),
@@ -15407,6 +15502,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map(Value::to_display_string)
                     .unwrap_or_default();
+                if let Some(loader) = self.commonjs_loader {
+                    return unsafe { (&mut *loader).load(require, &specifier, instruction) };
+                }
                 require.get(&specifier).ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: format!("CommonJS require target `{specifier}` is not in the graph"),
@@ -28898,6 +28996,31 @@ mod tests {
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
     use kiln_runtime::DEFAULT_ENTROPY_SEED;
+
+    #[test]
+    fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
+        let initial = ordinary_object([]);
+        let initial_object = match &initial {
+            Value::Object(object) => Rc::clone(object),
+            _ => unreachable!("ordinary_object returns an object"),
+        };
+        let cache = Rc::new(RefCell::new(initial));
+        let require = CommonJsRequire::new([(
+            "./dep.cjs".to_owned(),
+            "/tmp/dep.cjs".to_owned(),
+            Rc::clone(&cache),
+        )]);
+
+        let first = require.get("./dep.cjs").expect("cached module");
+        let Value::Object(first_object) = first else {
+            panic!("cached module should initially be an object");
+        };
+        assert!(Rc::ptr_eq(&first_object, &initial_object));
+
+        let replacement = Value::Number(42.0);
+        *cache.borrow_mut() = replacement.clone();
+        assert_eq!(require.get("./dep.cjs"), Some(replacement));
+    }
 
     #[test]
     fn node_readable_is_a_transport_independent_buffered_event_source() {
