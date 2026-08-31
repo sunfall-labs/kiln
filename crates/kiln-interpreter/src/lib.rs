@@ -3168,6 +3168,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
+        "http" => &["createServer"],
         _ => return None,
     })
 }
@@ -3177,6 +3178,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "events" => Native::NodeEvents,
             "fs/promises" => Native::NodeFsPromises,
+            "http" => Native::NodeHttp,
             _ => return None,
         },
     ))
@@ -3746,6 +3748,8 @@ pub enum ExecutionError {
     ///
     /// A catchable `RangeError`, in the specification and here -- see [`Self::CyclicJson`].
     RadixOutOfRange,
+    InvalidPort,
+    InvalidHttpStatus,
     /// A `size` a set-like reported as a negative number, which no collection can have.
     SetSizeOutOfRange,
     /// An index outside the array `with` was asked to copy.
@@ -4053,6 +4057,8 @@ impl fmt::Display for ExecutionError {
                     "argument is out of the range this method accepts"
                 )
             }
+            Self::InvalidPort => write!(formatter, "port is outside 0..=65535"),
+            Self::InvalidHttpStatus => write!(formatter, "invalid HTTP status code"),
             Self::DateOutOfRange => write!(formatter, "date has no ISO spelling"),
             Self::SetSizeOutOfRange => write!(formatter, "set size is negative"),
             Self::ArrayIndexOutOfRange => write!(formatter, "index is outside the array"),
@@ -4341,6 +4347,11 @@ impl ExecutionError {
                 ErrorKind::Range,
                 "toString() radix must be between 2 and 36".to_owned(),
             ),
+            Self::InvalidPort => (
+                ErrorKind::Range,
+                "Port should be >= 0 and < 65536".to_owned(),
+            ),
+            Self::InvalidHttpStatus => (ErrorKind::Range, "Invalid status code".to_owned()),
             Self::DateOutOfRange => (ErrorKind::Range, "Invalid time value".to_owned()),
             Self::SetSizeOutOfRange => (ErrorKind::Range, "Invalid set size".to_owned()),
             Self::ArrayIndexOutOfRange => (ErrorKind::Range, "Invalid index".to_owned()),
@@ -4896,6 +4907,26 @@ struct PendingHostRequest {
     conversion: HostResultConversion,
 }
 
+enum PendingNodeRequest {
+    Server {
+        request: RequestId,
+        state: Rc<RefCell<HttpServerState>>,
+    },
+    Stream {
+        request: RequestId,
+        server: Rc<RefCell<HttpServerState>>,
+        resource: kiln_host_abi::ResourceId,
+    },
+}
+
+impl PendingNodeRequest {
+    fn request(&self) -> RequestId {
+        match self {
+            Self::Server { request, .. } | Self::Stream { request, .. } => *request,
+        }
+    }
+}
+
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// A machine with nothing run yet.
     ///
@@ -4931,6 +4962,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_serial: 0,
             realm: Realm::new(),
             pending_host: Vec::new(),
+            pending_node: Vec::new(),
+            http_servers: Vec::new(),
             node_host: None,
             caught: None,
             unhandled: None,
@@ -14282,6 +14315,67 @@ fn node_event_emitter() -> Value {
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
+fn node_http_server(receiver: &Value) -> Result<Rc<RefCell<HttpServerState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Server method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::HttpServer(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "Server method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn node_http_response(receiver: &Value) -> Result<Rc<RefCell<HttpResponseState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "ServerResponse method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::HttpResponse(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "ServerResponse method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn node_listen_arguments(
+    arguments: &[Value],
+) -> Result<(u16, String, Option<Value>), ExecutionError> {
+    let port = arguments.first().map(Value::as_number).unwrap_or(f64::NAN);
+    if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
+        return Err(ExecutionError::InvalidPort);
+    }
+    let mut host = "0.0.0.0".to_owned();
+    let mut callback = None;
+    for argument in arguments.iter().skip(1) {
+        if is_callable(argument) {
+            callback = Some(argument.clone());
+        } else if let Value::String(value) = argument {
+            host = value.clone();
+        }
+    }
+    Ok((port as u16, host, callback))
+}
+
+fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
+    match value.unwrap_or(&Value::Undefined) {
+        Value::Undefined | Value::Null => Ok(Vec::new()),
+        Value::String(value) => Ok(value.as_bytes().to_vec()),
+        Value::TypedArray(value) => Ok(value.bytes()),
+        value => Err(ExecutionError::TypeErrorMessage {
+            message: format!(
+                "The chunk argument must be a string or typed array, received {}",
+                value.type_name()
+            ),
+        }),
+    }
+}
+
 fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEventListener> {
     object
         .borrow()
@@ -16812,6 +16906,15 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
+        Native::NodeHttp
+        | Native::NodeHttpCreateServer
+        | Native::NodeServerListen
+        | Native::NodeServerClose
+        | Native::NodeServerAddress
+        | Native::NodeResponseSetHeader
+        | Native::NodeResponseWriteHead
+        | Native::NodeResponseWrite
+        | Native::NodeResponseEnd => Value::Undefined,
         Native::Error(_)
         | Native::NodeEvents
         | Native::NodeFsPromises
