@@ -2847,6 +2847,13 @@ fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) -> Result<String, NativeError> {
+    // Keep paths embedded in the cached launcher project-relative, just like module units. An
+    // absolute checkout path would make identical graphs in sibling roots compile different
+    // launcher objects.
+    let logical_paths = modules
+        .iter()
+        .map(|(node, _)| logical_module_path(graph.project_root(), &node.path))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
@@ -3107,21 +3114,17 @@ int main(void) {
     // can return the initially allocated exports object without re-entering a module.
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
-            let filename = node.path.to_string_lossy();
-            let dirname = node
-                .path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .to_string_lossy();
+            let filename = &logical_paths[index];
+            let dirname = filename.rsplit_once('/').map_or("", |(parent, _)| parent);
             writeln!(
                 output,
                 "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
                 module.symbol,
-                native_c_string(&filename),
+                native_c_string(filename),
                 filename.len(),
-                native_c_string(&dirname),
+                native_c_string(dirname),
                 dirname.len(),
-                native_c_string(&filename),
+                native_c_string(filename),
                 module.symbol,
             )
             .unwrap();
@@ -3162,7 +3165,7 @@ int main(void) {
             writeln!(
                 output,
                 "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
-                native_c_string(&logical_module_path(graph.project_root(), &node.path)?)
+                native_c_string(&logical_paths[index])
             )
             .unwrap();
             if node.path == graph.entry() {
@@ -3200,7 +3203,7 @@ int main(void) {
         writeln!(
             output,
             "    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"module-enter\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
-            native_c_string(&logical_module_path(graph.project_root(), &node.path)?)
+            native_c_string(&logical_paths[index])
         )
         .unwrap();
         if node.path == graph.entry() {
