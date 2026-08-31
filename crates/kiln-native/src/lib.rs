@@ -4891,6 +4891,109 @@ console.log("pass");
     }
 
     #[test]
+    fn native_node_http_server_exposes_timeout_policy_used_by_frameworks() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-server-timeouts",
+            r#"import http from "node:http";
+const server = http.createServer(() => {});
+console.log(server.timeout, server.keepAliveTimeout, server.requestTimeout);
+server.setTimeout(12.9);
+console.log(server.timeout);
+console.log("pass");
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "0 5000 300000\n12\npass\n");
+    }
+
+    #[test]
+    fn native_node_http_response_exposes_node_lifecycle_state() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-response-state",
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  console.log(response.statusCode, response.headersSent, response.writableEnded, response.destroyed);
+  response.statusCode = 201;
+  response.writeHead(response.statusCode, { "content-type": "text/plain" });
+  console.log(response.statusCode, response.headersSent, response.writableEnded);
+  response.end("ok");
+  console.log(response.headersSent, response.writableEnded);
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "200 false false false\n201 true false\ntrue true\n");
+    }
+
+    #[test]
+    fn native_node_http_response_headers_are_case_insensitive_and_snapshot() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-response-headers",
+            r#"import http from "node:http";
+const server = http.createServer((_request, response) => {
+  response.setHeader("Content-Type", "text/plain");
+  console.log(response.getHeader("content-type"), response.hasHeader("CONTENT-TYPE"));
+  const headers = response.getHeaders();
+  headers["content-type"] = "changed";
+  console.log(response.getHeader("content-type"));
+  response.removeHeader("CONTENT-TYPE");
+  console.log(response.hasHeader("content-type"), response.getHeader("content-type"));
+  response.end("ok");
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "text/plain true\ntext/plain\nfalse undefined\n");
+    }
+
+    #[test]
+    fn native_node_http_incoming_message_exposes_request_lifecycle_state() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-request-state",
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  console.log(request.httpVersion, request.httpVersionMajor, request.httpVersionMinor);
+  console.log(request.aborted, request.complete, request.destroyed);
+  request.on("end", () => {
+    console.log(request.complete);
+    response.end("ok");
+    server.close();
+  });
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "1.1 1 1\nfalse false false\ntrue\n");
+    }
+
+    #[test]
     fn native_node_http_server_rejects_invalid_options_with_a_node_code() {
         use kiln_module_resolver::NodeRuntimeResolver;
         use std::process::Command;
