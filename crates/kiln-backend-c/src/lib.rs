@@ -865,6 +865,8 @@ method_ids! {
     (KILN_C99_METHOD_CLEAR_INTERVAL, 134, Generic),
     (KILN_C99_METHOD_PROMISE_ALL_SETTLED, 135, Generic),
     (KILN_C99_METHOD_PROMISE_ANY, 136, Generic),
+    (KILN_C99_METHOD_PROMISE_WITH_RESOLVERS, 411, Generic),
+    (KILN_C99_METHOD_NODE_TTY_ISATTY, 412, Direct),
     (KILN_C99_METHOD_REJECT_STEP, 137, Generic),
     (KILN_C99_METHOD_FINALLY_PASS, 138, Generic),
     (KILN_C99_METHOD_FINALLY_RAISE, 139, Generic),
@@ -1528,6 +1530,8 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_PROMISE_ALL_SETTLED),
     emit_method_define!(KILN_C99_METHOD_PROMISE_ANY),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_WITH_RESOLVERS),
+    emit_method_define!(KILN_C99_METHOD_NODE_TTY_ISATTY),
     emit_method_define!(KILN_C99_METHOD_REJECT_STEP),
     r#"
 /* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
@@ -1966,6 +1970,16 @@ typedef struct kiln_closure {
     uint32_t upvalue_count;
     kiln_value *upvalues;
 } kiln_closure;
+
+/* Properties attached to runtime-provided callables. Method identity is its append-only numeric
+ * code, so one realm-owned store per code gives `Stream.Readable`, `Buffer.constants`, and future
+ * native constructor statics ordinary property behavior without changing the scalar value ABI or
+ * pretending a method id is a closure pointer. */
+typedef struct kiln_method_store {
+    uint64_t code;
+    kiln_value properties;
+    struct kiln_method_store *next;
+} kiln_method_store;
 
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
@@ -2940,6 +2954,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
                                   const kiln_value *args, size_t argc);
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
+static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message);
 static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
@@ -3008,6 +3023,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
@@ -4119,6 +4135,12 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
         }
         return kiln_c99_put_mode(host, closure->properties, key, key_len, value, strict, depth,
                                  thrown);
+    }
+    if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN) {
+        kiln_value store;
+        status = kiln_c99_callable_store(target, &store, 1);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_put_mode(host, store, key, key_len, value, strict, depth, thrown);
     }
     if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex")) {
         /* The one property of a regexp a program may write, and the reason two evaluations of one
@@ -6391,6 +6413,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
         return kiln_c99_callable_method(key, key_len);
     case KILN_C99_BUILTIN_PROMISE:
+        if (kiln_c99_same_name(key, key_len, "withResolvers")) {
+            return KILN_C99_METHOD_PROMISE_WITH_RESOLVERS;
+        }
         if (kiln_c99_same_name(key, key_len, "allSettled")) {
             return KILN_C99_METHOD_PROMISE_ALL_SETTLED;
         }
@@ -7583,6 +7608,51 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
     return KILN_C99_OK;
 }
 
+static kiln_method_store *kiln_c99_method_stores;
+
+/* Return the property store for either representation of callable. `create == 0` makes reads
+ * allocation-free when no static was ever attached. Generated closures retain their inline
+ * store; runtime methods use the realm registry above. */
+static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
+    kiln_method_store *entry;
+    if (callable.tag == KILN_VALUE_FUNCTION) {
+        kiln_closure *closure = kiln_c99_closure_of(callable);
+        if (closure->properties.tag != KILN_VALUE_OBJECT && !create) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        return kiln_c99_function_store(callable, out);
+    }
+    if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN)
+        return KILN_C99_CONTROL_ERROR;
+    /* Method and builtin registries may assign the same numeric code. Fold the value tag into
+     * this private key so their stores cannot alias. */
+    {
+    uint64_t store_code = callable.bits | ((uint64_t)callable.tag << 56);
+    for (entry = kiln_c99_method_stores; entry != NULL; entry = entry->next) {
+        if (entry->code == store_code) {
+            *out = entry->properties;
+            return KILN_C99_OK;
+        }
+    }
+    if (!create) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    entry = (kiln_method_store *)malloc(sizeof *entry);
+    if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
+    entry->code = store_code;
+    entry->next = kiln_c99_method_stores;
+    if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
+        free(entry);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    kiln_c99_method_stores = entry;
+    *out = entry->properties;
+    return KILN_C99_OK;
+    }
+}
+
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
 /* The handler function a proxy offers for one operation, or undefined when it offers none.
@@ -8692,6 +8762,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_COMMONJS_REQUIRE:
     case KILN_VALUE_METHOD: {
         uint64_t callable;
+        kiln_value store;
+        int stored;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
@@ -8747,6 +8819,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             kiln_c99_same_name(key, key_len, "prototype")) {
             return kiln_c99_callable_prototype(target, out);
         }
+        stored = kiln_c99_callable_store(target, &store, 0);
+        if (stored != KILN_C99_OK) return stored;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t index;
+            for (index = 0; index < properties->count; ++index) {
+                if (kiln_c99_same_key(&properties->properties[index], key, key_len)) {
+                    return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                }
+            }
+        }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
         if (kiln_c99_same_name(key, key_len, "name")) {
@@ -8758,6 +8841,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_BUILTIN: {
+        kiln_value store;
+        int stored = kiln_c99_callable_store(target, &store, 0);
+        if (stored != KILN_C99_OK) return stored;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t index;
+            for (index = 0; index < properties->count; ++index) {
+                if (kiln_c99_same_key(&properties->properties[index], key, key_len))
+                    return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+            }
+        }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
          * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL) {
@@ -13180,6 +13274,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         if (status == KILN_C99_OK) *result = interfaces;
         return status;
     }
+    if (code == KILN_C99_METHOD_NODE_TTY_ISATTY) {
+        /* Native Node execution does not inherit the embedding process's terminal descriptors.
+         * This is the same deterministic contract as the interpreter and avoids an ambient
+         * isatty(3) read crossing the realm boundary. */
+        *result = kiln_c99_boolean(0);
+        return KILN_C99_OK;
+    }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_STREAM)) {
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
@@ -14634,6 +14735,25 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return status;
             }
             return kiln_c99_settle(*result, value, code == KILN_C99_METHOD_PROMISE_REJECT);
+        }
+        case KILN_C99_METHOD_PROMISE_WITH_RESOLVERS: {
+            kiln_value promise;
+            kiln_value resolve;
+            kiln_value reject;
+            status = kiln_c99_new_promise(&promise);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_new_settler(&resolve, promise, 0);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_new_settler(&reject, promise, 1);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_new_object(result);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, *result, "promise", 7, promise, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, *result, "resolve", 7, resolve, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, *result, "reject", 6, reject, 0, NULL);
+            return status;
         }
         case KILN_C99_METHOD_PROMISE_ALL:
         case KILN_C99_METHOD_PROMISE_RACE:
@@ -18492,9 +18612,10 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
     kiln_object *object;
     size_t index;
     int status;
-    if (target.tag == KILN_VALUE_FUNCTION) {
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
+        target.tag == KILN_VALUE_BUILTIN) {
         kiln_value store;
-        status = kiln_c99_function_store(target, &store);
+        status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -19279,6 +19400,22 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
         }
     }
     }
+}
+
+/* Parse one complete captured JSON module document. This is the same reader `JSON.parse` uses,
+ * but data-module materialization has no JavaScript call frame or reviver and needs a direct
+ * private entry point. */
+static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
+    kiln_json_reader reader;
+    int status;
+    reader.bytes = bytes;
+    reader.len = len;
+    reader.at = 0;
+    reader.depth = 0;
+    status = kiln_c99_json_read(&reader, out);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_json_space(&reader);
+    return reader.at == reader.len ? KILN_C99_OK : KILN_C99_CONTROL_ERROR;
 }
 
 /* Days-to-civil and back: Howard Hinnant's algorithm, the same one the interpreter uses. The two
@@ -22611,7 +22748,7 @@ fn render_uncaught(output: &mut String) {
         return;
     }
     output.push_str("kiln_uncaught:;\n");
-    output.push_str("    *result = kiln_c99_text(*thrown);\n");
+    output.push_str("    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(\" at \" , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }\n");
     output.push_str("    return KILN_C99_THROWN;\n");
 }
 
@@ -26357,6 +26494,77 @@ int main(void) {{
             result.status.success(),
             "generated C did not compile:\n{}",
             String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_promise_with_resolvers_exposes_and_settles_one_deferred() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value method;
+    kiln_value deferred;
+    kiln_value promise;
+    kiln_value resolve;
+    kiln_value value = kiln_c99_number(42.0);
+    kiln_value result;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE),
+                     "withResolvers", 13, &method, 0, &thrown) != KILN_C99_OK) return 1;
+    if (method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_PROMISE_WITH_RESOLVERS) return 2;
+    if (kiln_c99_call(NULL, &deferred, method, kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE),
+                      NULL, 0, 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, deferred, "promise", 7, &promise, 0, &thrown) != KILN_C99_OK ||
+        promise.tag != KILN_VALUE_PROMISE) return 4;
+    if (kiln_c99_get(NULL, deferred, "resolve", 7, &resolve, 0, &thrown) != KILN_C99_OK ||
+        resolve.tag != KILN_VALUE_SETTLER) return 5;
+    if (kiln_c99_call(NULL, &result, resolve, kiln_c99_undefined(), &value, 1, 0,
+                      &thrown) != KILN_C99_OK) return 6;
+    if (kiln_c99_promise_of(promise)->state != KILN_C99_FULFILLED ||
+        kiln_c99_as_number(kiln_c99_promise_of(promise)->value) != 42.0) return 7;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "promise-with-resolvers");
+        assert!(
+            run.status.success(),
+            "Promise.withResolvers failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_native_callables_have_isolated_static_property_stores() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value stream = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM);
+    kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
+    kiln_value buffer = kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER);
+    kiln_value constants;
+    kiln_value read;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_put(NULL, stream, "Readable", 8, readable, 0, &thrown) != KILN_C99_OK) return 1;
+    if (kiln_c99_new_object(&constants) != KILN_C99_OK) return 2;
+    if (kiln_c99_put(NULL, buffer, "constants", 9, constants, 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, stream, "Readable", 8, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_METHOD || read.bits != KILN_C99_METHOD_NODE_READABLE) return 4;
+    if (kiln_c99_get(NULL, buffer, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_OBJECT || read.bits != constants.bits) return 5;
+    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) == KILN_C99_OK) return 6;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "native-callable-statics");
+        assert!(
+            run.status.success(),
+            "native callable statics failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
         );
     }
 
