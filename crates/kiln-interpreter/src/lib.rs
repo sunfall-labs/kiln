@@ -9806,11 +9806,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::Native(Native::Error(kind)) => Some(self.error_prototype(*kind)),
                         _ => None,
                     };
-                    self.stack.push(Value::Boolean(instance_of(
-                        &left,
-                        &right,
-                        prototype.as_ref(),
-                    )));
+                    let answer = self.instance_of_value(&left, &right, prototype.as_ref(), current);
+                    let Some(answer) = self.catchable(answer, current)? else {
+                        continue;
+                    };
+                    self.stack.push(Value::Boolean(answer));
                 }
                 Instruction::Binary(operator) => {
                     let right = self.pop(current)?;
@@ -12340,19 +12340,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // reading of "the trap is absent": the operation falls through to the target, which is
         // what every trapped operation does too.
         if matches!(arguments.first(), Some(Value::Proxy(_)))
-            && matches!(
-                native,
-                Native::ObjectIsFrozen
-                    | Native::ObjectIsSealed
-                    | Native::ObjectFreeze
-                    | Native::ObjectSeal
-                    | Native::ObjectAssign
-                    // Serialising walks the value without the machine, so it cannot run a `get`
-                    // trap. Unwrapping the outermost proxy makes the common case -- a wrapper
-                    // whose traps only observe -- work; a proxy *nested* inside is still
-                    // refused rather than serialised as whatever the target holds.
-                    | Native::JsonStringify
-            )
+            && matches!(native, Native::JsonStringify)
         {
             let mut unwrapped = arguments.to_vec();
             unwrapped[0] = unwrap_proxy(&arguments[0]).clone();
@@ -12967,6 +12955,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
+                if arguments
+                    .iter()
+                    .any(|argument| matches!(argument, Value::Proxy(_)))
+                {
+                    return self.object_assign_with_proxies(arguments, instruction);
+                }
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 for source in arguments.iter().skip(1) {
                     for (key, property) in own_properties(&self.intrinsics, source) {
@@ -13128,6 +13122,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 Ok(target)
+            }
+            Native::ObjectFreeze | Native::ObjectSeal
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.proxy_integrity_level(&target, native == Native::ObjectFreeze, instruction)
+            }
+            Native::ObjectIsFrozen | Native::ObjectIsSealed
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.proxy_is_integrity_level(
+                    &target,
+                    native == Native::ObjectIsFrozen,
+                    instruction,
+                )
+            }
+            Native::ObjectIsPrototypeOf => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.is_prototype_of(&target, receiver, instruction)
             }
             // `Object.getOwnPropertyNames` is the `ownKeys` trap too. It lists what is not
             // enumerated as well, so it cannot be answered from `Object.keys`.
@@ -13418,6 +13432,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let value = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                let receiver = arguments.get(3).cloned().unwrap_or_else(|| target.clone());
                 // A typed array's `[[Set]]` writes *through itself*: handed a different
                 // receiver and an index the view does not have, the specification returns true
                 // without even coercing the value, because there is no slot to convert it for.
@@ -13431,7 +13446,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 {
                     return Ok(Value::Boolean(true));
                 }
-                let accepted = self.set_reflect(&target, &key, value, instruction)?;
+                let accepted = self.set_reflect(&target, &key, value, &receiver, instruction)?;
                 Ok(Value::Boolean(accepted))
             }
             Native::ReflectApply => {
@@ -17638,6 +17653,89 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `[[GetPrototypeOf]]`, including a proxy's `getPrototypeOf` trap and its invariant.
+    /// Prototype walks must use this operation rather than reading the compact representation's
+    /// target link, or `for-in`, `instanceof`, and `isPrototypeOf` can disagree with reflection.
+    fn prototype_for(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            self.proxy_get_prototype_of(target, instruction)
+        } else {
+            Ok(prototype_of(target))
+        }
+    }
+
+    /// The machine-aware `OrdinaryHasInstance` walk.  A proxy in the value chain contributes its
+    /// `getPrototypeOf` trap, while a proxy constructor contributes its `get` trap for
+    /// `prototype`; neither may be replaced with the target's private links.
+    fn instance_of_value(
+        &mut self,
+        value: &Value,
+        constructor: &Value,
+        error_prototype: Option<&Value>,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let prototype = match constructor {
+            Value::Proxy(_) => self.read_computed(
+                constructor,
+                &Value::String("prototype".to_owned()),
+                instruction,
+            )?,
+            Value::Function(closure) => match closure.prototype.borrow().clone() {
+                Some(prototype) => prototype,
+                None => return Ok(false),
+            },
+            Value::Native(Native::Error(_)) => match error_prototype {
+                Some(prototype) => prototype.clone(),
+                None => return Ok(false),
+            },
+            Value::Bound(bound) => {
+                return self.instance_of_value(value, &bound.target, error_prototype, instruction);
+            }
+            Value::Native(native) => match native.property("prototype") {
+                Some(prototype) => prototype,
+                None => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        if !is_an_object(&prototype) {
+            return Ok(false);
+        }
+        let mut current = self.prototype_for(value, instruction)?;
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            if matches!(current, Value::Null | Value::Undefined) {
+                return Ok(false);
+            }
+            if strict_equal(&current, &prototype) {
+                return Ok(true);
+            }
+            current = self.prototype_for(&current, instruction)?;
+        }
+        Ok(false)
+    }
+
+    fn is_prototype_of(
+        &mut self,
+        target: &Value,
+        prototype: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let mut current = self.prototype_for(target, instruction)?;
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            if matches!(current, Value::Null | Value::Undefined) {
+                return Ok(Value::Boolean(false));
+            }
+            if strict_equal(&current, prototype) {
+                return Ok(Value::Boolean(true));
+            }
+            current = self.prototype_for(&current, instruction)?;
+        }
+        Ok(Value::Boolean(false))
+    }
+
     /// Bytecode of the function currently executing.
     /// The instruction stream of the running frame, borrowed from `program` rather than `self`.
     ///
@@ -17689,13 +17787,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 // A value with no attribute record -- an array index, a string index -- is
                 // enumerable; only a recorded property can say otherwise.
-                if own_attributes(&self.intrinsics, &level, &key)
-                    .is_none_or(|attributes| attributes.enumerable)
-                {
+                let enumerable = if matches!(level, Value::Proxy(_)) {
+                    let described =
+                        self.proxy_descriptor(&level, &Value::String(key.clone()), current)?;
+                    !matches!(described, Value::Undefined)
+                        && self
+                            .read_property(&described, "enumerable", current)?
+                            .is_truthy()
+                } else {
+                    own_attributes(&self.intrinsics, &level, &key)
+                        .is_none_or(|attributes| attributes.enumerable)
+                };
+                if enumerable {
                     keys.push(Value::String(key));
                 }
             }
-            level = match prototype_of(&level) {
+            level = match self.prototype_for(&level, current)? {
                 Value::Undefined | Value::Null => break,
                 parent => parent,
             };
@@ -22647,6 +22754,127 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(true)
     }
 
+    /// Apply an integrity level to a proxy through its internal methods.  The target is not
+    /// visible to this operation: `preventExtensions`, `ownKeys`, `getOwnPropertyDescriptor`
+    /// and `defineProperty` are all observable traps, and each one carries its own invariant.
+    fn proxy_integrity_level(
+        &mut self,
+        target: &Value,
+        freeze: bool,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !self.proxy_prevent_extensions(target, instruction)? {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Object integrity level could not close the object".to_owned(),
+            });
+        }
+        let keys = self.own_keys(target, instruction)?;
+        for key in keys {
+            let mut data = ObjectData::default();
+            if freeze {
+                let described =
+                    self.proxy_descriptor(target, &Value::String(key.clone()), instruction)?;
+                if matches!(described, Value::Undefined) {
+                    continue;
+                }
+                let described = self.read_descriptor(&described, instruction)?;
+                if described.is_accessor() {
+                    data.set("get", described.get.unwrap_or(Value::Undefined));
+                    data.set("set", described.set.unwrap_or(Value::Undefined));
+                } else {
+                    data.set("value", described.value.unwrap_or(Value::Undefined));
+                    data.set("writable", Value::Boolean(false));
+                }
+            }
+            data.set("configurable", Value::Boolean(false));
+            let descriptor = Value::Object(Rc::new(RefCell::new(data)));
+            self.dispatch_native(
+                Native::ObjectDefineProperty,
+                &Value::Undefined,
+                &[target.clone(), Value::String(key), descriptor],
+                instruction,
+            )?;
+        }
+        Ok(target.clone())
+    }
+
+    /// Test a proxy's integrity level using the proxy's own answers.  In particular, a target
+    /// that is already closed does not make a lying descriptor trap acceptable: the descriptor
+    /// returned through `getOwnPropertyDescriptor` is what `TestIntegrityLevel` observes.
+    fn proxy_is_integrity_level(
+        &mut self,
+        target: &Value,
+        frozen: bool,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if self.proxy_is_extensible(target, instruction)? {
+            return Ok(Value::Boolean(false));
+        }
+        for key in self.own_keys(target, instruction)? {
+            let described = self.proxy_descriptor(target, &Value::String(key), instruction)?;
+            if matches!(described, Value::Undefined) {
+                continue;
+            }
+            let described = self.read_descriptor(&described, instruction)?;
+            if described.configurable != Some(false)
+                || (frozen && !described.is_accessor() && described.writable != Some(false))
+            {
+                return Ok(Value::Boolean(false));
+            }
+        }
+        Ok(Value::Boolean(true))
+    }
+
+    /// `Object.assign` with a proxy source or target.  A proxy source is enumerated by
+    /// `ownKeys`, filtered through its descriptors, and read through its `get` trap; a proxy
+    /// target receives every write through `set`.
+    fn object_assign_with_proxies(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if target.is_nullish() {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Cannot convert undefined or null to object".to_owned(),
+            });
+        }
+        for source in arguments.iter().skip(1) {
+            if source.is_nullish() {
+                continue;
+            }
+            if matches!(source, Value::Proxy(_)) {
+                for key in self.own_keys(source, instruction)? {
+                    let descriptor =
+                        self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
+                    if matches!(descriptor, Value::Undefined)
+                        || !self
+                            .read_property(&descriptor, "enumerable", instruction)?
+                            .is_truthy()
+                    {
+                        continue;
+                    }
+                    let value = self.read_property(source, &key, instruction)?;
+                    self.set_computed(&target, &Value::String(key), value, instruction)?;
+                }
+            } else {
+                for (key, property) in own_properties(&self.intrinsics, source) {
+                    let value = match property {
+                        Property::Value(value) => value,
+                        Property::Accessor { get, .. } => match get {
+                            Some(getter) => {
+                                self.call_value(&getter, source.clone(), Vec::new(), instruction)?
+                            }
+                            None => continue,
+                        },
+                    };
+                    self.set_computed(&target, &Value::String(key), value, instruction)?;
+                }
+            }
+        }
+        Ok(target)
+    }
+
     /// What a `set` trap that answered truthily may not have claimed.
     ///
     /// A handler is free to route a write anywhere it likes -- that is the point of the trap --
@@ -24388,6 +24616,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         target: &Value,
         key: &Value,
         value: Value,
+        receiver: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         if let Value::Proxy(proxy) = target {
@@ -24400,7 +24629,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         inner.clone(),
                         Self::trap_key(key),
                         value.clone(),
-                        target.clone(),
+                        receiver.clone(),
                     ];
                     let answered = self.call_value(&trap, handler, arguments, instruction)?;
                     if !answered.is_truthy() {
@@ -24411,15 +24640,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.check_set_invariant(&inner, key, &value, instruction)?;
                     Ok(true)
                 }
-                None => self.set_reflect(&inner, key, value, instruction),
+                None => self.set_reflect(&inner, key, value, receiver, instruction),
             };
         }
         let name = key.property_key();
-        if !self.write_accepted(target, &name) {
+        self.ordinary_set_reflect(target, &name, value, receiver, instruction)
+    }
+
+    /// The ordinary half of `Reflect.set(target, key, value, receiver)`.  The receiver is where
+    /// a writable data property is created or updated; it is not silently replaced by target.
+    fn ordinary_set_reflect(
+        &mut self,
+        target: &Value,
+        name: &str,
+        value: Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let own = own_property_state(&self.intrinsics, target, name);
+        if let Some((property, attributes)) = own {
+            match property {
+                Property::Accessor {
+                    set: Some(setter), ..
+                } => {
+                    self.call_value(&setter, receiver.clone(), vec![value], instruction)?;
+                    return Ok(true);
+                }
+                Property::Accessor { set: None, .. } => return Ok(false),
+                Property::Value(_) if !attributes.writable => return Ok(false),
+                Property::Value(_) => {}
+            }
+            if !is_reflect_target(receiver) {
+                return Ok(false);
+            }
+            let descriptor = Descriptor {
+                value: Some(value),
+                ..Descriptor::default()
+            };
+            return self.define_on_receiver(receiver, name, &descriptor, instruction);
+        }
+        let parent = self.prototype_for(target, instruction)?;
+        if !matches!(parent, Value::Null | Value::Undefined) {
+            return self.ordinary_set_reflect(&parent, name, value, receiver, instruction);
+        }
+        if !is_reflect_target(receiver) {
             return Ok(false);
         }
-        self.set_computed(target, key, value, instruction)?;
-        Ok(true)
+        self.define_on_receiver(
+            receiver,
+            name,
+            &Descriptor {
+                value: Some(value),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+                ..Descriptor::default()
+            },
+            instruction,
+        )
+    }
+
+    fn define_on_receiver(
+        &mut self,
+        receiver: &Value,
+        name: &str,
+        descriptor: &Descriptor,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
+        if let Some((property, attributes)) = held {
+            match property {
+                Property::Accessor { set: None, .. } => return Ok(false),
+                Property::Value(_) if !attributes.writable => return Ok(false),
+                _ => {}
+            }
+        }
+        if let Value::Proxy(_) = receiver {
+            let object = Self::completed_descriptor(descriptor);
+            return Ok(self
+                .dispatch_native(
+                    Native::ReflectDefineProperty,
+                    &Value::Undefined,
+                    &[receiver.clone(), Value::String(name.to_owned()), object],
+                    instruction,
+                )?
+                .is_truthy());
+        }
+        define_own_property(&self.intrinsics, receiver, name, descriptor)
     }
 
     fn string_constant(&self, index: u32, instruction: usize) -> Result<String, ExecutionError> {
@@ -28694,6 +29001,7 @@ fn error_to_string(value: &Value) -> String {
 /// A right-hand side that is not a function is a TypeError in JavaScript. There is nothing to
 /// throw with yet, so it answers false; that is wrong, and it is the direction that produces a
 /// visibly wrong answer rather than a silently corrupt one.
+#[cfg(test)]
 fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Value>) -> bool {
     let prototype = match constructor {
         Value::Function(closure) => match closure.prototype.borrow().clone() {
