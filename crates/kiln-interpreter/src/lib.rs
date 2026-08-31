@@ -13078,9 +13078,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         // Each of the `Promise` statics reads `this` as the constructor to build its result
-        // with -- `GetPromiseResolve(C)` -- so a primitive there is refused before any of them
-        // looks at its argument. This realm always builds an ordinary promise, but a program
-        // that redirected one of these onto a non-constructor has to be told so.
+        // with -- `NewPromiseCapability(C)` begins `If IsConstructor(C) is false, throw a
+        // TypeError` -- so one that is not a constructor is refused before any of them looks at
+        // its argument. This realm always builds an ordinary promise, but a program that
+        // redirected one of these onto something it cannot `new` has to be told so, and it has
+        // to be told *synchronously*: the refusal happens before the capability exists, so it is
+        // the one failure in a combinator that is not a rejection.
+        //
+        // `IsConstructor` rather than "is an object": `Promise.all.call(eval)` is a call on a
+        // built-in function, which is an object and is not something `new` can reach.
         if matches!(
             native,
             Native::PromiseResolve
@@ -13089,7 +13095,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::PromiseAllSettled
                 | Native::PromiseRace
                 | Native::PromiseAny
-        ) && !is_an_object(receiver)
+        ) && !is_constructor(receiver)
         {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "PromiseCapability constructor is not a constructor".to_owned(),
@@ -13538,8 +13544,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::PromiseRace
             | Native::PromiseAny => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let items = self.drain_iterable(&source, instruction)?;
-                self.combine(native, items)
+                // `IfAbruptRejectPromise`. A combinator builds the promise it will return
+                // *before* it looks at its argument, so every failure after that point -- an
+                // argument that is not iterable, a `Symbol.iterator` that throws, a `next` that
+                // does, a `then` that does -- is reported by rejecting that promise rather than
+                // by throwing out of the call. Throwing synchronously is a different shape of
+                // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
+                // way the specification says it may be written saw an exception where it had
+                // been promised a rejection.
+                let combined = match self.drain_iterable(&source, instruction) {
+                    Ok(items) => self.combine(native, items),
+                    Err(error) => Err(error),
+                };
+                match combined {
+                    Ok(promise) => Ok(promise),
+                    // A failure the machine cannot express as a value -- a step limit, a
+                    // bytecode defect -- is not a rejection and `thrown_value` hands it back.
+                    Err(error) => {
+                        let reason = self.thrown_value(error)?;
+                        let rejected = PromiseState::pending();
+                        self.settle(&rejected, &Settled::Rejected(reason));
+                        Ok(Value::Promise(rejected))
+                    }
+                }
             }
             Native::StringConstructor => {
                 let Some(value) = arguments.first() else {
