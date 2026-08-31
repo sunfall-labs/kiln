@@ -147,6 +147,12 @@ rayon = { version = "1.12", default-features = false }
 # The one realm scheduler. `test-util` is required for deterministic paused-time execution;
 # keep Tokio's surface minimal because its types never cross `kiln-runtime`'s public seam.
 tokio = { version = "1.48", default-features = false, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time", "test-util"] }
+# Keyed supervision for realm-owned async requests. `JoinMap` keeps RequestId cancellation and task
+# failure observation in one place without leaking Tokio types through the HostOps seam.
+tokio-util = { version = "0.7", default-features = false, features = ["join-map"] }
+# Stable whole-runtime counters for developer diagnostics. Keep `tokio_unstable` and exporter
+# integrations out of the shipped runtime; Kiln exposes a small owned snapshot instead.
+tokio-metrics = { version = "0.5", default-features = false, features = ["rt"] }
 # HTTP protocol state machines. Tokio remains the sole runtime; Hyper never crosses the runtime
 # seam, and default features stay off so HTTP/2 and client pools arrive only with explicit work.
 hyper = { version = "1.7", default-features = false, features = ["client", "http1", "server"] }
