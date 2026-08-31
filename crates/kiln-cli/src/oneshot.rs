@@ -249,6 +249,35 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn one_shot_native_node_runs_the_canonical_http_server_roundtrip() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-http-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native HTTP fixture");
+        let source = fixture.join("s01-http-hello.mjs");
+        std::fs::copy(root.join("conformance/server/s01-http-hello.mjs"), &source)
+            .expect("copy canonical native HTTP fixture");
+        let output = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                kiln_proto::NativeProfile::Dev,
+                true,
+            )
+            .expect("run canonical native Node server roundtrip")
+        };
+
+        assert_eq!(output.text, "200 text/plain kiln\n");
+        assert_eq!(output.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_node_run_selects_dual_package_exports_by_request_kind() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-dual-package-fixture-{}",

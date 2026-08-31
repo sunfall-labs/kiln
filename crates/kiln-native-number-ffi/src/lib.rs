@@ -31,7 +31,9 @@ const RUNTIME_ERROR: i32 = -8;
 #[cfg(feature = "realm")]
 mod http {
     use super::INVALID_ARGUMENT;
-    use kiln_runtime::node_http::{Http1Decoder, HttpResponse};
+    use kiln_runtime::node_http::{
+        Http1Decoder, Http1ResponseDecoder, HttpResponse, HttpResponseEvent,
+    };
     use std::slice;
 
     #[repr(C)]
@@ -45,6 +47,24 @@ mod http {
         pub version_minor: u8,
         pub keep_alive: u8,
     }
+
+    #[repr(C)]
+    pub struct ResponseEventView {
+        pub kind: u8,
+        pub reserved: u8,
+        pub status: u16,
+        pub reason: *mut u8,
+        pub reason_capacity: usize,
+        pub reason_len: usize,
+        pub data: *mut u8,
+        pub data_capacity: usize,
+        pub data_len: usize,
+        pub headers: *mut u8,
+        pub headers_capacity: usize,
+        pub headers_len: usize,
+    }
+
+    pub struct ResponseEvents(Vec<HttpResponseEvent>);
 
     /// Allocate an opaque incremental HTTP/1 decoder. The handle never exposes Rust layout.
     #[unsafe(no_mangle)]
@@ -199,6 +219,145 @@ mod http {
         // SAFETY: the caller provides writable storage for at least the encoded length.
         unsafe { std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, encoded.len()) };
         length
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_decoder_create(
+        out: *mut *mut Http1ResponseDecoder,
+    ) -> i32 {
+        if out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        unsafe { out.write(Box::into_raw(Box::new(Http1ResponseDecoder::default()))) };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_decoder_free(decoder: *mut Http1ResponseDecoder) {
+        if !decoder.is_null() {
+            drop(unsafe { Box::from_raw(decoder) });
+        }
+    }
+
+    /// Decode one transport chunk into an ordered batch of head, data, and end events.
+    ///
+    /// The adapter drains every returned event before pushing another chunk. Event bytes are
+    /// copied into caller-owned buffers, so no Rust allocation or layout crosses the ABI.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_decoder_push(
+        decoder: *mut Http1ResponseDecoder,
+        bytes: *const u8,
+        bytes_len: usize,
+        out: *mut *mut ResponseEvents,
+    ) -> i32 {
+        if decoder.is_null() || out.is_null() || (bytes.is_null() && bytes_len != 0) {
+            return INVALID_ARGUMENT;
+        }
+        let chunk = if bytes_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(bytes, bytes_len) }
+        };
+        let Ok(events) = (unsafe { &mut *decoder }).push_events(chunk) else {
+            return -2;
+        };
+        unsafe { out.write(Box::into_raw(Box::new(ResponseEvents(events)))) };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_events_len(
+        events: *const ResponseEvents,
+    ) -> usize {
+        if events.is_null() {
+            return 0;
+        }
+        unsafe { &*events }.0.len()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_events_get(
+        events: *const ResponseEvents,
+        index: usize,
+        out: *mut ResponseEventView,
+    ) -> i32 {
+        if events.is_null() || out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(event) = (unsafe { &*events }).0.get(index) else {
+            return INVALID_ARGUMENT;
+        };
+        let view = unsafe { &mut *out };
+        view.kind = match event {
+            HttpResponseEvent::Head(_) => 1,
+            HttpResponseEvent::Data(_) => 2,
+            HttpResponseEvent::End => 3,
+        };
+        match event {
+            HttpResponseEvent::Head(head) => {
+                let header_len = head
+                    .headers
+                    .iter()
+                    .map(|(name, value)| name.len() + 1 + value.len() + 1)
+                    .sum::<usize>();
+                view.status = head.status;
+                view.reason_len = head.reason.len();
+                view.headers_len = header_len;
+                if head.reason.len() > view.reason_capacity
+                    || header_len > view.headers_capacity
+                    || (view.reason.is_null() && !head.reason.is_empty())
+                    || (view.headers.is_null() && header_len != 0)
+                {
+                    return -3;
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        head.reason.as_ptr(),
+                        view.reason,
+                        head.reason.len(),
+                    )
+                };
+                let mut at = 0;
+                for (name, value) in &head.headers {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            name.as_ptr(),
+                            view.headers.add(at),
+                            name.len(),
+                        );
+                    }
+                    at += name.len();
+                    unsafe { view.headers.add(at).write(0) };
+                    at += 1;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            value.as_ptr(),
+                            view.headers.add(at),
+                            value.len(),
+                        );
+                    }
+                    at += value.len();
+                    unsafe { view.headers.add(at).write(0) };
+                    at += 1;
+                }
+            }
+            HttpResponseEvent::Data(data) => {
+                view.data_len = data.len();
+                if data.len() > view.data_capacity || (view.data.is_null() && !data.is_empty()) {
+                    return -3;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), view.data, data.len()) };
+            }
+            HttpResponseEvent::End => {}
+        };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_events_free(events: *mut ResponseEvents) {
+        if !events.is_null() {
+            drop(unsafe { Box::from_raw(events) });
+        }
     }
 }
 

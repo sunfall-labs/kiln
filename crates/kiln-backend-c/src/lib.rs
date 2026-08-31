@@ -1344,6 +1344,7 @@ int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header
                                    uint8_t *buffer, size_t capacity);
 typedef struct kiln_http1_response_event_view {
     uint8_t kind;
+    uint8_t reserved;
     uint16_t status;
     uint8_t *reason;
     size_t reason_capacity;
@@ -8125,7 +8126,7 @@ static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
                 break;
             }
             event.reason = reason;
-            event.reason_capacity = event.reason_len;
+            event.reason_capacity = reason_len;
             event.data = data;
             event.data_capacity = data_len;
             event.headers = headers_buffer;
@@ -8159,6 +8160,7 @@ static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
                 while (status == KILN_C99_OK && at < event.headers_len) {
                     const char *name = (const char *)event.headers + at;
                     size_t name_len = strlen(name);
+                    char *owned_name;
                     const char *value;
                     size_t value_len;
                     at += name_len + 1;
@@ -8167,8 +8169,15 @@ static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
                     value_len = strlen(value);
                     at += value_len + 1;
                     if (at > event.headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                    status = kiln_c99_put(NULL, headers, name, name_len,
+                    owned_name = name_len == 0 ? NULL : (char *)malloc(name_len);
+                    if (name_len != 0 && owned_name == NULL) {
+                        status = KILN_C99_OUT_OF_MEMORY;
+                        break;
+                    }
+                    if (name_len != 0) memcpy(owned_name, name, name_len);
+                    status = kiln_c99_put(NULL, headers, owned_name, name_len,
                                           kiln_c99_copy_text(value, value_len), 0, NULL);
+                    if (status != KILN_C99_OK) free(owned_name);
                 }
                 if (status == KILN_C99_OK)
                     status = kiln_c99_put(NULL, request->response, "headers", 7, headers, 0,
