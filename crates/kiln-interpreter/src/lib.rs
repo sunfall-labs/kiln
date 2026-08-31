@@ -454,6 +454,26 @@ pub enum Native {
     NodeFsPromises,
     NodeFs,
     NodeFsExistsSync,
+    /// `AbortController`, and the `AbortSignal` namespace its statics hang off.
+    AbortControllerConstructor,
+    AbortSignalConstructor,
+    /// `controller.abort(reason)`, and the two statics that build an already-settled signal.
+    AbortControllerAbort,
+    AbortSignalAbort,
+    AbortSignalTimeout,
+    AbortSignalAny,
+    /// `signal.addEventListener` / `removeEventListener` / `throwIfAborted`.
+    AbortSignalListen {
+        remove: bool,
+    },
+    AbortSignalThrowIfAborted,
+    /// Settle a particular signal later: the receiver is the signal, bound into a timer.
+    AbortSignalSettle,
+    /// Mirror another signal's abort onto this one, for `AbortSignal.any`.
+    AbortSignalFollow,
+    /// `new TextEncoder().encode(text)`.
+    TextEncoderConstructor,
+    TextEncoderEncode,
     /// Any of `node:fs`'s synchronous entry points. One variant because they all end the same
     /// way: this realm's filesystem is Tokio-owned and asynchronous, so none of them can answer,
     /// and which one was asked for adds nothing to that.
@@ -1433,6 +1453,11 @@ impl Native {
             (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
             (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
             (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
+            (Self::AbortSignalConstructor, "abort") => Some(Value::Native(Self::AbortSignalAbort)),
+            (Self::AbortSignalConstructor, "timeout") => {
+                Some(Value::Native(Self::AbortSignalTimeout))
+            }
+            (Self::AbortSignalConstructor, "any") => Some(Value::Native(Self::AbortSignalAny)),
             (Self::NodeFs, "existsSync") => Some(Value::Native(Self::NodeFsExistsSync)),
             // The synchronous readers exist and refuse when *called*, which is the shape
             // `existsSync` already had. A library that merely reaches for one during start-up --
@@ -4948,6 +4973,16 @@ pub struct GeneratorState {
     /// which only ever awaits. An async generator does both, and its driver has to know whether
     /// the consumer's step is finished or whether it is still waiting on something.
     awaiting: bool,
+    /// The value a `.return()` is unwinding towards, while that unwind is *suspended*.
+    ///
+    /// `.return()` unwinds by throwing a marker, and the marker is recognised by the resumption
+    /// that threw it. An async generator can suspend part-way through that unwind -- a `finally`
+    /// block is ordinary code and may `await` -- and it is then resumed by the driver with an
+    /// ordinary `Send`, which knows nothing about a return in flight. Without this the marker
+    /// reached the driver as though it were a thrown value, and the consumer got a promise
+    /// rejected with `[Function: returnSignal]`: not a JavaScript value at all, from a program
+    /// that had merely written `break` inside `for await`.
+    returning: Option<Value>,
 }
 
 impl PartialEq for GeneratorState {
@@ -12696,6 +12731,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
                         kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
+                        kiln_ir::Builtin::AbortController => Native::AbortControllerConstructor,
+                        kiln_ir::Builtin::AbortSignal => Native::AbortSignalConstructor,
+                        kiln_ir::Builtin::TextEncoder => Native::TextEncoderConstructor,
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
                             Native::TypedArrayConstructor(TypedKind::Int8)
@@ -13629,6 +13667,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             running: false,
             done: false,
             awaiting: false,
+            returning: None,
         }))))
     }
 
@@ -14915,6 +14954,136 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                               Tokio-owned and asynchronous"
                         .to_owned(),
                 });
+            }
+            Native::AbortControllerAbort | Native::AbortSignalAbort => {
+                let reason = arguments.first().cloned();
+                let signal = if matches!(native, Native::AbortSignalAbort) {
+                    let signal = abort_signal();
+                    self.run_abort(&signal, reason, instruction)?;
+                    signal
+                } else {
+                    let signal = self.read_property(receiver, "signal", instruction)?;
+                    self.run_abort(&signal, reason, instruction)?;
+                    return Ok(Value::Undefined);
+                };
+                return Ok(signal);
+            }
+            // A signal that aborts itself after a delay. The timer carries the signal as the
+            // receiver of a bound `abort`, which is what lets a `Native` with no state of its
+            // own settle a particular signal later.
+            Native::AbortSignalTimeout => {
+                let signal = abort_signal();
+                let milliseconds = self.as_number_argument(arguments.first(), instruction)?;
+                let reason = self.construct_error(
+                    ErrorKind::Error,
+                    &[Value::String(
+                        "The operation was aborted due to timeout".to_owned(),
+                    )],
+                );
+                if let Value::Object(object) = &reason {
+                    object
+                        .borrow_mut()
+                        .set_non_enumerable("name", Value::String("TimeoutError".to_owned()));
+                }
+                let timer = Timer {
+                    callback: Value::Bound(Rc::new(BoundFunction {
+                        target: Value::Native(Native::AbortSignalSettle),
+                        this_value: signal.clone(),
+                        arguments: vec![reason],
+                        properties: RefCell::new(ObjectData::default()),
+                    })),
+                    arguments: Vec::new(),
+                };
+                let delay = duration_from_milliseconds(milliseconds.max(0.0));
+                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                return Ok(signal);
+            }
+            // `AbortSignal.any(signals)`: one signal that follows whichever of them settles
+            // first, and is already aborted if any of them already is.
+            Native::AbortSignalAny => {
+                let signal = abort_signal();
+                let sources = self
+                    .drain_iterable(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                for source in sources {
+                    if self
+                        .read_property(&source, "aborted", instruction)?
+                        .is_truthy()
+                    {
+                        let reason = self.read_property(&source, "reason", instruction)?;
+                        self.run_abort(&signal, Some(reason), instruction)?;
+                        return Ok(signal);
+                    }
+                    let follower = Value::Bound(Rc::new(BoundFunction {
+                        target: Value::Native(Native::AbortSignalFollow),
+                        this_value: signal.clone(),
+                        arguments: vec![source.clone()],
+                        properties: RefCell::new(ObjectData::default()),
+                    }));
+                    self.dispatch_native(
+                        Native::AbortSignalListen { remove: false },
+                        &source,
+                        &[Value::String("abort".to_owned()), follower],
+                        instruction,
+                    )?;
+                }
+                return Ok(signal);
+            }
+            Native::AbortSignalSettle => {
+                let reason = arguments.first().cloned();
+                self.run_abort(receiver, reason, instruction)?;
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalFollow => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let reason = self.read_property(&source, "reason", instruction)?;
+                self.run_abort(receiver, Some(reason), instruction)?;
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalListen { remove } => {
+                // Only the "abort" type exists on a signal, so a listener for anything else is
+                // registered nowhere rather than never called: there is no second event.
+                if !matches!(arguments.first(), Some(Value::String(kind)) if kind == "abort") {
+                    return Ok(Value::Undefined);
+                }
+                let listener = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let Value::Object(object) = receiver else {
+                    return Ok(Value::Undefined);
+                };
+                let held = object.borrow().get_own(ABORT_LISTENERS).cloned();
+                let Some(Value::Array(listeners)) = held else {
+                    return Ok(Value::Undefined);
+                };
+                if remove {
+                    listeners
+                        .borrow_mut()
+                        .retain(|held| !same_value(held, &listener));
+                } else if is_callable(&listener)
+                    && !listeners
+                        .borrow()
+                        .iter()
+                        .any(|held| same_value(held, &listener))
+                {
+                    listeners.borrow_mut().push(listener);
+                }
+                return Ok(Value::Undefined);
+            }
+            Native::AbortSignalThrowIfAborted => {
+                if self
+                    .read_property(receiver, "aborted", instruction)?
+                    .is_truthy()
+                {
+                    self.caught = Some(self.read_property(receiver, "reason", instruction)?);
+                    return Err(ExecutionError::ThrownAcrossNative);
+                }
+                return Ok(Value::Undefined);
+            }
+            // Rust strings are already UTF-8, so the encoder is the identity on the bytes --
+            // which is the whole of what `TextEncoder` is defined to do.
+            Native::TextEncoderEncode => {
+                let text = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                return Ok(node_bytes_value(text.into_bytes()));
             }
             Native::NodeFsExistsSync => {
                 return Err(ExecutionError::Host {
@@ -20979,7 +21148,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         let instruction = self.instruction;
         match self.resume_catching(generator, resume, instruction)? {
-            // The body threw and nothing in it caught: that is the function's rejection.
+            // The body threw and nothing in it caught: that is the function's rejection -- with
+            // the one exception that is not a thrown value at all. See the same guard in
+            // `drive_async_generator`.
+            Err(Value::Native(Native::ReturnSignal)) => {
+                self.resolve_promise(promise, Value::Undefined);
+            }
             Err(thrown) => self.settle(promise, &Settled::Rejected(thrown)),
             Ok((value, true)) => self.resolve_promise(promise, value),
             Ok((awaited, false)) => {
@@ -21212,7 +21386,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // rather than resuming it and throwing the same thing again -- which is what it
                 // did, and what turned a caught rejection into an uncaught one two lines later.
                 generator.borrow_mut().done = true;
-                self.settle(step, &Settled::Rejected(thrown));
+                // The `.return()` marker is not a thrown value and must never become one. It
+                // reaches here when the unwind it started crossed a suspension this driver did
+                // not recognise, and rejecting with it hands the program a rejection whose
+                // reason is not a JavaScript value at all -- `[Function: returnSignal]`, from
+                // code that had merely written `break` inside `for await`. Ending the step is
+                // what the marker means, so that is what it does.
+                if matches!(thrown, Value::Native(Native::ReturnSignal)) {
+                    let result = iteration_result(Value::Undefined, true);
+                    self.resolve_promise(step, result);
+                } else {
+                    self.settle(step, &Settled::Rejected(thrown));
+                }
             }
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
@@ -21273,7 +21458,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // asked to return, so the value has to be kept here to answer with.
         let returning = match &resume {
             Resume::Return(value) => Some(value.clone()),
-            Resume::Send(_) | Resume::Throw(_) => None,
+            // A `Send` that resumes an unwind already in flight is still that unwind: what is
+            // finishing is the `finally` block which awaited, not the body.
+            Resume::Send(_) | Resume::Throw(_) => generator.borrow().returning.clone(),
         };
         let installed = self.handlers.len();
         self.handlers.push(Handler {
@@ -21285,17 +21472,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let outcome = self.resume_generator_with(generator, resume, instruction);
         self.handlers.truncate(installed);
         match outcome {
-            Ok(value) => Ok(Ok(value)),
+            // Suspended again with the unwind still travelling: remember it, so the resumption
+            // that finishes the `finally` recognises the marker as this return rather than as a
+            // thrown value.
+            Ok(value @ (_, false)) => {
+                generator.borrow_mut().returning = returning;
+                Ok(Ok(value))
+            }
+            Ok(value) => {
+                generator.borrow_mut().returning = None;
+                Ok(Ok(value))
+            }
             Err(ExecutionError::CaughtByHost) => {
                 let caught = self.caught.take().unwrap_or(Value::Undefined);
                 if let (Value::Native(Native::ReturnSignal), Some(value)) = (&caught, returning) {
-                    generator.borrow_mut().done = true;
+                    let mut state = generator.borrow_mut();
+                    state.done = true;
+                    state.returning = None;
+                    drop(state);
                     return Ok(Ok((value, true)));
                 }
+                generator.borrow_mut().returning = None;
                 Ok(Err(caught))
             }
             Err(ExecutionError::GeneratorReturned) => {
-                generator.borrow_mut().done = true;
+                let mut state = generator.borrow_mut();
+                state.done = true;
+                state.returning = None;
+                drop(state);
                 Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
             }
             Err(error) => Err(error),
@@ -24052,6 +24256,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Option<Value>, ExecutionError> {
         Ok(Some(match parent {
             Native::Error(kind) => self.construct_error_reached(kind, arguments, current)?,
+            Native::AbortControllerConstructor => abort_controller(),
+            Native::TextEncoderConstructor => text_encoder(),
+            // `new AbortSignal()` is a TypeError in every engine: a signal is produced by a
+            // controller or by one of the statics, never constructed, and that is the whole of
+            // how cancellation stays one-directional.
+            Native::AbortSignalConstructor => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Illegal constructor".to_owned(),
+                });
+            }
             Native::NodeEventEmitter => node_event_emitter(),
             Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
@@ -24419,6 +24633,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::PromiseConstructor) => {
                 let promise = self.construct_promise(&arguments, current)?;
                 self.stack.push(promise);
+            }
+            Value::Native(Native::AbortControllerConstructor) => {
+                self.stack.push(abort_controller());
+            }
+            Value::Native(Native::TextEncoderConstructor) => {
+                self.stack.push(text_encoder());
+            }
+            // A signal comes from a controller or from one of the statics, never from a caller.
+            Value::Native(Native::AbortSignalConstructor) => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Illegal constructor".to_owned(),
+                });
             }
             Value::Native(
                 kind @ (Native::SetConstructor
@@ -29111,6 +29337,70 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
+    /// The abort algorithm: settle the signal once, then tell everyone who asked.
+    ///
+    /// Idempotent, which is what makes `controller.abort()` safe to call from a `finally` and
+    /// from a timeout that has already fired. The listeners run *after* `aborted` and `reason`
+    /// are visible, because that is the state every one of them reads first.
+    fn run_abort(
+        &mut self,
+        signal: &Value,
+        reason: Option<Value>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let Value::Object(object) = signal else {
+            return Ok(());
+        };
+        if object
+            .borrow()
+            .get_own("aborted")
+            .is_some_and(Value::is_truthy)
+        {
+            return Ok(());
+        }
+        // The default reason is an `AbortError`, which is what a program tests for when it wants
+        // to tell "the caller cancelled this" from "this failed".
+        let reason = match reason {
+            Some(reason) if !matches!(reason, Value::Undefined) => reason,
+            _ => {
+                let error = self.construct_error(
+                    ErrorKind::Error,
+                    &[Value::String("This operation was aborted".to_owned())],
+                );
+                if let Value::Object(error) = &error {
+                    error
+                        .borrow_mut()
+                        .set_non_enumerable("name", Value::String("AbortError".to_owned()));
+                }
+                error
+            }
+        };
+        let listeners = {
+            let mut held = object.borrow_mut();
+            held.set_non_enumerable("aborted", Value::Boolean(true));
+            held.set_non_enumerable("reason", reason);
+            let listeners = match held.get_own(ABORT_LISTENERS) {
+                Some(Value::Array(listeners)) => listeners.borrow().clone(),
+                _ => Vec::new(),
+            };
+            let handler = held.get_own("onabort").cloned();
+            handler
+                .filter(|handler| is_callable(handler))
+                .into_iter()
+                .chain(listeners)
+                .collect::<Vec<_>>()
+        };
+        // One event object, shared by every listener, as a real dispatch would be.
+        let event = ordinary_object([
+            ("type".to_owned(), Value::String("abort".to_owned())),
+            ("target".to_owned(), signal.clone()),
+        ]);
+        for listener in listeners {
+            self.call_value(&listener, signal.clone(), vec![event.clone()], instruction)?;
+        }
+        Ok(())
+    }
+
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
     /// assignment spelling. The write itself still goes through `set_computed` after the same
     /// descriptor probe used by `set_or_throw`, so setters and proxy traps run only once.
@@ -30638,6 +30928,55 @@ fn decode_utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8], end: bool) -> String {
     let tail = pending.split_off(split);
     let complete = std::mem::replace(pending, tail);
     String::from_utf8_lossy(&complete).into_owned()
+}
+
+/// The three reserved slots an `AbortSignal` keeps beside its public shape.
+const ABORT_LISTENERS: &str = "@@abort-listeners";
+
+/// A fresh, un-aborted `AbortSignal`.
+///
+/// An ordinary object rather than an exotic kind: everything a signal does is state plus three
+/// methods, and nothing about it needs the value representation to know it exists. `aborted` and
+/// `reason` are stored rather than derived so a read is a read, and every member is
+/// non-enumerable, which is what keeps `Object.keys(signal)` empty as node's is.
+fn abort_signal() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("aborted", Value::Boolean(false));
+    data.set_non_enumerable("reason", Value::Undefined);
+    data.set_non_enumerable("onabort", Value::Null);
+    data.set_non_enumerable(
+        "addEventListener",
+        Value::Native(Native::AbortSignalListen { remove: false }),
+    );
+    data.set_non_enumerable(
+        "removeEventListener",
+        Value::Native(Native::AbortSignalListen { remove: true }),
+    );
+    data.set_non_enumerable(
+        "throwIfAborted",
+        Value::Native(Native::AbortSignalThrowIfAborted),
+    );
+    data.set_non_enumerable(ABORT_LISTENERS, Value::Array(ArrayData::new(Vec::new())));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// `new AbortController()`: a signal, and the one handle that can abort it.
+///
+/// Handing the two out separately is the whole point -- a callee can be given the signal without
+/// being given the power to fire it -- which is the same split `Proxy.revocable` makes.
+fn abort_controller() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("signal", abort_signal());
+    data.set_non_enumerable("abort", Value::Native(Native::AbortControllerAbort));
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// `new TextEncoder()`. UTF-8 and nothing else, which is all the encoder half is defined to do.
+fn text_encoder() -> Value {
+    let mut data = ObjectData::default();
+    data.set_non_enumerable("encoding", Value::String("utf-8".to_owned()));
+    data.set_non_enumerable("encode", Value::Native(Native::TextEncoderEncode));
+    Value::Object(Rc::new(RefCell::new(data)))
 }
 
 fn url_object(state: UrlState) -> Value {
@@ -34335,6 +34674,18 @@ fn call_native(
         | Native::NodeFs
         | Native::NodeFsExistsSync
         | Native::NodeFsSync
+        | Native::AbortControllerConstructor
+        | Native::AbortSignalConstructor
+        | Native::AbortControllerAbort
+        | Native::AbortSignalAbort
+        | Native::AbortSignalTimeout
+        | Native::AbortSignalAny
+        | Native::AbortSignalListen { .. }
+        | Native::AbortSignalThrowIfAborted
+        | Native::AbortSignalSettle
+        | Native::AbortSignalFollow
+        | Native::TextEncoderConstructor
+        | Native::TextEncoderEncode
         | Native::NodeFsReadFile
         | Native::NodeFsWriteFile
         | Native::NodeFsStat
@@ -38761,6 +39112,14 @@ fn native_is_constructor(native: Native) -> bool {
         // target's chain -- so the rule below cannot see it.
         Native::ProxyConstructor
         | Native::TextDecoderConstructor
+        | Native::TextEncoderConstructor
+        | Native::AbortControllerConstructor
+        // `AbortSignal` is a constructor that *refuses* `new`, exactly as `Symbol` is: a signal
+        // comes from a controller or from one of the statics and never from a caller, which is
+        // what keeps cancellation one-directional. Reported as a constructor so the refusal is
+        // "Illegal constructor" rather than "not a constructor", which is what node says and
+        // what a feature check reads.
+        | Native::AbortSignalConstructor
         | Native::NodeStringDecoderConstructor
         | Native::NodeAsyncResource => true,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
