@@ -389,6 +389,35 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    /// Encode a response whose body will be written incrementally.
+    ///
+    /// HTTP/1.1 uses chunked framing when the caller did not provide a length. The adapter owns
+    /// chunk boundaries; this method owns only the status line and headers, keeping HTTP bytes
+    /// out of the generic stream driver.
+    pub fn encode_stream_head(self, keep_alive: bool) -> Vec<u8> {
+        let reason = self
+            .reason
+            .unwrap_or_else(|| reason_phrase(self.status).to_owned());
+        let mut headers = self.headers;
+        let has_length = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+        let has_transfer_encoding = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"));
+        let has_connection = headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("connection"));
+        let no_body = matches!(self.status, 100..=199 | 204 | 304);
+        if !has_length && !has_transfer_encoding && !no_body {
+            headers.push(("Transfer-Encoding".into(), "chunked".into()));
+        }
+        if !has_connection && !keep_alive {
+            headers.push(("Connection".into(), "close".into()));
+        }
+        encode_head(self.status, &reason, headers)
+    }
+
     pub fn encode(self, keep_alive: bool) -> Vec<u8> {
         let reason = self
             .reason
@@ -407,21 +436,26 @@ impl HttpResponse {
         if !has_connection && !keep_alive {
             headers.push(("Connection".into(), "close".into()));
         }
-        let mut bytes = format!("HTTP/1.1 {} {}\r\n", self.status, reason).into_bytes();
-        for (name, value) in headers {
-            if valid_token(&name) && !value.contains(['\r', '\n']) {
-                bytes.extend_from_slice(name.as_bytes());
-                bytes.extend_from_slice(b": ");
-                bytes.extend_from_slice(value.as_bytes());
-                bytes.extend_from_slice(b"\r\n");
-            }
-        }
-        bytes.extend_from_slice(b"\r\n");
+        let mut bytes = encode_head(self.status, &reason, headers);
         if !no_body {
             bytes.extend_from_slice(&self.body);
         }
         bytes
     }
+}
+
+fn encode_head(status: u16, reason: &str, headers: Vec<(String, String)>) -> Vec<u8> {
+    let mut bytes = format!("HTTP/1.1 {status} {reason}\r\n").into_bytes();
+    for (name, value) in headers {
+        if valid_token(&name) && !value.contains(['\r', '\n']) {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(b": ");
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+        }
+    }
+    bytes.extend_from_slice(b"\r\n");
+    bytes
 }
 
 fn reason_phrase(status: u16) -> &'static str {

@@ -83,6 +83,20 @@ impl StreamDriver {
         self.reading = false;
     }
 
+    /// Resume delivery after a language-level readable paused it.
+    ///
+    /// A read already in flight is deliberately left alone: its completion is retained by the
+    /// adapter, while this method only selects a new host read when none exists. That keeps
+    /// cancellation and transport readiness out of Node's user-visible pause semantics.
+    pub fn resume_reading(&mut self) -> Vec<StreamAction> {
+        self.reading = true;
+        self.next_read_action().into_iter().collect()
+    }
+
+    pub const fn is_reading(&self) -> bool {
+        self.reading
+    }
+
     pub fn write(&mut self, data: Vec<u8>) -> (WriteDisposition, Vec<StreamAction>) {
         let disposition = self.state.enqueue_write(data.clone(), data.len());
         let actions = if disposition.submit_now {
@@ -560,6 +574,28 @@ mod tests {
             Some(vec![StreamAction::Event(StreamEvent::End)])
         );
         assert!(driver.state().read_closed());
+    }
+
+    #[test]
+    fn pause_stops_the_next_read_and_resume_restarts_it() {
+        let resource = ResourceId::new(5);
+        let mut driver = StreamDriver::new(resource, 8);
+        let actions = driver.start_reading();
+        start(&mut driver, &actions[0], 12);
+        driver.pause_reading();
+
+        assert_eq!(
+            driver.completed(completion(12, AsyncHostValue::Bytes(b"held".to_vec()))),
+            Some(vec![StreamAction::Data(b"held".to_vec())])
+        );
+        assert!(!driver.is_reading());
+        assert_eq!(
+            driver.resume_reading(),
+            vec![StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 8,
+            })]
+        );
     }
 
     #[test]
