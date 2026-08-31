@@ -1420,6 +1420,7 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_SYMBOL_FOR),
     emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
+    r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
     emit_method_define!(KILN_C99_METHOD_OBJECT_IS),

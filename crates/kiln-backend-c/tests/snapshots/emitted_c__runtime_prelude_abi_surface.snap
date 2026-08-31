@@ -496,6 +496,8 @@ typedef struct kiln_promise {
 typedef struct kiln_settler {
 typedef struct kiln_regexp {
 typedef struct kiln_symbol {
+typedef struct kiln_registered_symbol {
+static kiln_registered_symbol *kiln_c99_symbol_registry;
 typedef struct kiln_bound {
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
 typedef struct kiln_commonjs_require {
