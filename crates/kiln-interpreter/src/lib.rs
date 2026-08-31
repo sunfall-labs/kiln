@@ -345,6 +345,7 @@ pub enum Native {
     NodeEventOnce,
     NodeEventEmit,
     NodeEventListeners,
+    NodeEventNames,
     NodeEventRemoveListener,
     NodeEventRemoveAllListeners,
     NodeEventSetMaxListeners,
@@ -1278,6 +1279,9 @@ impl Native {
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "listeners") => {
                 Some(Value::Native(Self::NodeEventListeners))
             }
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), "eventNames") => {
+                Some(Value::Native(Self::NodeEventNames))
+            }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeListener" | "off") => {
                 Some(Value::Native(Self::NodeEventRemoveListener))
             }
@@ -1851,6 +1855,7 @@ enum NodeObject {
 #[derive(Debug)]
 struct ReadableState {
     buffer: Vec<Value>,
+    buffered_bytes: usize,
     high_water_mark: usize,
     ended: bool,
     end_emitted: bool,
@@ -2449,6 +2454,7 @@ fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
         Value::ArrayBuffer(buffer) => &buffer.properties,
         Value::DataView(view) => &view.properties,
         Value::RegExp(regexp) => &regexp.properties,
+        Value::Date(date) => &date.properties,
         _ => return None,
     })
 }
@@ -2524,7 +2530,7 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         // An exotic object carries an ordinary store for its named properties, and closing it is
         // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
         // of that store and are unaffected, which is what the specification says too.
-        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+        other if exotic_properties(other).is_some() => {
             exotic_properties(target).is_none_or(|store| store.borrow().is_extensible())
         }
         // Everything left is a primitive or a shape with no store at all. A definition on one is
@@ -2577,7 +2583,7 @@ fn own_property_state(
         },
         // A buffer, a view and a regexp have no exotic keys at all: everything they publish is
         // an accessor on the prototype, so every own property of one is a stored one.
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+        other if exotic_properties(other).is_some() => exotic_properties(target)
             .and_then(|store| store.borrow().get_own_property(key).cloned()),
         // A built-in keeps what a program changed in the realm's store and everything else in
         // the tables, so a property it has never touched still reads as the specification built
@@ -2752,7 +2758,7 @@ fn install_property(
         // An element key never reaches here: `define_own_property` answers those itself, the
         // way it answers an array's `length` itself, because their flags are the specification's
         // rather than the store's.
-        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+        other if exotic_properties(other).is_some() => {
             if let Some(store) = exotic_properties(target)
                 && !exotic_reserved_name(target, key)
             {
@@ -4915,6 +4921,35 @@ impl PartialEq for RegExpData {
     }
 }
 
+/// A `Date`: the instant it names, and the ordinary properties a program hung beside it.
+///
+/// The store is not decoration. A date is an ordinary object in every respect but the instant --
+/// `d.constructor = C` and `class D extends Date {}` are both property writes -- and while there
+/// was nowhere to put one, the first threw "cannot set a property on a date" and the second had
+/// nowhere to record the prototype that makes `new D(0) instanceof D` true.
+#[derive(Debug)]
+pub struct DateData {
+    /// Milliseconds since the epoch. A `Cell` because `d.setFullYear(y)` moves *this* date rather
+    /// than answering a new one.
+    time: std::cell::Cell<f64>,
+    properties: RefCell<ObjectData>,
+}
+
+impl PartialEq for DateData {
+    /// Identity, like every other object: two dates built from the same instant are two dates.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+/// A date at `time`, with an empty property store.
+fn new_date(time: f64) -> Value {
+    Value::Date(Rc::new(DateData {
+        time: std::cell::Cell::new(time),
+        properties: RefCell::new(ObjectData::default()),
+    }))
+}
+
 /// A JavaScript scalar value represented by the interpreter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -4942,7 +4977,7 @@ pub enum Value {
     RegExp(Rc<RegExpData>),
     /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same
     /// instant are still two objects and `===` has to say so.
-    Date(Rc<std::cell::Cell<f64>>),
+    Date(Rc<DateData>),
     /// One of the eight `Temporal` types, held opaquely by the linked calendar engine.
     ///
     /// Its own value kind rather than an object with reserved state, for the same reason `Date` is
@@ -5284,7 +5319,7 @@ impl Value {
             // for any object with no numeric primitive.
             Self::Intl(_) => f64::NAN,
             // A date converts to its instant, which is what makes `end - start` a duration.
-            Self::Date(time) => time.get(),
+            Self::Date(date) => date.time.get(),
             // Only where a number is explicitly asked for; arithmetic refuses the mix.
             Self::BigInt(value) => {
                 num_traits::ToPrimitive::to_f64(value.as_ref()).unwrap_or(f64::NAN)
@@ -5379,7 +5414,7 @@ impl Value {
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
-            Self::Date(time) => date_to_string(time.get()),
+            Self::Date(date) => date_to_string(date.time.get()),
             Self::Temporal(value) => value
                 .to_temporal_string(&kiln_temporal::Options::default())
                 .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
@@ -8106,18 +8141,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
                 message: "node:http request lost its connection".into(),
             })?;
-        // HTTP connections are driven by Hyper through the realm runtime. Their transport read
-        // is already registered there, so applying the generic StreamDriver pause/resume path
-        // would create a second raw TcpRead (or mutate a driver that does not own the read).
-        if owner
-            .borrow()
-            .streams
-            .iter()
-            .find(|stream| stream.resource() == resource)
-            .is_some_and(|stream| stream.runtime_http)
-        {
-            return Ok(result);
-        }
         let actions = {
             let mut owner = owner.borrow_mut();
             let connection = owner
@@ -8173,7 +8196,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             Native::NodeReadablePush => {
                 let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let (event, payload, emit_end, ready) = {
+                let (event, payload, emit_end, ready, call_read) = {
                     let mut state = state.borrow_mut();
                     if matches!(chunk, Value::Null) {
                         state.ended = true;
@@ -8183,18 +8206,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         if emit_end {
                             state.end_emitted = true;
                         }
-                        ("readable", Vec::new(), emit_end, false)
+                        ("readable", Vec::new(), emit_end, false, false)
                     } else {
                         let empty = matches!(&chunk, Value::String(text) if text.is_empty());
                         if !empty && !state.flowing {
+                            state.buffered_bytes = state
+                                .buffered_bytes
+                                .saturating_add(readable_chunk_length(&chunk));
                             state.buffer.push(chunk.clone());
                         }
-                        state.reading = state.buffer.len() < state.high_water_mark && !state.ended;
+                        let wants_more =
+                            state.buffered_bytes < state.high_water_mark && !state.ended;
+                        state.reading = wants_more;
                         (
                             if state.flowing { "data" } else { "readable" },
                             state.flowing.then_some(chunk).into_iter().collect(),
                             false,
-                            state.buffer.len() < state.high_water_mark,
+                            state.buffered_bytes < state.high_water_mark,
+                            empty && call_read_hook && wants_more,
                         )
                     }
                 };
@@ -8215,6 +8244,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
+                if call_read {
+                    let callback = self.read_property(receiver, "_read", instruction)?;
+                    if is_callable(&callback) {
+                        self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
+                    }
+                }
                 return Ok(Value::Boolean(ready));
             }
             Native::NodeReadableRead => {
@@ -8223,13 +8258,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = if state.buffer.is_empty() {
                         Value::Null
                     } else {
-                        state.buffer.remove(0)
+                        let value = state.buffer.remove(0);
+                        state.buffered_bytes = state
+                            .buffered_bytes
+                            .saturating_sub(readable_chunk_length(&value));
+                        value
                     };
                     let emit_end = state.ended && state.buffer.is_empty() && !state.end_emitted;
                     if emit_end {
                         state.end_emitted = true;
                     }
-                    let call_read = matches!(value, Value::Null) && !state.ended && !state.reading;
+                    let call_read = !state.ended
+                        && state.buffered_bytes < state.high_water_mark
+                        && (matches!(value, Value::Null) || state.buffer.is_empty());
                     if call_read {
                         state.reading = true;
                     }
@@ -10311,6 +10352,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
+                // A buffered or ended Readable whose earlier notification had no listener must
+                // announce itself again when `readable` is observed. Registration happens first,
+                // matching EventEmitter ordering and ensuring the new listener receives this
+                // notification rather than another one being lost.
+                if event == "readable"
+                    && let Ok(state) = node_readable_state(receiver)
+                {
+                    let (announce, pull) = {
+                        let mut state = state.borrow_mut();
+                        let announce = state.buffered_bytes != 0 || state.ended;
+                        let pull = !announce && !state.reading && !state.ended;
+                        if pull {
+                            state.reading = true;
+                        }
+                        (announce, pull)
+                    };
+                    sync_readable_public_state(receiver, &state.borrow());
+                    if announce {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            receiver,
+                            &[Value::String("readable".into())],
+                            instruction,
+                        )?;
+                    } else if pull {
+                        let callback = self.read_property(receiver, "_read", instruction)?;
+                        if is_callable(&callback) {
+                            self.call_value(
+                                &callback,
+                                receiver.clone(),
+                                Vec::new(),
+                                instruction,
+                            )?;
+                        }
+                    }
+                }
                 Ok(receiver.clone())
             }
             Native::NodeEventEmit => {
@@ -10346,6 +10423,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .collect(),
                 )))
             }
+            Native::NodeEventNames => Ok(Value::Array(ArrayData::new(
+                object
+                    .borrow()
+                    .node_events
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .filter(|bucket| !bucket.listeners.is_empty())
+                    .map(|bucket| Value::String(bucket.name.clone()))
+                    .collect(),
+            ))),
             Native::NodeEventRemoveListener => {
                 let event = arguments
                     .first()
@@ -10810,13 +10898,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks(runtime)?;
-            // HTTP event dispatch can settle a promise (for example, a response `end`
-            // listener resolving the next keep-alive request). The next fixed-point iteration
-            // drains that reaction before checking HTTP progress again; only a quiescent HTTP
-            // checkpoint reaches the liveness-aware host wait below.
-            if self.checkpoint_runtime_http(runtime)? {
-                continue;
-            }
+            self.checkpoint_runtime_http(runtime)?;
             runtime.enter(|| self.check_unhandled_rejection())?;
             if until_module && self.module_outcome().is_some() {
                 return Ok(());
@@ -10854,13 +10936,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn checkpoint_runtime_http(
         &mut self,
         runtime: &mut RealmRuntime,
-    ) -> Result<bool, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         // Response commands and body wakeups can make Hyper runnable without another HostOps
         // completion. Let Tokio advance those tasks before inspecting their per-connection
         // outputs; otherwise a pipelined request already buffered by Hyper can sit behind an
         // unrelated pending socket read forever.
-        runtime.poll_http_tasks_after_wake();
-        let mut progressed = false;
+        runtime.poll_http_tasks();
         let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
         let servers = shared
             .as_ref()
@@ -10890,7 +10971,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             message: "runtime HTTP connection disappeared at checkpoint".into(),
                         })?;
                 let had_actions = !actions.is_empty();
-                progressed |= had_actions;
                 let had_events = runtime.enter(|| {
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
@@ -10906,13 +10986,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     Ok::<_, ExecutionError>(event_count != 0)
                 })?;
-                progressed |= had_events;
                 if !had_actions && !had_events {
                     break;
                 }
             }
         }
-        Ok(progressed)
+        Ok(())
     }
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
@@ -13624,6 +13703,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeEventOnce
                 | Native::NodeEventEmit
                 | Native::NodeEventListeners
+                | Native::NodeEventNames
                 | Native::NodeEventRemoveListener
                 | Native::NodeEventRemoveAllListeners
                 | Native::NodeEventSetMaxListeners
@@ -13648,7 +13728,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if matches!(
             native,
-            Native::NodeReadablePause
+            Native::NodeReadablePush
+                | Native::NodeReadableRead
+                | Native::NodeReadableDestroy
+                | Native::NodeReadablePause
                 | Native::NodeReadableResume
                 | Native::NodeReadableSetEncoding
         ) {
@@ -15048,7 +15131,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     0 => self.wall_clock_milliseconds(self.clock_capability, instruction)?,
                     1 => match arguments.first() {
                         // `new Date(otherDate)` copies the instant rather than stringifying it.
-                        Some(Value::Date(existing)) => existing.get(),
+                        Some(Value::Date(existing)) => existing.time.get(),
                         Some(Value::String(text)) => parse_date(text),
                         Some(value) => {
                             let primitive = self.as_primitive(value, false, instruction)?;
@@ -15070,7 +15153,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     },
                     _ => date_from_fields(arguments),
                 };
-                Ok(Value::Date(Rc::new(std::cell::Cell::new(time_clip(time)))))
+                Ok(new_date(time_clip(time)))
             }
             Native::RegExpConstructor => {
                 let pattern = match arguments.first() {
@@ -15429,7 +15512,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         // Read before anything below converts an argument, because a conversion can run user
         // code that moves this very date.
-        let time = instant.get();
+        let time = instant.time.get();
         if let Some(field) = method.writes() {
             // Only the parameters the method declares, and beyond the first only those the
             // caller supplied: `setMilliseconds(a, b)` never touches `b`, so a `valueOf` on it
@@ -15444,7 +15527,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(Value::Number(
                 match date_written(method, field, time, &supplied) {
                     Some(updated) => {
-                        instant.set(updated);
+                        instant.time.set(updated);
                         updated
                     }
                     None => f64::NAN,
@@ -16127,7 +16210,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let primitive = match receiver {
             // A date is a value kind here rather than an object, so `ToPrimitive` on one with a
             // number hint is the instant it holds.
-            Value::Date(instant) => Value::Number(instant.get()),
+            Value::Date(instant) => Value::Number(instant.time.get()),
             other => self.as_primitive(other, false, instruction)?,
         };
         if matches!(primitive, Value::Number(number) if !number.is_finite()) {
@@ -26534,10 +26617,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // anything left becomes an own property of the store beside the value. Discarding it
             // outright made `sample.constructor = C` look like it worked and read back as the
             // view's own kind.
-            Value::TypedArray(_)
-            | Value::ArrayBuffer(_)
-            | Value::DataView(_)
-            | Value::RegExp(_) => {
+            other if exotic_properties(other).is_some() => {
                 let name = key.property_key();
                 let Some(store) = exotic_properties(target) else {
                     return Ok(());
@@ -27970,6 +28050,7 @@ fn new_readable_state(
     let public = Rc::new(RefCell::new(ObjectData::default()));
     Rc::new(RefCell::new(ReadableState {
         buffer: Vec::new(),
+        buffered_bytes: 0,
         high_water_mark,
         ended: false,
         end_emitted: false,
@@ -28002,7 +28083,7 @@ fn sync_readable_public_state(receiver: &Value, state: &ReadableState) {
         public.set("ended", Value::Boolean(state.ended));
         public.set("endEmitted", Value::Boolean(state.end_emitted));
         public.set("flowing", Value::Boolean(state.flowing));
-        public.set("length", Value::Number(state.buffer.len() as f64));
+        public.set("length", Value::Number(state.buffered_bytes as f64));
         public.set("highWaterMark", Value::Number(state.high_water_mark as f64));
     }
     if let Value::Object(object) = receiver {
@@ -28372,6 +28453,14 @@ fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
                 value.type_name()
             ),
         }),
+    }
+}
+
+fn readable_chunk_length(value: &Value) -> usize {
+    match value {
+        Value::String(value) => value.len(),
+        Value::TypedArray(value) => value.bytes().len(),
+        _ => 1,
     }
 }
 
@@ -29083,7 +29172,7 @@ fn json_stringify(
         | Value::Intl(_) => Some("{}".to_owned()),
         // A date serialises through `toJSON`, which is its ISO form -- or null when it is invalid,
         // since there is no ISO spelling for that.
-        Value::Date(time) => Some(match iso_string(time.get()) {
+        Value::Date(date) => Some(match iso_string(date.time.get()) {
             Some(text) => json_quote(&text),
             None => "null".to_owned(),
         }),
@@ -31693,6 +31782,7 @@ fn call_native(
         | Native::NodeEventOnce
         | Native::NodeEventEmit
         | Native::NodeEventListeners
+        | Native::NodeEventNames
         | Native::NodeEventRemoveListener
         | Native::NodeEventRemoveAllListeners
         | Native::NodeEventSetMaxListeners
@@ -32170,7 +32260,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         // their kind links to, which is where every accessor and method they publish lives.
         // Answering `false` for all of them made `"byteLength" in buffer` deny a property the
         // read right beside it produces.
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+        other if exotic_properties(other).is_some() => {
             exotic_properties(target).is_some_and(|store| store.borrow().lookup(&name).is_some())
                 || exotic_reserved_name(target, &name)
                 || own_attributes(intrinsics, &prototype_of(target), &name).is_some()
@@ -33488,7 +33578,7 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             Some(index) => valid_integer_index(view, index).is_none(),
             None => remove_exotic_property(&view.properties, &key.property_key()),
         },
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+        other if exotic_properties(other).is_some() => {
             let key = key.property_key();
             match exotic_properties(target) {
                 Some(store) if !exotic_reserved_name(target, &key) => {
@@ -33564,7 +33654,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             );
             entries
         }
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(value)
+        other if exotic_properties(other).is_some() => exotic_properties(value)
             .map(|store| {
                 store
                     .borrow()
@@ -34227,7 +34317,9 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             view.offset
         ),
         Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
-        Value::Date(time) => iso_string(time.get()).unwrap_or_else(|| "Invalid Date".to_owned()),
+        Value::Date(date) => {
+            iso_string(date.time.get()).unwrap_or_else(|| "Invalid Date".to_owned())
+        }
         Value::Temporal(value) => value
             .to_temporal_string(&kiln_temporal::Options::default())
             .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
@@ -37534,6 +37626,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             "once",
             "emit",
             "listeners",
+            "eventNames",
             "removeAllListeners",
             "setMaxListeners",
         ],
@@ -37738,7 +37831,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             keys.extend(from_object(&view.properties.borrow()));
             keys
         }
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+        other if exotic_properties(other).is_some() => exotic_properties(target)
             .map(|store| from_object(&store.borrow()))
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -37973,11 +38066,9 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
             .keys()
             .map(str::to_owned)
             .collect(),
-        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
-            exotic_properties(target)
-                .map(|store| store.borrow().keys().map(str::to_owned).collect())
-                .unwrap_or_default()
-        }
+        other if exotic_properties(other).is_some() => exotic_properties(target)
+            .map(|store| store.borrow().keys().map(str::to_owned).collect())
+            .unwrap_or_default(),
         Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics
@@ -38089,7 +38180,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             Some(index) => valid_integer_index(view, index).map(|_| Attributes::DEFAULT),
             None => view.properties.borrow().get_own_attributes(key),
         },
-        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+        other if exotic_properties(other).is_some() => exotic_properties(target)
             .filter(|_| !exotic_reserved_name(target, key))
             .and_then(|store| store.borrow().get_own_attributes(key)),
         // A string's characters are own properties, and immovable ones: nothing can rewrite or
@@ -39102,12 +39193,12 @@ mod tests {
             vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 7),
             Ok(Value::Number(1_725_000_123_456.25))
         );
-        assert_eq!(
+        // Compared by instant rather than by value: a date is an object, so two of them are
+        // never equal, and what this asserts is which clock the constructor read.
+        assert!(matches!(
             vm.dispatch_native(Native::DateConstructor, &Value::Undefined, &[], 8),
-            Ok(Value::Date(Rc::new(std::cell::Cell::new(
-                1_725_000_123_456.0
-            ))))
-        );
+            Ok(Value::Date(date)) if date.time.get() == 1_725_000_123_456.0
+        ));
         assert_eq!(
             vm.dispatch_native(Native::PerformanceNow, &Value::Undefined, &[], 9),
             Ok(Value::Number(0.0))
@@ -39341,7 +39432,7 @@ mod tests {
             locale: None,
         };
         let mut vm = test_vm(&program, &mut host);
-        let date = Value::Date(Rc::new(std::cell::Cell::new(0.0)));
+        let date = new_date(0.0);
 
         assert_eq!(
             vm.dispatch_native(Native::Date(DateMethod::ToIsoString), &date, &[], 0),
