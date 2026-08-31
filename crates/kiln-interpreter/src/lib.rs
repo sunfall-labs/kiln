@@ -2822,6 +2822,48 @@ fn array_set_length(
     Ok(reached == wanted)
 }
 
+/// What an integer-indexed `[[DefineOwnProperty]]` does with a descriptor.
+///
+/// Three answers rather than a boolean, because the middle one is a *call*: an accepted
+/// definition ends in `ToNumber` -- or `ToBigInt` -- of the value, which is the program's own
+/// method and may throw or detach the buffer it was aimed at. Naming the outcomes keeps the
+/// refusals in one place, so the machine's spelling of this operation and the pure one cannot
+/// disagree about which descriptors an element accepts.
+enum IndexedDefinition {
+    /// The key reaches no live element, or the descriptor asks for a flag no element can have.
+    Refused,
+    /// Accepted, and it names a value to convert and store at this index.
+    Stores(usize),
+    /// Accepted, and it names no value, so there is nothing to write.
+    Accepted,
+}
+
+/// `IntegerIndexedDefineOwnProperty` up to the write, or `None` when the name is not an element
+/// key at all and the ordinary definition is the one that should run.
+fn indexed_definition(
+    view: &TypedArrayData,
+    key: &str,
+    descriptor: &Descriptor,
+) -> Option<IndexedDefinition> {
+    let index = canonical_numeric_index(key)?;
+    let Some(at) = valid_integer_index(view, index) else {
+        return Some(IndexedDefinition::Refused);
+    };
+    // Every flag of an integer-indexed property is fixed by the specification rather than
+    // stored, so a descriptor that asks for a different one is refused whatever the view holds.
+    if descriptor.is_accessor()
+        || descriptor.configurable == Some(false)
+        || descriptor.enumerable == Some(false)
+        || descriptor.writable == Some(false)
+    {
+        return Some(IndexedDefinition::Refused);
+    }
+    Some(match descriptor.value {
+        Some(_) => IndexedDefinition::Stores(at),
+        None => IndexedDefinition::Accepted,
+    })
+}
+
 fn define_own_property(
     intrinsics: &Intrinsics,
     target: &Value,
@@ -2837,27 +2879,23 @@ fn define_own_property(
         return array_set_length(items, descriptor);
     }
     // An integer-indexed exotic object answers `[[DefineOwnProperty]]` itself for every element
-    // key, and it too has to run *instead of* the ordinary one: the flags of such a property are
-    // the specification's rather than the store's, so a descriptor that asks for any of them
-    // differently is refused whatever the current state says, and an element key the view cannot
-    // reach is refused rather than created as a named property.
+    // key, and it too has to run *instead of* the ordinary one. The conversion the definition
+    // ends in is the program's own method, so [`Vm::define_own`] is the spelling every machine
+    // caller uses; this one writes what it was handed, which is the same answer for every value
+    // that is already a number.
     if let Value::TypedArray(view) = target
-        && let Some(index) = canonical_numeric_index(key)
+        && let Some(outcome) = indexed_definition(view, key, descriptor)
     {
-        let Some(at) = valid_integer_index(view, index) else {
-            return Ok(false);
-        };
-        if descriptor.is_accessor()
-            || descriptor.configurable == Some(false)
-            || descriptor.enumerable == Some(false)
-            || descriptor.writable == Some(false)
-        {
-            return Ok(false);
-        }
-        if let Some(value) = &descriptor.value {
-            view.set(at, value)?;
-        }
-        return Ok(true);
+        return Ok(match outcome {
+            IndexedDefinition::Refused => false,
+            IndexedDefinition::Accepted => true,
+            IndexedDefinition::Stores(at) => {
+                if let Some(value) = &descriptor.value {
+                    view.set(at, value)?;
+                }
+                true
+            }
+        });
     }
     let Some((current, attributes)) = own_property_state(intrinsics, target, key) else {
         if !is_extensible_target(intrinsics, target) {
@@ -12341,7 +12379,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 continue;
             }
-            if !define_own_property(&self.intrinsics, target, &key, &descriptor)? {
+            if !self.define_own(target, &key, &descriptor, instruction)? {
                 return Err(ExecutionError::TypeErrorMessage {
                     message: refusal(&self.intrinsics, target, &key),
                 });
@@ -14059,7 +14097,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map_or_else(String::new, Value::property_key);
                 let source = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let descriptor = self.read_descriptor(&source, instruction)?;
-                let defined = define_own_property(&self.intrinsics, &target, &key, &descriptor)?;
+                let defined = self.define_own(&target, &key, &descriptor, instruction)?;
                 if matches!(native, Native::ReflectDefineProperty) {
                     return Ok(Value::Boolean(defined));
                 }
@@ -24803,10 +24841,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "toString" if view.kind == TypedKind::Uint8 => {
                     Value::Native(Native::NodeBufferToString)
                 }
-                // Everything else comes from the same table `%TypedArray%.prototype` answers
-                // from, so an instance and the prototype can never resolve a name differently.
-                other => match typed_array_method(other) {
-                    Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                // The chain a view actually has, walked in the order it has it:
+                // `Int8Array.prototype`, then `%TypedArray%.prototype` where the shared methods
+                // live, then `Object.prototype`. Each step asks the realm's store before its
+                // table, so a program that put a property on any of the three -- or replaced a
+                // method on one -- sees its change from an instance. Answering straight from
+                // the shared table skipped the first two links entirely, and
+                // `TypedArray.prototype.foo = 1` was invisible to every view in the realm.
+                other => match table_step(
+                    &self.intrinsics,
+                    PrototypeTable::TypedArrayFor(view.kind),
+                    other,
+                    Value::Undefined,
+                ) {
+                    Value::Undefined => match table_step(
+                        &self.intrinsics,
+                        PrototypeTable::TypedArray,
+                        other,
+                        typed_array_method(other),
+                    ) {
+                        Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                        found => found,
+                    },
                     found => found,
                 },
             },
@@ -25214,11 +25270,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         if let Value::TypedArray(view) = target
-            && let Some(index) = typed_array_index(key)
+            && let Some(index) = canonical_numeric_index(&key.property_key())
         {
-            // Out of range is `undefined`, and never an ordinary property: a typed array's
-            // indices are its whole contents.
-            return view.get(index).unwrap_or(Value::Undefined);
+            // Every element key is the view's own answer, and `undefined` when it reaches no
+            // slot. Never an ordinary property and never a question for the chain: that is what
+            // separates `sample[1.5]`, which is `undefined` however the prototype is decorated,
+            // from `sample["1.0"]`, which is an ordinary name and inherits like any other.
+            return valid_integer_index(view, index)
+                .and_then(|at| view.get(at))
+                .unwrap_or(Value::Undefined);
         }
         // `s[0]` is the character at that index, as a one-character string. Indices are UTF-16
         // code units, which is the unit `length` counts in, so the two agree on what is in range.
@@ -25432,7 +25492,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Overridden::Removed | Overridden::Untouched => None,
                 }
             }
-            _ => None,
+            // An exotic object's store can hold an accessor too, and only this spelling of the
+            // read reaches a computed key: `Object.defineProperty(sample, key, { get })` where
+            // `key` is a variable was answered by the prototype the getter was shadowing.
+            _ => self.stored_property(target, &property_key),
         };
         match accessor {
             Some(Property::Accessor { get, .. }) => match get {
@@ -26370,7 +26433,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?
                 .is_truthy());
         }
-        define_own_property(&self.intrinsics, receiver, name, descriptor)
+        self.define_own(receiver, name, descriptor, instruction)
+    }
+
+    /// `[[DefineOwnProperty]]`, with the one conversion only the machine can run.
+    ///
+    /// An accepted integer-indexed definition ends in `IntegerIndexedElementSet`, which is
+    /// `ToNumber` -- or `ToBigInt` -- of the descriptor's value. That is the program's own
+    /// method: it can throw, and it can detach the buffer the write was aimed at, which is why
+    /// the write asks again rather than trusting the index the decision handed it. Every other
+    /// definition is the free function's, unchanged.
+    fn define_own(
+        &mut self,
+        target: &Value,
+        key: &str,
+        descriptor: &Descriptor,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        if let Value::TypedArray(view) = target
+            && let Some(outcome) = indexed_definition(view, key, descriptor)
+        {
+            let view = Rc::clone(view);
+            return match outcome {
+                IndexedDefinition::Refused => Ok(false),
+                IndexedDefinition::Accepted => Ok(true),
+                IndexedDefinition::Stores(at) => {
+                    let value = descriptor.value.clone().unwrap_or(Value::Undefined);
+                    let element = self.as_element(view.kind, &value, instruction)?;
+                    view.set(at, &element)?;
+                    Ok(true)
+                }
+            };
+        }
+        define_own_property(&self.intrinsics, target, key, descriptor)
     }
 
     fn string_constant(&self, index: u32, instruction: usize) -> Result<String, ExecutionError> {
@@ -31037,7 +31132,21 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                     name.as_str(),
                     "length" | "byteLength" | "byteOffset" | "BYTES_PER_ELEMENT" | "buffer"
                 )
+                // The same two links the read walks, so `in` and the read cannot disagree about
+                // a name a program put on either view prototype.
+                || own_attributes(
+                    intrinsics,
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(view.kind))),
+                    &name,
+                )
+                .is_some()
                 || !matches!(typed_array_method(&name), Value::Undefined)
+                || own_attributes(
+                    intrinsics,
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray)),
+                    &name,
+                )
+                .is_some()
                 || !matches!(
                     inherited_object_property(intrinsics, &name),
                     Value::Undefined
@@ -32219,11 +32328,6 @@ fn is_pattern_whitespace(character: char) -> bool {
         character,
         '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
     )
-}
-
-/// A typed array integer index, accepting a numeric key or its canonical decimal spelling.
-fn typed_array_index(key: &Value) -> Option<usize> {
-    array_index(key)
 }
 
 /// `CanonicalNumericIndexString(P)`: the number a property name spells, when the name is exactly
