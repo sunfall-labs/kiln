@@ -949,7 +949,9 @@ method_ids! {
     (KILN_C99_METHOD_NODE_HTTP_REQUEST, 281, NodeHttp),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE, 282, NodeHttp),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_END, 283, NodeHttp),
-    (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284, NodeHttp, NodeNet),
+    /* Three groups, and no precedence between them: `kiln_c99_invoke_method` routes this
+     * code by receiver before it consults any group. See the comment there. */
+    (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284, NodeHttp, NodeNet, NodeStream),
     (KILN_C99_METHOD_NODE_NET_CONNECT, 338, Direct, NodeNet),
     (KILN_C99_METHOD_URL_SEARCH_PARAMS_GET, 339, Direct),
     (KILN_C99_METHOD_BUFFER_FROM, 340, Buffer),
@@ -13193,12 +13195,28 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_EVENT)) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_NET)) {
-        return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+    /* `setEncoding` is the one method name three unrelated Node receivers own: a `net.Socket`,
+     * an `http.IncomingMessage`, and a `stream.Readable`. A dispatch group answers "which handler
+     * owns this code", so a code carrying three group bits is answered by whichever group happens
+     * to be tested first -- which is not a property of the call. Route this one by the receiver's
+     * own hidden state, above every group test, so the name resolves to the object it was called
+     * on rather than to the order these ifs are written in. */
+    if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            if (kiln_c99_node_hidden_pointer(receiver, "@@node:socket", 13) != NULL) {
+                return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+            }
+            if (kiln_c99_node_hidden_pointer(receiver, "@@node:client", 13) != NULL ||
+                kiln_c99_node_hidden_pointer(receiver, "@@node:response", 15) != NULL) {
+                return kiln_c99_node_http(host, result, code, receiver, args, argc, depth,
+                                          thrown);
+            }
+        }
+        /* A plain `stream.Readable`, and the one path that refuses a receiver owning none of
+         * that state -- by name, from the handler whose prototype the method came off. */
+        return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING &&
-        receiver.tag == KILN_VALUE_OBJECT &&
-        kiln_c99_node_hidden_pointer(receiver, "@@node:socket", 13) != NULL) {
+    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_NET)) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_HTTP)) {
