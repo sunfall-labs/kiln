@@ -9,6 +9,7 @@ mod http_body;
 mod http_transport;
 mod hyper_http;
 pub mod node_http;
+pub mod node_http_agent;
 pub mod node_net;
 pub mod node_stream;
 
