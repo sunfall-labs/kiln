@@ -2096,7 +2096,8 @@ mod tests {
     fn pinned_express_graph_has_no_function_with_caller_relative_globals() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let entry = root.join("conformance/server/packages/s05-express.mjs");
-        if !entry.exists() {
+        let express = root.join("conformance/server/packages/node_modules/express/package.json");
+        if !entry.exists() || !express.is_file() {
             return;
         }
         let resolver = NodeRuntimeResolver::new(&root).expect("Node resolver");
