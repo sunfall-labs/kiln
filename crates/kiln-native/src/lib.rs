@@ -23,8 +23,9 @@ use kiln_artifact_cache::{
 #[cfg(test)]
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, EmissionPolicy, EmitError, emit_module_with_logical_path_and_policy,
-    emit_runtime_module_with_logical_path, emit_with_policy,
+    C_ABI_VERSION, EmissionPolicy, EmissionStringPolicy, EmitError,
+    emit_module_with_logical_path_and_policy, emit_runtime_module_with_logical_path,
+    emit_with_policy,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
@@ -124,10 +125,12 @@ impl NativeBuildOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NativeRealmPolicy {
     pub host_clock: bool,
     pub entropy: NativeEntropyPolicy,
+    pub timezone: NativeStringPolicy,
+    pub locale: NativeStringPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -138,11 +141,21 @@ pub enum NativeEntropyPolicy {
     Host,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NativeStringPolicy {
+    #[default]
+    Deterministic,
+    Named(String),
+    Host,
+}
+
 impl NativeRealmPolicy {
     pub const fn host_clock() -> Self {
         Self {
             host_clock: true,
             entropy: NativeEntropyPolicy::Deterministic,
+            timezone: NativeStringPolicy::Deterministic,
+            locale: NativeStringPolicy::Deterministic,
         }
     }
 
@@ -150,10 +163,20 @@ impl NativeRealmPolicy {
         self.entropy = entropy;
         self
     }
+
+    pub fn with_timezone(mut self, timezone: NativeStringPolicy) -> Self {
+        self.timezone = timezone;
+        self
+    }
+
+    pub fn with_locale(mut self, locale: NativeStringPolicy) -> Self {
+        self.locale = locale;
+        self
+    }
 }
 
 impl NativeRealmPolicy {
-    const fn emission(self) -> EmissionPolicy {
+    fn emission(&self) -> EmissionPolicy {
         EmissionPolicy {
             host_clock: self.host_clock,
             entropy: match self.entropy {
@@ -164,6 +187,16 @@ impl NativeRealmPolicy {
                     kiln_backend_c::EmissionEntropyPolicy::Seeded(seed)
                 }
                 NativeEntropyPolicy::Host => kiln_backend_c::EmissionEntropyPolicy::Host,
+            },
+            timezone: match &self.timezone {
+                NativeStringPolicy::Deterministic => EmissionStringPolicy::Deterministic,
+                NativeStringPolicy::Named(value) => EmissionStringPolicy::Named(value.clone()),
+                NativeStringPolicy::Host => EmissionStringPolicy::Host,
+            },
+            locale: match &self.locale {
+                NativeStringPolicy::Deterministic => EmissionStringPolicy::Deterministic,
+                NativeStringPolicy::Named(value) => EmissionStringPolicy::Named(value.clone()),
+                NativeStringPolicy::Host => EmissionStringPolicy::Host,
             },
         }
     }
@@ -976,7 +1009,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path, options.realm)?;
+            let emitted = emit_native_graph_module(node, &logical_path, &options.realm)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1282,7 +1315,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path, options.realm)?;
+            let emitted = emit_native_graph_module(node, &logical_path, &options.realm)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1735,7 +1768,7 @@ fn native_builtin_supports_export(
 fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
-    policy: NativeRealmPolicy,
+    policy: &NativeRealmPolicy,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
         ModuleSource::NodeBuiltin(builtin) => {
@@ -3730,7 +3763,7 @@ mod tests {
         let emitted = emit_native_graph_module(
             &node,
             ".kiln/builtins/events.builtin",
-            NativeRealmPolicy::default(),
+            &NativeRealmPolicy::default(),
         )
         .expect("events materializes");
 

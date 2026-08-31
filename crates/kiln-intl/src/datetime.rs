@@ -52,7 +52,7 @@ use icu_time::zone::iana::IanaParserExtended;
 use icu_time::zone::{UtcOffset, VariantOffsetsCalculator};
 use icu_time::{DateTime, TimeZone, ZonedDateTime};
 
-use crate::locale::{RelevantKey, Resolution, resolve};
+use crate::locale::{RelevantKey, Resolution};
 use crate::{Error, Setting};
 
 /// The kinds of value `format` accepts besides a time value.
@@ -383,6 +383,15 @@ fn parsed_calendar_algorithm(value: &str) -> Option<CalendarAlgorithm> {
 impl DateTimeFormat {
     /// Build a formatter. `options` has already been read off the options object, in order.
     pub fn new(requested: &[String], options: Options) -> Result<Self, Error> {
+        Self::new_with_default(requested, crate::locale::DEFAULT, options)
+    }
+
+    /// Build with the default locale selected by the containing realm.
+    pub fn new_with_default(
+        requested: &[String],
+        default: &str,
+        options: Options,
+    ) -> Result<Self, Error> {
         // A `-u-` keyword type is case-insensitive and canonically lower case, so
         // `{ calendar: "GREGORY" }` and `-u-ca-gregory` are one request rather than two.
         let calendar_request = options
@@ -398,12 +407,17 @@ impl DateTimeFormat {
         // `hour12` does not merely outrank `hourCycle`: it removes the `hc` keyword from the
         // resolved locale altogether, so `en-US-u-hc-h11` with `hour12: false` reports `en-US`.
         let ignores_hour_cycle = options.hour12.is_some();
-        let resolution = resolve(requested, &keys, |key, value| match key {
-            "ca" => CALENDARS.contains(&value),
-            "nu" => numbering_system_is_known(value),
-            "hc" => !ignores_hour_cycle && HOUR_CYCLES.contains(&value),
-            _ => false,
-        });
+        let resolution = crate::locale::resolve_with_default(
+            requested,
+            default,
+            &keys,
+            |key, value| match key {
+                "ca" => CALENDARS.contains(&value),
+                "nu" => numbering_system_is_known(value),
+                "hc" => !ignores_hour_cycle && HOUR_CYCLES.contains(&value),
+                _ => false,
+            },
+        );
 
         let mut preferences: icu_datetime::DateTimeFormatterPreferences =
             resolution.icu().clone().into();
