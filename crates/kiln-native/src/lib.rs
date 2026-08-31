@@ -4633,7 +4633,7 @@ mod tests {
         let project = TestDirectory::new("native-node-builtin-gate");
         let entry = project.path.join("main.mjs");
         fs::write(&entry, "export const marker = 1;\n").expect("write entry");
-        let builtin_path = NodeBuiltin::Path.virtual_path(&project.path);
+        let builtin_path = NodeBuiltin::QueryString.virtual_path(&project.path);
         let entry_program = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
@@ -4647,7 +4647,7 @@ mod tests {
                 local_count: 1,
                 functions: Vec::new(),
             },
-            dependencies: vec!["node:path".to_owned()],
+            dependencies: vec!["node:querystring".to_owned()],
             imports: Vec::new(),
             exports: vec![ExportBinding {
                 exported: "marker".to_owned(),
@@ -4661,7 +4661,7 @@ mod tests {
                 &project.path,
                 [(
                     entry.clone(),
-                    "node:path".to_owned(),
+                    "node:querystring".to_owned(),
                     NodeRequestKind::Import,
                     builtin_path,
                 )],
@@ -4678,8 +4678,12 @@ mod tests {
         )
         .expect("typed node graph");
 
-        validate_native_node_builtins(&graph).expect("node:path materializes natively");
-        assert!(native_builtin_body(NodeBuiltin::Path).is_some());
+        assert_eq!(
+            validate_native_node_builtins(&graph)
+                .expect_err("unmaterialized builtin must fail")
+                .to_string(),
+            "native Node execution does not yet materialize the `node:querystring` builtin"
+        );
         assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
         assert!(!native_builtin_supports_export(
             NodeBuiltin::QueryString,
@@ -4735,6 +4739,7 @@ mod tests {
         assert!(emitted.source.contains("exports[1] = constructor;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_some());
         assert!(native_builtin_body(NodeBuiltin::Path).is_some());
+        assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
     }
 
     #[test]
@@ -4748,6 +4753,7 @@ mod tests {
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_some());
         assert!(native_builtin_body(NodeBuiltin::Path).is_some());
+        assert!(native_builtin_supports_export(NodeBuiltin::Path, "resolve"));
     }
 
     #[test]
