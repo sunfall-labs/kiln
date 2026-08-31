@@ -854,6 +854,22 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
 #define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
 #define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
+#define KILN_C99_METHOD_NODE_STREAM 360
+#define KILN_C99_METHOD_NODE_READABLE 361
+#define KILN_C99_METHOD_NODE_WRITABLE 362
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
+#define KILN_C99_METHOD_NODE_READABLE_READ 366
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
+#define KILN_C99_METHOD_NODE_WRITABLE_END 373
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -1867,6 +1883,9 @@ static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t 
 static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
                                     const kiln_value *args, size_t argc, int depth,
                                     kiln_value *thrown);
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
+                                kiln_value receiver, const kiln_value *args, size_t argc,
+                                int depth, kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -2011,6 +2030,148 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
     value.ptr = ptr;
     value.len = len;
     return value;
+}
+
+/* Realm stream semantics. The transport adapters only feed data and lifecycle events into these
+ * ordinary objects; no socket, reactor, clock, or scheduler state is duplicated here. */
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
+                                kiln_value receiver, const kiln_value *args, size_t argc,
+                                int depth, kiln_value *thrown) {
+    kiln_value object = receiver;
+    kiln_value ignored;
+    kiln_property *buffer;
+    int status;
+    if (code == KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL) {
+        *result = argc > 1 ? args[1] : kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_STREAM_FINISHED) {
+        kiln_value stream = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value callback = argc > 1 ? args[argc - 1] : kiln_c99_undefined();
+        kiln_value ended = kiln_c99_undefined();
+        kiln_value event;
+        kiln_value once_args[2];
+        if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
+        if (stream.tag != KILN_VALUE_OBJECT) return kiln_c99_throw_not_a(thrown, stream, "stream");
+        status = kiln_c99_get(host, stream, "writableEnded", 13, &ended, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_truthy(ended)) {
+            status = kiln_c99_get(host, stream, "readableEnded", 13, &ended, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            event = kiln_c99_copy_text(kiln_c99_truthy(ended) ? "end" : "finish",
+                                       kiln_c99_truthy(ended) ? 3 : 6);
+            once_args[0] = event;
+            once_args[1] = callback;
+            status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE,
+                                         stream, once_args, 2, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            status = kiln_c99_call(host, &ignored, callback, kiln_c99_undefined(), NULL, 0,
+                                   depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_STREAM || code == KILN_C99_METHOD_NODE_READABLE ||
+        code == KILN_C99_METHOD_NODE_WRITABLE) {
+        if (object.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&object);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                     object, NULL, 0, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (code == KILN_C99_METHOD_NODE_READABLE) {
+            kiln_value queue;
+            status = kiln_c99_new_array(&queue);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "@@node:readable", 15, queue, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "readableEnded", 13, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "push", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PUSH));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "read", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_READ));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_DESTROY));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pause", 5, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PAUSE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "resume", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_RESUME));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "setEncoding", 11, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pipe", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PIPE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "unpipe", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_UNPIPE));
+        } else if (code == KILN_C99_METHOD_NODE_WRITABLE) {
+            status = kiln_c99_put(NULL, object, "writableEnded", 13, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "writableFinished", 16, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "write", 5, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_WRITE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "end", 3, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_END));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_DESTROY));
+        }
+        *result = object;
+        return status;
+    }
+    if (receiver.tag != KILN_VALUE_OBJECT) return kiln_c99_throw_not_a(thrown, receiver, "stream");
+    buffer = kiln_c99_own_private(receiver, "@@node:readable", 15);
+    if (code == KILN_C99_METHOD_NODE_READABLE_PUSH) {
+        kiln_value chunk = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value emit_args[2];
+        if (buffer == NULL || buffer->value.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, receiver, "Readable");
+        if (chunk.tag == KILN_VALUE_NULL) {
+            status = kiln_c99_put(NULL, receiver, "readableEnded", 13, kiln_c99_boolean(1), 0, NULL);
+            emit_args[0] = kiln_c99_copy_text("end", 3);
+            status = status == KILN_C99_OK ? kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown) : status;
+            *result = kiln_c99_boolean(0);
+            return status;
+        }
+        status = kiln_c99_array_push(buffer->value, chunk);
+        emit_args[0] = kiln_c99_copy_text("readable", 8);
+        emit_args[1] = chunk;
+        if (status == KILN_C99_OK) status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown);
+        *result = kiln_c99_boolean(1);
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_READ) {
+        kiln_array *queue;
+        size_t index;
+        if (buffer == NULL || buffer->value.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, receiver, "Readable");
+        queue = kiln_c99_array_of(buffer->value);
+        if (queue->count == 0) { *result = kiln_c99_null(); return KILN_C99_OK; }
+        *result = queue->elements[0];
+        for (index = 1; index < queue->count; ++index) queue->elements[index - 1] = queue->elements[index];
+        queue->count -= 1;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_PAUSE || code == KILN_C99_METHOD_NODE_READABLE_RESUME ||
+        code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING || code == KILN_C99_METHOD_NODE_READABLE_UNPIPE) {
+        *result = receiver; return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_PIPE) { *result = argc > 0 ? args[0] : kiln_c99_undefined(); return KILN_C99_OK; }
+    if (code == KILN_C99_METHOD_NODE_WRITABLE_WRITE) {
+        kiln_value hook;
+        status = kiln_c99_get(host, receiver, "_write", 6, &hook, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_is_callable(hook)) {
+            kiln_value callback = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+            kiln_value write_args[3] = { argc > 0 ? args[0] : kiln_c99_undefined(), kiln_c99_copy_text("buffer", 6), callback };
+            status = kiln_c99_call(host, &ignored, hook, receiver, write_args, 3, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = kiln_c99_boolean(1); return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_WRITABLE_END) {
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+            status = kiln_c99_node_stream(host, &ignored, KILN_C99_METHOD_NODE_WRITABLE_WRITE, receiver, args, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_put(NULL, receiver, "writableEnded", 13, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, receiver, "writableFinished", 16, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) { kiln_value emit_args[1] = { kiln_c99_copy_text("finish", 6) }; status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown); }
+        *result = receiver; return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_DESTROY || code == KILN_C99_METHOD_NODE_WRITABLE_DESTROY) {
+        kiln_value emit_args[1] = { kiln_c99_copy_text("close", 5) };
+        status = kiln_c99_put(NULL, receiver, "destroyed", 9, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown);
+        *result = receiver; return status;
+    }
+    return KILN_C99_CONTROL_ERROR;
 }
 
 static kiln_value kiln_c99_undefined(void) {
@@ -11390,6 +11551,16 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         if (status == KILN_C99_OK) *result = interfaces;
         return status;
     }
+    if (code >= KILN_C99_METHOD_NODE_STREAM &&
+        code <= KILN_C99_METHOD_NODE_WRITABLE_DESTROY) {
+        return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_PERFORMANCE_NOW) {
+        double milliseconds;
+        status = kiln_realm_now(&milliseconds);
+        if (status == KILN_C99_OK) *result = kiln_c99_number(milliseconds);
+        return status;
+    }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_LAST) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
@@ -18530,7 +18701,10 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_METHOD &&
         (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER ||
-         callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)) {
+         callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+         callee.bits == KILN_C99_METHOD_NODE_STREAM ||
+         callee.bits == KILN_C99_METHOD_NODE_READABLE ||
+         callee.bits == KILN_C99_METHOD_NODE_WRITABLE)) {
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer. */
@@ -18543,8 +18717,11 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return kiln_c99_node_http(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                       depth, thrown);
         }
-        return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
-                                   depth, thrown);
+        if (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER)
+            return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                       depth, thrown);
+        return kiln_c99_node_stream(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                    depth, thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
