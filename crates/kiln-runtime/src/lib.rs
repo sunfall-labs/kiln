@@ -109,6 +109,8 @@ pub enum RuntimeHttpClientEvent {
 /// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
 /// framing and body backpressure are realm-runtime policy. Only Kiln types cross this seam.
 pub trait ActiveHttpRuntime {
+    /// Poll protocol tasks that may have become runnable without a new HostOps completion.
+    fn poll_tasks(&mut self);
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision;
     fn client_connection_connected(
         &mut self,
@@ -849,7 +851,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>> {
         self.local.block_on(&self.runtime, async {
-            tokio::task::yield_now().await;
+            let _ = tokio::time::timeout(std::time::Duration::ZERO, tokio::task::yield_now()).await;
         });
         self.http_connections
             .get_mut(&resource)
@@ -877,6 +879,16 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
     /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
     pub fn poll_http_tasks(&mut self) {
+        self.local.block_on(&self.runtime, async {
+            let _ = tokio::time::timeout(std::time::Duration::ZERO, tokio::task::yield_now()).await;
+        });
+    }
+
+    /// Advance protocol tasks after the caller has just delivered a completion or command that
+    /// woke them. Unlike [`Self::poll_http_tasks`], this path may await one scheduler yield: the
+    /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
+    #[doc(hidden)]
+    pub fn poll_http_tasks_after_wake(&mut self) {
         self.local.block_on(&self.runtime, async {
             tokio::task::yield_now().await;
         });
@@ -1288,6 +1300,10 @@ fn map_http1_client_event(
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
+    fn poll_tasks(&mut self) {
+        self.poll_http_tasks();
+    }
+
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
         let decision = self.http_agent.acquire(origin, request);
         if let AgentDecision::Reuse(resource) = decision {
@@ -3518,6 +3534,110 @@ mod tests {
         );
         assert_ne!(connect_request, read_request);
         assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
+    fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
+        use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction};
+
+        let resource = ResourceId::new(44);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: DEFAULT_HIGH_WATER_MARK,
+        };
+        let requests =
+            b"GET /first HTTP/1.1\r\nHost: kiln\r\n\r\nGET /second HTTP/1.1\r\nHost: kiln\r\n\r\n";
+        let first_write = AsyncHostOp::TcpWrite {
+            stream: resource,
+            data: b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n6\r\n/first\r\n0\r\n\r\n"
+                .to_vec(),
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: read.clone(),
+                result: Ok(AsyncHostValue::Bytes(requests.to_vec())),
+            },
+            ScriptedHostStep {
+                operation: first_write.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one read")
+        };
+        let read_request = runtime.start_host_op(read_operation.clone(), false);
+        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        let completion = runtime
+            .next_host_completion()
+            .expect("pipeline read completes");
+        runtime
+            .complete_http_connection(resource, completion)
+            .expect("read belongs to connection");
+
+        let first_events = (0..8)
+            .find_map(|_| {
+                runtime.poll_http_connection(resource);
+                let events = runtime.take_http_events(resource);
+                (!events.is_empty()).then_some(events)
+            })
+            .expect("first request events");
+        let (first_id, first, _) = request_events(&first_events);
+        assert_eq!(first.target, "/first");
+        assert!(runtime.start_http1_response(
+            resource,
+            first_id,
+            200,
+            Vec::new(),
+            DEFAULT_HIGH_WATER_MARK,
+        ));
+        assert!(
+            runtime
+                .end_http1_response(resource, first_id, b"/first".to_vec())
+                .is_some()
+        );
+
+        let write_actions = (0..8)
+            .find_map(|_| {
+                runtime
+                    .poll_http_connection(resource)
+                    .filter(|actions| !actions.is_empty())
+            })
+            .expect("first response write");
+        let [StreamAction::Start(write_operation)] = write_actions.as_slice() else {
+            panic!("first response selects one write: {write_actions:?}")
+        };
+        assert_eq!(write_operation, &first_write);
+        let write_request = runtime.start_host_op(write_operation.clone(), false);
+        assert!(runtime.http_connection_started(resource, write_operation, write_request));
+        let completion = runtime
+            .next_host_completion()
+            .expect("first write completes");
+        runtime
+            .complete_http_connection(resource, completion)
+            .expect("write belongs to connection");
+
+        let mut second_events = Vec::new();
+        for _ in 0..16 {
+            runtime.poll_http_connection(resource);
+            second_events.extend(runtime.take_http_events(resource));
+            if second_events.iter().any(|event| {
+                matches!(
+                    event,
+                    RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
+                )
+            }) {
+                break;
+            }
+        }
+        assert!(
+            second_events.iter().any(|event| matches!(
+                event,
+                RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
+            )),
+            "buffered pipeline events: {second_events:?}"
+        );
     }
 
     #[test]
