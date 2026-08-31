@@ -519,7 +519,7 @@ expected_stdout = "bundle\n"
         let manifest = Manifest::read(&path).expect("the corpus manifest is in the subset");
         // 32 ported plus the regression probes and the server probes authored here, which are
         // separate groups so the ported counts keep meaning what they say.
-        assert_eq!(manifest.tests().len(), 43);
+        assert_eq!(manifest.tests().len(), 44);
         assert_eq!(
             manifest
                 .tests_under(&manifest.directory().join("guard"))
@@ -536,7 +536,7 @@ expected_stdout = "bundle\n"
             manifest
                 .tests_under(&manifest.directory().join("server"))
                 .count(),
-            4
+            5
         );
         let probe = manifest
             .tests()
