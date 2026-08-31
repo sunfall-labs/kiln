@@ -11,6 +11,9 @@ use kiln_ir::{
 };
 use kiln_runtime::{
     NodeHostOps, Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
+    node_http::{Http1Decoder, HttpResponse},
+    node_net::{ServerAction, TcpServerDriver},
+    node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
 
 // `Temporal` is glue over a linked calendar engine, and it is long enough that inlining a ninth
@@ -249,6 +252,15 @@ pub enum Native {
     NodeEventListeners,
     NodeEventRemoveAllListeners,
     NodeEventSetMaxListeners,
+    NodeHttp,
+    NodeHttpCreateServer,
+    NodeServerListen,
+    NodeServerClose,
+    NodeServerAddress,
+    NodeResponseSetHeader,
+    NodeResponseWriteHead,
+    NodeResponseWrite,
+    NodeResponseEnd,
     ProcessGetBuiltinModule,
     Error(ErrorKind),
     SymbolConstructor,
@@ -883,6 +895,7 @@ impl Native {
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
+            (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
             ))),
@@ -1347,6 +1360,41 @@ pub struct ObjectData {
     primitive: Option<Value>,
     /// Realm-local Node EventEmitter state, intentionally absent from property reflection.
     node_events: Option<Vec<NodeEventBucket>>,
+    /// Interpreter-owned Node server/socket/request/response state. Runtime drivers remain
+    /// executor- and JavaScript-independent; this slot only ties one JS object to its adapter.
+    node_object: Option<NodeObject>,
+}
+
+#[derive(Clone, Debug)]
+enum NodeObject {
+    HttpServer(Rc<RefCell<HttpServerState>>),
+    HttpResponse(Rc<RefCell<HttpResponseState>>),
+}
+
+#[derive(Debug)]
+struct HttpServerState {
+    driver: TcpServerDriver,
+    handler: Value,
+    streams: Vec<HttpConnection>,
+    object: Option<Weak<RefCell<ObjectData>>>,
+}
+
+#[derive(Debug)]
+struct HttpConnection {
+    driver: StreamDriver,
+    decoder: Http1Decoder,
+    close_after_finish: bool,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct HttpResponseState {
+    stream: kiln_host_abi::ResourceId,
+    keep_alive: bool,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    ended: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1371,6 +1419,7 @@ impl Default for ObjectData {
             prototype: None,
             primitive: None,
             node_events: None,
+            node_object: None,
         }
     }
 }
@@ -4800,6 +4849,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     realm: Realm<Job, Timer>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
+    /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
+    pending_node: Vec<PendingNodeRequest>,
+    /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
+    /// independent of which host operations happen to be pending at that moment.
+    http_servers: Vec<Rc<RefCell<HttpServerState>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
     node_host: Option<*mut dyn NodeHostOps>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
@@ -4930,6 +4984,481 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn dispatch_node_http(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match native {
+            Native::NodeHttpCreateServer => {
+                let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&handler) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The request listener must be a function".into(),
+                    });
+                }
+                let state = Rc::new(RefCell::new(HttpServerState {
+                    driver: TcpServerDriver::default(),
+                    handler,
+                    streams: Vec::new(),
+                    object: None,
+                }));
+                let mut data = ObjectData::default();
+                data.node_events = Some(Vec::new());
+                data.node_object = Some(NodeObject::HttpServer(Rc::clone(&state)));
+                data.set("listen", Value::Native(Native::NodeServerListen));
+                data.set("close", Value::Native(Native::NodeServerClose));
+                data.set("address", Value::Native(Native::NodeServerAddress));
+                data.set("on", Value::Native(Native::NodeEventOn));
+                data.set("once", Value::Native(Native::NodeEventOnce));
+                data.set("emit", Value::Native(Native::NodeEventEmit));
+                let object = Rc::new(RefCell::new(data));
+                state.borrow_mut().object = Some(Rc::downgrade(&object));
+                self.http_servers.push(Rc::clone(&state));
+                Ok(Value::Object(object))
+            }
+            Native::NodeServerListen => {
+                let state = node_http_server(receiver)?;
+                let (port, host, callback) = node_listen_arguments(arguments)?;
+                if let Some(callback) = callback {
+                    self.dispatch_node_event(
+                        Native::NodeEventOnce,
+                        receiver,
+                        &[Value::String("listening".into()), callback],
+                        instruction,
+                    )?;
+                }
+                let action = state.borrow().driver.listen(host, port);
+                self.start_http_server_action(&state, action, instruction)?;
+                Ok(receiver.clone())
+            }
+            Native::NodeServerAddress => {
+                let state = node_http_server(receiver)?;
+                let state = state.borrow();
+                let Some(listener) = state.driver.listener() else {
+                    return Ok(Value::Null);
+                };
+                let mut address = ObjectData::default();
+                address.set(
+                    "address",
+                    listener
+                        .address
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Undefined),
+                );
+                address.set("family", Value::String("IPv4".into()));
+                address.set(
+                    "port",
+                    listener
+                        .port
+                        .map(|port| Value::Number(f64::from(port)))
+                        .unwrap_or(Value::Undefined),
+                );
+                Ok(Value::Object(Rc::new(RefCell::new(address))))
+            }
+            Native::NodeServerClose => {
+                let state = node_http_server(receiver)?;
+                if let Some(callback) = arguments.first().filter(|value| is_callable(value)) {
+                    self.dispatch_node_event(
+                        Native::NodeEventOnce,
+                        receiver,
+                        &[Value::String("close".into()), callback.clone()],
+                        instruction,
+                    )?;
+                }
+                let actions = {
+                    let mut state = state.borrow_mut();
+                    state.driver.close()
+                };
+                for action in actions {
+                    self.start_http_server_action(&state, action, instruction)?;
+                }
+                Ok(receiver.clone())
+            }
+            Native::NodeResponseSetHeader
+            | Native::NodeResponseWriteHead
+            | Native::NodeResponseWrite
+            | Native::NodeResponseEnd => {
+                self.dispatch_node_response(native, receiver, arguments, instruction)
+            }
+            _ => unreachable!("only HTTP natives dispatch here"),
+        }
+    }
+
+    fn start_http_server_action(
+        &mut self,
+        state: &Rc<RefCell<HttpServerState>>,
+        action: ServerAction,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let ServerAction::Start(operation) = action else {
+            return self.apply_http_server_action(state, action, instruction);
+        };
+        let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:http requires the Node execution Adapter".into(),
+        })?;
+        let request = unsafe { (&mut *host).start_node_op(operation.clone(), true) };
+        if !state.borrow_mut().driver.started(&operation, request) {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "node:http server rejected its own host operation".into(),
+            });
+        }
+        self.pending_node.push(PendingNodeRequest::Server {
+            request,
+            state: Rc::clone(state),
+        });
+        Ok(())
+    }
+
+    fn apply_http_server_action(
+        &mut self,
+        state: &Rc<RefCell<HttpServerState>>,
+        action: ServerAction,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match action {
+            ServerAction::Cancel(request) => {
+                let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the Node execution Adapter".into(),
+                })?;
+                unsafe { (&mut *host).cancel_node_op(request) };
+                self.pending_node
+                    .retain(|pending| pending.request() != request);
+                Ok(())
+            }
+            ServerAction::Start(operation) => {
+                self.start_http_server_action(state, ServerAction::Start(operation), instruction)
+            }
+            ServerAction::Listening(_) => {
+                self.emit_http_server(state, "listening", vec![], instruction)
+            }
+            ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
+            ServerAction::Connection(accepted) => {
+                let mut stream = HttpConnection {
+                    driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
+                    decoder: Http1Decoder::default(),
+                    close_after_finish: false,
+                    closed: false,
+                };
+                let actions = stream.driver.start_reading();
+                state.borrow_mut().streams.push(stream);
+                for action in actions {
+                    self.start_http_stream_action(
+                        state,
+                        accepted.resource.id,
+                        action,
+                        instruction,
+                    )?;
+                }
+                Ok(())
+            }
+            ServerAction::Error(error) => {
+                let error = self.node_error_value(error);
+                self.emit_http_server(state, "error", vec![error], instruction)
+            }
+        }
+    }
+
+    fn emit_http_server(
+        &mut self,
+        state: &Rc<RefCell<HttpServerState>>,
+        event: &str,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let object = state
+            .borrow()
+            .object
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined);
+        let mut payload = vec![Value::String(event.to_owned())];
+        payload.extend(arguments);
+        self.dispatch_node_event(Native::NodeEventEmit, &object, &payload, instruction)?;
+        Ok(())
+    }
+
+    fn node_error_value(&mut self, error: kiln_host_abi::AsyncHostError) -> Value {
+        let object = self.construct_error(ErrorKind::Error, &[Value::String(error.message)]);
+        if let Value::Object(object) = &object {
+            let mut object = object.borrow_mut();
+            object.set_non_enumerable("code", Value::String(error.code));
+            object.set_non_enumerable("syscall", Value::String(error.syscall));
+            if let Some(path) = error.path {
+                object.set_non_enumerable("path", Value::String(path));
+            }
+        }
+        object
+    }
+
+    fn http_server_for_stream(
+        &self,
+        resource: kiln_host_abi::ResourceId,
+    ) -> Option<Rc<RefCell<HttpServerState>>> {
+        self.http_servers
+            .iter()
+            .find(|server| {
+                server
+                    .borrow()
+                    .streams
+                    .iter()
+                    .any(|stream| stream.driver.resource() == resource)
+            })
+            .cloned()
+    }
+
+    fn start_http_stream_action(
+        &mut self,
+        server: &Rc<RefCell<HttpServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        action: StreamAction,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match action {
+            StreamAction::Start(operation) => {
+                let host = self.node_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the Node execution Adapter".into(),
+                })?;
+                let request = unsafe { (&mut *host).start_node_op(operation.clone(), true) };
+                let accepted = server
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .is_some_and(|stream| stream.driver.started(&operation, request));
+                if !accepted {
+                    return Err(ExecutionError::Host {
+                        instruction,
+                        message: "node:http stream rejected its own host operation".into(),
+                    });
+                }
+                self.pending_node.push(PendingNodeRequest::Stream {
+                    request,
+                    server: Rc::clone(server),
+                    resource,
+                });
+                Ok(())
+            }
+            StreamAction::Data(bytes) => {
+                let requests = {
+                    let mut server_state = server.borrow_mut();
+                    let connection = server_state
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "node:http received data for an unknown stream".into(),
+                        })?;
+                    connection
+                        .decoder
+                        .push(&bytes)
+                        .map_err(|error| ExecutionError::Host {
+                            instruction,
+                            message: format!("HTTP parse error: {error:?}"),
+                        })?
+                };
+                for request in requests {
+                    if !request.keep_alive {
+                        if let Some(connection) = server
+                            .borrow_mut()
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.driver.resource() == resource)
+                        {
+                            connection.driver.pause_reading();
+                        }
+                    }
+                    self.dispatch_http_request(server, resource, request, instruction)?;
+                }
+                Ok(())
+            }
+            StreamAction::Event(StreamEvent::Finish) => {
+                let close = server
+                    .borrow()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .is_some_and(|stream| stream.close_after_finish);
+                if close {
+                    let action = {
+                        let server = server.borrow();
+                        server
+                            .streams
+                            .iter()
+                            .find(|stream| stream.driver.resource() == resource)
+                            .expect("finish belongs to this stream")
+                            .driver
+                            .close()
+                    };
+                    self.start_http_stream_action(server, resource, action, instruction)?;
+                }
+                Ok(())
+            }
+            StreamAction::Event(StreamEvent::Close) => {
+                if let Some(stream) = server
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                {
+                    stream.closed = true;
+                }
+                Ok(())
+            }
+            StreamAction::Event(_) => Ok(()),
+            StreamAction::Error(error) => {
+                let error = self.node_error_value(error);
+                self.emit_http_server(server, "clientError", vec![error], instruction)
+            }
+        }
+    }
+
+    fn dispatch_http_request(
+        &mut self,
+        server: &Rc<RefCell<HttpServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        request: kiln_runtime::node_http::HttpRequest,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let mut incoming = ObjectData::default();
+        incoming.set("method", Value::String(request.method.clone()));
+        incoming.set("url", Value::String(request.target.clone()));
+        let mut headers = ObjectData::default();
+        for (name, value) in request.headers_object() {
+            headers.set(&name, Value::String(value));
+        }
+        incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
+        let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+
+        let response_state = Rc::new(RefCell::new(HttpResponseState {
+            stream: resource,
+            keep_alive: request.keep_alive,
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+            ended: false,
+        }));
+        let mut response = ObjectData::default();
+        response.node_object = Some(NodeObject::HttpResponse(response_state));
+        response.set("setHeader", Value::Native(Native::NodeResponseSetHeader));
+        response.set("writeHead", Value::Native(Native::NodeResponseWriteHead));
+        response.set("write", Value::Native(Native::NodeResponseWrite));
+        response.set("end", Value::Native(Native::NodeResponseEnd));
+        let response = Value::Object(Rc::new(RefCell::new(response)));
+
+        let handler = {
+            let state = server.borrow();
+            state.handler.clone()
+        };
+        self.call_value(
+            &handler,
+            Value::Undefined,
+            vec![incoming, response],
+            instruction,
+        )?;
+        Ok(())
+    }
+
+    fn dispatch_node_response(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_http_response(receiver)?;
+        match native {
+            Native::NodeResponseSetHeader => {
+                let name = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                let value = arguments
+                    .get(1)
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                let mut state = state.borrow_mut();
+                if let Some(header) = state
+                    .headers
+                    .iter_mut()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+                {
+                    header.1 = value;
+                } else {
+                    state.headers.push((name, value));
+                }
+                Ok(receiver.clone())
+            }
+            Native::NodeResponseWriteHead => {
+                let status = arguments.first().map(Value::as_number).unwrap_or(200.0);
+                if !(100.0..=999.0).contains(&status) || status.fract() != 0.0 {
+                    return Err(ExecutionError::InvalidHttpStatus);
+                }
+                state.borrow_mut().status = status as u16;
+                Ok(receiver.clone())
+            }
+            Native::NodeResponseWrite => {
+                let bytes = node_body_bytes(arguments.first())?;
+                state.borrow_mut().body.extend(bytes);
+                Ok(Value::Boolean(true))
+            }
+            Native::NodeResponseEnd => {
+                let bytes = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined))
+                    .map(|value| node_body_bytes(Some(value)))
+                    .transpose()?
+                    .unwrap_or_default();
+                let (resource, encoded) = {
+                    let mut state = state.borrow_mut();
+                    if state.ended {
+                        return Ok(receiver.clone());
+                    }
+                    state.body.extend(bytes);
+                    state.ended = true;
+                    let response = HttpResponse {
+                        status: state.status,
+                        reason: None,
+                        headers: std::mem::take(&mut state.headers),
+                        body: std::mem::take(&mut state.body),
+                    };
+                    (state.stream, response.encode(state.keep_alive))
+                };
+                let server =
+                    self.http_server_for_stream(resource)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "HTTP response lost its stream".into(),
+                        })?;
+                let actions = {
+                    let mut server_state = server.borrow_mut();
+                    let connection = server_state
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .expect("server lookup found this stream");
+                    connection.close_after_finish = !state.borrow().keep_alive;
+                    let (_, actions) = connection.driver.end(Some(encoded));
+                    actions
+                };
+                for action in actions {
+                    self.start_http_stream_action(&server, resource, action, instruction)?;
+                }
+                Ok(receiver.clone())
+            }
+            _ => unreachable!("only response natives dispatch here"),
+        }
+    }
+
     fn dispatch_node_event(
         &mut self,
         native: Native,
@@ -5101,6 +5630,62 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn settle_host_completion(&mut self, completion: Completion) -> Result<(), ExecutionError> {
+        if let Some(position) = self
+            .pending_node
+            .iter()
+            .position(|pending| pending.request() == completion.request)
+        {
+            let pending = self.pending_node.swap_remove(position);
+            return match pending {
+                PendingNodeRequest::Server { state, .. } => {
+                    let actions = {
+                        let mut state = state.borrow_mut();
+                        state
+                            .driver
+                            .completed(completion)
+                            .expect("request was routed to its server driver")
+                    };
+                    for action in actions {
+                        self.apply_http_server_action(&state, action, self.instruction)?;
+                    }
+                    Ok(())
+                }
+                PendingNodeRequest::Stream {
+                    server, resource, ..
+                } => {
+                    let actions = {
+                        let mut server = server.borrow_mut();
+                        server
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.driver.resource() == resource)
+                            .and_then(|stream| stream.driver.completed(completion))
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction: self.instruction,
+                                message: "completion lost its node:http stream".into(),
+                            })?
+                    };
+                    for action in actions {
+                        self.start_http_stream_action(&server, resource, action, self.instruction)?;
+                    }
+                    let still_pending = self.pending_node.iter().any(|pending| {
+                        matches!(
+                            pending,
+                            PendingNodeRequest::Stream {
+                                resource: pending_resource,
+                                ..
+                            } if *pending_resource == resource
+                        )
+                    });
+                    if !still_pending {
+                        server.borrow_mut().streams.retain(|stream| {
+                            stream.driver.resource() != resource || !stream.closed
+                        });
+                    }
+                    Ok(())
+                }
+            };
+        }
         let Some(position) = self
             .pending_host
             .iter()
@@ -5122,19 +5707,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Settled::Fulfilled(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
             }
             Ok(value) => Settled::Fulfilled(node_host_value(value)?),
-            Err(error) => {
-                let object =
-                    self.construct_error(ErrorKind::Error, &[Value::String(error.message.clone())]);
-                if let Value::Object(object) = &object {
-                    let mut object = object.borrow_mut();
-                    object.set_non_enumerable("code", Value::String(error.code));
-                    object.set_non_enumerable("syscall", Value::String(error.syscall));
-                    if let Some(path) = error.path {
-                        object.set_non_enumerable("path", Value::String(path));
-                    }
-                }
-                Settled::Rejected(object)
-            }
+            Err(error) => Settled::Rejected(self.node_error_value(error)),
         };
         self.settle(&pending.promise, &outcome);
         Ok(())
@@ -5144,7 +5717,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         loop {
             self.drain_microtasks(runtime)?;
             runtime.enter(|| self.check_unhandled_rejection())?;
-            if !self.pending_host.is_empty() {
+            if !self.pending_host.is_empty() || !self.pending_node.is_empty() {
                 let completion =
                     runtime
                         .next_host_completion()
@@ -5152,7 +5725,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             instruction: self.instruction,
                             message: "Node host lost a pending request".to_owned(),
                         })?;
-                self.settle_host_completion(completion)?;
+                runtime.enter(|| self.settle_host_completion(completion))?;
                 continue;
             }
             let Some(WorkItem::Timer { work: timer, .. }) = runtime.next_timer(&mut self.realm)
@@ -6953,6 +7526,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeEventSetMaxListeners
         ) {
             return self.dispatch_node_event(native, receiver, arguments, instruction);
+        }
+        if matches!(
+            native,
+            Native::NodeHttpCreateServer
+                | Native::NodeServerListen
+                | Native::NodeServerClose
+                | Native::NodeServerAddress
+                | Native::NodeResponseSetHeader
+                | Native::NodeResponseWriteHead
+                | Native::NodeResponseWrite
+                | Native::NodeResponseEnd
+        ) {
+            return self.dispatch_node_http(native, receiver, arguments, instruction);
         }
         // The same wrapper opening `call_native` does, applied before the machine's own arms so
         // that the two halves of a built-in cannot disagree about what its receiver is.

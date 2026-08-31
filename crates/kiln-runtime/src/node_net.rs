@@ -13,6 +13,7 @@ use kiln_host_abi::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerAction {
     Start(AsyncHostOp),
+    Cancel(RequestId),
     Listening(ResourceInfo),
     Connection(AcceptedTcpStream),
     Close,
@@ -77,16 +78,27 @@ impl TcpServerDriver {
         })
     }
 
-    pub fn close(&mut self) -> Option<ServerAction> {
-        let listener = self.listener.as_ref()?;
+    pub fn close(&mut self) -> Vec<ServerAction> {
+        let Some(listener) = self.listener.as_ref() else {
+            return Vec::new();
+        };
         if self.closing || self.closed {
-            return None;
+            return Vec::new();
         }
         self.closing = true;
         self.accepting = false;
-        Some(ServerAction::Start(AsyncHostOp::CloseResource {
+        let mut actions: Vec<ServerAction> = self
+            .pending
+            .iter()
+            .filter(|(_, kind)| matches!(kind, PendingKind::Accept))
+            .map(|(request, _)| ServerAction::Cancel(*request))
+            .collect();
+        self.pending
+            .retain(|(_, kind)| !matches!(kind, PendingKind::Accept));
+        actions.push(ServerAction::Start(AsyncHostOp::CloseResource {
             resource: listener.id,
-        }))
+        }));
+        actions
     }
 
     pub fn started(&mut self, operation: &AsyncHostOp, request: RequestId) -> bool {
@@ -283,15 +295,22 @@ mod tests {
             port: 80,
         };
         server.started(&listen, RequestId::new(1));
-        server.completed(completion(1, AsyncHostValue::Resource(listener.clone())));
-        let close = server.close().expect("first close starts");
-        assert!(server.close().is_none());
-        let ServerAction::Start(close_op) = close else {
+        let listening = server
+            .completed(completion(1, AsyncHostValue::Resource(listener.clone())))
+            .expect("listen completes");
+        let ServerAction::Start(accept) = &listening[1] else {
             unreachable!()
         };
-        assert!(server.started(&close_op, RequestId::new(2)));
+        assert!(server.started(accept, RequestId::new(2)));
+        let actions = server.close();
+        assert!(server.close().is_empty());
+        assert_eq!(actions[0], ServerAction::Cancel(RequestId::new(2)));
+        let ServerAction::Start(close_op) = &actions[1] else {
+            unreachable!()
+        };
+        assert!(server.started(close_op, RequestId::new(3)));
         assert_eq!(
-            server.completed(completion(2, AsyncHostValue::Undefined)),
+            server.completed(completion(3, AsyncHostValue::Undefined)),
             Some(vec![ServerAction::Close])
         );
         assert!(server.closed());

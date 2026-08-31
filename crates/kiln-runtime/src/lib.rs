@@ -364,11 +364,16 @@ impl RealmRuntime {
 /// a Tokio handle or `RealmRuntime`, keeping executor ownership out of language objects.
 pub trait NodeHostOps {
     fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId;
+    fn cancel_node_op(&mut self, request: RequestId) -> bool;
 }
 
 impl NodeHostOps for RealmRuntime {
     fn start_node_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.start_host_op_in_context(operation, referenced)
+    }
+
+    fn cancel_node_op(&mut self, request: RequestId) -> bool {
+        self.host.cancel(request)
     }
 }
 
@@ -2215,7 +2220,8 @@ mod tests {
             }
         }
 
-        let ServerAction::Start(close) = server.close().expect("close starts") else {
+        let close_actions = server.close();
+        let ServerAction::Start(close) = close_actions.last().expect("close starts") else {
             unreachable!()
         };
         let close_request = runtime.start_host_op(close.clone(), false);
