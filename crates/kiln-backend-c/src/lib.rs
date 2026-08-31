@@ -24646,19 +24646,26 @@ fn emit_instruction(
             }
         },
     }
+    {
+        let emitted = &mut output[before..];
+        let refusal_target = if matches!(site, ReturnSite::Entry { .. }) {
+            "goto kiln_refusal;"
+        } else {
+            "return KILN_C99_CONTROL_ERROR;"
+        };
+        let refusal = format!(
+            "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
+        );
+        let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
+        output.truncate(before);
+        output.push_str(&replaced);
+    }
     if matches!(site, ReturnSite::Entry { .. }) {
         let emitted = &mut output[before..];
         let reset = format!(
             "kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; {instruction_site}"
         );
         let replaced = emitted.replace(&instruction_site, &reset);
-        output.truncate(before);
-        output.push_str(&replaced);
-        let emitted = &mut output[before..];
-        let refusal = format!(
-            "{control_refusal} goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
-        );
-        let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
         output.truncate(before);
         output.push_str(&replaced);
     }
@@ -25733,7 +25740,7 @@ int main(void) {
         assert!(
             generated
                 .source
-                .contains("kiln_c99_diagnostic_site = \"node_modules/@fastify/error/index.js\";")
+                .contains("\"node_modules/@fastify/error/index.js\"")
         );
         assert!(
             generated
