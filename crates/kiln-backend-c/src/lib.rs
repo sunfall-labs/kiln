@@ -12600,9 +12600,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         return KILN_C99_OK;
     }
-    if ((code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) ||
-        (code >= KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY &&
-         code <= KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS) ||
+    if ((code >= KILN_C99_METHOD_MATH_FLOOR && code <= KILN_C99_METHOD_ARRAY_AT) ||
+        code == KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY ||
+        code == KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES ||
+        code == KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR ||
+        code == KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS ||
         code == KILN_C99_METHOD_OBJECT_IS || code == KILN_C99_METHOD_SYMBOL_FOR ||
         code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
@@ -24335,6 +24337,50 @@ int main(void) {{
         assert!(
             run.status.success(),
             "native symbol registry failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_reflective_object_statics_dispatch_without_a_receiver() {
+        let generated = emit(&program(
+            vec![Constant::Undefined],
+            vec![Instruction::Const(0), Instruction::Return],
+            0,
+        ))
+        .expect("reflective static probe emits");
+        let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_value target;
+    kiln_value descriptor;
+    kiln_value key = kiln_c99_copy_text("answer", 6);
+    kiln_value value = kiln_c99_number(42.0);
+    kiln_value args[3];
+    kiln_value result;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_new_object(&descriptor) != KILN_C99_OK) return 2;
+    if (kiln_c99_put(NULL, descriptor, "value", 5, value, 0, NULL) != KILN_C99_OK) return 3;
+    args[0] = target;
+    args[1] = key;
+    args[2] = descriptor;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_OK) return 4;
+    if (!kiln_c99_strict_equal(result, target)) return 5;
+    if (kiln_c99_get(NULL, target, "answer", 6, &result, 0, &thrown) != KILN_C99_OK) return 6;
+    if (result.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(result) != 42.0) return 7;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 8;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "object-define-property-static");
+        assert!(
+            run.status.success(),
+            "Object.defineProperty static dispatch failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
