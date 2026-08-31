@@ -14,9 +14,15 @@ use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module_in_runtime,
+    node_builtin_export_names, node_builtin_exports,
 };
-use kiln_ir::{CompileDiagnostic, ModuleProgram, compile_module};
-use kiln_module_resolver::{ModuleResolver, PathRole, ResolutionPolicy, SUPPORTED_EXTENSIONS};
+use kiln_ir::{
+    BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
+    compile_module,
+};
+use kiln_module_resolver::{
+    ModuleResolver, NodeBuiltin, PathRole, ResolutionPolicy, SUPPORTED_EXTENSIONS,
+};
 use kiln_runtime::RealmRuntime;
 
 /// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
@@ -69,8 +75,20 @@ pub struct Dependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleNode {
     pub path: PathBuf,
+    /// Where this module's interface and implementation come from.
+    ///
+    /// Builtins retain their typed identity all the way through the graph. Their virtual path is
+    /// only a stable graph key; it is never handed to a source loader or inferred from a suffix.
+    pub source: ModuleSource,
     pub program: ModuleProgram,
     pub dependencies: Vec<Dependency>,
+}
+
+/// The provider responsible for one graph node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleSource {
+    Source,
+    NodeBuiltin(NodeBuiltin),
 }
 
 /// An acyclic, entry-rooted module graph.
@@ -561,6 +579,12 @@ impl ModuleGraph {
                 .modules
                 .get(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
+            if let ModuleSource::NodeBuiltin(builtin) = node.source {
+                let exports = node_builtin_exports(builtin.specifier())
+                    .expect("only materializable builtins have linkable exports");
+                values.insert(path.clone(), exports.into_iter().collect());
+                continue;
+            }
             let mut imports = Vec::with_capacity(node.program.imports.len());
             for import in &node.program.imports {
                 let dependency = node
@@ -690,9 +714,13 @@ struct Builder<P, R> {
 }
 
 enum WorkItem {
-    Enter(PathBuf),
+    Enter {
+        path: PathBuf,
+        source: ModuleSource,
+    },
     Exit {
         path: PathBuf,
+        source: ModuleSource,
         program: ModuleProgram,
         dependencies: Vec<Dependency>,
     },
@@ -710,10 +738,13 @@ where
     R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
-        let mut work = vec![WorkItem::Enter(path)];
+        let mut work = vec![WorkItem::Enter {
+            path,
+            source: ModuleSource::Source,
+        }];
         while let Some(item) = work.pop() {
             match item {
-                WorkItem::Enter(path) => match self.states.get(&path).copied() {
+                WorkItem::Enter { path, source } => match self.states.get(&path).copied() {
                     Some(VisitState::Done) => continue,
                     Some(VisitState::Visiting) => {
                         let start = self
@@ -729,9 +760,13 @@ where
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
 
-                        let program = (self.provider)(&path)?;
+                        let program = match source {
+                            ModuleSource::Source => (self.provider)(&path)?,
+                            ModuleSource::NodeBuiltin(builtin) => builtin_module_program(builtin),
+                        };
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
+                        let mut dependency_sources = Vec::with_capacity(program.dependencies.len());
                         for specifier in &program.dependencies {
                             let resolved =
                                 self.resolver.resolve(specifier, &path).map_err(|error| {
@@ -741,26 +776,38 @@ where
                                         error,
                                     }
                                 })?;
+                            let source = resolved
+                                .builtin()
+                                .map(ModuleSource::NodeBuiltin)
+                                .unwrap_or(ModuleSource::Source);
                             dependencies.push(Dependency {
                                 specifier: specifier.clone(),
                                 target: resolved.path,
                             });
+                            dependency_sources.push(source);
                         }
 
                         // LIFO work preserves the original source order: the first dependency is
                         // entered first, while Exit remains below all child work.
                         work.push(WorkItem::Exit {
                             path,
+                            source,
                             program,
                             dependencies: dependencies.clone(),
                         });
-                        for dependency in dependencies.into_iter().rev() {
-                            work.push(WorkItem::Enter(dependency.target));
+                        for (dependency, source) in
+                            dependencies.into_iter().zip(dependency_sources).rev()
+                        {
+                            work.push(WorkItem::Enter {
+                                path: dependency.target,
+                                source,
+                            });
                         }
                     }
                 },
                 WorkItem::Exit {
                     path,
+                    source,
                     program,
                     dependencies,
                 } => {
@@ -771,6 +818,7 @@ where
                         path.clone(),
                         ModuleNode {
                             path,
+                            source,
                             program,
                             dependencies,
                         },
@@ -779,6 +827,34 @@ where
             }
         }
         Ok(())
+    }
+}
+
+/// A builtin participates in ordinary graph linking but has no source body to parse. Its empty
+/// program carries only the export shape needed by the linker; execution materializes those
+/// exports directly from the interpreter's canonical builtin table without entering the VM.
+fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
+    // Resolution can recognize future surface before execution advertises it. An empty export
+    // table means importing a name fails at link time rather than producing a placeholder.
+    let names = node_builtin_export_names(builtin.specifier()).unwrap_or(&[]);
+    ModuleProgram {
+        program: Program {
+            version: BYTECODE_VERSION,
+            constants: vec![],
+            code: vec![Instruction::Return],
+            local_count: names.len() as u32,
+            functions: vec![],
+        },
+        dependencies: vec![],
+        imports: vec![],
+        exports: names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| ExportBinding {
+                exported: (*name).to_owned(),
+                local_slot: slot as u32,
+            })
+            .collect(),
     }
 }
 
@@ -960,7 +1036,7 @@ mod tests {
     use super::*;
     use kiln_host_abi::{HostError, HostOp, HostValue};
     use kiln_ir::{BYTECODE_VERSION, Instruction, Program};
-    use kiln_module_resolver::NodePackageResolver;
+    use kiln_module_resolver::{NodePackageResolver, NodeRuntimeResolver};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -1079,6 +1155,78 @@ mod tests {
             .execute(&mut host, ExecutionLimits::default())
             .expect("execute package graph");
         assert_eq!(host.output, ["42"]);
+    }
+
+    #[test]
+    fn node_builtin_static_imports_are_typed_virtual_modules() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { EventEmitter } from 'node:events';",
+                "import * as fs from 'node:fs/promises';",
+                "console.log(typeof EventEmitter, typeof fs.readFile, Object.keys(fs).join(','));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let mut loaded = Vec::new();
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            loaded.push(path.to_path_buf());
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build graph with builtins");
+
+        // Only the real entry passed through the source provider. Builtins are typed graph nodes,
+        // not fake files or generated JavaScript.
+        assert_eq!(loaded, [fs::canonicalize(&entry).unwrap()]);
+        assert_eq!(graph.module_count(), 3);
+        assert_eq!(
+            graph
+                .modules()
+                .filter(|node| matches!(node.source, ModuleSource::NodeBuiltin(_)))
+                .count(),
+            2
+        );
+
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute builtin imports");
+        assert_eq!(host.output, ["function function readFile,stat,writeFile"]);
+    }
+
+    #[test]
+    fn recognized_but_unimplemented_node_builtin_fails_at_link_time() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            "import { createServer } from 'node:http'; console.log(createServer);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let error = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect_err("unimplemented builtin export must not become a placeholder");
+        assert!(matches!(
+            error,
+            ModuleGraphError::MissingExport { name, .. } if name == "createServer"
+        ));
     }
 
     /// A function value survives the module boundary it was exported across.
