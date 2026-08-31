@@ -508,6 +508,10 @@ fn execute_graph(
     revision: u64,
     node: bool,
 ) -> Response {
+    // `eval` and `Function` are runtime compilation, but still use the exact frontend pipeline
+    // linked into this executable. The interpreter receives it as an explicit host service and
+    // therefore keeps no parser dependency or ambient compiler discovery of its own.
+    kiln_conformance::install_source_compiler();
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
         Ok(graph) if node => graph.execute_node(&mut host, Default::default()),
@@ -780,6 +784,7 @@ fn execute_program(
     revision: u64,
     node: bool,
 ) -> Response {
+    kiln_conformance::install_source_compiler();
     let program = match program {
         Ok(program) => program,
         Err(diagnostics) => {

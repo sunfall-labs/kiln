@@ -52,3 +52,12 @@ pub use test262::{
     run_case, run_case_variants, run_case_variants_with_harness, run_case_with_harness,
     run_variant, run_variant_with_harness,
 };
+
+/// Install the frontend service used by runtime `eval` and `Function` compilation.
+///
+/// The interpreter remains downstream of parsing and lowering; executable hosts call this at
+/// their entry boundary so dynamically generated code uses the same Oxc → HIR → IR pipeline as
+/// source files. Keeping this explicit also lets embedders omit code generation deliberately.
+pub fn install_source_compiler() {
+    source_compiler::install();
+}

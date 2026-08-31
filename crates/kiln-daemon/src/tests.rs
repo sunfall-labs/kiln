@@ -1989,6 +1989,78 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
 }
 
 #[test]
+fn production_daemon_compiles_direct_eval_at_runtime() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let path = "eval.js".to_owned();
+    let text = "console.log(eval('40 + 2'));\n";
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: path.clone(),
+            text: text.into(),
+        })
+        .expect("set source");
+    let Response::Ran(summary) = client
+        .request(&Request::Run {
+            node: false,
+            source_view: client.source_view(),
+            path,
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
+        .expect("run eval")
+    else {
+        panic!("expected run response");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "42\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_daemon_compiles_function_constructor_at_runtime() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let path = "function.js".to_owned();
+    let text = "console.log(Function('return 6')());\n";
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: path.clone(),
+            text: text.into(),
+        })
+        .expect("set source");
+    let Response::Ran(summary) = client
+        .request(&Request::Run {
+            node: false,
+            source_view: client.source_view(),
+            path,
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+        })
+        .expect("run Function")
+    else {
+        panic!("expected run response");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "6\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
 fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() {
     let fixture = Fixture::empty();
     let disk_module = fixture.dir.join("production-disk.ts");
