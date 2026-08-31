@@ -171,7 +171,7 @@ impl RelativeTimeFormat {
         let formatter = self.formatter(unit)?;
         let phrase = formatter.format(decimal(value)).to_string();
         let numeral = crate::number::NumberFormat::new(
-            &[self.resolution.locale.clone()],
+            std::slice::from_ref(&self.resolution.locale),
             crate::number::Options {
                 numbering_system: Some(self.numbering_system.clone()),
                 ..crate::number::Options::default()

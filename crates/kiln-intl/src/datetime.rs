@@ -440,11 +440,11 @@ impl DateTimeFormat {
         let zone = options
             .time_zone
             .clone()
-            .unwrap_or_else(|| TimeZoneChoice::Offset(0));
+            .unwrap_or(TimeZoneChoice::Offset(0));
         let offset = resolve_offset(&zone);
 
         let field_set = build_field_set(&options)?;
-        let formatter = DateTimeFormatter::try_new(preferences, field_set.clone())
+        let formatter = DateTimeFormatter::try_new(preferences, field_set)
             .map_err(|_| Error::range("no date formatting data for the resolved locale"))?;
         let ranges = DateRangeFormatter::try_new(preferences, field_set)
             .map_err(|_| Error::range("no date range formatting data for the resolved locale"))?;
@@ -560,7 +560,7 @@ impl DateTimeFormat {
             || restricted.second.is_some()
             || restricted.fractional_second_digits.is_some();
         let field_set = shaped_field_set(&restricted, shape)?;
-        let formatter = DateTimeFormatter::try_new(self.preferences, field_set.clone())
+        let formatter = DateTimeFormatter::try_new(self.preferences, field_set)
             .map_err(|_| Error::range("no date formatting data for the resolved locale"))?;
         let ranges = DateRangeFormatter::try_new(self.preferences, field_set)
             .map_err(|_| Error::range("no date range formatting data for the resolved locale"))?;
@@ -1245,10 +1245,10 @@ fn apply_components(builder: &mut FieldSetBuilder, options: &Options) {
     let width = options
         .month
         .as_deref()
-        .and_then(|value| match value {
-            "long" => Some(Length::Long),
-            "short" | "narrow" => Some(Length::Medium),
-            _ => Some(Length::Short),
+        .map(|value| match value {
+            "long" => Length::Long,
+            "short" | "narrow" => Length::Medium,
+            _ => Length::Short,
         })
         .or_else(|| {
             options.weekday.as_deref().map(|value| match value {
@@ -1430,7 +1430,7 @@ fn attribute_sources(
             .filter(|(_, (other, _))| other == kind)
             .map(|(position, _)| position)
             .collect();
-        if occurrences.len() % 2 != 0 || occurrences.is_empty() {
+        if !occurrences.len().is_multiple_of(2) || occurrences.is_empty() {
             continue;
         }
         let half = occurrences.len() / 2;
