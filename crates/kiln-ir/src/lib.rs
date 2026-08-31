@@ -501,6 +501,11 @@ pub enum Builtin {
     /// indirect eval, which runs in global scope; a direct call is [`Instruction::DirectEval`]
     /// instead, because only the compiler knows what a caller's scope contains.
     Eval,
+    /// Explicit resource management's two names. Appended, like everything after `Json`: the
+    /// discriminant is hashed into the artifact cache key, so inserting one in the middle would
+    /// invalidate every cached native build.
+    DisposableStack,
+    SuppressedError,
 }
 
 impl Builtin {
@@ -568,6 +573,8 @@ impl Builtin {
             "Float32Array" => Some(Self::Float32Array),
             "Float64Array" => Some(Self::Float64Array),
             "eval" => Some(Self::Eval),
+            "DisposableStack" => Some(Self::DisposableStack),
+            "SuppressedError" => Some(Self::SuppressedError),
 
             _ => None,
         }
@@ -633,6 +640,8 @@ impl Builtin {
             Self::Float32Array => "Float32Array",
             Self::Float64Array => "Float64Array",
             Self::Eval => "eval",
+            Self::DisposableStack => "DisposableStack",
+            Self::SuppressedError => "SuppressedError",
         }
     }
 }
