@@ -2,9 +2,10 @@
 
 ## Status
 
-**Accepted for a single module; a known approximation for a graph.** The correct design for the
-graph case is written down below and is a small change to `kiln-native-runtime`, which is why it
-is recorded rather than deferred silently.
+**Superseded by ADR 0028.** This document records the former per-translation-unit approximation.
+The Realm-owned correction described below is now implemented for Promise reactions,
+`queueMicrotask`, timers and native HTTP event ingress. `process.nextTick` is the remaining native
+callback lane that has not crossed the Realm ABI.
 
 ## Context
 
@@ -28,9 +29,17 @@ Correct, and it spans two crates.
 the linker, and picking one would put a program's ordering at the mercy of which file it started
 from.
 
-**3. A queue per unit, drained when that unit's entry point returns.** What this implements.
+**3. A queue per unit, drained when that unit's entry point returns.** What the original
+implementation chose.
 
-## Decision
+Implementation update (31 August 2026): generated C now submits opaque microtask payloads through
+the private Realm ABI, the native launcher gives every module in a graph the same Realm, and it
+drives that Realm only after the complete graph has entered. The per-unit queue described by this
+ADR is no longer the implementation. The private ABI still needs a distinct `process.nextTick`
+lane so its FIFO drains before ordinary microtasks at every checkpoint, including when a nextTick
+callback queues another nextTick.
+
+## Decision (superseded)
 
 Each generated translation unit owns a microtask queue, and its entry point drains that queue
 before returning.
@@ -48,16 +57,10 @@ silent -- `scripts/native.sh` compares the two engines on whatever is put in fro
 
 ## Consequences
 
-- The ordering guarantee is stated at module scope rather than program scope. Any program that is
-  one module -- the common case, and every probe here -- gets node's ordering exactly.
-- A cross-module `await` may run earlier than it would in node. That is a real difference and it
-  is not detected automatically; it needs a graph probe, which does not exist yet because the
-  native module path has no async coverage.
-- The fix is design 1 and it is small: a queue and a `int (*runner)(kiln_host *)` in
-  `runtime_source()`, each unit assigning the runner on entry, and the launcher calling it after
-  the last module. It is not done here because it lands in a crate another session owns and
-  because the single-module case -- which is what the compiler is used for today -- is already
-  correct.
-- Draining inside the entry point means an uncaught rejection surfaces as that module failing,
-  rather than as a separate unhandled-rejection report. Node distinguishes the two; kiln does not,
-  in either engine.
+- Microtask ordering is now a Realm/program invariant rather than a translation-unit invariant.
+- A graph shares one queue and reaches its first checkpoint after dependency-first module entry,
+  removing the cross-module approximation this ADR accepted temporarily.
+- Adding native `process.nextTick` requires a private async ABI revision and cache-identity miss,
+  but no public embedding ABI or IR discriminant change.
+- Unhandled-rejection reporting remains a separate compatibility question; moving queue ownership
+  did not silently claim Node's complete reporting policy.

@@ -12,13 +12,15 @@ clock, and ADR 0025's rule that language engines are linked rather than reimplem
 This ADR does not choose the internal value representation or collector left open by proposed ADR
 0021.
 
-Implementation milestone (30 August 2026): `kiln-runtime` now owns the deterministic Realm clock,
-microtask queue and timer ordering, and interpreted bytecode enters that runtime. Linked interpreted
-modules reuse one runtime instance. Native executables now create an opaque Realm through the
-private Rust archive, enter every generated-C module body as a callback on its Tokio runtime, and
-destroy the Realm after the scalar program or complete module graph. The generated-C event loop and
-its file-local queue/timer state have not yet moved behind that ABI, so native entry ownership is a
-tracer bullet rather than completion of the scheduler migration.
+Implementation milestone (31 August 2026): `kiln-runtime` owns the deterministic Realm clock,
+microtask queue, timer ordering and native HTTP transport ingress, and interpreted bytecode enters
+that runtime. Linked interpreted modules reuse one runtime instance. Native executables create an
+opaque Realm through the private Rust archive, enter every generated-C module body as a callback on
+its Tokio runtime, submit opaque Promise/`queueMicrotask` and timer work through the private ABI,
+drive the Realm after the scalar program or complete module graph, and then destroy it. The former
+per-translation-unit queue in ADR 0033 is gone. Native `process.nextTick` is the remaining callback
+lane: its FIFO must live beside the Realm microtask queue and drain before ordinary microtasks at
+every checkpoint.
 
 ## Context
 
