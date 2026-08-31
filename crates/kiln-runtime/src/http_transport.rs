@@ -289,7 +289,10 @@ impl HttpTransportDriver {
         let write_succeeded = write_completed && completion.result.is_ok();
         if write_succeeded {
             self.write_in_flight = false;
-            debug_assert!(self.transport.acknowledge_write());
+            assert!(
+                self.transport.acknowledge_write(),
+                "HTTP write completion had no queued transport bytes"
+            );
         }
         let actions = self.stream.completed(completion)?;
         let mut outward = Vec::new();

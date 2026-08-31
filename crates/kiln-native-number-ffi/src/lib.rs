@@ -869,7 +869,14 @@ mod realm {
         0
     }
 
-    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> i32 {
+    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<bool, i32> {
+        let mut made_progress = false;
+        if !in_context {
+            // A response command can wake Hyper and make a pipelined request runnable without
+            // another HostOps completion. Advance the one Tokio scheduler before inspecting
+            // per-connection events, matching the interpreted adapter's checkpoint contract.
+            realm.runtime.borrow_mut().poll_http_tasks();
+        }
         let resources = realm
             .http_connections
             .borrow()
@@ -880,7 +887,7 @@ mod realm {
             loop {
                 let actions = if in_context {
                     let Some(runtime) = active_runtime() else {
-                        return INVALID_ARGUMENT;
+                        return Err(INVALID_ARGUMENT);
                     };
                     // SAFETY: this is the current realm runtime; this poll never nests block_on.
                     unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
@@ -889,9 +896,10 @@ mod realm {
                 };
                 let Some(actions) = actions else { break };
                 let had_actions = !actions.is_empty();
+                made_progress |= had_actions;
                 let status = apply_http_actions(realm, resource, actions, in_context);
                 if status != 0 {
-                    return status;
+                    return Err(status);
                 }
                 let (owner, role) = {
                     let connections = realm.http_connections.borrow();
@@ -906,7 +914,7 @@ mod realm {
                     HttpRole::Server => {
                         let events = if in_context {
                             let Some(runtime) = active_runtime() else {
-                                return INVALID_ARGUMENT;
+                                return Err(INVALID_ARGUMENT);
                             };
                             // SAFETY: event extraction is synchronous on the active runtime.
                             unsafe { &mut *runtime }.take_http_events(resource)
@@ -1019,7 +1027,7 @@ mod realm {
                     HttpRole::Client => {
                         let events = if in_context {
                             let Some(runtime) = active_runtime() else {
-                                return INVALID_ARGUMENT;
+                                return Err(INVALID_ARGUMENT);
                             };
                             // SAFETY: event extraction is synchronous on the active runtime.
                             unsafe { &mut *runtime }.take_http1_client_events(resource)
@@ -1104,16 +1112,17 @@ mod realm {
                     }
                 }
                 let had_events = !payloads.is_empty();
+                made_progress |= had_events;
                 for payload in payloads {
                     let status = queue_http_event(realm, payload);
                     if status != 0 {
-                        return status;
+                        return Err(status);
                     }
                 }
                 if close_transport {
                     let actions = if in_context {
                         let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
+                            return Err(INVALID_ARGUMENT);
                         };
                         // Hyper may publish `Closed` in the same poll that queued its final
                         // response bytes. Drain those bytes before asking the transport to close
@@ -1123,15 +1132,15 @@ mod realm {
                         realm.runtime.borrow_mut().poll_http_connection(resource)
                     };
                     let Some(actions) = actions else {
-                        return RUNTIME_ERROR;
+                        return Err(RUNTIME_ERROR);
                     };
                     let status = apply_http_actions(realm, resource, actions, in_context);
                     if status != 0 {
-                        return status;
+                        return Err(status);
                     }
                     let actions = if in_context {
                         let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
+                            return Err(INVALID_ARGUMENT);
                         };
                         // SAFETY: this is the current realm's exclusively active runtime.
                         unsafe { &mut *runtime }.close_http_connection(resource)
@@ -1139,11 +1148,11 @@ mod realm {
                         realm.runtime.borrow_mut().close_http_connection(resource)
                     };
                     let Some(actions) = actions else {
-                        return RUNTIME_ERROR;
+                        return Err(RUNTIME_ERROR);
                     };
                     let status = apply_http_actions(realm, resource, actions, in_context);
                     if status != 0 {
-                        return status;
+                        return Err(status);
                     }
                 }
                 if !had_actions && !had_events {
@@ -1151,7 +1160,7 @@ mod realm {
                 }
             }
         }
-        0
+        Ok(made_progress)
     }
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
@@ -1162,11 +1171,19 @@ mod realm {
                 if status != 0 {
                     return status;
                 }
-                let status = checkpoint_http(realm, false);
-                if status != 0 {
+                if let Err(status) = checkpoint_http(realm, false) {
                     return status;
                 }
                 continue;
+            }
+
+            // HTTP protocol futures can become runnable without a HostOps completion (for
+            // example when ending response N releases a pipelined request N+1 already buffered
+            // by Hyper). Drain that scheduler-owned work before selecting a blocking host turn.
+            match checkpoint_http(realm, false) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(status) => return status,
             }
 
             let turn = {
@@ -1195,8 +1212,7 @@ mod realm {
                         if status != 0 {
                             return status;
                         }
-                        let status = checkpoint_http(realm, false);
-                        if status != 0 {
+                        if let Err(status) = checkpoint_http(realm, false) {
                             return status;
                         }
                         continue;
@@ -1234,8 +1250,7 @@ mod realm {
                     if status != 0 {
                         return status;
                     }
-                    let status = checkpoint_http(realm, false);
-                    if status != 0 {
+                    if let Err(status) = checkpoint_http(realm, false) {
                         return status;
                     }
                 }

@@ -711,8 +711,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Hyper's public HTTP/1 server service serializes request dispatch until response headers exist"]
-    fn server_connection_serializes_pipelined_responses_in_request_order() {
+    fn server_connection_dispatches_the_next_pipeline_request_after_the_prior_head() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -736,26 +735,47 @@ mod tests {
                 .await
                 .expect("pipelined requests write");
 
-            let ids = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                let mut ids = Vec::new();
-                while ids.len() < 2 {
-                    match events.recv().await.expect("server event arrives") {
-                    EngineEvent::RequestHead { id, request } => {
-                        ids.push((id, request.target));
-                    }
-                    EngineEvent::RequestEnd { .. } => {}
-                    event => panic!("unexpected server event: {event:?}"),
-                    }
+            let first_id = match events.recv().await.expect("first server event arrives") {
+                EngineEvent::RequestHead { id, request } => {
+                    assert_eq!(request.target, "/first");
+                    id
                 }
-                ids
-            })
-            .await
-            .expect("both pipelined request heads arrive");
-            assert_eq!(ids[0].1, "/first");
-            assert_eq!(ids[1].1, "/second");
+                event => panic!("unexpected server event before first head: {event:?}"),
+            };
+            assert!(matches!(
+                events.recv().await,
+                Some(EngineEvent::RequestEnd { id }) if id == first_id
+            ));
 
-            for (id, body) in [(ids[1].0, b"second".as_slice()), (ids[0].0, b"first".as_slice())]
+            let mut response_body = crate::http_body::ResponseBodyDriver::default();
+            response_body.end(b"first".to_vec());
+            let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+            response_sender
+                .send(ResponseCommand {
+                    id: first_id,
+                    status: 200,
+                    headers: vec![("content-length".into(), "5".into())],
+                    body: response_body.body(body_events),
+                })
+                .expect("first response command sends");
+
+            let second_id = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                async {
+                    match events.recv().await.expect("second server event arrives") {
+                        EngineEvent::RequestHead { id, request } => {
+                            assert_eq!(request.target, "/second");
+                            id
+                        }
+                        event => panic!("unexpected server event before second head: {event:?}"),
+                    }
+                },
+            )
+            .await
+            .expect("second pipelined request head arrives after the first response head");
+
             {
+                let (id, body) = (second_id, b"second".as_slice());
                 let mut response_body = crate::http_body::ResponseBodyDriver::default();
                 response_body.end(body.to_vec());
                 let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
@@ -769,15 +789,19 @@ mod tests {
                     .expect("response command sends");
             }
 
-            let mut response = vec![0; 512];
-            let length = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                client_io.read(&mut response),
-            )
+            let response = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                let mut response = Vec::new();
+                let mut chunk = [0; 512];
+                while !response.windows(b"second".len()).any(|bytes| bytes == b"second") {
+                    let length = client_io.read(&mut chunk).await.expect("response reads");
+                    assert_ne!(length, 0, "connection closed before the second response");
+                    response.extend_from_slice(&chunk[..length]);
+                }
+                response
+            })
             .await
-            .expect("pipelined response bytes arrive")
-            .expect("response reads");
-            let response = String::from_utf8(response[..length].to_vec()).expect("HTTP is ASCII");
+            .expect("both pipelined response bodies arrive");
+            let response = String::from_utf8(response).expect("HTTP is ASCII");
             assert!(
                 response.find("first").is_some_and(|first| {
                     response
