@@ -4,6 +4,7 @@
 //! `node_http` events and owned bytes; HostOps consumes portable resource operations. Keeping this
 //! module private prevents either external seam from inheriting Hyper's API or release cadence.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -208,7 +209,10 @@ pub(crate) fn event_connection<I>(
 where
     I: AsyncRead + AsyncWrite + Unpin + 'static,
 {
-    let responses = std::rc::Rc::new(tokio::sync::Mutex::new(responses));
+    let responses = std::rc::Rc::new(tokio::sync::Mutex::new((
+        responses,
+        BTreeMap::<u64, ResponseCommand>::new(),
+    )));
     let next_id = std::rc::Rc::new(std::cell::Cell::new(1_u64));
     Box::pin(async move {
         let service_events = events.clone();
@@ -245,9 +249,15 @@ where
                 }
                 let _ = events.send(EngineEvent::RequestEnd { id });
                 let mut response = loop {
-                    match responses.lock().await.recv().await {
+                    let mut responses = responses.lock().await;
+                    if let Some(command) = responses.1.remove(&id) {
+                        break command;
+                    }
+                    match responses.0.recv().await {
                         Some(command) if command.id == id => break command,
-                        Some(_) => continue,
+                        Some(command) => {
+                            responses.1.insert(command.id, command);
+                        }
                         None => {
                             let mut driver = crate::http_body::ResponseBodyDriver::default();
                             driver.end(Vec::new());
