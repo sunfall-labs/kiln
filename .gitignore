@@ -2,6 +2,9 @@
 *.profraw
 /bench/results/*.json
 !/bench/results/baseline.json
+# Committed for the same reason baseline.json is: a recorded number is what makes a later
+# change in it a diff someone has to justify. Written by scripts/server-baseline.sh.
+!/bench/results/server-baseline.json
 .DS_Store
 /.kiln/
 
