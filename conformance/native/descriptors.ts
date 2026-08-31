@@ -14,10 +14,16 @@ console.log(Object.getOwnPropertyDescriptor(defined, "assigned"));
 console.log(Object.keys(defined), Object.getOwnPropertyNames(defined), JSON.stringify(defined));
 console.log(Object.getOwnPropertyDescriptor(defined, "absent"), Object.hasOwn(defined, "hidden"));
 
-// A non-writable property takes the write and drops it; a non-enumerable one is readable and
-// invisible to everything that lists. Modules are strict and a real engine throws on the write,
-// but both kiln engines are silent, and they have to agree before either can change.
-defined.hidden = 99;
+// A non-writable property refuses the write and a module is always strict, so the write throws
+// rather than being dropped; a non-enumerable one is readable and invisible to everything that
+// lists. Both engines were silent here for a long time and this probe recorded that agreement --
+// the interpreter now throws, so the note this replaces has come due for the native backend too.
+try {
+  defined.hidden = 99;
+  console.log("no throw", defined.hidden);
+} catch (error) {
+  console.log("threw", error instanceof TypeError);
+}
 console.log(defined.hidden, "hidden" in defined, defined.assigned);
 
 // An accessor descriptor is a different *kind* of property, not a data property with functions in

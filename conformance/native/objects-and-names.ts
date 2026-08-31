@@ -1,12 +1,15 @@
 // Two things a program does to an object that are not writes to it: freezing it, and naming
 // something that is not there.
 
-// A frozen object ignores every write. Modules are strict and a real engine would throw here,
-// but both kiln engines are silent, and they have to agree before either can change.
+// A frozen object refuses every write, and a module is strict code -- so the refusal is a
+// TypeError, both for a property that is there and cannot change and for one that is not there
+// and cannot be added. Nothing lands either way; strictness only decides whether it is said.
 const settings = { retries: 3, verbose: false };
 console.log(Object.freeze(settings) === settings, Object.isFrozen(settings));
-settings.retries = 99;
-(settings as any).added = 1;
+function refused(attempt: () => void): string {
+  try { attempt(); return "no throw"; } catch (error: any) { return error.constructor.name; }
+}
+console.log(refused(() => { settings.retries = 99; }), refused(() => { (settings as any).added = 1; }));
 console.log(settings.retries, (settings as any).added, JSON.stringify(settings));
 console.log(Object.isFrozen({}), Object.isFrozen(1), Object.isFrozen("x"), Object.freeze(7));
 // Freezing is shallow: the object is frozen, not what it holds.

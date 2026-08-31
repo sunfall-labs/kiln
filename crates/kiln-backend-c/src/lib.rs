@@ -1224,7 +1224,6 @@ struct kiln_node_socket {
     uint64_t close_request;
     kiln_node_server *server;
     struct kiln_node_client_request *client_requests;
-    uint64_t next_client_request_id;
     struct kiln_node_response *responses;
     int close_after_write;
     int closing;
@@ -1451,6 +1450,7 @@ int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_even
                                          kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
+int kiln_realm_http_client_request_id_active(uint64_t *out_id);
 int kiln_realm_http_client_start_active(uint64_t resource,
                                         uint64_t id,
                                         const kiln_realm_http_request *request,
@@ -1629,6 +1629,18 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value value, int strict, int depth, kiln_value *thrown);
+static int kiln_c99_assign(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                           kiln_value value, int strict, int depth, kiln_value *thrown);
+static int kiln_c99_assign_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                    kiln_value value, int strict, int depth, kiln_value *thrown);
+static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const char *key,
+                                    size_t key_len, int *answer, int depth, kiln_value *thrown);
+static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
+                                             int *answer, int depth, kiln_value *thrown);
+static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
 static kiln_value *kiln_c99_exotic_store(kiln_value target);
@@ -1641,9 +1653,12 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
                                       kiln_value receiver, kiln_value *out, int depth,
                                       kiln_value *thrown);
 static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
-                              int depth, kiln_value *thrown);
+                              int strict, int depth, kiln_value *thrown);
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value value, int strict, int depth,
+                                      kiln_value *thrown);
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
@@ -2332,8 +2347,8 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
-static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-                        kiln_value value, int depth, kiln_value *thrown) {
+static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value value, int strict, int depth, kiln_value *thrown) {
     kiln_object *object;
     size_t index;
     int status;
@@ -2347,8 +2362,8 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
     if (target.tag == KILN_VALUE_PROXY) {
         /* Writing to a proxy is a call, exactly as reading one is. */
         return kiln_c99_proxy_set(host, target,
-                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), value, depth,
-                                  thrown);
+                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), value, strict,
+                                  depth, thrown);
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
@@ -2365,7 +2380,8 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 return status;
             }
         }
-        return kiln_c99_put(host, closure->properties, key, key_len, value, depth, thrown);
+        return kiln_c99_put_mode(host, closure->properties, key, key_len, value, strict, depth,
+                                 thrown);
     }
     if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name(key, key_len, "lastIndex")) {
         /* The one property of a regexp a program may write, and the reason two evaluations of one
@@ -2388,7 +2404,7 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                                             "Invalid array length");
             }
             if (array->frozen) {
-                return KILN_C99_OK;
+                return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
             }
             if ((size_t)wanted <= array->count) {
                 array->count = (size_t)wanted;
@@ -2411,7 +2427,8 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 return status;
             }
         }
-        return kiln_c99_put(host, array->properties, key, key_len, value, depth, thrown);
+        return kiln_c99_put_mode(host, array->properties, key, key_len, value, strict, depth,
+                                 thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         /* A primitive has nowhere to put a property, and every module is strict, so the language
@@ -2428,14 +2445,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
             target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_BIGINT ||
             target.tag == KILN_VALUE_SYMBOL) {
-            return kiln_c99_throw_cannot_set(thrown, target);
+            return strict ? kiln_c99_throw_cannot_set(thrown, target) : KILN_C99_OK;
         }
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
     if (object->frozen) {
-        /* Silently, which is what the interpreter does and therefore what this has to do. */
-        return KILN_C99_OK;
+        return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
     }
     if (kiln_c99_same_name(key, key_len, "__proto__") &&
         object->prototype.tag != KILN_VALUE_NULL) {
@@ -2468,20 +2484,27 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                     /* A data property on the *prototype* is shadowed by an own one, not
                      * written through, so only an own hit assigns here. */
                     if (steps == 0) {
-                        /* Non-writable takes the write and drops it, like a frozen object
-                         * above: a real engine throws in strict mode, but the interpreter is
-                         * silent here and the two have to agree before either can change. */
+                        /* A refused write is observable only in strict code. */
                         if (walked->properties[index].writable) {
                             walked->properties[index].value = value;
+                        } else if (strict) {
+                            return kiln_c99_throw_read_only(thrown, key, key_len);
                         }
                         return KILN_C99_OK;
+                    }
+                    /* A non-writable one on a prototype cannot be shadowed by an assignment
+                     * either: `Object.create(Object.freeze({x: 1})).x = 2` is refused. */
+                    if (!walked->properties[index].writable) {
+                        return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
+                                      : KILN_C99_OK;
                     }
                     steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
                     break;
                 }
                 if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
-                    /* Getter-only: the write is discarded in sloppy mode and a TypeError in
-                     * strict. Modules are strict, but a script is not, and this is shared. */
+                    if (strict) {
+                        return kiln_c99_throw_read_only(thrown, key, key_len);
+                    }
                     return KILN_C99_OK;
                 }
                 {
@@ -2505,6 +2528,60 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         slot->value = value;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown) {
+    return kiln_c99_put_mode(host, target, key, key_len, value, 0, depth, thrown);
+}
+
+/* `Set(O, P, V, throw)`: the write an assignment instruction performs.
+ *
+ * The one thing an assignment knows that `put` does not: whether the code that wrote it was
+ * strict, which is the whole of the difference between discarding a refused write and raising
+ * it. Everything this backend runs is module code, so the emitted call passes 1 -- but the flag
+ * travels rather than being assumed, because `put` is also how the runtime builds its own
+ * globals and those must not throw. */
+static int kiln_c99_assign(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                           kiln_value value, int strict, int depth, kiln_value *thrown) {
+    return kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
+}
+
+static int kiln_c99_assign_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                    kiln_value value, int strict, int depth, kiln_value *thrown) {
+    return kiln_c99_set_computed_mode(host, target, key, value, strict, depth, thrown);
+}
+
+/* `DeletePropertyOrThrow`: a `delete` that could not remove the property is a TypeError in
+ * strict code, and module code is strict. `delete` itself still answers with a flag, because
+ * every built-in that removes a property wants the flag rather than the throw. */
+static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const char *key,
+                                    size_t key_len, int *answer, int depth, kiln_value *thrown) {
+    int status = kiln_c99_delete(host, target, key, key_len, answer, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (!*answer) {
+        return kiln_c99_throw_cannot_delete(thrown, key, key_len);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
+                                             int *answer, int depth, kiln_value *thrown) {
+    kiln_value text;
+    int status = kiln_c99_delete_computed(host, target, key, answer, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (*answer) {
+        return KILN_C99_OK;
+    }
+    text = kiln_c99_property_key(key);
+    if (text.tag != KILN_VALUE_STRING) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    return kiln_c99_throw_cannot_delete(thrown, text.ptr, text.len);
 }
 
 /* Find or create the own property named `key`, bypassing the prototype chain entirely.
@@ -5491,10 +5568,12 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
     return kiln_c99_get_computed(host, target, key, out, depth, thrown);
 }
 
-/* `proxy[key] = value`, through the `set` trap or through the target. The trap's answer is
- * discarded: a strict-mode assignment would throw on a falsy one, and neither engine does. */
+/* `proxy[key] = value`, through the `set` trap or through the target.
+ *
+ * A handler that answers falsy has refused the write, and a refusal in strict code is a
+ * TypeError like any other -- which is the only thing the trap's answer is for. */
 static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
-                              int depth, kiln_value *thrown) {
+                              int strict, int depth, kiln_value *thrown) {
     kiln_value trap;
     kiln_value inner = kiln_c99_proxy_of(proxy)->target;
     kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
@@ -5503,16 +5582,27 @@ static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key,
         return status;
     }
     if (trap.tag == KILN_VALUE_UNDEFINED) {
-        return kiln_c99_set_computed(host, inner, key, value, depth, thrown);
+        return kiln_c99_set_computed_mode(host, inner, key, value, strict, depth, thrown);
     }
     {
         kiln_value arguments[4];
-        kiln_value ignored;
+        kiln_value answered;
         arguments[0] = inner;
         arguments[1] = key;
         arguments[2] = value;
         arguments[3] = proxy;
-        return kiln_c99_call(host, &ignored, trap, handler, arguments, 4, depth, thrown);
+        status = kiln_c99_call(host, &answered, trap, handler, arguments, 4, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (strict && !kiln_c99_truthy(answered)) {
+            kiln_value text = kiln_c99_property_key(key);
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            return kiln_c99_throw_read_only(thrown, text.ptr, text.len);
+        }
+        return KILN_C99_OK;
     }
 }
 
@@ -7000,9 +7090,15 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
 
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value value, int depth, kiln_value *thrown) {
+    return kiln_c99_set_computed_mode(host, target, key, value, 0, depth, thrown);
+}
+
+static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value value, int strict, int depth,
+                                      kiln_value *thrown) {
     double index;
     if (target.tag == KILN_VALUE_PROXY) {
-        return kiln_c99_proxy_set(host, target, key, value, depth, thrown);
+        return kiln_c99_proxy_set(host, target, key, value, strict, depth, thrown);
     }
     index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY && index >= 0.0) {
@@ -7011,9 +7107,17 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         size_t fill;
         int status;
         if (array->frozen) {
-            /* Silently, which is what a write to a frozen object does and therefore what this
-             * has to do -- the two are the same rule seen from different sides. */
-            return KILN_C99_OK;
+            /* A frozen array refuses an element write exactly as a frozen object refuses a
+             * property write -- the two are one rule seen from different sides -- so strict code
+             * raises where sloppy code drops it. */
+            kiln_value text = kiln_c99_property_key(key);
+            if (!strict) {
+                return KILN_C99_OK;
+            }
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            return kiln_c99_throw_read_only(thrown, text.ptr, text.len);
         }
         status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
                                   sizeof *array->elements);
@@ -7046,7 +7150,7 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         if (text.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
-        return kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
+        return kiln_c99_put_mode(host, target, text.ptr, text.len, value, strict, depth, thrown);
     }
 }
 
@@ -8910,12 +9014,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = request->host;
             socket->resource = completion->resource;
-            socket->next_client_request_id = 1;
-            request->request_id = socket->next_client_request_id;
-            socket->next_client_request_id =
-                socket->next_client_request_id == UINT64_MAX
-                    ? 1
-                    : socket->next_client_request_id + 1;
+            status = kiln_realm_http_client_request_id_active(&request->request_id);
+            if (status != KILN_C99_OK) return status;
             request->next = socket->client_requests;
             socket->client_requests = request;
             request->socket = socket;
@@ -9376,11 +9476,9 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (request->sent) {
             status = code == KILN_C99_METHOD_NODE_CLIENT_REQUEST_END
                          ? kiln_realm_http_client_end_active(
-                               request->socket->resource, request->request_id,
-                               (const uint8_t *)text.ptr, text.len)
+                               request->socket->resource, 1, (const uint8_t *)text.ptr, text.len)
                          : kiln_realm_http_client_write_active(
-                               request->socket->resource, request->request_id,
-                               (const uint8_t *)text.ptr, text.len);
+                               request->socket->resource, 1, (const uint8_t *)text.ptr, text.len);
             if (status < KILN_C99_OK) return status;
         } else if (text.len != 0) {
             if (kiln_c99_reserve((void **)&request->pending_body,
@@ -16764,6 +16862,40 @@ static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target) {
     return status;
 }
 
+/* "Cannot assign to read only property 'x' of object", the sentence the interpreter raises for
+ * the same refusal. The two engines run the same bytecode, so they say the same thing. */
+static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len) {
+    static const char terminator[1] = {0};
+    kiln_text built = {NULL, 0, 0};
+    int status;
+    if (kiln_c99_text_append_c(&built, "Cannot assign to read only property '") != KILN_C99_OK ||
+        kiln_c99_text_append(&built, key, key_len) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&built, "' of object") != KILN_C99_OK ||
+        kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
+    free(built.bytes);
+    return status;
+}
+
+static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len) {
+    static const char terminator[1] = {0};
+    kiln_text built = {NULL, 0, 0};
+    int status;
+    if (kiln_c99_text_append_c(&built, "Cannot delete property '") != KILN_C99_OK ||
+        kiln_c99_text_append(&built, key, key_len) != KILN_C99_OK ||
+        kiln_c99_text_append_c(&built, "' of an object") != KILN_C99_OK ||
+        kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
+    free(built.bytes);
+    return status;
+}
+
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
     kiln_value built;
     int status;
@@ -20139,7 +20271,7 @@ fn emit_instruction(
             // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], {symbol}_constant_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_assign(host, stack[sp - 1], {symbol}_constant_{name}, {}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len()
             )
             .unwrap();
@@ -20156,7 +20288,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}"
+                "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_assign_computed(host, stack[sp - 1], key, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}"
             )
             .unwrap();
         }
@@ -20256,7 +20388,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete(host, stack[sp - 1], {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, stack[sp - 1], {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
                 text.len()
             )
             .unwrap();
@@ -20265,7 +20397,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; int answer; int status = kiln_c99_delete_computed(host, stack[sp - 1], key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+                "    {{ kiln_value key = stack[--sp]; int answer; int status = kiln_c99_delete_computed_or_throw(host, stack[sp - 1], key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
             )
             .unwrap();
         }
@@ -21398,6 +21530,10 @@ int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_even
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work) {
     (void)resource; (void)run; if (drop != NULL) drop(work); return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_client_request_id_active(uint64_t *out_id) {
+    if (out_id != NULL) *out_id = 1;
+    return KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_http_client_start_active(uint64_t resource,
                                         uint64_t id,
