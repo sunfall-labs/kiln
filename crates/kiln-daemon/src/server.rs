@@ -23,10 +23,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
-    Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
-    native_build_program, native_build_shared_graph, native_build_shared_program,
-    native_graph_with_cache, native_program, native_run_graph, native_run_program,
-    prepare_run_with_cache,
+    GraphRunPlan, Next, PreparedRun, build_graph_from_snapshot, dispatch, dispatch_source,
+    execute_prepared_run, graph_run_plan, graph_snapshot_is_current, graph_sources_from_snapshot,
+    native_build_graph, native_build_output, native_build_program, native_build_shared_graph,
+    native_build_shared_program, native_graph_with_cache, native_program, native_run_graph,
+    native_run_program, patch_graph_from_snapshot, prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 use crate::graph_cache::GraphCache;
@@ -41,9 +42,9 @@ pub enum DaemonError {
     Listen { socket: PathBuf, source: io::Error },
 }
 
-/// The authoritative source set and its coherence identity move together. Every request that
-/// consumes source bytes checks `source_view` while holding this same mutex through preparation;
-/// this prevents a query from observing a source set that changes between its check and parse.
+/// The authoritative source set and its coherence identity move together. Requests validate the
+/// view and copy source bytes while holding this mutex, then validate again before publishing any
+/// graph prepared from that owned snapshot.
 pub(crate) struct DaemonState<E> {
     pub(crate) engine: E,
     pub(crate) source_view: SourceView,
@@ -859,7 +860,12 @@ fn handle_run<E: QueryEngine>(
     steps: StepBudget,
     source_view: SourceView,
 ) -> (Response, Next) {
-    let prepared = {
+    enum RunPlan {
+        Prepared(crate::dispatch::PreparedRun),
+        Graph(GraphRunPlan),
+    }
+
+    let plan = {
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         if guard.source_view != source_view {
             return (
@@ -872,19 +878,43 @@ fn handle_run<E: QueryEngine>(
         let revision = guard.engine.revision().0;
         let resolutions = guard.resolutions.clone();
         match panic::catch_unwind(AssertUnwindSafe(|| {
-            let DaemonState {
-                engine,
-                graph_cache,
-                ..
-            } = &mut *guard;
-            prepare_run_with_cache(
-                engine,
-                Some(graph_cache),
-                path,
-                project_root,
-                resolutions.as_ref(),
-                node,
-            )
+            let entry = crate::dispatch::resolve_source_path(&path, &project_root);
+            match entry {
+                Some(entry) => {
+                    let DaemonState {
+                        engine,
+                        graph_cache,
+                        ..
+                    } = &mut *guard;
+                    let file = crate::dispatch::ensure_canonical_source(
+                        engine,
+                        &path,
+                        &entry,
+                        &project_root,
+                    )?;
+                    graph_run_plan(
+                        &*engine,
+                        graph_cache,
+                        source_view,
+                        path,
+                        file,
+                        project_root,
+                        entry,
+                        resolutions.as_ref(),
+                        node,
+                    )
+                    .map(RunPlan::Graph)
+                }
+                None => prepare_run_with_cache(
+                    &mut guard.engine,
+                    None,
+                    path,
+                    project_root,
+                    resolutions.as_ref(),
+                    node,
+                )
+                .map(RunPlan::Prepared),
+            }
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
                 match next_source_view(guard.source_view) {
@@ -895,7 +925,7 @@ fn handle_run<E: QueryEngine>(
                     Err(message) => return (Response::Error { message }, Next::Continue),
                 }
             }
-            Ok(Ok(prepared)) => prepared,
+            Ok(Ok(plan)) => plan,
             Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
             Err(payload) => {
                 if guard.engine.revision().0 != revision {
@@ -906,6 +936,81 @@ fn handle_run<E: QueryEngine>(
                     }
                 }
                 return (internal_error(&*payload), Next::Continue);
+            }
+        }
+    };
+    let prepared = match plan {
+        RunPlan::Prepared(prepared) => prepared,
+        RunPlan::Graph(GraphRunPlan::Cached {
+            graph,
+            path,
+            file,
+            revision,
+        }) => PreparedRun::Graph {
+            graph: Ok(graph),
+            path,
+            file,
+            revision,
+        },
+        RunPlan::Graph(GraphRunPlan::Build {
+            snapshot,
+            key,
+            stale,
+            path,
+            file,
+            revision,
+        }) => {
+            let graph = match panic::catch_unwind(AssertUnwindSafe(|| {
+                if let Some((old, changed)) = stale.as_ref() {
+                    if let Some(graph) = patch_graph_from_snapshot(&snapshot, old, *changed)? {
+                        return Ok((graph, true));
+                    }
+                }
+                build_graph_from_snapshot(&snapshot).map(|graph| (graph, false))
+            })) {
+                Ok(graph) => graph,
+                Err(payload) => return (internal_error(&*payload), Next::Continue),
+            };
+            let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !graph_snapshot_is_current(&snapshot, &guard.engine, source_view) {
+                return (
+                    Response::StaleSourceView {
+                        current: guard.source_view,
+                    },
+                    Next::Continue,
+                );
+            }
+            match graph {
+                Ok((graph, partial)) => {
+                    let graph = match graph_sources_from_snapshot(&snapshot, &graph) {
+                        Some(sources) => {
+                            if stale.is_some() && partial {
+                                guard.graph_cache.record_partial_hit();
+                            } else if stale.is_some() {
+                                guard.graph_cache.record_miss();
+                            }
+                            guard.graph_cache.insert(key, sources, graph)
+                        }
+                        None => Arc::new(graph),
+                    };
+                    PreparedRun::Graph {
+                        graph: Ok(graph),
+                        path,
+                        file,
+                        revision,
+                    }
+                }
+                Err(error) => {
+                    if stale.is_some() {
+                        guard.graph_cache.record_miss();
+                    }
+                    PreparedRun::Graph {
+                        graph: Err(error),
+                        path,
+                        file,
+                        revision,
+                    }
+                }
             }
         }
     };

@@ -4,14 +4,13 @@
 //! while the engine lock is held; owned interpreter/native work can then execute without it.
 
 use crate::graph_cache::{GraphCache, GraphCacheKey, GraphCacheLookup, GraphSourceRevision};
-use kiln_db::QueryEngine;
+use kiln_db::{FileId as DbFileId, QueryEngine, Revision};
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, Stats, StepBudget,
+    RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
 };
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +39,43 @@ pub(crate) enum PreparedRun {
         program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
         path: String,
         file: kiln_db::FileId,
+        revision: u64,
+    },
+}
+
+/// Owned source state captured while the daemon lock is held. Graph parsing and linking can then
+/// run against this immutable view while SetSource remains available to other clients.
+#[derive(Debug)]
+pub(crate) struct OwnedGraphSnapshot {
+    pub(crate) source_view: SourceView,
+    pub(crate) project_root: PathBuf,
+    pub(crate) entry: PathBuf,
+    pub(crate) resolutions: Option<ResolutionMap>,
+    pub(crate) node: bool,
+    pub(crate) sources: BTreeMap<PathBuf, OwnedGraphSource>,
+    pub(crate) revisions: Vec<GraphSourceRevision>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedGraphSource {
+    pub(crate) file: DbFileId,
+    pub(crate) text: String,
+    pub(crate) revision: Revision,
+}
+
+pub(crate) enum GraphRunPlan {
+    Cached {
+        graph: Arc<ModuleGraph>,
+        path: String,
+        file: DbFileId,
+        revision: u64,
+    },
+    Build {
+        snapshot: OwnedGraphSnapshot,
+        key: GraphCacheKey,
+        stale: Option<(Arc<ModuleGraph>, GraphSourceRevision)>,
+        path: String,
+        file: DbFileId,
         revision: u64,
     },
 }
@@ -360,6 +396,279 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     Ok(prepared)
 }
 
+/// Capture all active source bytes under the daemon lock and return a graph build plan. The
+/// first implementation snapshots the complete active set for correctness; a future refinement
+/// can narrow the copy once graph reachability and cancellation are explicit APIs.
+pub(crate) fn graph_run_plan<E: QueryEngine>(
+    engine: &E,
+    cache: &mut GraphCache,
+    source_view: SourceView,
+    path: String,
+    file: DbFileId,
+    project_root: String,
+    entry: PathBuf,
+    resolutions: Option<&ResolutionMap>,
+    node: bool,
+) -> Result<GraphRunPlan, String> {
+    let canonical_root = std::fs::canonicalize(&project_root)
+        .map_err(|error| format!("cannot canonicalize request project root: {error}"))?;
+    if let Some(resolutions) = resolutions
+        && canonical_root != Path::new(&resolutions.project_root)
+    {
+        return Err(format!(
+            "request project root {} does not match pinned resolution root {}",
+            canonical_root.display(),
+            resolutions.project_root
+        ));
+    }
+    let canonical_entry = std::fs::canonicalize(&entry)
+        .map_err(|error| format!("cannot canonicalize graph entry: {error}"))?;
+    let key = GraphCacheKey::new(
+        canonical_root.clone(),
+        canonical_entry.clone(),
+        resolutions,
+        node,
+    );
+    let stale = match cache.lookup(&key, |source| engine.source_revision(source)) {
+        GraphCacheLookup::Hit(graph) => {
+            return Ok(GraphRunPlan::Cached {
+                graph,
+                path,
+                file,
+                revision: engine.revision().0,
+            });
+        }
+        GraphCacheLookup::Stale { graph, changed } if changed.len() == 1 => {
+            Some((graph, changed[0]))
+        }
+        GraphCacheLookup::Stale { .. } | GraphCacheLookup::Miss => None,
+    };
+
+    let mut sources = BTreeMap::new();
+    let mut revisions = Vec::new();
+    for (source_file, source_path) in engine.source_files() {
+        let Some(revision) = engine.source_revision(source_file) else {
+            return Err(format!(
+                "query engine listed {source_path} without a source revision"
+            ));
+        };
+        let Some(text) = engine.source(source_file) else {
+            return Err(format!(
+                "query engine listed {source_path} without source bytes"
+            ));
+        };
+        revisions.push(GraphSourceRevision {
+            file: source_file,
+            revision,
+        });
+        let canonical_path = canonical_source_path(&source_path, &canonical_root)
+            .unwrap_or_else(|| PathBuf::from(&source_path));
+        sources.insert(
+            canonical_path,
+            OwnedGraphSource {
+                file: source_file,
+                text: text.to_owned(),
+                revision,
+            },
+        );
+    }
+    Ok(GraphRunPlan::Build {
+        snapshot: OwnedGraphSnapshot {
+            source_view,
+            project_root: canonical_root,
+            entry: canonical_entry,
+            resolutions: resolutions.cloned(),
+            node,
+            sources,
+            revisions,
+        },
+        key,
+        stale,
+        path,
+        file,
+        revision: engine.revision().0,
+    })
+}
+
+fn canonical_source_path(path: &str, project_root: &Path) -> Option<PathBuf> {
+    let path = Path::new(path);
+    let absolute = path
+        .is_absolute()
+        .then(|| path.to_path_buf())
+        .unwrap_or_else(|| project_root.join(path));
+    std::fs::canonicalize(absolute).ok()
+}
+
+pub(crate) fn build_graph_from_snapshot(
+    snapshot: &OwnedGraphSnapshot,
+) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    let entries = snapshot
+        .resolutions
+        .iter()
+        .flat_map(|map| &map.entries)
+        .map(|entry| {
+            (
+                PathBuf::from(&entry.importer),
+                entry.specifier.clone(),
+                match entry.condition {
+                    kiln_proto::NodeRequestKind::Import => {
+                        kiln_module_resolver::NodeRequestKind::Import
+                    }
+                    kiln_proto::NodeRequestKind::Require => {
+                        kiln_module_resolver::NodeRequestKind::Require
+                    }
+                },
+                PathBuf::from(&entry.target),
+            )
+        })
+        .collect::<Vec<_>>();
+    let formats = snapshot
+        .resolutions
+        .iter()
+        .flat_map(|map| &map.node_formats)
+        .map(|format| {
+            (
+                PathBuf::from(&format.path),
+                match format.format {
+                    kiln_proto::NodeModuleFormat::EsModule => {
+                        kiln_module_resolver::NodeModuleFormat::EsModule
+                    }
+                    kiln_proto::NodeModuleFormat::CommonJs => {
+                        kiln_module_resolver::NodeModuleFormat::CommonJs
+                    }
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolver = if snapshot.node {
+        kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
+            &snapshot.project_root,
+            entries,
+            formats,
+        )
+    } else {
+        kiln_module_resolver::PinnedPackageResolver::new_with_requests_and_formats(
+            &snapshot.project_root,
+            entries,
+            formats,
+        )
+    }
+    .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
+        importer: PathBuf::new(),
+        specifier: String::new(),
+        error,
+    })?;
+    ModuleGraph::build_with_typed_policy(&snapshot.entry, resolver, |path, source_kind| {
+        snapshot_module_payload(snapshot, path, source_kind)
+    })
+}
+
+/// Patch one ordinary ESM module in an old immutable graph. Returning `None` asks the caller to
+/// fall back to a complete rebuild (CommonJS, JSON, builtins, and topology changes need that).
+pub(crate) fn patch_graph_from_snapshot(
+    snapshot: &OwnedGraphSnapshot,
+    old: &ModuleGraph,
+    changed: GraphSourceRevision,
+) -> Result<Option<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
+    let Some((path, _source)) = snapshot
+        .sources
+        .iter()
+        .find(|(_, source)| source.file == changed.file)
+    else {
+        return Ok(None);
+    };
+    if old
+        .module(path)
+        .is_none_or(|module| module.source != kiln_module_graph::ModuleSource::Source)
+    {
+        return Ok(None);
+    }
+    let kiln_module_graph::ModulePayload::Program(program) =
+        snapshot_module_payload(snapshot, path, kiln_module_graph::ModuleSource::Source)?
+    else {
+        unreachable!("ordinary source snapshot payload is a program");
+    };
+    Ok(old.patch_module(path, program))
+}
+
+fn snapshot_module_payload(
+    snapshot: &OwnedGraphSnapshot,
+    path: &Path,
+    source_kind: kiln_module_graph::ModuleSource,
+) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    let source =
+        snapshot
+            .sources
+            .get(path)
+            .ok_or_else(|| kiln_module_graph::ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: "source is not synchronized".to_owned(),
+            })?;
+    if source_kind == kiln_module_graph::ModuleSource::Json {
+        return Ok(kiln_module_graph::ModulePayload::JsonText(
+            source.text.clone(),
+        ));
+    }
+    let path_string =
+        path.to_str()
+            .ok_or_else(|| kiln_module_graph::ModuleGraphError::FrontendPath {
+                path: path.to_path_buf(),
+            })?;
+    #[cfg(test)]
+    wait_for_graph_gate(path);
+    if source_kind == kiln_module_graph::ModuleSource::CommonJs {
+        let (hir, static_requires) =
+            frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
+        let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
+            kiln_module_graph::ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            }
+        })?;
+        program.dependencies = static_requires;
+        return Ok(kiln_module_graph::ModulePayload::Program(program));
+    }
+    let hir = frontend_oxc::parse(path_string, &source.text);
+    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+        kiln_module_graph::ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        }
+    })?;
+    Ok(kiln_module_graph::ModulePayload::Program(program))
+}
+
+pub(crate) fn graph_snapshot_is_current<E: QueryEngine>(
+    snapshot: &OwnedGraphSnapshot,
+    engine: &E,
+    source_view: SourceView,
+) -> bool {
+    source_view == snapshot.source_view
+        && snapshot
+            .revisions
+            .iter()
+            .all(|source| engine.source_revision(source.file) == Some(source.revision))
+}
+
+pub(crate) fn graph_sources_from_snapshot(
+    snapshot: &OwnedGraphSnapshot,
+    graph: &ModuleGraph,
+) -> Option<Vec<GraphSourceRevision>> {
+    graph
+        .module_order()
+        .iter()
+        .map(|path| {
+            snapshot
+                .sources
+                .get(path)
+                .map(|source| GraphSourceRevision {
+                    file: source.file,
+                    revision: source.revision,
+                })
+        })
+        .collect()
+}
+
 /// Execute an interpreted run after preparation has released the query-engine mutex.
 pub(crate) fn execute_prepared_run(
     prepared: PreparedRun,
@@ -421,6 +730,13 @@ pub(crate) struct ExecutionGateGuard {
 #[cfg(test)]
 pub(crate) fn install_run_gate(path: &str) -> (std::sync::mpsc::Receiver<()>, ExecutionGateGuard) {
     install_execution_gate(format!("run:{path}"))
+}
+
+#[cfg(test)]
+pub(crate) fn install_graph_gate(
+    path: &str,
+) -> (std::sync::mpsc::Receiver<()>, ExecutionGateGuard) {
+    install_execution_gate(format!("graph:{path}"))
 }
 
 #[cfg(test)]
@@ -487,6 +803,11 @@ pub(crate) fn wait_for_test_gate(root: &str) {
 #[cfg(test)]
 fn wait_for_run_gate(path: &str) {
     wait_for_execution_gate(&format!("run:{path}"));
+}
+
+#[cfg(test)]
+fn wait_for_graph_gate(path: &Path) {
+    wait_for_execution_gate(&format!("graph:{}", path.display()));
 }
 
 #[cfg(test)]
@@ -1437,7 +1758,7 @@ fn ensure_source<E: QueryEngine>(engine: &mut E, path: &str) -> Result<kiln_db::
     Ok(file)
 }
 
-fn resolve_source_path(path: &str, project_root: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_source_path(path: &str, project_root: &str) -> Option<PathBuf> {
     let path = Path::new(path);
     let candidate = if path.is_absolute() {
         path.to_path_buf()
@@ -1477,7 +1798,7 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// making the source snapshot and the following graph build one atomic observation. Activating
 /// the canonical input and removing an alias remain two visible source mutations by the
 /// [`QueryEngine`] revision contract; subsequent preparations are mutation-free.
-fn ensure_canonical_source<E: QueryEngine>(
+pub(crate) fn ensure_canonical_source<E: QueryEngine>(
     engine: &mut E,
     requested_path: &str,
     entry: &Path,
