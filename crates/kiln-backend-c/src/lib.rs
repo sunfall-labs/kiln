@@ -1397,6 +1397,7 @@ struct kiln_node_socket {
     uint64_t next_client_request_id;
     struct kiln_node_response *responses;
     int close_after_write;
+    int close_after_responses;
     int shutdown_after_write;
     int utf8;
     int closing;
@@ -1467,6 +1468,15 @@ static void kiln_c99_node_unlink_response(kiln_node_response *response) {
         }
         cursor = &(*cursor)->next;
     }
+}
+
+static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
+    const kiln_node_response *response;
+    if (socket == NULL) return 0;
+    for (response = socket->responses; response != NULL; response = response->next) {
+        if (!response->ended) return 1;
+    }
+    return 0;
 }
 
 typedef struct kiln_node_completion {
@@ -9937,6 +9947,15 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
     if (!force && socket->server != NULL && socket->server->protocol_http) {
+        // The C adapter registers a response before invoking the JavaScript listener, while the
+        // realm only registers its Hyper body when response.start/end reaches the runtime. A
+        // same-turn server.close() must therefore wait on C's response list before asking the
+        // runtime to close; otherwise an idle runtime transport can tear down the socket before
+        // the delayed response command is observed.
+        if (kiln_c99_node_has_unended_response(socket)) {
+            socket->close_after_responses = 1;
+            return KILN_C99_OK;
+        }
         int status = kiln_realm_http_server_close_active(socket->resource);
         if (status != KILN_C99_INVALID_ARGUMENT) return status;
     }
@@ -10977,6 +10996,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         if (status < KILN_C99_OK) return status;
         response->ended = 1;
+        if (response->socket->close_after_responses &&
+            !kiln_c99_node_has_unended_response(response->socket)) {
+            response->socket->close_after_responses = 0;
+            status = kiln_realm_http_server_close_active(response->socket->resource);
+            if (status != KILN_C99_OK) return status;
+        }
         *result = receiver;
         return KILN_C99_OK;
     }
