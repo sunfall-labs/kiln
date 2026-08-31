@@ -7485,7 +7485,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for action in actions {
                     self.start_http_server_action(&state, action, instruction)?;
                 }
-                let streams = if state.borrow().protocol == ServerProtocol::Net {
+                let streams = if matches!(
+                    state.borrow().protocol,
+                    ServerProtocol::Net | ServerProtocol::Http
+                ) {
                     let mut state = state.borrow_mut();
                     state
                         .streams
@@ -8077,6 +8080,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
+                RuntimeHttpClientEvent::Ready { id: _ } => {
+                    let release = unsafe {
+                        ActiveHttpRuntime::release_client_connection(&mut *runtime, resource, true)
+                    };
+                    if let AgentRelease::Dispatch { request } = release {
+                        let queued = self.http_client_request(request).ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message: "HTTP Agent lost its queued ClientRequest".into(),
+                            }
+                        })?;
+                        self.attach_http_client_request_to_resource(
+                            &queued,
+                            resource,
+                            instruction,
+                        )?;
+                    } else if release == AgentRelease::Retire {
+                        let actions =
+                            unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
+                                .unwrap_or_default();
+                        for action in actions {
+                            self.start_http_stream_action(owner, resource, action, instruction)?;
+                        }
+                    }
+                }
                 RuntimeHttpClientEvent::Drain { id } | RuntimeHttpClientEvent::Finish { id } => {
                     let name = if matches!(event, RuntimeHttpClientEvent::Drain { .. }) {
                         "drain"
@@ -8126,9 +8154,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseEnd { id } => {
-                    let release = unsafe {
-                        ActiveHttpRuntime::release_client_connection(&mut *runtime, resource, true)
-                    };
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -8148,38 +8173,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         stream.response = None;
                     }
                     self.remove_http_client_request(id);
-                    match release {
-                        AgentRelease::Idle => {
-                            self.set_http_resource_referenced(owner, resource, false, instruction)?;
-                        }
-                        AgentRelease::Dispatch { request } => {
-                            let queued = self.http_client_request(request).ok_or_else(|| {
-                                ExecutionError::Host {
-                                    instruction,
-                                    message: "HTTP Agent lost its queued ClientRequest".into(),
-                                }
-                            })?;
-                            self.attach_http_client_request_to_resource(
-                                &queued,
-                                resource,
-                                instruction,
-                            )?;
-                        }
-                        AgentRelease::Retire => {
-                            let actions = unsafe {
-                                ActiveHttpRuntime::close_connection(&mut *runtime, resource)
-                            }
-                            .unwrap_or_default();
-                            for action in actions {
-                                self.start_http_stream_action(
-                                    owner,
-                                    resource,
-                                    action,
-                                    instruction,
-                                )?;
-                            }
-                        }
-                    }
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
                     let request = owner
@@ -8875,26 +8868,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "HTTP Agent connection disappeared during attachment".into(),
             });
         }
-        self.set_http_resource_referenced(&owner, resource, true, instruction)?;
         self.flush_http_client_request(state, &socket, instruction)
-    }
-
-    fn set_http_resource_referenced(
-        &mut self,
-        owner: &Rc<RefCell<NodeServerState>>,
-        resource: kiln_host_abi::ResourceId,
-        referenced: bool,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        self.start_http_stream_action(
-            owner,
-            resource,
-            StreamAction::Start(AsyncHostOp::SetResourceReferenced {
-                resource,
-                referenced,
-            }),
-            instruction,
-        )
     }
 
     fn flush_http_client_request(
@@ -9559,7 +9533,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if until_module && self.module_outcome().is_some() {
                 return Ok(());
             }
-            let has_pending = self.module_realm.as_ref().map_or_else(
+            let has_pending_adapter_work = self.module_realm.as_ref().map_or_else(
                 || !self.pending_host.is_empty() || !self.pending_node.is_empty(),
                 |realm| {
                     let realm = realm.borrow();
@@ -9567,8 +9541,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 },
             );
             let turn = self.with_realm_mut(|realm| {
-                if has_pending {
-                    runtime.next_turn(realm)
+                if has_pending_adapter_work {
+                    runtime.next_referenced_turn(realm)
                 } else {
                     runtime.next_timer(realm).map(RuntimeTurn::Timer)
                 }
@@ -11799,7 +11773,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `toLocaleString` reduces each element by *calling* its own, so it has no pure
                 // form at all: it is the machine's from the first element on.
                 | Native::ArrayToLocaleString
+                // `join` converts its separator with `ToString`, which may be the program's own
+                // -- and a view's elements are read the same way an array's are, so the one
+                // walk serves both receivers. The pure arm coerced neither, which made a typed
+                // array and an array disagree about `join({toString(){ return "-" }})`.
+                | Native::ArrayJoin
         ) {
+            return self.generic_array_native(native, receiver, arguments, instruction);
+        }
+        // The four that build a *new* array take the machine's walk whatever their receiver is,
+        // because `ArraySpeciesCreate` is a pair of property reads and possibly a call, and a
+        // pure arm can make none of them. A dense fast path here would answer with a plain array
+        // while the generic one honoured the receiver's species -- one method disagreeing with
+        // another about what `slice` and `map` return is worse than neither consulting it.
+        //
+        // A typed array is excluded: `%TypedArray%.prototype.slice` builds through
+        // `TypedArraySpeciesCreate`, which is a different operation over a different receiver.
+        if !matches!(receiver, Value::TypedArray(_))
+            && matches!(
+                native,
+                Native::ArraySlice | Native::ArraySplice | Native::ArrayConcat | Native::ArrayFlat
+            )
+        {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
         // These three answer from the machine because each can run program code -- a set-like's
@@ -17050,6 +17045,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // The three that build a new array go the same way the four natives do, and for the same
+        // reason: the species is decided by reading the receiver's `constructor`, and this walk
+        // has no way to consult it that the generic one does not already have.
+        if matches!(
+            method,
+            CallbackMethod::Map | CallbackMethod::Filter | CallbackMethod::FlatMap
+        ) {
+            return self.generic_array_callback(method, receiver, arguments, instruction);
+        }
         let Some(items) = dense_array(receiver) else {
             return self.generic_array_callback(method, receiver, arguments, instruction);
         };
@@ -19154,6 +19158,62 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `ArraySpeciesCreate(originalArray, length)`: what a derived array method builds into.
+    ///
+    /// Not an implementation detail. `map`, `filter`, `slice`, `splice`, `concat`, `flat` and
+    /// `flatMap` each produce a *new* array, and the language lets the receiver say what kind:
+    /// a subclass of Array gets its subclass back, and a program that sets `constructor` or
+    /// `Symbol.species` gets whatever it named. Building a plain array regardless is the answer
+    /// only when the receiver is not an array at all, or has said nothing.
+    ///
+    /// Every step here is observable -- reading `constructor`, then `@@species` off it, then
+    /// constructing -- which is why this cannot live in the pure table and why the seven methods
+    /// take the machine's walk whether or not their receiver is a dense array. One of them
+    /// consulting the species while another quietly did not would be worse than none doing it.
+    fn array_species_create(
+        &mut self,
+        original: &Value,
+        length: u64,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !matches!(unwrap_proxy(original), Value::Array(_)) {
+            return Self::create_array_of_length(length);
+        }
+        let constructor = self.read_property(original, "constructor", instruction)?;
+        // A constructor that is an object is asked for its species; `null` there means "plain
+        // array" rather than an error, which is what lets a program opt out by writing it.
+        let species = if is_an_object(&constructor) {
+            let named = self.read_computed(
+                &constructor,
+                &Value::Symbol(Symbol::WellKnown(WellKnown::Species)),
+                instruction,
+            )?;
+            if matches!(named, Value::Null) {
+                Value::Undefined
+            } else {
+                named
+            }
+        } else {
+            constructor
+        };
+        if matches!(species, Value::Undefined) {
+            return Self::create_array_of_length(length);
+        }
+        if !is_constructor(&species) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a constructor", species.to_display_string()),
+            });
+        }
+        // The plain `Array` constructor is the common case and builds exactly what
+        // `ArrayCreate` would, so it is answered without a call.
+        if matches!(species, Value::Native(Native::ArrayConstructor)) {
+            return Self::create_array_of_length(length);
+        }
+        #[expect(clippy::cast_precision_loss)]
+        let requested = Value::Number(length as f64);
+        self.construct_value(species.clone(), vec![requested], species, instruction)
+    }
+
     /// `ArrayCreate(length)`, which is what `ArraySpeciesCreate` reduces to when the receiver is
     /// not an array: the species lookup is skipped entirely for one that is not.
     fn create_array_of_length(length: u64) -> Result<Value, ExecutionError> {
@@ -19178,10 +19238,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// `CreateDataPropertyOrThrow(A, ToString(index), value)` on an array this method made.
-    fn create_element(array: &Value, index: u64, value: Value) -> Result<(), ExecutionError> {
+    fn create_element(
+        &mut self,
+        array: &Value,
+        index: u64,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
         let Value::Array(items) = array else {
-            return Ok(());
+            // Whatever the species built. `CreateDataPropertyOrThrow` rather than an assignment:
+            // a definition bypasses an inherited setter, which is what "create" means, and it
+            // raises rather than dropping the element when the object refuses.
+            return self.define_element(array, index, value);
         };
+        // An array the species handed back may already have something recorded at this position
+        // -- `Object.defineProperty(q, 0, {writable: false})` on a fresh one is exactly what the
+        // corpus checks -- and a *definition* replaces it, flags and all, where the dense write
+        // below would leave the old flags standing over a new value.
+        #[expect(clippy::cast_possible_truncation)]
+        let at = index as usize;
+        if array_exotic_element(items, at).is_some()
+            || items.properties.borrow().is_frozen()
+            || !items.properties.borrow().is_extensible()
+        {
+            return self.define_element(array, index, value);
+        }
         if index >= MAX_DENSE_ARRAY as u64 {
             return Err(ExecutionError::ArrayTooLarge {
                 length: MAX_DENSE_ARRAY,
@@ -19200,6 +19280,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Shorten or lengthen an array this method made, so that its `length` is what the walk
     /// counted rather than what it happened to reach.
+    /// `CreateDataPropertyOrThrow(O, ToString(index), value)` on something that is not an
+    /// array: whatever `ArraySpeciesCreate` built when the receiver named a species.
+    fn define_element(
+        &mut self,
+        target: &Value,
+        index: u64,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let key = Self::element_key(index).property_key();
+        let descriptor = Descriptor {
+            value: Some(value),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
+            get: None,
+            set: None,
+        };
+        if define_own_property(&self.intrinsics, target, &key, &descriptor)? {
+            return Ok(());
+        }
+        Err(ExecutionError::TypeErrorMessage {
+            message: format!("Cannot define property '{key}' of object"),
+        })
+    }
+
+    /// Set the finished length of what a method built, whatever kind of object that is.
+    fn finish_created_array(
+        &mut self,
+        array: &Value,
+        length: u64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if matches!(array, Value::Array(_)) {
+            Self::truncate_created_array(array, length);
+            return Ok(());
+        }
+        self.set_array_like_length(array, length, instruction)
+    }
+
     fn truncate_created_array(array: &Value, length: u64) {
         let Value::Array(items) = array else {
             return;
@@ -19409,18 +19528,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let start = self.bound_argument(arguments.first(), length, 0, instruction)?;
                 let end = self.bound_argument(arguments.get(1), length, length, instruction)?;
                 let count = end.saturating_sub(start);
-                let created = Self::create_array_of_length(count)?;
+                let created = self.array_species_create(receiver, count, instruction)?;
                 let mut written = 0;
                 let mut index = start;
                 while index < end {
                     Self::walk_step(&mut steps)?;
                     if let Some(value) = self.element_read(receiver, index, instruction)? {
-                        Self::create_element(&created, written, value)?;
+                        self.create_element(&created, written, value)?;
                     }
                     index += 1;
                     written += 1;
                 }
-                Self::truncate_created_array(&created, written);
+                self.finish_created_array(&created, written, instruction)?;
                 Ok(created)
             }
             Native::ArraySplice => {
@@ -19448,15 +19567,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 };
                 Self::bounded_index(length + inserted, 0)?;
-                let removed = Self::create_array_of_length(removed_count)?;
+                let removed = self.array_species_create(receiver, removed_count, instruction)?;
                 for offset in 0..removed_count {
                     Self::walk_step(&mut steps)?;
                     if self.element_has(receiver, start + offset, instruction)? {
                         let value = self.element_get(receiver, start + offset, instruction)?;
-                        Self::create_element(&removed, offset, value)?;
+                        self.create_element(&removed, offset, value)?;
                     }
                 }
-                Self::truncate_created_array(&removed, removed_count);
+                self.finish_created_array(&removed, removed_count, instruction)?;
                 if inserted < removed_count {
                     let mut index = start;
                     while index < length - removed_count {
@@ -19504,7 +19623,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(removed)
             }
             Native::ArrayConcat => {
-                let created = Self::create_array_of_length(0)?;
+                let created = self.array_species_create(receiver, 0, instruction)?;
                 let mut written = 0;
                 let mut sources = vec![receiver.clone()];
                 sources.extend(arguments.iter().cloned());
@@ -19515,17 +19634,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         for index in 0..length {
                             Self::walk_step(&mut steps)?;
                             if let Some(value) = self.element_read(&source, index, instruction)? {
-                                Self::create_element(&created, written, value)?;
+                                self.create_element(&created, written, value)?;
                             }
                             written += 1;
                         }
                     } else {
                         Self::walk_step(&mut steps)?;
-                        Self::create_element(&created, written, source)?;
+                        self.create_element(&created, written, source)?;
                         written += 1;
                     }
                 }
-                Self::truncate_created_array(&created, written);
+                self.finish_created_array(&created, written, instruction)?;
                 Ok(created)
             }
             Native::ArrayJoin => {
@@ -19668,7 +19787,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.as_number_argument(arguments.first(), instruction)?,
                     ),
                 };
-                let created = Self::create_array_of_length(0)?;
+                let created = self.array_species_create(receiver, 0, instruction)?;
                 let mut written = 0;
                 self.flatten_into(
                     &created,
@@ -19679,7 +19798,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &mut steps,
                     instruction,
                 )?;
-                Self::truncate_created_array(&created, written);
+                self.finish_created_array(&created, written, instruction)?;
                 Ok(created)
             }
             // `join` with `ToString` replaced by a *call* to each element's own
@@ -19808,7 +19927,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                 )?;
             } else {
-                Self::create_element(into, *written, value)?;
+                self.create_element(into, *written, value)?;
                 *written += 1;
             }
         }
@@ -19853,7 +19972,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     } else {
                         self.element_get(receiver, at, instruction)?
                     };
-                    Self::create_element(&created, at, value)?;
+                    self.create_element(&created, at, value)?;
                 }
                 Ok(created)
             }
@@ -19862,7 +19981,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, length - at - 1, instruction)?;
-                    Self::create_element(&created, at, value)?;
+                    self.create_element(&created, at, value)?;
                 }
                 Ok(created)
             }
@@ -19875,7 +19994,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    Self::create_element(&created, at, value)?;
+                    self.create_element(&created, at, value)?;
                 }
                 self.array_sort(&created, arguments, instruction)
             }
@@ -19906,18 +20025,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for at in 0..start {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    Self::create_element(&created, written, value)?;
+                    self.create_element(&created, written, value)?;
                     written += 1;
                 }
                 for argument in arguments.iter().skip(2) {
-                    Self::create_element(&created, written, argument.clone())?;
+                    self.create_element(&created, written, argument.clone())?;
                     written += 1;
                 }
                 let mut at = start + removed;
                 while at < length {
                     Self::walk_step(&mut steps)?;
                     let value = self.element_get(receiver, at, instruction)?;
-                    Self::create_element(&created, written, value)?;
+                    self.create_element(&created, written, value)?;
                     written += 1;
                     at += 1;
                 }
@@ -20015,9 +20134,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | CallbackMethod::FindLastIndex
         );
         let created = match method {
-            CallbackMethod::Map => Some(Self::create_array_of_length(length)?),
+            CallbackMethod::Map => {
+                Some(self.array_species_create(receiver, length, instruction)?)
+            }
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
-                Some(Self::create_array_of_length(0)?)
+                Some(self.array_species_create(receiver, 0, instruction)?)
             }
             _ => None,
         };
@@ -20043,7 +20164,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )?;
             match method {
                 CallbackMethod::Map => {
-                    Self::create_element(
+                    self.create_element(
                         created.as_ref().unwrap_or(&Value::Undefined),
                         index,
                         produced,
@@ -20051,7 +20172,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 CallbackMethod::Filter => {
                     if produced.is_truthy() {
-                        Self::create_element(
+                        self.create_element(
                             created.as_ref().unwrap_or(&Value::Undefined),
                             written,
                             value,
@@ -20069,12 +20190,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Self::walk_step(&mut steps)?;
                             if self.element_has(&produced, at, instruction)? {
                                 let nested = self.element_get(&produced, at, instruction)?;
-                                Self::create_element(into, written, nested)?;
+                                self.create_element(into, written, nested)?;
                             }
                             written += 1;
                         }
                     } else {
-                        Self::create_element(into, written, produced)?;
+                        self.create_element(into, written, produced)?;
                         written += 1;
                     }
                 }
@@ -20103,7 +20224,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             CallbackMethod::Map => created.unwrap_or(Value::Undefined),
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
                 let created = created.unwrap_or(Value::Undefined);
-                Self::truncate_created_array(&created, written);
+                self.finish_created_array(&created, written, instruction)?;
                 created
             }
             CallbackMethod::FindIndex | CallbackMethod::FindLastIndex => Value::Number(-1.0),
@@ -23250,11 +23371,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // them, and because `new x.constructor(...)` is how a library clones a value whose type
         // it was handed rather than told.
         //
-        // An own property of that name wins, because it is one: `a.constructor = {}` is an
-        // ordinary assignment and reading it back has to see what was written, which is exactly
-        // what `ArraySpeciesCreate` consults.
+        // Anything the *chain* says wins, because a `constructor` reached that way is a real
+        // property: `a.constructor = {}` is an ordinary assignment and reading it back has to
+        // see what was written, and `class MyArray extends Array {}` puts its own on its
+        // prototype. Both are exactly what `ArraySpeciesCreate` consults, and answering the
+        // intrinsic over them made every subclass's derived methods build a plain array.
         if name == "constructor"
             && own_property_state(&self.intrinsics, target, name).is_none()
+            && self.stored_property(target, name).is_none()
             && let Some(constructor) = intrinsic_constructor(target)
         {
             return constructor;
@@ -32981,6 +33105,24 @@ fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
         Value::Native(native) if defines_species(*native) => {
             (key == WellKnown::Species.property_key()).then_some(BuiltinAccessor::Species)
         }
+        // A subclass constructor *inherits* the accessor: `class MyArray extends Array {}` puts
+        // `Array` in `MyArray`'s own prototype chain, so `MyArray[Symbol.species]` is the same
+        // getter answering a different receiver -- which is the whole mechanism by which
+        // `myArray.map(f)` builds a `MyArray`. The chain here is the constructor's own, not its
+        // instances', and it ends at a built-in that the store cannot be walked into.
+        Value::Function(_) | Value::Bound(_) if key == WellKnown::Species.property_key() => {
+            let mut current = prototype_of(target);
+            for _ in 0..MAX_PROTOTYPE_DEPTH {
+                match current {
+                    Value::Native(native) if defines_species(native) => {
+                        return Some(BuiltinAccessor::Species);
+                    }
+                    Value::Function(_) | Value::Bound(_) => current = prototype_of(&current),
+                    _ => return None,
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -33050,7 +33192,7 @@ fn prototype_may_change(intrinsics: &Intrinsics, target: &Value, prototype: &Val
     // from being made -- so the walk terminates on its own. The step cap is there for the one
     // case that is not this operation's to reason about: a chain that reaches a value whose
     // prototype is answered by a table rather than a slot.
-    for _ in 0..MAX_PROTOTYPE_WALK {
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
         if !is_reflect_target(&link) {
             return true;
         }
@@ -33069,8 +33211,6 @@ fn prototype_may_change(intrinsics: &Intrinsics, target: &Value, prototype: &Val
 }
 
 /// How far the cycle check walks before it gives up and allows the write.
-const MAX_PROTOTYPE_WALK: usize = 10_000;
-
 /// What `Object.setPrototypeOf` and the `__proto__` setter throw when the change is refused.
 fn prototype_change_refused() -> ExecutionError {
     ExecutionError::TypeErrorMessage {
@@ -35449,8 +35589,10 @@ mod tests {
             vec!["0", "1", "length"]
         );
 
-        let mut boxed_data = ObjectData::default();
-        boxed_data.primitive = Some(Value::String("ab".to_owned()));
+        let boxed_data = ObjectData {
+            primitive: Some(Value::String("ab".to_owned())),
+            ..ObjectData::default()
+        };
         let boxed = Value::Object(Rc::new(RefCell::new(boxed_data)));
         assert_eq!(
             own_property_keys_including_symbols(&intrinsics, &boxed),
