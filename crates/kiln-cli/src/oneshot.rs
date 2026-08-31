@@ -410,6 +410,50 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn one_shot_node_preserves_http_response_after_client_half_close() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-http-half-close-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create HTTP half-close fixture");
+        let source = fixture.join("http-server-allow-half-open.mjs");
+        std::fs::copy(
+            root.join("conformance/node/upstream-adapted/http-server-allow-half-open.mjs"),
+            &source,
+        )
+        .expect("copy pinned HTTP half-close fixture");
+
+        let interpreted = {
+            let mut session = OneShot::start().expect("start interpreted engine");
+            commands::run(&mut session, &source, &fixture, true)
+                .expect("run interpreted HTTP half-close fixture")
+        };
+        assert_eq!(interpreted.text, "pass\n");
+        assert_eq!(interpreted.exit_code, 0);
+
+        let native = {
+            let mut session = OneShot::start().expect("start native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                kiln_proto::NativeProfile::Dev,
+                true,
+            )
+            .expect("run native HTTP half-close fixture")
+        };
+        assert_eq!(
+            native.text, "pass\n",
+            "exit={} notes={:?} value={:?}",
+            native.exit_code, native.notes, native.value
+        );
+        assert_eq!(native.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_node_run_selects_dual_package_exports_by_request_kind() {
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-dual-package-fixture-{}",
