@@ -14638,6 +14638,11 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     }
     case KILN_VALUE_STRING:
         return kiln_c99_json_quote(text, value.ptr, value.len);
+    case KILN_VALUE_BIGINT:
+        /* BigInt has no JSON representation.  This is a TypeError, rather than an omitted
+         * value, and must travel through the ordinary thrown-value path so callers can catch it. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Do not know how to serialize a BigInt");
     default:
         break;
     }
@@ -14969,6 +14974,13 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
             return KILN_C99_OK;
         }
         if (byte != '\\') {
+            /* JSON strings may contain ordinary Unicode text, but the sixteen C0 control
+             * characters must be escaped.  Letting one through would make JSON.parse accept a
+             * JavaScript source string that the JSON grammar rejects. */
+            if ((unsigned char)byte < 0x20) {
+                free(text.bytes);
+                return KILN_C99_CONTROL_ERROR;
+            }
             if (pending_high != 0) {
                 if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
                     free(text.bytes);
@@ -15212,20 +15224,54 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
          * here and the digits themselves are handed to the shared parser -- one place that knows
          * how a decimal becomes a double. */
         size_t start = reader->at;
+        size_t digits;
         if (reader->bytes[reader->at] == '-') {
             reader->at += 1;
         }
-        while (reader->at < reader->len) {
-            char byte = reader->bytes[reader->at];
-            if ((byte >= '0' && byte <= '9') || byte == '.' || byte == 'e' || byte == 'E' ||
-                byte == '+' || byte == '-') {
-                reader->at += 1;
-                continue;
-            }
-            break;
-        }
-        if (reader->at == start) {
+        if (reader->at >= reader->len) {
             return KILN_C99_CONTROL_ERROR;
+        }
+        if (reader->bytes[reader->at] == '0') {
+            reader->at += 1;
+            /* JSON disallows leading zeroes; the following digit is not a new token. */
+            if (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
+                reader->bytes[reader->at] <= '9') {
+                return KILN_C99_CONTROL_ERROR;
+            }
+        } else if (reader->bytes[reader->at] >= '1' && reader->bytes[reader->at] <= '9') {
+            do {
+                reader->at += 1;
+            } while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
+                     reader->bytes[reader->at] <= '9');
+        } else {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        if (reader->at < reader->len && reader->bytes[reader->at] == '.') {
+            reader->at += 1;
+            digits = reader->at;
+            while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
+                   reader->bytes[reader->at] <= '9') {
+                reader->at += 1;
+            }
+            if (reader->at == digits) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+        }
+        if (reader->at < reader->len &&
+            (reader->bytes[reader->at] == 'e' || reader->bytes[reader->at] == 'E')) {
+            reader->at += 1;
+            if (reader->at < reader->len &&
+                (reader->bytes[reader->at] == '+' || reader->bytes[reader->at] == '-')) {
+                reader->at += 1;
+            }
+            digits = reader->at;
+            while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
+                   reader->bytes[reader->at] <= '9') {
+                reader->at += 1;
+            }
+            if (reader->at == digits) {
+                return KILN_C99_CONTROL_ERROR;
+            }
         }
         {
             double number = kiln_string_to_number(reader->bytes + start, reader->at - start);

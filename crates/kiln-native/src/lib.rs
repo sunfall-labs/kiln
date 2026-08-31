@@ -5421,6 +5421,100 @@ int main(void) {{
     }
 
     #[test]
+    fn native_json_errors_are_catchable_and_uncaught_errors_are_reported() {
+        use kiln_module_resolver::ModuleResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native JSON exception integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-json-exceptions");
+        let project = root.path.join("project");
+        fs::create_dir_all(&project).expect("create JSON exception project");
+        let entry = project.join("main.js");
+        fs::write(
+            &entry,
+            "try { JSON.parse('{oops'); } catch (error) { console.log('parse', error instanceof SyntaxError, error.constructor.name); }\nconsole.log('after-parse');\nconst cycle = {}; cycle.self = cycle; try { JSON.stringify(cycle); } catch (error) { console.log('stringify', error instanceof TypeError, error.constructor.name); }\nconsole.log('after-stringify');\n",
+        )
+        .expect("write catchable JSON exception source");
+        let mut graph = ModuleGraph::build_node(
+            &entry,
+            ModuleResolver::new(&project).expect("module resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("catchable JSON exception source compiles");
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let caught = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("caught"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("catchable JSON exceptions run natively");
+        assert_eq!(caught.exit_code, Some(0));
+        assert_eq!(
+            caught.stdout,
+            b"parse true SyntaxError\nafter-parse\nstringify true TypeError\nafter-stringify\n"
+        );
+        assert!(caught.stderr.is_empty());
+
+        fs::write(&entry, "JSON.parse('{oops');\n").expect("write uncaught JSON exception source");
+        graph = ModuleGraph::build_node(
+            &entry,
+            ModuleResolver::new(&project).expect("module resolver for uncaught source"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("uncaught JSON exception source compiles");
+        let uncaught = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("uncaught"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("uncaught JSON exception run reports a native result");
+        assert_eq!(uncaught.exit_code, Some(1));
+        assert!(uncaught.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&uncaught.stderr)
+                .contains("uncaught SyntaxError: Unexpected token in JSON")
+        );
+
+        fs::write(
+            &entry,
+            "const cycle = {}; cycle.self = cycle; JSON.stringify(cycle);\n",
+        )
+        .expect("write uncaught cyclic JSON source");
+        graph = ModuleGraph::build_node(
+            &entry,
+            ModuleResolver::new(&project).expect("module resolver for cyclic source"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("uncaught cyclic JSON source compiles");
+        let uncaught_cycle = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("uncaught-cycle"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("uncaught cyclic JSON run reports a native result");
+        assert_eq!(uncaught_cycle.exit_code, Some(1));
+        assert!(uncaught_cycle.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&uncaught_cycle.stderr)
+                .contains("uncaught TypeError: Converting circular structure to JSON")
+        );
+    }
+
+    #[test]
     fn graph_build_reuses_sibling_objects_across_different_roots() {
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native graph integration: no C compiler found");
