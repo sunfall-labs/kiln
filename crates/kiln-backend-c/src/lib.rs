@@ -19511,7 +19511,6 @@ fn produces_references(program: &Program) -> bool {
                     | Instruction::NewCell(_)
                     | Instruction::LoadCell(_)
                     | Instruction::StoreCell(_)
-                    | Instruction::MarkUninitialized(_)
                     | Instruction::Pop
                     | Instruction::Dup
                     | Instruction::Unary(_)
@@ -20499,9 +20498,10 @@ fn emit_instruction(
         }
         Instruction::LoadCell(local) => {
             if guarded.contains(local) {
+                let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                    "    if (kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -20517,9 +20517,18 @@ fn emit_instruction(
         Instruction::MarkUninitialized(local) => {
             writeln!(output, "    kiln_c99_mark_uninitialized(&locals[{local}]);").unwrap();
         }
-        // An upvalue slot always holds a cell -- that is what capturing means -- so unlike a
-        // local it needs no test to know whether to read through it.
+        // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
+        // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
+        // function, so this body cannot use its own `MarkUninitialized` set to decide whether to
+        // check. Reading the marker is cheap compared with the pointer chase and keeps captured
+        // bindings in parity with `LoadCell` and the interpreter.
         Instruction::LoadUpvalue(upvalue) => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    if (kiln_c99_cell_of(upvalues[{upvalue}])->tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
             writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(upvalues[{upvalue}]);").unwrap();
         }
         Instruction::StoreUpvalue(upvalue) => {
@@ -20608,9 +20617,10 @@ fn emit_instruction(
         }
         Instruction::LoadLocal(local) => {
             if guarded.contains(local) {
+                let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (locals[{local}].tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                    "    if (locals[{local}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -20723,9 +20733,10 @@ fn emit_instruction(
         // it directly rather than reaching for a frame that may no longer exist.
         Instruction::LoadGlobal(slot) => {
             if guarded.contains(slot) {
+                let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if ({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED) return KILN_C99_UNINITIALIZED_ERROR;"
+                    "    if ({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }

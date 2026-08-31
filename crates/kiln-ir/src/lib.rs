@@ -315,9 +315,9 @@ pub enum Instruction {
     DefineMethod,
     /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
     ///
-    /// Reading it is a `ReferenceError`. Emitted only where a read could actually reach it --
-    /// a captured binding or a module-scope one -- because a plain local can only be read by
-    /// code the compiler already checked.
+    /// Reading it is a `ReferenceError`. Emitted for lexical bindings as they enter scope, which
+    /// matters for captured bindings and for control-flow joins such as switch cases where the
+    /// compiler's straight-line initialization state cannot describe every incoming path.
     MarkUninitialized(u32),
     /// Replace a value with an array of its own enumerable string keys, in enumeration order.
     ///
@@ -1305,9 +1305,9 @@ struct Local {
     ///
     /// Every name a block declares exists from the moment the block is entered, because a
     /// function declared at the top of it can be called immediately and its body may refer to a
-    /// `const` written further down. Reading such a name *directly*, before its declaration, is
-    /// the mistake this flag catches; reading it from inside a nested function is not, and
-    /// resolves as an upvalue rather than a local, so the check never sees it.
+    /// `const` written further down. The runtime marker catches a direct read before the
+    /// declaration; a nested function resolves the same name as an upvalue and checks the shared
+    /// cell when it eventually runs.
     initialized: bool,
     /// The slot holds a cell rather than the value, because a nested function refers to this
     /// name. Reads and writes go through `LoadCell`/`StoreCell` so every closure sharing the
@@ -1383,12 +1383,11 @@ struct Compiler {
     strict: bool,
     /// Whether this compilation is an `eval` program rather than a file.
     ///
-    /// The one thing it changes is the temporal dead zone. A file's dead-zone read is refused
-    /// where the compiler sees it, because a static answer beats a runtime one; eval code cannot
-    /// afford that, because refusing is a `SyntaxError` and the language promises a
-    /// `ReferenceError` -- `assert.throws(ReferenceError, () => eval("typeof x; let x;"))` is
-    /// exactly the difference, and a program told its source was invalid takes a different
-    /// branch. Every eval binding is boxed, so the runtime check is already there to raise it.
+    /// The one thing it changes is the temporal dead zone. Both files and eval code preserve a
+    /// reachable dead-zone read for runtime, because the language promises a `ReferenceError` --
+    /// `assert.throws(ReferenceError, () => eval("typeof x; let x;"))` -- rather than rejecting
+    /// source that may never reach the read. Every eval binding is boxed, so the runtime check is
+    /// already there to raise it.
     eval_program: bool,
     /// Whether this compilation is a *module* body rather than a script or an `eval`.
     ///
@@ -1403,8 +1402,8 @@ struct Compiler {
     /// The parameter list is its own scope, and every name in it exists -- uninitialised --
     /// from the moment the call begins. So `function f(x = x) {}` compiles and only *calling*
     /// it fails, and the failure is a `ReferenceError`, not a rejection of the source. The flag
-    /// is what tells a dead-zone read here apart from one in a body, where refusing at compile
-    /// time is both allowed and better.
+    /// is what tells a dead-zone read here apart from one in a body, where the same runtime check
+    /// must remain reachable so a surrounding `try` can catch it.
     parameter_dead_zone: bool,
     /// Names of the calling frame's bindings borrowed into scope 0 of an eval program.
     ///
@@ -2415,7 +2414,7 @@ impl Compiler {
         // reaches the currently executing module frame, which is correct only while a callable
         // stays in its declaring module. Exported functions and classes travel; their cells travel
         // with them. `predeclare` applies the same rule to hoisted bindings, and keeping this
-        // non-hoisted path weaker let hidden superclass bindings index the importer by slot.
+        // non-hoisted path weaker lets hidden superclass bindings index the importer by slot.
         let celled = self.cell_everything || self.captured.contains(name);
         // A `let` or `const` whose initializer has not run yet is in its dead zone, and the
         // initializer is part of that zone. A `var` never is, and a binding the caller is about
@@ -2435,7 +2434,8 @@ impl Compiler {
             self.code.push(Instruction::NewCell(slot));
             // A captured binding can be read from a function called before the declaration runs,
             // where the compiler cannot see the read. The marker is what makes that a
-            // `ReferenceError` rather than an undefined the program never wrote.
+            // `ReferenceError` rather than an undefined the program never wrote. Uncaptured
+            // bindings use a scratch marker below when their initializer reads them directly.
             if in_dead_zone {
                 self.code.push(Instruction::MarkUninitialized(slot));
             }
@@ -2566,27 +2566,22 @@ impl Compiler {
     fn load_lexically(&mut self, name: &str) {
         match self.resolve_or_capture(name) {
             // Reading a binding whose declaration has not run yet is the temporal dead zone.
-            // Refused rather than read as undefined, which is what pre-declaring every name
-            // in a block would otherwise turn a loud mistake into. A nested function reading
-            // the same name resolves as an upvalue and never reaches this arm, which is
-            // correct: it runs later, by which time the declaration has.
-            // Eval code raises this at run time instead. The read is still refused --
-            // the cell holds the uninitialised marker and `LoadCell` throws on it -- but as
-            // the `ReferenceError` the language names rather than as a rejection of the
-            // source, which is what a caller waiting on `assert.throws(ReferenceError, …)`
-            // is entitled to see.
+            // Keep the read in the instruction stream: if control never reaches it, compilation
+            // succeeds, and if it does, the marker produces the language's `ReferenceError`.
+            // A nested function reading the same name resolves as an upvalue and checks the
+            // shared cell when it runs.
             Resolution::Local(local) if !local.initialized && local.celled && self.eval_program => {
                 self.code.push(Instruction::LoadCell(local.slot))
             }
             // Any read of a binding whose declaration has not run yet: `x; let x = 1`,
             // `let x = x`, or a parameter read from another parameter's default in
-            // `function f(x = y, y) {}`. The refusal has to be a *run-time* `ReferenceError`,
-            // because the source is well formed and only reaching the read fails -- which is
-            // exactly what `assert.throws(ReferenceError, () => f())` asks for. A cell that is
-            // uninitialised by construction is that refusal, spelled with instructions that
-            // already exist rather than with an opcode of its own; a scratch one rather than the
-            // binding's own, because a plain local has no cell at this point in the code and an
-            // uncelled slot is not one to load from.
+            // `function f(x = y, y) {}`. The check has to be a *run-time* `ReferenceError`,
+            // because the source is well formed and only reaching the read fails -- exactly what
+            // `assert.throws(ReferenceError, () => f())` asks for. A cell that is uninitialised by
+            // construction is that check, spelled with instructions that already exist rather
+            // than with an opcode of its own; a scratch one rather than the binding's own,
+            // because a plain local has no cell at this point in the code and an uncelled slot is
+            // not one to load from.
             Resolution::Local(local) if !local.initialized => {
                 let _ = local;
                 let scratch = self.local_count;
@@ -2831,10 +2826,13 @@ impl Compiler {
             } else {
                 Instruction::StoreLocal(slot)
             });
-        } else if celled {
-            // Only a captured binding can be read before its declaration without the compiler
-            // seeing it, through a function that was called too early. A plain local cannot, so
-            // it pays nothing.
+        } else {
+            // Keep the run-time state on every lexical slot, not only captured ones. A switch
+            // shares one scope between all of its cases, so compiler-time `initialized` state
+            // can be true after compiling one case even though another case jumps straight to a
+            // read before the declaration. The marker lets the machine preserve the TDZ across
+            // that control-flow join; captured cells need it for the same reason when a closure
+            // is called too early.
             self.code.push(Instruction::MarkUninitialized(slot));
         }
     }
@@ -4670,6 +4668,15 @@ impl Compiler {
                 Instruction::StoreGlobal(slot),
             ),
         };
+        // Assignment is also a read of the binding's state: `x = 1; let x;` is a ReferenceError,
+        // not a write that makes the later declaration appear to have run. A switch shares one
+        // scope between its cases, so compiler-time `initialized` can be true here after another
+        // case's declaration even when this path reaches the assignment first. Probe the
+        // run-time slot before every lexical write; initialized bindings pay only a load/pop.
+        if kind != VariableKind::Var || matches!(&load, Instruction::LoadUpvalue(_)) {
+            self.code.push(load.clone());
+            self.code.push(Instruction::Pop);
+        }
         if imported {
             self.error(
                 Some(span),
@@ -8996,7 +9003,7 @@ mod tests {
     }
 
     #[test]
-    fn an_uncaptured_module_lexical_needs_no_runtime_dead_zone_marker() {
+    fn an_uncaptured_module_lexical_needs_a_runtime_dead_zone_marker() {
         let program = compile(&module(vec![statement(StatementKind::Variable {
             kind: VariableKind::Let,
             declarations: vec![kiln_hir::VariableDeclarator {
@@ -9008,7 +9015,7 @@ mod tests {
         .expect("compiles");
 
         assert!(
-            !program
+            program
                 .code
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::MarkUninitialized(_)))
