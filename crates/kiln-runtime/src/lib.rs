@@ -5,6 +5,7 @@
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
 
+pub mod node_http;
 pub mod node_net;
 pub mod node_stream;
 
@@ -2182,6 +2183,149 @@ mod tests {
             runtime
                 .next_host_completion()
                 .expect("stream close completes");
+        }
+    }
+
+    #[test]
+    fn http_core_composes_with_stream_driver_for_a_live_tokio_exchange() {
+        use crate::node_http::{Http1Decoder, HttpResponse};
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("ephemeral port assigned"),
+            },
+            false,
+        );
+        let mut server_stream = None;
+        let mut client_stream = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection completes");
+            if completion.request == accept {
+                server_stream = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client_stream = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+        let server_stream = server_stream.unwrap();
+        let client_stream = client_stream.unwrap();
+
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: client_stream.id,
+                data: b"POST /echo HTTP/1.1\r\nHost: kiln\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping".to_vec(),
+            },
+            false,
+        );
+        runtime
+            .next_host_completion()
+            .expect("request write completes");
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: server_stream.id,
+                max_bytes: 4096,
+            },
+            false,
+        );
+        let request_bytes = match runtime
+            .next_host_completion()
+            .expect("request read completes")
+            .result
+            .expect("request read succeeds")
+        {
+            AsyncHostValue::Bytes(bytes) => bytes,
+            other => panic!("expected request bytes, got {other:?}"),
+        };
+        let request = Http1Decoder::default()
+            .push(&request_bytes)
+            .expect("request parses")
+            .pop()
+            .expect("complete request");
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/echo");
+        assert_eq!(request.body, b"ping");
+
+        let response = HttpResponse {
+            status: 200,
+            reason: None,
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: request.body,
+        }
+        .encode(request.keep_alive);
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: server_stream.id,
+                data: response,
+            },
+            false,
+        );
+        runtime
+            .next_host_completion()
+            .expect("response write completes");
+        runtime.start_host_op(
+            AsyncHostOp::TcpShutdown {
+                stream: server_stream.id,
+            },
+            false,
+        );
+        runtime
+            .next_host_completion()
+            .expect("response shutdown completes");
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: client_stream.id,
+                max_bytes: 4096,
+            },
+            false,
+        );
+        let response = match runtime
+            .next_host_completion()
+            .expect("response read completes")
+            .result
+            .expect("response read succeeds")
+        {
+            AsyncHostValue::Bytes(bytes) => bytes,
+            other => panic!("expected response bytes, got {other:?}"),
+        };
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping"
+        );
+
+        for resource in [server_stream.id, client_stream.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime.next_host_completion().expect("close completes");
         }
     }
 
