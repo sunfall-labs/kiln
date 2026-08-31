@@ -274,6 +274,8 @@ pub enum Native {
     NodeBufferAlloc,
     NodeBufferConcat,
     NodeBufferToString,
+    UrlConstructor,
+    UrlSearchParamsGet,
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
@@ -1495,6 +1497,8 @@ enum NodeObject {
     HttpIncoming(Rc<RefCell<HttpIncomingState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
     HttpClientRequest(Rc<RefCell<HttpClientRequestState>>),
+    Url(Rc<UrlState>),
+    UrlSearchParams(Rc<UrlState>),
 }
 
 #[derive(Debug)]
@@ -1562,6 +1566,20 @@ struct HttpResponseState {
 struct HttpIncomingState {
     stream: kiln_host_abi::ResourceId,
     encoding: Option<String>,
+}
+
+#[derive(Debug)]
+struct UrlState {
+    href: String,
+    origin: String,
+    protocol: String,
+    host: String,
+    hostname: String,
+    port: String,
+    pathname: String,
+    search: String,
+    hash: String,
+    query: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -6487,6 +6505,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             vec![incoming.clone(), response],
             instruction,
         )?;
+        // A Node callback is one JavaScript turn. An async request listener may reach its first
+        // `await` before returning; drain the resulting promise reactions before waiting for
+        // another host completion, or a response that depends on that continuation can never be
+        // written and the realm deadlocks on its own socket.
+        self.drain_microtask_jobs()?;
         Ok(incoming)
     }
 
@@ -7786,6 +7809,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                         kiln_ir::Builtin::Buffer => Native::NodeBuffer,
+                        kiln_ir::Builtin::Url => Native::UrlConstructor,
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
@@ -8952,9 +8976,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // were lost and nothing constructed a call that reached them. `Set.prototype.union`
         // panicked the process rather than answering.
         match native {
-            Native::SetOperation(operation) => {
-                return self.set_operation(operation, receiver, arguments, instruction);
-            }
+
             Native::ArrayCopy(method) => {
                 return self.array_copy(method, receiver, arguments, instruction);
             }
@@ -9449,6 +9471,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::String(
                     String::from_utf8_lossy(&view.bytes()).into_owned(),
                 ))
+            }
+            Native::UrlConstructor => {
+                let input = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let base = arguments.get(1).map(Value::to_display_string);
+                Ok(url_object(parse_url(&input, base.as_deref())?))
+            }
+            Native::UrlSearchParamsGet => {
+                let Value::Object(object) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "URLSearchParams.get called on an incompatible receiver".into(),
+                    });
+                };
+                let state = match &object.borrow().node_object {
+                    Some(NodeObject::UrlSearchParams(state)) => Rc::clone(state),
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "URLSearchParams.get called on an incompatible receiver"
+                                .into(),
+                        });
+                    }
+                };
+                let name = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                Ok(state
+                    .query
+                    .iter()
+                    .find(|(key, _)| key == &name)
+                    .map(|(_, value)| Value::String(value.clone()))
+                    .unwrap_or(Value::Null))
             }
             Native::ArrayFrom => self.array_from(arguments, instruction),
             Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
@@ -14833,8 +14889,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Run microtasks until none are left, including ones queued by the ones already running.
     fn drain_microtasks(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
+        runtime.enter(|| self.drain_microtask_jobs())
+    }
+
+    /// The ECMAScript microtask checkpoint, independent of which infrastructure turn reached it.
+    /// Tokio owns polling; this queue owns language ordering.
+    fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
         while let Some(job) = self.realm.pop_microtask() {
-            runtime.enter(|| match job {
+            match job {
                 Job::Callback(callback, arguments) => self
                     .call_value(&callback, Value::Undefined, arguments, self.instruction)
                     .map(|_| ()),
@@ -14866,7 +14928,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     Ok(())
                 }
-            })?;
+            }?;
         }
         Ok(())
     }
@@ -15057,6 +15119,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor));
         globals.set_non_enumerable("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
         globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBuffer));
+        globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor),
@@ -15398,6 +15461,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::NodeEventEmitter) => {
                 self.stack.push(node_event_emitter());
+            }
+            Value::Native(Native::UrlConstructor) => {
+                let built = self.dispatch_native(
+                    Native::UrlConstructor,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(built);
             }
             // `new Object(v)` and `Object(v)` are the same operation: the specification routes
             // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
@@ -16996,6 +17068,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Object(object) => {
                 let object = object.borrow();
+                if let Some(NodeObject::Url(state)) = &object.node_object {
+                    return match name {
+                        "href" => Value::String(state.href.clone()),
+                        "origin" => Value::String(state.origin.clone()),
+                        "protocol" => Value::String(state.protocol.clone()),
+                        "host" => Value::String(state.host.clone()),
+                        "hostname" => Value::String(state.hostname.clone()),
+                        "port" => Value::String(state.port.clone()),
+                        "pathname" => Value::String(state.pathname.clone()),
+                        "search" => Value::String(state.search.clone()),
+                        "hash" => Value::String(state.hash.clone()),
+                        "searchParams" => url_search_params_object(Rc::clone(state)),
+                        _ => object.get(name).unwrap_or(Value::Undefined),
+                    };
+                }
                 object.get(name).unwrap_or_else(|| {
                     // An object whose prototype is explicitly `null` inherits nothing --
                     // `Object.create(null)` is how a program asks for a bare dictionary, and
@@ -18548,6 +18635,141 @@ fn node_bytes_value(bytes: Vec<u8>) -> Value {
         length: Some(length),
         kind: TypedKind::Uint8,
     }))
+}
+
+fn url_object(state: UrlState) -> Value {
+    let state = Rc::new(state);
+    let mut object = ObjectData::default();
+    object.node_object = Some(NodeObject::Url(state));
+    Value::Object(Rc::new(RefCell::new(object)))
+}
+
+fn url_search_params_object(state: Rc<UrlState>) -> Value {
+    let mut object = ObjectData::default();
+    object.node_object = Some(NodeObject::UrlSearchParams(state));
+    object.set("get", Value::Native(Native::UrlSearchParamsGet));
+    Value::Object(Rc::new(RefCell::new(object)))
+}
+
+fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError> {
+    let absolute = if input.contains("://") {
+        input.to_owned()
+    } else {
+        let base = base.ok_or_else(|| ExecutionError::TypeErrorMessage {
+            message: format!("Invalid URL: {input}"),
+        })?;
+        let Some(scheme_end) = base.find("://") else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("Invalid base URL: {base}"),
+            });
+        };
+        let authority_start = scheme_end + 3;
+        let authority_end = base[authority_start..]
+            .find(['/', '?', '#'])
+            .map_or(base.len(), |index| authority_start + index);
+        let origin = &base[..authority_end];
+        if input.starts_with('/') {
+            format!("{origin}{input}")
+        } else {
+            let base_path_end = base[authority_end..]
+                .find(['?', '#'])
+                .map_or(base.len(), |index| authority_end + index);
+            let base_path = &base[authority_end..base_path_end];
+            let directory = base_path.rsplit_once('/').map_or("/", |(dir, _)| dir);
+            format!("{origin}{directory}/{input}")
+        }
+    };
+    let scheme_end = absolute
+        .find("://")
+        .ok_or_else(|| ExecutionError::TypeErrorMessage {
+            message: format!("Invalid URL: {absolute}"),
+        })?;
+    let protocol = format!("{}:", &absolute[..scheme_end]);
+    let authority_start = scheme_end + 3;
+    let authority_end = absolute[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(absolute.len(), |index| authority_start + index);
+    let host = absolute[authority_start..authority_end].to_owned();
+    if host.is_empty() {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: format!("Invalid URL: {absolute}"),
+        });
+    }
+    let (hostname, port) = host
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or_else(
+            || (host.clone(), String::new()),
+            |(hostname, port)| (hostname.to_owned(), port.to_owned()),
+        );
+    let fragment_at = absolute[authority_end..]
+        .find('#')
+        .map(|index| authority_end + index);
+    let query_at = absolute[authority_end..]
+        .find('?')
+        .map(|index| authority_end + index)
+        .filter(|query| fragment_at.is_none_or(|fragment| *query < fragment));
+    let path_end = query_at.or(fragment_at).unwrap_or(absolute.len());
+    let pathname = if authority_end == path_end {
+        "/".to_owned()
+    } else {
+        absolute[authority_end..path_end].to_owned()
+    };
+    let search = query_at.map_or_else(String::new, |query| {
+        absolute[query..fragment_at.unwrap_or(absolute.len())].to_owned()
+    });
+    let hash = fragment_at.map_or_else(String::new, |fragment| absolute[fragment..].to_owned());
+    let query = search
+        .strip_prefix('?')
+        .unwrap_or_default()
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (name, value) = part.split_once('=').unwrap_or((part, ""));
+            (decode_form_component(name), decode_form_component(value))
+        })
+        .collect();
+    let origin = format!("{}//{host}", protocol);
+    Ok(UrlState {
+        href: format!("{origin}{pathname}{search}{hash}"),
+        origin,
+        protocol,
+        host,
+        hostname,
+        port,
+        pathname,
+        search,
+        hash,
+        query,
+    })
+}
+
+fn decode_form_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => decoded.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                let hex = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    b'A'..=b'F' => Some(byte - b'A' + 10),
+                    _ => None,
+                };
+                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    decoded.push((high << 4) | low);
+                    index += 2;
+                } else {
+                    decoded.push(bytes[index]);
+                }
+            }
+            byte => decoded.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEventListener> {
@@ -21203,6 +21425,8 @@ fn call_native(
         | Native::NodeBufferAlloc
         | Native::NodeBufferConcat
         | Native::NodeBufferToString
+        | Native::UrlConstructor
+        | Native::UrlSearchParamsGet
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
@@ -26786,6 +27010,67 @@ fn number_string(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every native the machine must dispatch has a route to it.
+    ///
+    /// `call_native` is a free function with no VM, so a built-in that can run program code --
+    /// a comparator, a getter, an options bag, a set-like's `has` -- gets an `unreachable!` arm
+    /// there and a route in `Vm::dispatch_native`. The `unreachable!` is written to make a lost
+    /// route loud, and it does the opposite: nothing routes to the arm, so nothing reaches the
+    /// assertion, and the built-in aborts the process the first time a program calls it.
+    ///
+    /// That has now happened to `Set.prototype.union`, the copying array methods, every
+    /// `RegExp.prototype` accessor, the date methods, the regexp symbol methods, `Iterator.from`,
+    /// `Object.groupBy`, `Map.groupBy` and `Promise.try` -- each found by a panicking test rather
+    /// than by the guard that exists for it. The pairing is checked here instead of trusted.
+    #[test]
+    fn every_machine_dispatched_native_has_a_route() {
+        const MARKER: &str = "dispatched by the interpreter";
+        let source = include_str!("lib.rs");
+
+        let start = source
+            .find("fn dispatch_native(")
+            .expect("dispatch_native must exist");
+        let end = source[start..]
+            .find("\n    fn ")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let routes = &source[start..end];
+
+        let mut missing = Vec::new();
+        let mut cursor = 0;
+        while let Some(found) = source[cursor..].find(MARKER) {
+            let at = cursor + found;
+            cursor = at + MARKER.len();
+            // The arm's patterns sit between the previous arm and this one's `=>`.
+            let head = &source[..at];
+            let Some(arrow) = head.rfind("=>") else {
+                continue;
+            };
+            let arm_start = head[..arrow]
+                .rfind("\n        ")
+                .map_or(0, |index| index + 1);
+            for pattern in head[arm_start..arrow].split("Native::").skip(1) {
+                let name: String = pattern
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric() || *character == '_')
+                    .collect();
+                if name.is_empty() {
+                    continue;
+                }
+                if !routes.contains(&format!("Native::{name}")) {
+                    missing.push(name);
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "these natives assert that the machine dispatches them, but `dispatch_native` has no \
+             route to them, so calling one aborts the process: {missing:?}"
+        );
+    }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
 

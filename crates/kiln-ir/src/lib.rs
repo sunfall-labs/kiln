@@ -442,6 +442,8 @@ pub enum Builtin {
     /// Node's global byte container. The interpreter installs the Node-compatible surface only;
     /// native Node execution remains unadvertised until it shares that runtime adapter.
     Buffer,
+    /// WHATWG URL, used by both web-compatible programs and Node servers.
+    Url,
     /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
     Function,
     Proxy,
@@ -509,6 +511,7 @@ impl Builtin {
             "BigInt" => Some(Self::BigInt),
             "process" => Some(Self::Process),
             "Buffer" => Some(Self::Buffer),
+            "URL" => Some(Self::Url),
             // node's alias for the global object. `globalThis` exists to unify it with the
             // browser's `self`, and code written before that still tests for this one.
             "global" => Some(Self::GlobalThis),
@@ -575,6 +578,7 @@ impl Builtin {
             Self::BigInt => "BigInt",
             Self::Process => "process",
             Self::Buffer => "Buffer",
+            Self::Url => "URL",
             Self::Function => "Function",
             Self::Proxy => "Proxy",
             Self::Escape => "escape",
