@@ -95,6 +95,7 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
 #define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
+#define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -361,6 +362,7 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
 #define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -635,6 +637,8 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -765,6 +769,8 @@ static int kiln_c99_random(kiln_host *host, double *out) {
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
 static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
 static const char *kiln_c99_builtin_name(uint64_t builtin) {

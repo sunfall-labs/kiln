@@ -427,6 +427,9 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
 #define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
+/* WHATWG URL. The object it constructs is ordinary; only construction and query lookup need
+ * runtime code, so no URL-specific value tag or ABI representation crosses the boundary. */
+#define KILN_C99_BUILTIN_URL 63
 
 /* Array methods, part two.
  *
@@ -827,6 +830,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
 #define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -1815,6 +1819,11 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown);
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
+                                          const kiln_value *args, size_t argc,
+                                          kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -3222,6 +3231,116 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
         at += extra + 1;
     }
     return 1;
+}
+
+/* The URL subset shared with the interpreter today: absolute HTTP-like input, or a path against
+ * an absolute base; pathname and query lookup are the public state. Keeping that advertised
+ * subset identical is better than a broader native parser that disagrees in corners. */
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown) {
+    kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    kiln_value base = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
+    const char *start;
+    const char *end;
+    const char *query;
+    const char *fragment;
+    const char *scheme;
+    kiln_value params;
+    int status;
+    if (input.tag != KILN_VALUE_STRING || base.tag != KILN_VALUE_STRING) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    scheme = NULL;
+    {
+        size_t index;
+        for (index = 0; index + 2 < input.len; ++index) {
+            if (input.ptr[index] == ':' && input.ptr[index + 1] == '/' &&
+                input.ptr[index + 2] == '/') {
+                scheme = input.ptr + index;
+                break;
+            }
+        }
+    }
+    if (scheme != NULL) {
+        start = scheme + 3;
+        end = input.ptr + input.len;
+        while (start < end && *start != '/' && *start != '?' && *start != '#') ++start;
+        if (start == end || *start != '/') start = "/";
+    } else {
+        int valid_base = 0;
+        size_t index;
+        for (index = 0; index + 2 < base.len; ++index) {
+            if (base.ptr[index] == ':' && base.ptr[index + 1] == '/' &&
+                base.ptr[index + 2] == '/') {
+                valid_base = 1;
+                break;
+            }
+        }
+        if (!valid_base) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Invalid base URL");
+        }
+        start = input.len == 0 ? "/" : input.ptr;
+        end = input.ptr + input.len;
+    }
+    if (start == input.ptr || (start >= input.ptr && start <= input.ptr + input.len)) {
+        end = input.ptr + input.len;
+    } else {
+        end = start + 1;
+    }
+    query = memchr(start, '?', (size_t)(end - start));
+    fragment = memchr(start, '#', (size_t)(end - start));
+    if (fragment != NULL && (query == NULL || fragment < query)) query = NULL;
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, *out, "pathname", 8,
+                          kiln_c99_copy_text(start, (size_t)((query != NULL ? query :
+                              (fragment != NULL ? fragment : end)) - start)), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_object(&params);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, params, "@@url:query", 11,
+                          query == NULL ? kiln_c99_copy_text("", 0) :
+                          kiln_c99_copy_text(query + 1, (size_t)((fragment != NULL ? fragment : end) - query - 1)),
+                          0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, params, "get", 3,
+                          kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_put(NULL, *out, "searchParams", 12, params, 0, NULL);
+}
+
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
+                                          const kiln_value *args, size_t argc,
+                                          kiln_value *thrown) {
+    kiln_value query;
+    kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    size_t at = 0;
+    int status;
+    if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "URLSearchParams.get called on an incompatible receiver");
+    }
+    status = kiln_c99_get(NULL, receiver, "@@url:query", 11, &query, 0, NULL);
+    if (status != KILN_C99_OK || query.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR;
+    while (at <= query.len) {
+        size_t pair_end = at;
+        size_t equal;
+        while (pair_end < query.len && query.ptr[pair_end] != '&') ++pair_end;
+        equal = at;
+        while (equal < pair_end && query.ptr[equal] != '=') ++equal;
+        if (equal - at == name.len && memcmp(query.ptr + at, name.ptr, name.len) == 0) {
+            kiln_value encoded = kiln_c99_copy_text(
+                equal < pair_end ? query.ptr + equal + 1 : "",
+                equal < pair_end ? pair_end - equal - 1 : 0);
+            const kiln_value decode_args[1] = {encoded};
+            return kiln_c99_invoke_method(NULL, out, KILN_C99_METHOD_DECODE_URI_COMPONENT,
+                                          kiln_c99_undefined(), decode_args, 1, 0, thrown);
+        }
+        if (pair_end == query.len) break;
+        at = pair_end + 1;
+    }
+    *out = kiln_c99_null();
+    return KILN_C99_OK;
 }
 
 /* `Number.prototype.toFixed`, rounded on the value's *exact* decimal expansion.
@@ -10828,6 +10947,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
+    if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
+        return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);
+    }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_LAST) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
@@ -17925,6 +18047,9 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_new_proxy(result, argc > 0 ? args[0] : kiln_c99_undefined(),
                                   argc > 1 ? args[1] : kiln_c99_undefined());
     }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
+        return kiln_c99_url_construct(result, args, argc, thrown);
+    }
     if (callee.tag == KILN_VALUE_PROXY) {
         kiln_value trap;
         kiln_value inner = kiln_c99_proxy_of(callee)->target;
@@ -19231,7 +19356,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Int32Array
             | kiln_ir::Builtin::Uint32Array
             | kiln_ir::Builtin::Float32Array
-            | kiln_ir::Builtin::Float64Array,
+            | kiln_ir::Builtin::Float64Array
+            | kiln_ir::Builtin::Url,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -21298,6 +21424,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::Uint32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT32_ARRAY)",
                 kiln_ir::Builtin::Float32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT32_ARRAY)",
                 kiln_ir::Builtin::Float64Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)",
+                kiln_ir::Builtin::Url => "kiln_c99_builtin(KILN_C99_BUILTIN_URL)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -24348,6 +24475,59 @@ int main(void) {{
         assert!(
             run.status.success(),
             "symbol-only properties must not leave malformed inspection separators"
+        );
+    }
+
+    #[test]
+    fn executable_url_constructs_path_and_decodes_query_values() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("/echo?q=one%20two".into()),
+                Constant::String("http://127.0.0.1".into()),
+                Constant::String("pathname".into()),
+                Constant::String("/echo".into()),
+                Constant::String("searchParams".into()),
+                Constant::String("get".into()),
+                Constant::String("q".into()),
+                Constant::String("one two".into()),
+                Constant::Boolean(false),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Url),
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::New { argc: 2 },
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(2),
+                Instruction::Const(3),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::JumpIfFalse(20),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(4),
+                Instruction::Const(6),
+                Instruction::CallMethod { name: 5, argc: 1 },
+                Instruction::Const(7),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+                Instruction::Const(8),
+                Instruction::Return,
+                Instruction::Const(8),
+                Instruction::Return,
+            ],
+            1,
+        ))
+        .expect("URL probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "url-routing");
+        assert!(
+            run.status.success(),
+            "native URL path/query behavior failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
         );
     }
 }
