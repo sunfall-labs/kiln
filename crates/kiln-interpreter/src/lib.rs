@@ -40188,6 +40188,7 @@ mod tests {
     }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
+    use kiln_ir::Builtin;
 
     #[test]
     fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
@@ -42212,6 +42213,83 @@ mod tests {
             .unwrap(),
             Value::Boolean(false)
         );
+    }
+
+    fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
+        // `Symbol() * f()` must reject while reducing the left operand. If the right operand is
+        // reduced first (or both operands are reduced before the numeric check), its `valueOf`
+        // throws "called" and hides the required Symbol TypeError.
+        Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("valueOf".to_owned()),
+                Constant::String("called".to_owned()),
+            ],
+            code: vec![
+                Instruction::LoadBuiltin(Builtin::Symbol),
+                Instruction::Call { argc: 0 },
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Binary(operator),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: Some("right".to_owned()),
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::Const(0),
+                        Instruction::MakeFunction(1),
+                        Instruction::NewObject { count: 1 },
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: Some("valueOf".to_owned()),
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![Instruction::Const(1), Instruction::Throw],
+                    upvalues: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_symbol_numeric_error_precedes_the_right_value_of_call() {
+        assert!(matches!(
+            run(&symbol_with_throwing_right_value_of(BinaryOp::Multiply)),
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "TypeError: Cannot convert a Symbol value to a number"
+        ));
+    }
+
+    #[test]
+    fn symbol_addition_and_relational_comparison_reduce_the_right_value_first() {
+        for operator in [BinaryOp::Add, BinaryOp::LessThan] {
+            assert!(
+                matches!(
+                    run(&symbol_with_throwing_right_value_of(operator)),
+                    Err(ExecutionError::Uncaught { message, .. }) if message == "called"
+                ),
+                "{operator:?} must reduce the right operand before choosing its conversion"
+            );
+        }
     }
 
     #[test]
