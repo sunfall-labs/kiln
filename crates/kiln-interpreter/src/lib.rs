@@ -12,9 +12,9 @@ use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
-    duration_from_milliseconds,
-    node_http::{Http1Decoder, Http1ResponseDecoder, HttpRequestEvent, HttpResponseEvent},
+    ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
+    RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+    node_http::{Http1Decoder, HttpRequestEvent, HttpResponseEvent},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -1750,7 +1750,6 @@ struct NodeConnection {
     driver: StreamDriver,
     runtime_http: bool,
     decoder: Http1Decoder,
-    response_decoder: Http1ResponseDecoder,
     request: Option<Value>,
     response: Option<Value>,
     http_responses: Vec<(u64, Value)>,
@@ -7160,7 +7159,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
                     decoder: Http1Decoder::default(),
-                    response_decoder: Http1ResponseDecoder::default(),
                     request: None,
                     response: None,
                     http_responses: Vec::new(),
@@ -7368,29 +7366,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(());
                 }
                 if server.borrow().protocol == ServerProtocol::HttpClient {
-                    let events = {
-                        let mut owner = server.borrow_mut();
-                        let connection = owner
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.resource() == resource)
-                            .ok_or_else(|| ExecutionError::Host {
-                                instruction,
-                                message: "node:http client received data for an unknown stream"
-                                    .into(),
-                            })?;
-                        connection
-                            .response_decoder
-                            .push_events(&bytes)
-                            .map_err(|error| ExecutionError::Host {
-                                instruction,
-                                message: format!("HTTP response parse error: {error:?}"),
-                            })?
-                    };
-                    for event in events {
-                        self.dispatch_http_response_event(server, resource, event, instruction)?;
-                    }
-                    return Ok(());
+                    return Err(ExecutionError::Host {
+                        instruction,
+                        message: "runtime-owned HTTP client leaked protocol bytes".into(),
+                    });
                 }
                 let events = {
                     let mut server_state = server.borrow_mut();
@@ -7592,12 +7571,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         server: &Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
         instruction: usize,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<usize, ExecutionError> {
         let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
             instruction,
             message: "node:http requires the realm HTTP runtime".into(),
         })?;
         let events = unsafe { ActiveHttpRuntime::take_events(&mut *runtime, resource) };
+        let event_count = events.len();
         for event in events {
             match event {
                 RuntimeHttpEvent::Request { id, request, body } => {
@@ -7701,7 +7681,88 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
         }
-        Ok(())
+        Ok(event_count)
+    }
+
+    fn dispatch_runtime_http_client_events(
+        &mut self,
+        owner: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        instruction: usize,
+    ) -> Result<usize, ExecutionError> {
+        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:http client requires the realm HTTP runtime".into(),
+        })?;
+        let events = unsafe { ActiveHttpRuntime::take_client_events(&mut *runtime, resource) };
+        let event_count = events.len();
+        for event in events {
+            match event {
+                RuntimeHttpClientEvent::Response {
+                    status,
+                    reason,
+                    headers,
+                    body,
+                } => {
+                    self.dispatch_http_response_event(
+                        owner,
+                        resource,
+                        HttpResponseEvent::Head(kiln_runtime::node_http::HttpResponseHead {
+                            status,
+                            reason,
+                            headers,
+                            keep_alive: false,
+                        }),
+                        instruction,
+                    )?;
+                    if !body.is_empty() {
+                        self.dispatch_http_response_event(
+                            owner,
+                            resource,
+                            HttpResponseEvent::Data(body),
+                            instruction,
+                        )?;
+                    }
+                    self.dispatch_http_response_event(
+                        owner,
+                        resource,
+                        HttpResponseEvent::End,
+                        instruction,
+                    )?;
+                }
+                RuntimeHttpClientEvent::Error(message) => {
+                    let request = owner
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
+                        .and_then(|stream| stream.request.clone())
+                        .unwrap_or(Value::Undefined);
+                    let error = self.construct_error(ErrorKind::Error, &[Value::String(message)]);
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &request,
+                        &[Value::String("error".into()), error],
+                        instruction,
+                    )?;
+                }
+                RuntimeHttpClientEvent::Closed => {
+                    let actions = {
+                        let mut owner = owner.borrow_mut();
+                        owner
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                            .map(|stream| stream.driver.close_actions())
+                            .unwrap_or_default()
+                    };
+                    for action in actions {
+                        self.start_http_stream_action(owner, resource, action, instruction)?;
+                    }
+                }
+            }
+        }
+        Ok(event_count)
     }
 
     fn poll_runtime_http_writes(
@@ -8275,38 +8336,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         socket: &Rc<RefCell<NetSocketState>>,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let (owner, resource) = {
+        let resource = {
             let socket = socket.borrow();
-            (
-                socket
-                    .owner
-                    .as_ref()
-                    .and_then(Weak::upgrade)
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "HTTP client request lost its connection owner".into(),
-                    })?,
-                socket.resource.ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "HTTP client request is not connected".into(),
-                })?,
-            )
+            socket.resource.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP client request is not connected".into(),
+            })?
         };
-        let bytes = encode_http_client_request(&state.borrow());
-        let actions = {
-            let mut owner = owner.borrow_mut();
-            let connection = owner
-                .streams
-                .iter_mut()
-                .find(|stream| stream.resource() == resource)
-                .expect("HTTP client connection owns its stream");
-            let (_, mut actions) = connection.driver.write(bytes);
-            let (_, end_actions) = connection.driver.end(None);
-            actions.extend(end_actions);
-            actions
+        let request = {
+            let state = state.borrow();
+            let mut headers = state.headers.clone();
+            if !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+            {
+                headers.push(("host".into(), format!("{}:{}", state.host, state.port)));
+            }
+            if !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
+            {
+                headers.push(("connection".into(), "close".into()));
+            }
+            RuntimeHttpClientRequest {
+                method: state.method.clone(),
+                target: state.path.clone(),
+                headers,
+                body: state.body.clone(),
+            }
         };
-        for action in actions {
-            self.start_http_stream_action(&owner, resource, action, instruction)?;
+        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:http client requires the realm HTTP runtime".into(),
+        })?;
+        if !unsafe { ActiveHttpRuntime::send_client_request(&mut *runtime, resource, request) } {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "Hyper rejected the HTTP client request".into(),
+            });
         }
         Ok(())
     }
@@ -8589,7 +8656,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
                     if runtime_http {
-                        self.dispatch_runtime_http_events(&server, resource, self.instruction)?;
+                        let _ =
+                            self.dispatch_runtime_http_events(&server, resource, self.instruction)?;
                     }
                     if let Some(stream) = server
                         .borrow_mut()
@@ -8668,9 +8736,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         };
                         let mut connection = NodeConnection {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
-                            runtime_http: protocol == ServerProtocol::Http,
+                            runtime_http: protocol == ServerProtocol::HttpClient,
                             decoder: Http1Decoder::default(),
-                            response_decoder: Http1ResponseDecoder::default(),
                             request: Some(request),
                             response: None,
                             http_responses: Vec::new(),
@@ -8678,7 +8745,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             closed: false,
                             applying_read_completion: false,
                         };
-                        let actions = connection.driver.start_reading();
+                        let actions = if protocol == ServerProtocol::HttpClient {
+                            let runtime =
+                                self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                                    instruction: self.instruction,
+                                    message: "node:http client requires the realm HTTP runtime"
+                                        .into(),
+                                })?;
+                            unsafe {
+                                ActiveHttpRuntime::start_client_connection(&mut *runtime, resource)
+                            }
+                        } else {
+                            connection.driver.start_reading()
+                        };
                         let owner = Rc::new(RefCell::new(NodeServerState {
                             driver: TcpServerDriver::default(),
                             handler: Value::Undefined,
@@ -8872,32 +8951,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .collect::<Vec<_>>();
         drop(shared);
         for (server, resource) in connections {
-            let actions =
-                runtime
-                    .poll_http_connection(resource)
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction: self.instruction,
-                        message: "runtime HTTP connection disappeared at checkpoint".into(),
-                    })?;
-            runtime.enter(|| {
-                for action in actions {
-                    self.start_http_stream_action(&server, resource, action, self.instruction)?;
+            for _ in 0..8 {
+                let actions =
+                    runtime
+                        .poll_http_connection(resource)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "runtime HTTP connection disappeared at checkpoint".into(),
+                        })?;
+                let had_actions = !actions.is_empty();
+                let had_events = runtime.enter(|| {
+                    for action in actions {
+                        self.start_http_stream_action(&server, resource, action, self.instruction)?;
+                    }
+                    let event_count = if server.borrow().protocol == ServerProtocol::HttpClient {
+                        self.dispatch_runtime_http_client_events(
+                            &server,
+                            resource,
+                            self.instruction,
+                        )?
+                    } else {
+                        self.dispatch_runtime_http_events(&server, resource, self.instruction)?
+                    };
+                    Ok::<_, ExecutionError>(event_count != 0)
+                })?;
+                if !had_actions && !had_events {
+                    break;
                 }
-                self.dispatch_runtime_http_events(&server, resource, self.instruction)
-            })?;
-            let actions =
-                runtime
-                    .poll_http_connection(resource)
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction: self.instruction,
-                        message: "runtime HTTP connection disappeared after event dispatch".into(),
-                    })?;
-            runtime.enter(|| {
-                for action in actions {
-                    self.start_http_stream_action(&server, resource, action, self.instruction)?;
-                }
-                self.dispatch_runtime_http_events(&server, resource, self.instruction)
-            })?;
+            }
         }
         Ok(())
     }
@@ -21907,38 +21988,6 @@ fn node_http_request_arguments(
         .filter(is_callable)
         .unwrap_or(Value::Undefined);
     Ok((host, port as u16, method, path, headers, callback))
-}
-
-fn encode_http_client_request(state: &HttpClientRequestState) -> Vec<u8> {
-    let mut headers = state.headers.clone();
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
-    {
-        headers.push(("Host".into(), format!("{}:{}", state.host, state.port)));
-    }
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-    {
-        headers.push(("Content-Length".into(), state.body.len().to_string()));
-    }
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
-    {
-        headers.push(("Connection".into(), "close".into()));
-    }
-    let mut bytes = format!("{} {} HTTP/1.1\r\n", state.method, state.path).into_bytes();
-    for (name, value) in headers {
-        bytes.extend_from_slice(name.as_bytes());
-        bytes.extend_from_slice(b": ");
-        bytes.extend_from_slice(value.as_bytes());
-        bytes.extend_from_slice(b"\r\n");
-    }
-    bytes.extend_from_slice(b"\r\n");
-    bytes.extend_from_slice(&state.body);
-    bytes
 }
 
 fn node_listen_arguments(

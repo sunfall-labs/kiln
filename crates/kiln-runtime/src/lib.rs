@@ -55,6 +55,26 @@ pub enum RuntimeHttpEvent {
     Closed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHttpClientRequest {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeHttpClientEvent {
+    Response {
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    Error(String),
+    Closed,
+}
+
 /// Runtime-owned HTTP/1 control used by language adapters.
 ///
 /// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
@@ -98,6 +118,13 @@ pub trait ActiveHttpRuntime {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
+    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction>;
+    fn send_client_request(
+        &mut self,
+        resource: ResourceId,
+        request: RuntimeHttpClientRequest,
+    ) -> bool;
+    fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent>;
 }
 
 /// Default deterministic entropy seed from ADR 0026.
@@ -621,10 +648,41 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             RuntimeHttpConnection {
                 transport,
                 task,
-                events: event_receiver,
-                responses: response_sender,
+                events: Some(event_receiver),
+                responses: Some(response_sender),
                 response_bodies: BTreeMap::new(),
                 body_events: BTreeMap::new(),
+                client_requests: None,
+                client_events: None,
+            },
+        );
+        actions
+    }
+
+    pub fn start_http1_client_connection(
+        &mut self,
+        resource: ResourceId,
+    ) -> Vec<node_stream::StreamAction> {
+        let (io, mut transport) = HttpTransportDriver::new(resource);
+        let (request_sender, request_receiver) = mpsc::unbounded_channel();
+        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let task = self.local.spawn_local(hyper_http::client_connection(
+            io,
+            request_receiver,
+            event_sender,
+        ));
+        let actions = transport.start();
+        self.http_connections.insert(
+            resource,
+            RuntimeHttpConnection {
+                transport,
+                task,
+                events: None,
+                responses: None,
+                response_bodies: BTreeMap::new(),
+                body_events: BTreeMap::new(),
+                client_requests: Some(request_sender),
+                client_events: Some(event_receiver),
             },
         );
         actions
@@ -688,7 +746,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Vec::new();
         };
         let mut events = Vec::new();
-        while let Ok(event) = connection.events.try_recv() {
+        let Some(receiver) = connection.events.as_mut() else {
+            return events;
+        };
+        while let Ok(event) = receiver.try_recv() {
             events.push(match event {
                 hyper_http::EngineEvent::Request { id, request, body } => {
                     RuntimeHttpEvent::Request { id, request, body }
@@ -735,7 +796,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             headers,
             body: body.body(body_event_sender),
         };
-        if connection.responses.send(command).is_err() {
+        if connection
+            .responses
+            .as_ref()
+            .is_none_or(|responses| responses.send(command).is_err())
+        {
             return false;
         }
         connection.response_bodies.insert(id, body);
@@ -765,7 +830,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             headers,
             body: body.body(body_event_sender),
         };
-        if connection.responses.send(command).is_err() {
+        if connection
+            .responses
+            .as_ref()
+            .is_none_or(|responses| responses.send(command).is_err())
+        {
             return false;
         }
         connection.response_bodies.insert(id, body);
@@ -801,6 +870,58 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 .get_mut(&id)?
                 .end(data),
         )
+    }
+
+    pub fn send_http1_client_request(
+        &mut self,
+        resource: ResourceId,
+        request: RuntimeHttpClientRequest,
+    ) -> bool {
+        self.http_connections
+            .get_mut(&resource)
+            .and_then(|connection| connection.client_requests.as_ref())
+            .is_some_and(|requests| {
+                requests
+                    .send(hyper_http::ClientRequestCommand {
+                        method: request.method,
+                        target: request.target,
+                        headers: request.headers,
+                        body: request.body,
+                    })
+                    .is_ok()
+            })
+    }
+
+    pub fn take_http1_client_events(
+        &mut self,
+        resource: ResourceId,
+    ) -> Vec<RuntimeHttpClientEvent> {
+        let Some(receiver) = self
+            .http_connections
+            .get_mut(&resource)
+            .and_then(|connection| connection.client_events.as_mut())
+        else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(match event {
+                hyper_http::ClientEvent::Response {
+                    status,
+                    reason,
+                    headers,
+                    body,
+                } => RuntimeHttpClientEvent::Response {
+                    status,
+                    reason,
+                    headers,
+                    body,
+                },
+                hyper_http::ClientEvent::Error(message) => RuntimeHttpClientEvent::Error(message),
+                hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
+            });
+        }
+        events
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -854,10 +975,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 struct RuntimeHttpConnection {
     transport: HttpTransportDriver,
     task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
-    events: mpsc::UnboundedReceiver<hyper_http::EngineEvent>,
-    responses: mpsc::UnboundedSender<hyper_http::ResponseCommand>,
+    events: Option<mpsc::UnboundedReceiver<hyper_http::EngineEvent>>,
+    responses: Option<mpsc::UnboundedSender<hyper_http::ResponseCommand>>,
     response_bodies: BTreeMap<u64, ResponseBodyDriver>,
     body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
+    client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
+    client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
@@ -924,6 +1047,22 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
         self.end_http1_response(resource, id, data)
+    }
+
+    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction> {
+        self.start_http1_client_connection(resource)
+    }
+
+    fn send_client_request(
+        &mut self,
+        resource: ResourceId,
+        request: RuntimeHttpClientRequest,
+    ) -> bool {
+        self.send_http1_client_request(resource, request)
+    }
+
+    fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {
+        self.take_http1_client_events(resource)
     }
 }
 
