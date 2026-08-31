@@ -816,14 +816,12 @@ mod tests {
                 .expect("request writes");
             client_io.shutdown().await.expect("client half closes");
 
-            let id = loop {
-                match events.recv().await.expect("request event arrives") {
-                    EngineEvent::RequestHead { id, request } => {
-                        assert_eq!(request.target, "/half");
-                        break id;
-                    }
-                    event => panic!("unexpected event before request head: {event:?}"),
+            let id = match events.recv().await.expect("request event arrives") {
+                EngineEvent::RequestHead { id, request } => {
+                    assert_eq!(request.target, "/half");
+                    id
                 }
+                event => panic!("unexpected event before request head: {event:?}"),
             };
             assert!(matches!(
                 events.recv().await,

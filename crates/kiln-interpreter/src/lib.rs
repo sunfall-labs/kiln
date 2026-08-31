@@ -1844,6 +1844,7 @@ struct NodeConnection {
     client_requests: std::collections::BTreeMap<u64, Value>,
     client_responses: std::collections::BTreeMap<u64, Value>,
     http_responses: Vec<(u64, Value)>,
+    close_when_response_ends: bool,
     closed: bool,
     applying_read_completion: bool,
 }
@@ -7532,7 +7533,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for action in actions {
                     self.start_http_server_action(&state, action, instruction)?;
                 }
-                let streams = match state.borrow().protocol {
+                // Copy the protocol out before taking a mutable borrow in the `Net` arm. A
+                // match scrutinee borrow otherwise lives for the whole arm and panics when the
+                // arm closes each accepted stream.
+                let protocol = state.borrow().protocol;
+                let streams = match protocol {
                     ServerProtocol::Net => {
                         let mut state = state.borrow_mut();
                         state
@@ -7542,12 +7547,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .collect::<Vec<_>>()
                     }
                     ServerProtocol::Http => {
-                        let resources = state
-                            .borrow()
-                            .streams
-                            .iter()
-                            .map(NodeConnection::resource)
-                            .collect::<Vec<_>>();
+                        // Mark every current connection first. A request handler can call
+                        // `server.close()` before it calls `response.end()`; keep that active
+                        // request alive and close it from the response-end path below.
+                        let resources = {
+                            let mut state = state.borrow_mut();
+                            state
+                                .streams
+                                .iter_mut()
+                                .filter_map(|stream| {
+                                    stream.close_when_response_ends = true;
+                                    let response_ended = stream
+                                        .response
+                                        .as_ref()
+                                        .and_then(|response| node_http_response(response).ok())
+                                        .is_some_and(|response| response.borrow().ended);
+                                    (response_ended || stream.response.is_none())
+                                        .then_some(stream.resource())
+                                })
+                                .collect::<Vec<_>>()
+                        };
                         let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                             instruction,
                             message: "node:http requires the realm HTTP runtime".into(),
@@ -7555,11 +7574,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         resources
                             .into_iter()
                             .map(|resource| {
-                                // `close_connection` defers resource retirement until any
-                                // response bytes already selected by Hyper are acknowledged.
-                                // That keeps `server.close()` from truncating an active response
-                                // while ensuring an idle keep-alive socket cannot keep the realm
-                                // alive forever.
                                 let actions = unsafe {
                                     ActiveHttpRuntime::close_connection(&mut *runtime, resource)
                                 }
@@ -7702,6 +7716,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     client_requests: std::collections::BTreeMap::new(),
                     client_responses: std::collections::BTreeMap::new(),
                     http_responses: Vec::new(),
+                    close_when_response_ends: false,
                     closed: false,
                     applying_read_completion: false,
                 };
@@ -8339,6 +8354,50 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// Complete a `server.close()` that arrived before this response was ended.
+    fn close_http_stream_after_response_end(
+        &mut self,
+        resource: kiln_host_abi::ResourceId,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let server = self
+            .http_server_for_stream(resource)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP response lost its stream".into(),
+            })?;
+        let should_close = {
+            let mut server_state = server.borrow_mut();
+            server_state
+                .streams
+                .iter_mut()
+                .find(|stream| stream.resource() == resource)
+                .is_some_and(|stream| {
+                    if !stream.close_when_response_ends {
+                        return false;
+                    }
+                    stream.close_when_response_ends = false;
+                    true
+                })
+        };
+        if !should_close {
+            return Ok(());
+        }
+        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:http requires the realm HTTP runtime".into(),
+        })?;
+        let actions = unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP server stream disappeared while closing".into(),
+            })?;
+        for action in actions {
+            self.start_http_stream_action(&server, resource, action, instruction)?;
+        }
+        Ok(())
+    }
+
     fn dispatch_http_response_event(
         &mut self,
         owner: &Rc<RefCell<NodeServerState>>,
@@ -8831,6 +8890,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: "Hyper lost the HTTP response body".into(),
                 })?;
                 self.poll_runtime_http_writes(resource, instruction)?;
+                self.close_http_stream_after_response_end(resource, instruction)?;
                 Ok(receiver.clone())
             }
             _ => unreachable!("only response natives dispatch here"),
@@ -9471,6 +9531,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             client_requests: std::collections::BTreeMap::new(),
                             client_responses: std::collections::BTreeMap::new(),
                             http_responses: Vec::new(),
+                            close_when_response_ends: false,
                             closed: false,
                             applying_read_completion: false,
                         };
