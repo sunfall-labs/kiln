@@ -113,9 +113,9 @@ requested shared-library copy, then reports those paths and the canonical loader
 versioned protocol. Library outputs ending in `.h` are rejected, and coordination layers reject a
 derived header that would overwrite the source.
 Each file publication is atomic, and a process mutex plus an advisory lock on the output directory
-prevents concurrent builders from interleaving different shared packages. The package is still not
-reader-transactional; the requested library path is the final ready signal until a future versioned
-package-directory design can swap a manifest for the package. Directory scope is required because
+prevents concurrent builders from interleaving different shared packages. ADR 0035 adds a versioned
+package directory and `CURRENT` pointer so readers can select a validated header/loader generation
+transactionally; the requested paths remain compatibility aliases. Directory scope is required because
 different library suffixes can derive the same header pathname.
 
 Default executable and shared-library paths preserve the entry's complete project-relative source

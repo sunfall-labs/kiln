@@ -5,6 +5,7 @@
 //! generated module C, application object, reusable runtime object, launcher object, executable.
 
 mod number_provider;
+pub mod shared_publication;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -360,6 +361,7 @@ pub enum NativeError {
         specifier: &'static str,
         export_name: String,
     },
+    SharedPackage(shared_publication::SharedPackageError),
 }
 
 impl fmt::Display for NativeError {
@@ -420,6 +422,9 @@ impl fmt::Display for NativeError {
                 formatter,
                 "native Node execution does not yet materialize the `{specifier}` export `{export_name}`"
             ),
+            Self::SharedPackage(error) => {
+                write!(formatter, "native shared-library package failed: {error}")
+            }
         }
     }
 }
@@ -441,6 +446,7 @@ impl std::error::Error for NativeError {
             | Self::RunResult { .. }
             | Self::UnsupportedNodeBuiltin { .. }
             | Self::UnsupportedNodeBuiltinExport { .. } => None,
+            Self::SharedPackage(error) => Some(error),
         }
     }
 }
@@ -472,6 +478,12 @@ impl From<CacheError> for NativeError {
 impl From<ToolchainError> for NativeError {
     fn from(value: ToolchainError) -> Self {
         Self::Toolchain(value)
+    }
+}
+
+impl From<shared_publication::SharedPackageError> for NativeError {
+    fn from(value: shared_publication::SharedPackageError) -> Self {
+        Self::SharedPackage(value)
     }
 }
 
@@ -1078,7 +1090,14 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        publish_shared_artifacts(&options.output, &loader, header_source.as_bytes(), &library)?;
+        publish_shared_artifacts_with_symbols(
+            &options.output,
+            &loader,
+            header_source.as_bytes(),
+            &library,
+            &module.symbol,
+            &module_api_symbol,
+        )?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
@@ -1375,7 +1394,14 @@ impl NativeBuilder {
                 (bytes, false, report.elapsed)
             }
         };
-        publish_shared_artifacts(&options.output, &loader, header_source.as_bytes(), &library)?;
+        publish_shared_artifacts_with_symbols(
+            &options.output,
+            &loader,
+            header_source.as_bytes(),
+            &library,
+            &wrapper_symbol,
+            &module_api_symbol,
+        )?;
 
         Ok(NativeSharedLibraryReport {
             output: options.output.clone(),
@@ -3151,6 +3177,7 @@ fn materialized_temporary_path(path: &Path, counter: u64) -> PathBuf {
     ))
 }
 
+#[cfg(test)]
 fn publish_shared_artifacts(
     output: &Path,
     loader: &Path,
@@ -3163,20 +3190,49 @@ fn publish_shared_artifacts(
             second: loader.to_path_buf(),
         });
     }
+    let _process_lock = SHARED_PUBLICATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _directory_lock = acquire_shared_publication_lock(output)?;
+    materialize_immutable(loader, library)?;
+    // Keep the old helper's compatibility-alias ordering for focused materialization tests. The
+    // actual shared builders use the transactional package publisher below.
+    materialize(&shared_library_header_path(output), header_source, false)?;
+    materialize(output, library, false)
+}
+
+fn publish_shared_artifacts_with_symbols(
+    output: &Path,
+    loader: &Path,
+    header_source: &[u8],
+    library: &[u8],
+    legacy_entry_symbol: &str,
+    v2_api_symbol: &str,
+) -> Result<shared_publication::SharedLibraryPackage, NativeError> {
+    if output == loader {
+        return Err(NativeError::ArtifactPathCollision {
+            first: output.to_path_buf(),
+            second: loader.to_path_buf(),
+        });
+    }
     // `File` locking semantics differ for separately opened handles in one process, so keep an
     // explicit process lock as well as the cross-process directory lock.
     let _process_lock = SHARED_PUBLICATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _directory_lock = acquire_shared_publication_lock(output)?;
-    materialize_immutable(loader, library)?;
-    // Publish the declaration first so replacing the library remains the final ready signal for
-    // consumers. The directory lock keeps concurrent builders from interleaving two pairs;
-    // readers still use the library replacement as the readiness boundary.
-    materialize(&shared_library_header_path(output), header_source, false)?;
-    materialize(output, library, false)
+    shared_publication::publish_locked(
+        output,
+        loader,
+        header_source,
+        library,
+        legacy_entry_symbol,
+        v2_api_symbol,
+    )
+    .map_err(NativeError::from)
 }
 
+#[cfg(test)]
 fn materialize_immutable(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
     let parent = path
         .parent()
@@ -3226,6 +3282,7 @@ fn materialize_immutable(path: &Path, bytes: &[u8]) -> Result<(), NativeError> {
     result.and(cleanup)
 }
 
+#[cfg(test)]
 fn immutable_contents_match(path: &Path, bytes: &[u8]) -> Result<bool, NativeError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -5189,6 +5246,13 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 },
             )
             .expect("build embedded scheduling graph");
+        let package = shared_publication::read_shared_library_package(&library.output)
+            .expect("read graph shared-library package");
+        assert_eq!(
+            package.manifest().legacy_entry_symbol,
+            library.module_symbol
+        );
+        assert_eq!(package.manifest().v2_api_symbol, library.module_api_symbol);
         let header_name = library
             .header
             .file_name()
@@ -5646,6 +5710,18 @@ int main(void) {{
         assert_eq!(second.loader, first.loader);
         assert_eq!(first.header, library_path.with_extension("h"));
         assert_eq!(second.header, first.header);
+        let package = shared_publication::read_shared_library_package(&second.output)
+            .expect("read scalar shared-library package");
+        assert_eq!(package.manifest().legacy_entry_symbol, second.module_symbol);
+        assert_eq!(package.manifest().v2_api_symbol, second.module_api_symbol);
+        assert_eq!(
+            fs::read(package.header_path()).unwrap(),
+            fs::read(&second.header).unwrap()
+        );
+        assert_eq!(
+            fs::read(package.loader_path()).unwrap(),
+            fs::read(&second.loader).unwrap()
+        );
         let published_header = fs::read_to_string(&second.header).expect("read embedding header");
         assert!(published_header.contains(&format!("int {}(", second.module_symbol)));
 
