@@ -13,7 +13,9 @@ pub mod node_stream;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -221,6 +223,37 @@ pub struct ScriptedHost {
     next_sequence: u64,
 }
 
+/// The provider boundary owned by [`RealmRuntime`].
+///
+/// [`AsyncHostOps`] is the portable operation protocol. This companion trait supplies the two
+/// pieces needed by the realm pump: observing whether a request is outstanding and waiting for a
+/// completion without exposing an executor or provider-specific readiness type. A provider may
+/// return an already-scripted completion immediately, or await its own infrastructure (as the
+/// Tokio provider does); the realm's timer-versus-completion arbitration remains shared.
+pub trait RealmHostProvider: AsyncHostOps {
+    /// Start an operation while the realm's LocalSet is active.
+    ///
+    /// Providers with resource tables may override this to keep resource creation on the realm
+    /// task. The default is sufficient for providers whose [`AsyncHostOps::start`] is already
+    /// context-independent.
+    fn start_on_realm(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        AsyncHostOps::start(self, operation, referenced)
+    }
+
+    /// Cancel an operation through the realm-owned provider boundary.
+    fn cancel_on_realm(&mut self, request: RequestId) -> bool {
+        AsyncHostOps::cancel(self, request)
+    }
+
+    /// Whether the provider still owns a request that can complete.
+    fn has_pending_work(&self) -> bool;
+
+    /// Wait for the next completion in provider-defined infrastructure order.
+    fn next_completion_async<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Option<Completion>> + 'a>>;
+}
+
 impl ScriptedHost {
     pub fn new(steps: impl IntoIterator<Item = ScriptedHostStep>) -> Self {
         Self {
@@ -289,6 +322,18 @@ impl AsyncHostOps for ScriptedHost {
     }
 }
 
+impl RealmHostProvider for ScriptedHost {
+    fn has_pending_work(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn next_completion_async<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Option<Completion>> + 'a>> {
+        Box::pin(async move { <Self as AsyncHostOps>::next_completion(self) })
+    }
+}
+
 /// Failure while constructing the deterministic realm runtime.
 #[derive(Debug)]
 pub struct RuntimeBuildError(std::io::Error);
@@ -317,11 +362,11 @@ impl std::error::Error for RuntimeBuildError {
 ///
 /// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
 /// [`Clone`] when driven because an interval re-arms the same callback before returning it.
-pub struct RealmRuntime {
+pub struct RealmRuntime<H = TokioHost> {
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
     time_paused: bool,
-    host: TokioHost,
+    host: H,
     capabilities: RealmCapabilities,
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
@@ -329,7 +374,7 @@ pub struct RealmRuntime {
     _not_send: PhantomData<Rc<()>>,
 }
 
-impl std::fmt::Debug for RealmRuntime {
+impl<H> std::fmt::Debug for RealmRuntime<H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RealmRuntime")
@@ -338,7 +383,7 @@ impl std::fmt::Debug for RealmRuntime {
     }
 }
 
-impl RealmRuntime {
+impl RealmRuntime<TokioHost> {
     /// Builds a current-thread runtime with Tokio's timer driver enabled.
     pub fn new() -> Result<Self, RuntimeBuildError> {
         Self::with_capabilities(RealmCapabilities::default())
@@ -346,6 +391,25 @@ impl RealmRuntime {
 
     /// Builds a current-thread runtime with explicit environmental capabilities.
     pub fn with_capabilities(capabilities: RealmCapabilities) -> Result<Self, RuntimeBuildError> {
+        Self::with_host_and_capabilities(TokioHost::new(), capabilities)
+    }
+}
+
+impl<H: RealmHostProvider> RealmRuntime<H> {
+    /// Builds a runtime around an explicit asynchronous host provider.
+    ///
+    /// The current-thread Tokio runtime and LocalSet remain the realm scheduler for every
+    /// provider. Scripted providers therefore replace external services only; they do not create
+    /// a second executor or bypass the normal completion ingress.
+    pub fn with_host(host: H) -> Result<Self, RuntimeBuildError> {
+        Self::with_host_and_capabilities(host, RealmCapabilities::default())
+    }
+
+    /// Builds a runtime around an explicit provider and capability policy.
+    pub fn with_host_and_capabilities(
+        host: H,
+        capabilities: RealmCapabilities,
+    ) -> Result<Self, RuntimeBuildError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
@@ -355,7 +419,7 @@ impl RealmRuntime {
             runtime,
             local: tokio::task::LocalSet::new(),
             time_paused: false,
-            host: TokioHost::new(),
+            host,
             capabilities,
             http_connections: BTreeMap::new(),
             _not_send: PhantomData,
@@ -371,14 +435,14 @@ impl RealmRuntime {
     /// Host requests are spawned by [`Self::start_host_op`] so their futures always run on this
     /// runtime. Keeping the request table separately borrowable lets the interpreter settle a
     /// completion without exposing Tokio handles or constructing a second executor.
-    pub fn host(&mut self) -> &mut TokioHost {
+    pub fn host(&mut self) -> &mut H {
         &mut self.host
     }
 
     /// Starts one asynchronous host operation on this realm's Tokio runtime.
     pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.local.block_on(&self.runtime, async {
-            self.host.start_on(operation, referenced)
+            RealmHostProvider::start_on_realm(&mut self.host, operation, referenced)
         })
     }
 
@@ -391,21 +455,16 @@ impl RealmRuntime {
         operation: AsyncHostOp,
         referenced: bool,
     ) -> RequestId {
-        self.host.start_on(operation, referenced)
+        RealmHostProvider::start_on_realm(&mut self.host, operation, referenced)
     }
 
     /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
     pub fn next_host_completion(&mut self) -> Option<Completion> {
-        if self.host.pending.is_empty() {
+        if !self.host.has_pending_work() {
             return None;
         }
-        if self.host.ready.is_empty() {
-            let completion = self
-                .local
-                .block_on(&self.runtime, self.host.receiver.recv())?;
-            self.host.collect_ready(completion);
-        }
-        self.host.take_ready()
+        self.local
+            .block_on(&self.runtime, self.host.next_completion_async())
     }
 
     /// Returns whether this realm still owns an asynchronous host request.
@@ -414,12 +473,12 @@ impl RealmRuntime {
     /// completion after language work is exhausted. The provider's resource liveness remains
     /// separate: this reports pending requests, not whether those requests keep the realm alive.
     pub fn has_pending_host_work(&self) -> bool {
-        !self.host.pending.is_empty()
+        self.host.has_pending_work()
     }
 
     /// Cancels one asynchronous host request owned by this realm.
     pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
-        AsyncHostOps::cancel(&mut self.host, request)
+        RealmHostProvider::cancel_on_realm(&mut self.host, request)
     }
 
     /// Wait for either the next host completion or the realm's next timer.
@@ -438,44 +497,34 @@ impl RealmRuntime {
             });
             self.time_paused = true;
         }
-        if let Some(completion) = self.host.take_ready() {
+        if let Some(completion) = AsyncHostOps::next_completion(&mut self.host) {
             return Some(RuntimeTurn::Completion(completion));
         }
-        loop {
-            let deadline = realm.next_timer_deadline();
-            if self.host.pending.is_empty() {
-                return self.next_timer(realm).map(RuntimeTurn::Timer);
-            }
-            let turn = self.local.block_on(&self.runtime, async {
-                match deadline {
-                    Some(deadline) => {
-                        let delay = deadline.saturating_sub(realm.now);
-                        tokio::select! {
-                            biased;
-                            completion = self.host.receiver.recv() => {
-                                completion.map(Ok)
-                            }
-                            _ = tokio::time::sleep(delay) => {
-                                realm.run_next_timer().map(Err)
-                            }
+        let deadline = realm.next_timer_deadline();
+        if !self.host.has_pending_work() {
+            return self.next_timer(realm).map(RuntimeTurn::Timer);
+        }
+        let turn = self.local.block_on(&self.runtime, async {
+            match deadline {
+                Some(deadline) => {
+                    let delay = deadline.saturating_sub(realm.now);
+                    tokio::select! {
+                        biased;
+                        completion = self.host.next_completion_async() => {
+                            completion.map(Ok)
+                        }
+                        _ = tokio::time::sleep(delay) => {
+                            realm.run_next_timer().map(Err)
                         }
                     }
-                    None => self.host.receiver.recv().await.map(Ok),
                 }
-            });
-            match turn {
-                Some(Ok(completion)) => {
-                    self.host.collect_ready(completion);
-                    if let Some(completion) = self.host.take_ready() {
-                        return Some(RuntimeTurn::Completion(completion));
-                    }
-                    // A canceled request may have left a completion buffered in the provider
-                    // channel. It is rejected by `promote_completion`; keep selecting until a
-                    // live request or the timer can make progress.
-                }
-                Some(Err(timer)) => return Some(RuntimeTurn::Timer(timer)),
-                None => return None,
+                None => self.host.next_completion_async().await.map(Ok),
             }
+        });
+        match turn {
+            Some(Ok(completion)) => Some(RuntimeTurn::Completion(completion)),
+            Some(Err(timer)) => Some(RuntimeTurn::Timer(timer)),
+            None => None,
         }
     }
 
@@ -496,7 +545,7 @@ impl RealmRuntime {
     ///
     /// This is useful for installing the host into a synchronous realm machine whose lifetime
     /// spans several calls to [`Self::enter`] and [`Self::next_host_completion`].
-    pub fn host_mut(&mut self) -> &mut TokioHost {
+    pub fn host_mut(&mut self) -> &mut H {
         &mut self.host
     }
 
@@ -660,13 +709,13 @@ impl Drop for RuntimeHttpConnection {
     }
 }
 
-impl ActiveAsyncHostOps for RealmRuntime {
+impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.start_host_op_in_context(operation, referenced)
     }
 
     fn cancel(&mut self, request: RequestId) -> bool {
-        AsyncHostOps::cancel(&mut self.host, request)
+        RealmHostProvider::cancel_on_realm(&mut self.host, request)
     }
 }
 
@@ -1384,6 +1433,34 @@ impl AsyncHostOps for TokioHost {
     fn next_completion(&mut self) -> Option<Completion> {
         self.collect_ready_nonblocking();
         self.take_ready()
+    }
+}
+
+impl RealmHostProvider for TokioHost {
+    fn start_on_realm(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        self.start_on(operation, referenced)
+    }
+
+    fn cancel_on_realm(&mut self, request: RequestId) -> bool {
+        AsyncHostOps::cancel(self, request)
+    }
+
+    fn has_pending_work(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn next_completion_async<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Option<Completion>> + 'a>> {
+        Box::pin(async move {
+            loop {
+                if let Some(completion) = self.take_ready() {
+                    return Some(completion);
+                }
+                let completion = self.receiver.recv().await?;
+                self.collect_ready(completion);
+            }
+        })
     }
 }
 
@@ -2270,6 +2347,343 @@ mod tests {
         assert!(!host.cancel(unexpected));
         assert!(host.next_completion().is_none());
         assert_ne!(mismatch, unexpected);
+    }
+
+    #[test]
+    fn scripted_runtime_drives_the_stream_driver_through_fragmented_reads_and_queued_writes() {
+        use crate::node_stream::{StreamAction, StreamDriver, StreamEvent};
+
+        let resource = ResourceId::new(41);
+        let connect = AsyncHostOp::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: 8080,
+        };
+        let first_read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: 4,
+        };
+        let second_read = first_read.clone();
+        let third_read = first_read.clone();
+        let first_write = AsyncHostOp::TcpWrite {
+            stream: resource,
+            data: b"abcd".to_vec(),
+        };
+        let second_write = AsyncHostOp::TcpWrite {
+            stream: resource,
+            data: b"ef".to_vec(),
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: connect.clone(),
+                result: Ok(AsyncHostValue::Resource(ResourceInfo {
+                    id: resource,
+                    kind: ResourceKind::TcpStream,
+                    address: Some("127.0.0.1".into()),
+                    port: Some(8080),
+                })),
+            },
+            ScriptedHostStep {
+                operation: first_read.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"ab".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: second_read,
+                result: Ok(AsyncHostValue::Bytes(b"cd".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: third_read,
+                result: Ok(AsyncHostValue::Bytes(Vec::new())),
+            },
+            ScriptedHostStep {
+                operation: first_write.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+            ScriptedHostStep {
+                operation: second_write.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let connect_request = runtime.start_host_op(connect, true);
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("connect completes")
+                .request,
+            connect_request
+        );
+        let mut driver = StreamDriver::new(resource, 4);
+
+        let actions = driver.start_reading();
+        let StreamAction::Start(operation) = &actions[0] else {
+            panic!("expected first scripted read, got {actions:?}");
+        };
+        assert_eq!(operation, &first_read);
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+
+        let actions = driver
+            .completed(
+                runtime
+                    .next_host_completion()
+                    .expect("first read completes"),
+            )
+            .expect("first read belongs to stream");
+        assert_eq!(actions[0], StreamAction::Data(b"ab".to_vec()));
+        let StreamAction::Start(operation) = &actions[1] else {
+            panic!("expected second scripted read, got {actions:?}");
+        };
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+
+        let actions = driver
+            .completed(
+                runtime
+                    .next_host_completion()
+                    .expect("second read completes"),
+            )
+            .expect("second read belongs to stream");
+        assert_eq!(actions[0], StreamAction::Data(b"cd".to_vec()));
+        let StreamAction::Start(operation) = &actions[1] else {
+            panic!("expected EOF read, got {actions:?}");
+        };
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+        assert_eq!(
+            driver.completed(runtime.next_host_completion().expect("EOF completes")),
+            Some(vec![StreamAction::Event(StreamEvent::End)])
+        );
+
+        let (first, actions) = driver.write(b"abcd".to_vec());
+        assert!(!first.ready);
+        let StreamAction::Start(operation) = &actions[0] else {
+            panic!("expected first scripted write, got {actions:?}");
+        };
+        assert_eq!(operation, &first_write);
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+        let (second, actions) = driver.write(b"ef".to_vec());
+        assert!(!second.ready);
+        assert!(actions.is_empty());
+
+        let actions = driver
+            .completed(
+                runtime
+                    .next_host_completion()
+                    .expect("first write completes"),
+            )
+            .expect("first write belongs to stream");
+        assert_eq!(actions[0], StreamAction::Event(StreamEvent::Drain));
+        let StreamAction::Start(operation) = &actions[1] else {
+            panic!("expected queued scripted write, got {actions:?}");
+        };
+        assert_eq!(operation, &second_write);
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+        assert!(
+            driver
+                .completed(
+                    runtime
+                        .next_host_completion()
+                        .expect("second write completes")
+                )
+                .expect("second write belongs to stream")
+                .is_empty()
+        );
+        assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
+    fn scripted_runtime_cancellation_retires_stream_read_before_close() {
+        use crate::node_stream::{StreamAction, StreamDriver, StreamEvent};
+
+        let resource = ResourceId::new(42);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: 8,
+        };
+        let close = AsyncHostOp::CloseResource { resource };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: read.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"late".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: close.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let mut driver = StreamDriver::new(resource, 8);
+        let actions = driver.start_reading();
+        let StreamAction::Start(operation) = &actions[0] else {
+            panic!("expected scripted read, got {actions:?}");
+        };
+        let request = runtime.start_host_op(operation.clone(), false);
+        assert!(driver.started(operation, request));
+
+        let actions = driver.close_actions();
+        assert_eq!(actions[0], StreamAction::Cancel(request));
+        let StreamAction::Start(close_operation) = &actions[1] else {
+            panic!("expected close action, got {actions:?}");
+        };
+        assert_eq!(close_operation, &close);
+        assert!(runtime.cancel_host_op(request));
+        let close_request = runtime.start_host_op(close_operation.clone(), false);
+        assert!(driver.started(close_operation, close_request));
+        assert_eq!(
+            driver.completed(runtime.next_host_completion().expect("close completes")),
+            Some(vec![StreamAction::Event(StreamEvent::Close)])
+        );
+        assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
+    fn scripted_runtime_keeps_equal_checkpoint_completions_in_submission_order() {
+        let first_op = AsyncHostOp::ReadFile {
+            path: "scripted/first".into(),
+        };
+        let second_op = AsyncHostOp::ReadFile {
+            path: "scripted/second".into(),
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: first_op.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"first".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: second_op.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"second".to_vec())),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let mut realm = Realm::<(), ()>::new();
+        realm.set_timeout(Duration::ZERO, ());
+        let first = runtime.start_host_op(first_op, false);
+        let second = runtime.start_host_op(second_op, false);
+        let first_completion = match runtime.next_turn(&mut realm).expect("first completion") {
+            RuntimeTurn::Completion(completion) => completion,
+            RuntimeTurn::Timer(_) => panic!("a ready completion must beat a due timer"),
+        };
+        let second_completion = match runtime.next_turn(&mut realm).expect("second completion") {
+            RuntimeTurn::Completion(completion) => completion,
+            RuntimeTurn::Timer(_) => panic!("a ready completion must beat a due timer"),
+        };
+        assert_eq!(first_completion.request, first);
+        assert_eq!(second_completion.request, second);
+        assert!(first_completion.sequence < second_completion.sequence);
+        assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
+    fn scripted_provider_drives_hyper_connection_through_the_same_stream_bridge() {
+        use crate::node_http::HttpResponse;
+        use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction};
+
+        let resource = ResourceId::new(43);
+        let connect = AsyncHostOp::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: 8080,
+        };
+        let connected = ResourceInfo {
+            id: resource,
+            kind: ResourceKind::TcpStream,
+            address: Some("127.0.0.1".into()),
+            port: Some(8080),
+        };
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: DEFAULT_HIGH_WATER_MARK,
+        };
+        let request = b"GET /health HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n";
+        let write = AsyncHostOp::TcpWrite {
+            stream: resource,
+            data: b"HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 4\r\n\r\nkiln".to_vec(),
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: connect.clone(),
+                result: Ok(AsyncHostValue::Resource(connected.clone())),
+            },
+            ScriptedHostStep {
+                operation: read.clone(),
+                result: Ok(AsyncHostValue::Bytes(request.to_vec())),
+            },
+            ScriptedHostStep {
+                operation: write.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let connect_request = runtime.start_host_op(connect, false);
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("connect completes")
+                .result,
+            Ok(AsyncHostValue::Resource(connected))
+        );
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one scripted read: {start:?}");
+        };
+        assert_eq!(read_operation, &read);
+        let read_request = runtime.start_host_op(read_operation.clone(), false);
+        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        let request_completion = runtime
+            .next_host_completion()
+            .expect("request read completes");
+        let actions = runtime
+            .complete_http_connection(resource, request_completion)
+            .expect("request read belongs to HTTP connection");
+        let [StreamAction::Start(next_read)] = actions.as_slice() else {
+            panic!("HTTP bridge starts one follow-up read: {actions:?}");
+        };
+        assert_eq!(next_read, &read);
+
+        let event = (0..8)
+            .find_map(|_| {
+                runtime.poll_http_connection(resource);
+                runtime.take_http_events(resource).into_iter().next()
+            })
+            .unwrap_or_else(|| panic!("Hyper did not publish a request event"));
+        let crate::RuntimeHttpEvent::Request { id, request, body } = event else {
+            panic!("Hyper published an unexpected event: {event:?}");
+        };
+        assert_eq!(request.target, "/health");
+        assert!(body.is_empty());
+        assert!(runtime.respond_http1(
+            resource,
+            id,
+            HttpResponse {
+                status: 200,
+                reason: Some("OK".into()),
+                headers: vec![("connection".into(), "close".into())],
+                body: b"kiln".to_vec(),
+            }
+        ));
+        let writes = (0..8)
+            .find_map(|_| {
+                runtime
+                    .poll_http_connection(resource)
+                    .filter(|actions| !actions.is_empty())
+            })
+            .unwrap_or_else(|| panic!("Hyper did not select a response write"));
+        let [StreamAction::Start(write_operation)] = writes.as_slice() else {
+            panic!("Hyper selects one scripted response write: {writes:?}");
+        };
+        assert_eq!(write_operation, &write);
+        let write_request = runtime.start_host_op(write_operation.clone(), false);
+        assert!(runtime.http_connection_started(resource, write_operation, write_request));
+        let write_completion = runtime
+            .next_host_completion()
+            .expect("response write completes");
+        let write_actions = runtime
+            .complete_http_connection(resource, write_completion)
+            .expect("response write belongs to HTTP connection");
+        assert!(write_actions.is_empty());
+        assert_ne!(connect_request, read_request);
+        assert!(runtime.host_mut().is_exhausted());
     }
 
     #[test]
