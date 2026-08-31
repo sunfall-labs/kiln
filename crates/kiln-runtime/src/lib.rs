@@ -422,33 +422,42 @@ impl RealmRuntime {
         if let Some(completion) = self.host.take_ready() {
             return Some(RuntimeTurn::Completion(completion));
         }
-        let deadline = realm.next_timer_deadline();
-        if self.host.pending.is_empty() {
-            return self.next_timer(realm).map(RuntimeTurn::Timer);
-        }
-        self.local.block_on(&self.runtime, async {
-            match deadline {
-                Some(deadline) => {
-                    let delay = deadline.saturating_sub(realm.now);
-                    tokio::select! {
-                        biased;
-                        completion = self.host.receiver.recv() => {
-                            let completion = completion?;
-                            self.host.collect_ready(completion);
-                            self.host.take_ready().map(RuntimeTurn::Completion)
-                        }
-                        _ = tokio::time::sleep(delay) => {
-                            realm.run_next_timer().map(RuntimeTurn::Timer)
+        loop {
+            let deadline = realm.next_timer_deadline();
+            if self.host.pending.is_empty() {
+                return self.next_timer(realm).map(RuntimeTurn::Timer);
+            }
+            let turn = self.local.block_on(&self.runtime, async {
+                match deadline {
+                    Some(deadline) => {
+                        let delay = deadline.saturating_sub(realm.now);
+                        tokio::select! {
+                            biased;
+                            completion = self.host.receiver.recv() => {
+                                completion.map(Ok)
+                            }
+                            _ = tokio::time::sleep(delay) => {
+                                realm.run_next_timer().map(Err)
+                            }
                         }
                     }
+                    None => self.host.receiver.recv().await.map(Ok),
                 }
-                None => {
-                    let completion = self.host.receiver.recv().await?;
+            });
+            match turn {
+                Some(Ok(completion)) => {
                     self.host.collect_ready(completion);
-                    self.host.take_ready().map(RuntimeTurn::Completion)
+                    if let Some(completion) = self.host.take_ready() {
+                        return Some(RuntimeTurn::Completion(completion));
+                    }
+                    // A canceled request may have left a completion buffered in the provider
+                    // channel. It is rejected by `promote_completion`; keep selecting until a
+                    // live request or the timer can make progress.
                 }
+                Some(Err(timer)) => return Some(RuntimeTurn::Timer(timer)),
+                None => return None,
             }
-        })
+        }
     }
 
     /// Runs one synchronous realm operation as the current Tokio task.
@@ -1900,6 +1909,74 @@ mod tests {
             .expect("test channel remains open");
 
         assert!(AsyncHostOps::next_completion(runtime.host_mut()).is_none());
+    }
+
+    #[test]
+    fn stale_completion_does_not_end_a_later_turn() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let stale = runtime.start_host_op(
+            AsyncHostOp::ReadFile {
+                path: "canceled.txt".into(),
+            },
+            false,
+        );
+        assert!(runtime.cancel_host_op(stale));
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let live = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        runtime
+            .host_mut()
+            .sender
+            .send(HostCompletion {
+                request: stale,
+                sequence: 0,
+                lifecycle: None,
+                result: Ok(HostCompletionValue::Public(AsyncHostValue::Bytes(
+                    b"stale".to_vec(),
+                ))),
+            })
+            .expect("test channel remains open");
+        let mut realm: Realm = Realm::new();
+        realm.set_timeout(Duration::ZERO, WorkId::new(93));
+        let turn = runtime
+            .next_turn(&mut realm)
+            .expect("stale completion must not end the drive");
+        match turn {
+            RuntimeTurn::Timer(WorkItem::Timer { work, .. }) => {
+                assert_eq!(work, WorkId::new(93));
+                assert!(runtime.cancel_host_op(live));
+            }
+            RuntimeTurn::Timer(WorkItem::Microtask(_)) => {
+                panic!("next_turn must not select a microtask")
+            }
+            RuntimeTurn::Completion(_) => panic!("accept must remain pending without a client"),
+        }
+        runtime.start_host_op(
+            AsyncHostOp::CloseResource {
+                resource: listener.id,
+            },
+            false,
+        );
+        runtime.next_host_completion().expect("close completes");
     }
 
     #[test]
