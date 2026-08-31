@@ -1530,6 +1530,39 @@ mod tests {
     }
 
     #[test]
+    fn node_discovers_nested_conditional_commonjs_require() {
+        let project = TempProject::new();
+        let dependency = project.write("dep.cjs", "module.exports = 41;");
+        let bridge = project.write(
+            "bridge.cjs",
+            "if (true) { const value = require('./dep.cjs'); module.exports = value + 1; }",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import value from './bridge.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build nested CommonJS graph");
+
+        let dependency = fs::canonicalize(dependency).expect("canonical dependency");
+        let bridge_node = graph.module(&bridge).expect("bridge node");
+        assert_eq!(bridge_node.program.dependencies, ["./dep.cjs"]);
+        assert_eq!(bridge_node.dependencies[0].target, dependency);
+
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute nested CommonJS graph");
+        assert_eq!(host.output, ["42"]);
+    }
+
+    #[test]
     fn node_commonjs_require_reads_esm_export_values() {
         let project = TempProject::new();
         project.write("dep.mjs", "export let answer = 41;");

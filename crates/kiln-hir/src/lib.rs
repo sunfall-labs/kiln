@@ -860,84 +860,470 @@ impl Module {
 
 /// Literal CommonJS dependencies in first source-occurrence order.
 ///
-/// This deliberately recognizes only `require("...")`. Dynamic arguments remain runtime work;
-/// treating arbitrary calls as static graph edges would evaluate JavaScript during discovery.
+/// This recursively walks executable HIR and recognizes only calls to the CommonJS wrapper's
+/// unshadowed `require("...")`. Dynamic arguments remain runtime work; treating arbitrary calls as
+/// static graph edges would evaluate JavaScript during discovery.
 pub fn commonjs_literal_requires(module: &Module) -> Vec<String> {
-    let mut found = Vec::new();
-    for statement in &module.body {
-        collect_statement_requires(statement, &mut found);
-    }
-    found
+    let mut walker = CommonJsRequireWalker { found: Vec::new() };
+    walker.walk_body(&module.body, false);
+    walker.found
 }
 
-fn push_require(expression: &Expression, found: &mut Vec<String>) {
-    if let ExpressionKind::Call {
-        callee, arguments, ..
-    } = &expression.kind
-        && matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "require")
-        && let [
-            ListElement::Item(Expression {
-                kind: ExpressionKind::Literal(Literal::String(specifier)),
+struct CommonJsRequireWalker {
+    found: Vec<String>,
+}
+
+impl CommonJsRequireWalker {
+    fn walk_body(&mut self, body: &[Statement], shadowed: bool) {
+        let shadowed =
+            shadowed || statements_declare_require(body) || statements_have_var_require(body);
+        for statement in body {
+            self.walk_statement(statement, shadowed);
+        }
+    }
+
+    fn walk_statement(&mut self, statement: &Statement, shadowed: bool) {
+        match &statement.kind {
+            StatementKind::Variable { declarations, .. } => {
+                for declaration in declarations {
+                    self.walk_pattern(&declaration.pattern, shadowed);
+                    if let Some(value) = &declaration.initializer {
+                        self.walk_expression(value, shadowed);
+                    }
+                }
+            }
+            StatementKind::Expression(expression)
+            | StatementKind::Throw(expression)
+            | StatementKind::ExportDefault(expression) => {
+                self.walk_expression(expression, shadowed)
+            }
+            StatementKind::Block(body) => self.walk_body(body, shadowed),
+            StatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                self.walk_expression(test, shadowed);
+                self.walk_statement(consequent, shadowed);
+                if let Some(alternate) = alternate {
+                    self.walk_statement(alternate, shadowed);
+                }
+            }
+            StatementKind::While { test, body } => {
+                self.walk_expression(test, shadowed);
+                self.walk_statement(body, shadowed);
+            }
+            StatementKind::DoWhile { body, test } => {
+                self.walk_statement(body, shadowed);
+                self.walk_expression(test, shadowed);
+            }
+            StatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                self.walk_expression(discriminant, shadowed);
+                let switch_shadowed = shadowed
+                    || cases
+                        .iter()
+                        .any(|case| statements_declare_require(&case.body));
+                for case in cases {
+                    if let Some(test) = &case.test {
+                        self.walk_expression(test, switch_shadowed);
+                    }
+                    self.walk_body(&case.body, switch_shadowed);
+                }
+            }
+            StatementKind::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                let loop_shadowed =
+                    shadowed || init.as_deref().is_some_and(statement_declares_require);
+                if let Some(init) = init {
+                    self.walk_statement(init, loop_shadowed);
+                }
+                if let Some(test) = test {
+                    self.walk_expression(test, loop_shadowed);
+                }
+                if let Some(update) = update {
+                    self.walk_expression(update, loop_shadowed);
+                }
+                self.walk_statement(body, loop_shadowed);
+            }
+            StatementKind::Labelled { body, .. } => self.walk_statement(body, shadowed),
+            StatementKind::ForIn {
+                kind,
+                name,
+                object,
+                body,
+            } => {
+                let loop_shadowed = shadowed || (*kind != VariableKind::Var && name == "require");
+                self.walk_expression(object, loop_shadowed);
+                self.walk_statement(body, loop_shadowed);
+            }
+            StatementKind::ForOf {
+                kind,
+                pattern,
+                iterable,
+                body,
                 ..
-            }),
-        ] = arguments.as_slice()
-        && !found.contains(specifier)
-    {
-        found.push(specifier.clone());
+            } => {
+                let loop_shadowed =
+                    shadowed || (*kind != VariableKind::Var && pattern_binds_require(pattern));
+                self.walk_pattern(pattern, loop_shadowed);
+                self.walk_expression(iterable, loop_shadowed);
+                self.walk_statement(body, loop_shadowed);
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.walk_body(block, shadowed);
+                if let Some(handler) = handler {
+                    let handler_shadowed =
+                        shadowed || handler.binding.as_deref() == Some("require");
+                    self.walk_body(&handler.body, handler_shadowed);
+                }
+                self.walk_body(finalizer, shadowed);
+            }
+            StatementKind::Function(function) => self.walk_function(function, shadowed),
+            StatementKind::Class(class) => self.walk_class(class, shadowed),
+            StatementKind::Return(value) => {
+                if let Some(value) = value {
+                    self.walk_expression(value, shadowed);
+                }
+            }
+            StatementKind::Break { .. }
+            | StatementKind::Continue { .. }
+            | StatementKind::Empty
+            | StatementKind::Unsupported { .. } => {}
+        }
     }
-    collect_expression_requires(expression, found);
+
+    fn walk_function(&mut self, function: &Function, shadowed: bool) {
+        let shadowed = shadowed
+            || (function.binds_own_name && function.name.as_deref() == Some("require"))
+            || function
+                .parameters
+                .iter()
+                .any(|parameter| pattern_binds_require(&parameter.pattern))
+            || function.rest.as_ref().is_some_and(pattern_binds_require);
+        for parameter in &function.parameters {
+            self.walk_pattern(&parameter.pattern, shadowed);
+        }
+        if let Some(rest) = &function.rest {
+            self.walk_pattern(rest, shadowed);
+        }
+        self.walk_body(&function.body, shadowed);
+    }
+
+    fn walk_class(&mut self, class: &Class, shadowed: bool) {
+        let class_shadowed = shadowed || class.name.as_deref() == Some("require");
+        if let Some(superclass) = &class.superclass {
+            self.walk_expression(superclass, class_shadowed);
+        }
+        for field in &class.fields {
+            self.walk_object_key(&field.key, class_shadowed);
+            if let Some(value) = &field.value {
+                self.walk_expression(value, class_shadowed);
+            }
+        }
+        if let Some(constructor) = &class.constructor {
+            self.walk_function(constructor, class_shadowed);
+        }
+        for method in &class.methods {
+            self.walk_object_key(&method.key, class_shadowed);
+            self.walk_function(&method.function, class_shadowed);
+        }
+    }
+
+    fn walk_expression(&mut self, expression: &Expression, shadowed: bool) {
+        match &expression.kind {
+            ExpressionKind::Literal(_)
+            | ExpressionKind::Identifier(_)
+            | ExpressionKind::SuperMember { .. }
+            | ExpressionKind::Update { .. }
+            | ExpressionKind::This
+            | ExpressionKind::NewTarget
+            | ExpressionKind::TemplateStrings { .. }
+            | ExpressionKind::RegExp { .. }
+            | ExpressionKind::Unsupported { .. } => {}
+            ExpressionKind::Unary { argument, .. }
+            | ExpressionKind::Await(argument)
+            | ExpressionKind::Chain {
+                expression: argument,
+            } => self.walk_expression(argument, shadowed),
+            ExpressionKind::Binary { left, right, .. }
+            | ExpressionKind::Logical { left, right, .. } => {
+                self.walk_expression(left, shadowed);
+                self.walk_expression(right, shadowed);
+            }
+            ExpressionKind::Assignment { value, .. } => self.walk_expression(value, shadowed),
+            ExpressionKind::Conditional {
+                test,
+                consequent,
+                alternate,
+            } => {
+                self.walk_expression(test, shadowed);
+                self.walk_expression(consequent, shadowed);
+                self.walk_expression(alternate, shadowed);
+            }
+            ExpressionKind::Call {
+                callee, arguments, ..
+            } => {
+                if !shadowed
+                    && matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "require")
+                    && let [
+                        ListElement::Item(Expression {
+                            kind: ExpressionKind::Literal(Literal::String(specifier)),
+                            ..
+                        }),
+                    ] = arguments.as_slice()
+                    && !self.found.iter().any(|found| found == specifier)
+                {
+                    self.found.push(specifier.clone());
+                }
+                self.walk_expression(callee, shadowed);
+                self.walk_list(arguments, shadowed);
+            }
+            ExpressionKind::SuperCall { arguments } => self.walk_list(arguments, shadowed),
+            ExpressionKind::UpdateMember {
+                object, property, ..
+            } => {
+                self.walk_expression(object, shadowed);
+                self.walk_object_key(property, shadowed);
+            }
+            ExpressionKind::Yield { value, .. } => {
+                if let Some(value) = value {
+                    self.walk_expression(value, shadowed);
+                }
+            }
+            ExpressionKind::Class(class) => self.walk_class(class, shadowed),
+            ExpressionKind::Function(function) => self.walk_function(function, shadowed),
+            ExpressionKind::Array { elements } => self.walk_list(elements, shadowed),
+            ExpressionKind::Sequence { operands } => {
+                for operand in operands {
+                    self.walk_expression(operand, shadowed);
+                }
+            }
+            ExpressionKind::ComputedMember {
+                object, property, ..
+            } => {
+                self.walk_expression(object, shadowed);
+                self.walk_expression(property, shadowed);
+            }
+            ExpressionKind::PrivateIn { object, .. }
+            | ExpressionKind::PrivateMember { object, .. } => {
+                self.walk_expression(object, shadowed)
+            }
+            ExpressionKind::PatternAssignment { pattern, value } => {
+                self.walk_pattern(pattern, shadowed);
+                self.walk_expression(value, shadowed);
+            }
+            ExpressionKind::ComputedAssignment {
+                object,
+                property,
+                value,
+                ..
+            } => {
+                self.walk_expression(object, shadowed);
+                self.walk_expression(property, shadowed);
+                self.walk_expression(value, shadowed);
+            }
+            ExpressionKind::New {
+                callee, arguments, ..
+            } => {
+                self.walk_expression(callee, shadowed);
+                self.walk_list(arguments, shadowed);
+            }
+            ExpressionKind::MemberAssignment { object, value, .. } => {
+                self.walk_expression(object, shadowed);
+                self.walk_expression(value, shadowed);
+            }
+            ExpressionKind::Object { members } => {
+                for member in members {
+                    match member {
+                        ObjectMember::Property(property) => {
+                            self.walk_object_key(&property.key, shadowed);
+                            self.walk_expression(&property.value, shadowed);
+                        }
+                        ObjectMember::Spread(value) => self.walk_expression(value, shadowed),
+                        ObjectMember::Accessor { key, function, .. } => {
+                            self.walk_object_key(key, shadowed);
+                            self.walk_function(function, shadowed);
+                        }
+                    }
+                }
+            }
+            ExpressionKind::StaticMember { object, .. } => self.walk_expression(object, shadowed),
+            ExpressionKind::Delete { object, property } => {
+                self.walk_expression(object, shadowed);
+                self.walk_object_key(property, shadowed);
+            }
+            ExpressionKind::PrivateAssignment { object, value, .. } => {
+                self.walk_expression(object, shadowed);
+                self.walk_expression(value, shadowed);
+            }
+            ExpressionKind::Template { expressions, .. } => {
+                for expression in expressions {
+                    self.walk_expression(expression, shadowed);
+                }
+            }
+        }
+    }
+
+    fn walk_list(&mut self, list: &[ListElement], shadowed: bool) {
+        for element in list {
+            if let ListElement::Item(expression) | ListElement::Spread(expression) = element {
+                self.walk_expression(expression, shadowed);
+            }
+        }
+    }
+
+    fn walk_pattern(&mut self, pattern: &Pattern, shadowed: bool) {
+        match pattern {
+            Pattern::Identifier(_) => {}
+            Pattern::Member { object, .. } => self.walk_expression(object, shadowed),
+            Pattern::Computed { object, property } => {
+                self.walk_expression(object, shadowed);
+                self.walk_expression(property, shadowed);
+            }
+            Pattern::PrivateMember { object, .. } => self.walk_expression(object, shadowed),
+            Pattern::Object { properties, rest } => {
+                for property in properties {
+                    if let PatternKey::Computed(key) = &property.key {
+                        self.walk_expression(key, shadowed);
+                    }
+                    self.walk_pattern(&property.value, shadowed);
+                }
+                if let Some(rest) = rest {
+                    self.walk_pattern(rest, shadowed);
+                }
+            }
+            Pattern::Array { elements, rest } => {
+                for element in elements.iter().flatten() {
+                    self.walk_pattern(element, shadowed);
+                }
+                if let Some(rest) = rest {
+                    self.walk_pattern(rest, shadowed);
+                }
+            }
+            Pattern::WithDefault { inner, default } => {
+                self.walk_pattern(inner, shadowed);
+                self.walk_expression(default, shadowed);
+            }
+        }
+    }
+
+    fn walk_object_key(&mut self, key: &ObjectKey, shadowed: bool) {
+        if let ObjectKey::Computed(expression) = key {
+            self.walk_expression(expression, shadowed);
+        }
+    }
 }
 
-fn collect_statement_requires(statement: &Statement, found: &mut Vec<String>) {
+fn pattern_binds_require(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Identifier(name) => name == "require",
+        Pattern::Object { properties, rest } => {
+            properties
+                .iter()
+                .any(|property| pattern_binds_require(&property.value))
+                || rest.as_deref().is_some_and(pattern_binds_require)
+        }
+        Pattern::Array { elements, rest } => {
+            elements.iter().flatten().any(pattern_binds_require)
+                || rest.as_deref().is_some_and(pattern_binds_require)
+        }
+        Pattern::WithDefault { inner, .. } => pattern_binds_require(inner),
+        Pattern::Member { .. } | Pattern::Computed { .. } | Pattern::PrivateMember { .. } => false,
+    }
+}
+
+fn statement_declares_require(statement: &Statement) -> bool {
     match &statement.kind {
-        StatementKind::Expression(expression) | StatementKind::Throw(expression) => {
-            push_require(expression, found)
-        }
-        StatementKind::Variable { declarations, .. } => {
-            for declaration in declarations {
-                if let Some(value) = &declaration.initializer {
-                    push_require(value, found);
-                }
-            }
-        }
-        StatementKind::Block(body) => {
-            for statement in body {
-                collect_statement_requires(statement, found);
-            }
-        }
-        StatementKind::Return(Some(value)) => push_require(value, found),
-        _ => {}
+        StatementKind::Variable { declarations, .. } => declarations
+            .iter()
+            .any(|declaration| pattern_binds_require(&declaration.pattern)),
+        StatementKind::Function(function) => function.name.as_deref() == Some("require"),
+        StatementKind::Class(class) => class.name.as_deref() == Some("require"),
+        _ => false,
     }
 }
 
-fn collect_expression_requires(expression: &Expression, found: &mut Vec<String>) {
-    match &expression.kind {
-        ExpressionKind::Call {
-            callee, arguments, ..
+fn statements_declare_require(statements: &[Statement]) -> bool {
+    statements.iter().any(statement_declares_require)
+}
+
+fn statements_have_var_require(statements: &[Statement]) -> bool {
+    statements.iter().any(statement_has_var_require)
+}
+
+fn statement_has_var_require(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::Variable {
+            kind: VariableKind::Var,
+            declarations,
+        } => declarations
+            .iter()
+            .any(|declaration| pattern_binds_require(&declaration.pattern)),
+        StatementKind::Variable { .. } => false,
+        StatementKind::Block(body) => statements_have_var_require(body),
+        StatementKind::If {
+            consequent,
+            alternate,
+            ..
         } => {
-            push_require(callee, found);
-            for argument in arguments {
-                if let ListElement::Item(value) | ListElement::Spread(value) = argument {
-                    push_require(value, found);
-                }
-            }
+            statement_has_var_require(consequent)
+                || alternate.as_deref().is_some_and(statement_has_var_require)
         }
-        ExpressionKind::StaticMember { object, .. } => push_require(object, found),
-        ExpressionKind::MemberAssignment { object, value, .. } => {
-            push_require(object, found);
-            push_require(value, found);
+        StatementKind::While { body, .. }
+        | StatementKind::DoWhile { body, .. }
+        | StatementKind::Labelled { body, .. } => statement_has_var_require(body),
+        StatementKind::ForIn {
+            kind, name, body, ..
+        } => (*kind == VariableKind::Var && name == "require") || statement_has_var_require(body),
+        StatementKind::ForOf {
+            kind,
+            pattern,
+            body,
+            ..
+        } => {
+            (*kind == VariableKind::Var && pattern_binds_require(pattern))
+                || statement_has_var_require(body)
         }
-        ExpressionKind::Function(function) => {
-            for statement in &function.body {
-                collect_statement_requires(statement, found);
-            }
+        StatementKind::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| statements_have_var_require(&case.body)),
+        StatementKind::For { init, body, .. } => {
+            init.as_deref().is_some_and(statement_has_var_require)
+                || statement_has_var_require(body)
         }
-        ExpressionKind::Binary { left, right, .. }
-        | ExpressionKind::Logical { left, right, .. } => {
-            push_require(left, found);
-            push_require(right, found);
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            statements_have_var_require(block)
+                || handler
+                    .as_ref()
+                    .is_some_and(|handler| statements_have_var_require(&handler.body))
+                || statements_have_var_require(finalizer)
         }
-        _ => {}
+        // Nested functions and classes have their own var environment.
+        StatementKind::Function(_)
+        | StatementKind::Class(_)
+        | StatementKind::Expression(_)
+        | StatementKind::Throw(_)
+        | StatementKind::Break { .. }
+        | StatementKind::Continue { .. }
+        | StatementKind::Empty
+        | StatementKind::Return(_)
+        | StatementKind::ExportDefault(_)
+        | StatementKind::Unsupported { .. } => false,
     }
 }
 
@@ -1112,5 +1498,365 @@ mod tests {
         };
 
         assert_eq!(module.runtime_export_names(), ["value"]);
+    }
+
+    fn require_call(specifier: &str) -> Expression {
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(Expression {
+                    kind: ExpressionKind::Identifier("require".into()),
+                    span: Span::default(),
+                }),
+                arguments: vec![ListElement::Item(Expression {
+                    kind: ExpressionKind::Literal(Literal::String(specifier.into())),
+                    span: Span::default(),
+                })],
+                optional: false,
+            },
+            span: Span::default(),
+        }
+    }
+
+    fn expression_statement(expression: Expression) -> Statement {
+        Statement {
+            kind: StatementKind::Expression(expression),
+            span: Span::default(),
+        }
+    }
+
+    fn literal_statement(specifier: &str) -> Statement {
+        expression_statement(require_call(specifier))
+    }
+
+    fn empty_function(body: Vec<Statement>) -> Function {
+        Function {
+            name: None,
+            binds_own_name: false,
+            arrow: false,
+            generator: false,
+            asynchronous: false,
+            parameters: Vec::new(),
+            rest: None,
+            body,
+            span: Span::default(),
+        }
+    }
+
+    fn empty_module(body: Vec<Statement>) -> Module {
+        Module {
+            source_kind: SourceKind::JavaScript,
+            source_goal: SourceGoal::Script,
+            items: Vec::new(),
+            body,
+            requested_modules: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            diagnostics: Vec::new(),
+            panicked: false,
+        }
+    }
+
+    #[test]
+    fn commonjs_scanner_walks_nested_statement_and_expression_containers() {
+        let object = Expression {
+            kind: ExpressionKind::Object {
+                members: vec![
+                    ObjectMember::Property(ObjectProperty {
+                        key: ObjectKey::Computed(require_call("./object-key")),
+                        value: require_call("./object-value"),
+                        span: Span::default(),
+                    }),
+                    ObjectMember::Spread(require_call("./object-spread")),
+                    ObjectMember::Accessor {
+                        key: ObjectKey::Static("accessor".into()),
+                        kind: MethodKind::Get,
+                        function: empty_function(vec![literal_statement("./accessor")]),
+                    },
+                ],
+            },
+            span: Span::default(),
+        };
+        let array = Expression {
+            kind: ExpressionKind::Array {
+                elements: vec![
+                    ListElement::Item(require_call("./array-item")),
+                    ListElement::Spread(require_call("./array-spread")),
+                ],
+            },
+            span: Span::default(),
+        };
+        let body = vec![
+            Statement {
+                kind: StatementKind::If {
+                    test: require_call("./if-test"),
+                    consequent: Box::new(Statement {
+                        kind: StatementKind::Block(vec![
+                            expression_statement(object),
+                            expression_statement(array),
+                        ]),
+                        span: Span::default(),
+                    }),
+                    alternate: Some(Box::new(literal_statement("./if-alternate"))),
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::While {
+                    test: require_call("./while-test"),
+                    body: Box::new(literal_statement("./while-body")),
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::DoWhile {
+                    body: Box::new(literal_statement("./do-body")),
+                    test: require_call("./do-test"),
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::Switch {
+                    discriminant: require_call("./switch-discriminant"),
+                    cases: vec![SwitchCase {
+                        test: Some(require_call("./switch-test")),
+                        body: vec![literal_statement("./switch-body")],
+                    }],
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::For {
+                    init: Some(Box::new(expression_statement(require_call("./for-init")))),
+                    test: Some(require_call("./for-test")),
+                    update: Some(require_call("./for-update")),
+                    body: Box::new(literal_statement("./for-body")),
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::ForIn {
+                    kind: VariableKind::Const,
+                    name: "item".into(),
+                    object: require_call("./for-in-object"),
+                    body: Box::new(literal_statement("./for-in-body")),
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::ForOf {
+                    kind: VariableKind::Const,
+                    pattern: Pattern::Identifier("item".into()),
+                    iterable: require_call("./for-of-iterable"),
+                    body: Box::new(literal_statement("./for-of-body")),
+                    awaiting: false,
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::Try {
+                    block: vec![literal_statement("./try-body")],
+                    handler: Some(CatchClause {
+                        binding: None,
+                        body: vec![literal_statement("./catch-body")],
+                    }),
+                    finalizer: vec![literal_statement("./finally-body")],
+                },
+                span: Span::default(),
+            },
+            Statement {
+                kind: StatementKind::Function(Box::new(empty_function(vec![literal_statement(
+                    "./function-body",
+                )]))),
+                span: Span::default(),
+            },
+            expression_statement(Expression {
+                kind: ExpressionKind::Sequence {
+                    operands: vec![
+                        Expression {
+                            kind: ExpressionKind::Conditional {
+                                test: Box::new(require_call("./conditional-test")),
+                                consequent: Box::new(require_call("./conditional-yes")),
+                                alternate: Box::new(require_call("./conditional-no")),
+                            },
+                            span: Span::default(),
+                        },
+                        Expression {
+                            kind: ExpressionKind::Await(Box::new(require_call("./await"))),
+                            span: Span::default(),
+                        },
+                        Expression {
+                            kind: ExpressionKind::Delete {
+                                object: Box::new(require_call("./delete-object")),
+                                property: Box::new(ObjectKey::Computed(require_call(
+                                    "./delete-key",
+                                ))),
+                            },
+                            span: Span::default(),
+                        },
+                    ],
+                },
+                span: Span::default(),
+            }),
+        ];
+
+        assert_eq!(
+            commonjs_literal_requires(&empty_module(body)),
+            [
+                "./if-test",
+                "./object-key",
+                "./object-value",
+                "./object-spread",
+                "./accessor",
+                "./array-item",
+                "./array-spread",
+                "./if-alternate",
+                "./while-test",
+                "./while-body",
+                "./do-body",
+                "./do-test",
+                "./switch-discriminant",
+                "./switch-test",
+                "./switch-body",
+                "./for-init",
+                "./for-test",
+                "./for-update",
+                "./for-body",
+                "./for-in-object",
+                "./for-in-body",
+                "./for-of-iterable",
+                "./for-of-body",
+                "./try-body",
+                "./catch-body",
+                "./finally-body",
+                "./function-body",
+                "./conditional-test",
+                "./conditional-yes",
+                "./conditional-no",
+                "./await",
+                "./delete-object",
+                "./delete-key",
+            ]
+        );
+    }
+
+    #[test]
+    fn commonjs_scanner_respects_require_shadowing_and_deduplicates() {
+        let shadowed_block = Statement {
+            kind: StatementKind::Block(vec![
+                literal_statement("./ignored-block-before"),
+                Statement {
+                    kind: StatementKind::Variable {
+                        kind: VariableKind::Let,
+                        declarations: vec![VariableDeclarator {
+                            pattern: Pattern::Identifier("require".into()),
+                            initializer: None,
+                            span: Span::default(),
+                        }],
+                    },
+                    span: Span::default(),
+                },
+                literal_statement("./ignored-block-after"),
+            ]),
+            span: Span::default(),
+        };
+        let parameter_shadowed = Statement {
+            kind: StatementKind::Function(Box::new(Function {
+                parameters: vec![Parameter {
+                    pattern: Pattern::Identifier("require".into()),
+                    span: Span::default(),
+                }],
+                ..empty_function(vec![literal_statement("./ignored-parameter")])
+            })),
+            span: Span::default(),
+        };
+        let var_shadowed = Statement {
+            kind: StatementKind::Function(Box::new(empty_function(vec![
+                literal_statement("./ignored-var-before"),
+                Statement {
+                    kind: StatementKind::Block(vec![Statement {
+                        kind: StatementKind::Variable {
+                            kind: VariableKind::Var,
+                            declarations: vec![VariableDeclarator {
+                                pattern: Pattern::Identifier("require".into()),
+                                initializer: None,
+                                span: Span::default(),
+                            }],
+                        },
+                        span: Span::default(),
+                    }]),
+                    span: Span::default(),
+                },
+                literal_statement("./ignored-var-after"),
+            ]))),
+            span: Span::default(),
+        };
+        let rest_shadowed = Statement {
+            kind: StatementKind::Function(Box::new(Function {
+                rest: Some(Pattern::Identifier("require".into())),
+                ..empty_function(vec![literal_statement("./ignored-rest")])
+            })),
+            span: Span::default(),
+        };
+        let loop_shadowed = Statement {
+            kind: StatementKind::For {
+                init: Some(Box::new(Statement {
+                    kind: StatementKind::Variable {
+                        kind: VariableKind::Let,
+                        declarations: vec![VariableDeclarator {
+                            pattern: Pattern::Identifier("require".into()),
+                            initializer: None,
+                            span: Span::default(),
+                        }],
+                    },
+                    span: Span::default(),
+                })),
+                test: Some(require_call("./ignored-loop-test")),
+                update: Some(require_call("./ignored-loop-update")),
+                body: Box::new(literal_statement("./ignored-loop-body")),
+            },
+            span: Span::default(),
+        };
+        let class_expression = Expression {
+            kind: ExpressionKind::Class(Box::new(Class {
+                name: Some("require".into()),
+                superclass: Some(require_call("./ignored-superclass")),
+                constructor: Some(empty_function(vec![literal_statement(
+                    "./ignored-constructor",
+                )])),
+                methods: vec![ClassMethod {
+                    key: ObjectKey::Static("method".into()),
+                    function: empty_function(vec![literal_statement("./ignored-method")]),
+                    is_static: false,
+                    kind: MethodKind::Normal,
+                }],
+                fields: Vec::new(),
+                span: Span::default(),
+            })),
+            span: Span::default(),
+        };
+        let module = empty_module(vec![
+            literal_statement("./first"),
+            literal_statement("./first"),
+            shadowed_block,
+            parameter_shadowed,
+            var_shadowed,
+            rest_shadowed,
+            loop_shadowed,
+            expression_statement(class_expression),
+            Statement {
+                kind: StatementKind::Try {
+                    block: Vec::new(),
+                    handler: Some(CatchClause {
+                        binding: Some("require".into()),
+                        body: vec![literal_statement("./ignored-catch")],
+                    }),
+                    finalizer: Vec::new(),
+                },
+                span: Span::default(),
+            },
+            literal_statement("./last"),
+        ]);
+
+        assert_eq!(commonjs_literal_requires(&module), ["./first", "./last"]);
     }
 }
