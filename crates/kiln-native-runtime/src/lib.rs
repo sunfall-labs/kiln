@@ -582,7 +582,34 @@ void kiln_cli_report_failure(int status, kiln_value value) {
         fputc('\n', stderr);
         return;
     }
-    fprintf(stderr, "the program stopped with status %d\n", status);
+    /* Say what the status *means*, not just what it is. `-2` is by far the most common one a
+     * program hits and it is the one that says least: it is the backend reaching something it
+     * does not implement yet, which is a backlog entry, but a bare number reads as a crash and
+     * sends whoever sees it looking for a memory fault instead of a missing builtin. Naming it is
+     * what makes the difference between a refusal you can see and an exit code with no words. */
+    switch (status) {
+    case KILN_C99_CONTROL_ERROR:
+        fputs("the native backend reached something it does not implement yet\n", stderr);
+        return;
+    case KILN_C99_OUT_OF_MEMORY:
+        fputs("out of memory\n", stderr);
+        return;
+    case KILN_C99_CALL_DEPTH_ERROR:
+        fputs("call depth exceeded\n", stderr);
+        return;
+    case KILN_C99_UNINITIALIZED_ERROR:
+        fputs("a binding was read before it was initialised\n", stderr);
+        return;
+    case KILN_C99_HOST_ERROR:
+        fputs("the host refused an operation\n", stderr);
+        return;
+    case KILN_C99_INVALID_ARGUMENT:
+        fputs("an argument was not valid\n", stderr);
+        return;
+    default:
+        fprintf(stderr, "the program stopped with status %d\n", status);
+        return;
+    }
 }
 
 static int kiln_cli_write_value(kiln_value value) {
@@ -1227,6 +1254,65 @@ int main(void) {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn c_failure_reporter_explains_known_statuses_and_preserves_fallback() {
+        let Some(cc) = find_cc() else {
+            return;
+        };
+        let root = test_directory();
+        std::fs::create_dir(&root).expect("create test directory");
+        let runtime = root.join("runtime.c");
+        let harness = root.join("harness.c");
+        let header = root.join("kiln_host.h");
+        let number_provider = root.join("number-provider.c");
+        let executable = root.join("kiln-failure-reporter-test");
+        std::fs::write(&runtime, runtime_source()).expect("write runtime");
+        std::fs::write(&harness, FAILURE_REPORTER_SOURCE).expect("write failure reporter harness");
+        std::fs::write(&header, embedding_header()).expect("write header");
+        std::fs::write(&number_provider, kiln_native_number::runtime_source())
+            .expect("write test number provider");
+        let compile = Command::new(cc)
+            .args([
+                "-std=c11",
+                "-pedantic",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-Wno-unused-function",
+            ])
+            .args([
+                runtime.as_os_str(),
+                harness.as_os_str(),
+                number_provider.as_os_str(),
+            ])
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .expect("invoke C compiler");
+        assert!(
+            compile.status.success(),
+            "C failure reporter failed to compile/link:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let run = Command::new(&executable)
+            .output()
+            .expect("run failure reporter harness");
+        assert!(run.status.success());
+        assert!(run.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(run.stderr).expect("UTF-8 stderr"),
+            "the native backend reached something it does not implement yet\n".to_owned()
+                + "out of memory\n"
+                + "call depth exceeded\n"
+                + "a binding was read before it was initialised\n"
+                + "the host refused an operation\n"
+                + "an argument was not valid\n"
+                + "the program stopped with status -99\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn find_cc() -> Option<&'static str> {
         find_compiler("cc")
     }
@@ -1359,6 +1445,24 @@ int main(int argc, char **argv) {
     value.ptr = text;
     value.len = sizeof(text);
     return kiln_cli_write_result_file(argv[5], value) == KILN_C99_OK ? 0 : 1;
+}
+"#;
+
+    const FAILURE_REPORTER_SOURCE: &str = r#"
+#include "kiln_host.h"
+
+extern void kiln_cli_report_failure(int status, kiln_value value);
+
+int main(void) {
+    kiln_value value = { KILN_VALUE_UNDEFINED, 0, 0, 0, 0 };
+    kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
+    kiln_cli_report_failure(KILN_C99_OUT_OF_MEMORY, value);
+    kiln_cli_report_failure(KILN_C99_CALL_DEPTH_ERROR, value);
+    kiln_cli_report_failure(KILN_C99_UNINITIALIZED_ERROR, value);
+    kiln_cli_report_failure(KILN_C99_HOST_ERROR, value);
+    kiln_cli_report_failure(KILN_C99_INVALID_ARGUMENT, value);
+    kiln_cli_report_failure(-99, value);
+    return 0;
 }
 "#;
 }
