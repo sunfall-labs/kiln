@@ -747,6 +747,11 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_SOCKET_WRITE 272
 #define KILN_C99_METHOD_NODE_SOCKET_END 273
 #define KILN_C99_METHOD_NODE_SOCKET_DESTROY 274
+#define KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER 275
+#define KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER 276
+#define KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD 277
+#define KILN_C99_METHOD_NODE_RESPONSE_WRITE 278
+#define KILN_C99_METHOD_NODE_RESPONSE_END 279
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1139,6 +1144,7 @@ typedef struct kiln_node_server {
     char *address;
     size_t address_len;
     uint32_t port;
+    int protocol_http;
     int closing;
 } kiln_node_server;
 
@@ -1150,8 +1156,23 @@ typedef struct kiln_node_socket {
     uint64_t write_request;
     uint64_t shutdown_request;
     uint64_t close_request;
+    kiln_node_server *server;
+    void *http_decoder;
+    int close_after_write;
+    int http_dispatched;
     int closing;
 } kiln_node_socket;
+
+typedef struct kiln_node_response {
+    kiln_node_socket *socket;
+    kiln_value object;
+    kiln_value headers;
+    char *body;
+    size_t body_len;
+    size_t body_capacity;
+    uint16_t status;
+    int ended;
+} kiln_node_response;
 
 typedef struct kiln_node_completion {
     uint32_t kind;
@@ -1261,6 +1282,26 @@ int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
                                     void *work, uint64_t *out_request);
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int kiln_realm_cancel_active_request(uint64_t request);
+typedef struct kiln_http1_request_view {
+    uint8_t *method;
+    size_t method_capacity;
+    size_t method_len;
+    uint8_t *target;
+    size_t target_capacity;
+    size_t target_len;
+    uint8_t version_minor;
+    uint8_t keep_alive;
+} kiln_http1_request_view;
+int32_t kiln_http1_decoder_create(void **out_decoder);
+void kiln_http1_decoder_free(void *decoder);
+int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
+                                kiln_http1_request_view *out_request);
+int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
+                                   const size_t *header_name_lens,
+                                   const uint8_t *const *header_values,
+                                   const size_t *header_value_lens, size_t header_count,
+                                   const uint8_t *body, size_t body_len, uint8_t keep_alive,
+                                   uint8_t *buffer, size_t capacity);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
@@ -1534,6 +1575,9 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                              kiln_value receiver, const kiln_value *args, size_t argc,
                              int depth, kiln_value *thrown);
+static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *thrown);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -7832,6 +7876,79 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
     return status;
 }
 
+static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *bytes,
+                                      size_t bytes_len, kiln_value *thrown) {
+    kiln_http1_request_view parsed;
+    uint8_t method[64];
+    uint8_t target[8192];
+    kiln_node_response *response;
+    kiln_value request;
+    kiln_value ignored;
+    int status;
+    if (socket->http_dispatched) return KILN_C99_OK;
+    if (socket->http_decoder == NULL) {
+        status = kiln_http1_decoder_create(&socket->http_decoder);
+        if (status != KILN_C99_OK) return status;
+    }
+    memset(&parsed, 0, sizeof parsed);
+    parsed.method = method;
+    parsed.method_capacity = sizeof method;
+    parsed.target = target;
+    parsed.target_capacity = sizeof target;
+    status = kiln_http1_decoder_push(socket->http_decoder, bytes, bytes_len, &parsed);
+    if (status == 1) return KILN_C99_OK;
+    if (status != KILN_C99_OK) return KILN_C99_CONTROL_ERROR;
+    socket->http_dispatched = 1;
+    response = (kiln_node_response *)calloc(1, sizeof *response);
+    if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
+    response->socket = socket;
+    response->status = 200;
+    status = kiln_c99_new_object(&request);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                     request, NULL, 0, 0, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, request, "method", 6,
+                              kiln_c99_copy_text((const char *)parsed.method,
+                                                 parsed.method_len), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, request, "url", 3,
+                              kiln_c99_copy_text((const char *)parsed.target,
+                                                 parsed.target_len), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, request, "httpVersion", 11,
+                              parsed.version_minor ? kiln_c99_copy_text("1.1", 3)
+                                                   : kiln_c99_copy_text("1.0", 3), 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                     response->object, NULL, 0, 0, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            response->object, "setHeader", 9,
+            kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            response->object, "writeHead", 9,
+            kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(response->object, "write", 5,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(response->object, "end", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_END));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
+                                                  response);
+    if (status != KILN_C99_OK) return status;
+    {
+        kiln_value arguments[2] = {request, response->object};
+        return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
+                             socket->server->object, arguments, 2, 0, thrown);
+    }
+}
+
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
                                   void *host, void *thrown) {
     kiln_node_completion *work = (kiln_node_completion *)opaque;
@@ -7880,10 +7997,13 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = server->host;
             socket->resource = completion->resource;
+            socket->server = server;
             status = kiln_c99_node_socket_object(socket, exception);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_call(server->host, &ignored, server->connection_listener,
-                                   server->object, &socket->object, 1, 0, exception);
+            status = server->protocol_http
+                         ? KILN_C99_OK
+                         : kiln_c99_call(server->host, &ignored, server->connection_listener,
+                                         server->object, &socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
             read = (kiln_node_completion *)calloc(1, sizeof *read);
             if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -7916,8 +8036,14 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 kiln_node_completion *read;
                 kiln_value data = kiln_c99_copy_text((const char *)completion->bytes,
                                                      (size_t)completion->bytes_len);
-                int status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
+                int status;
+                if (socket->server != NULL && socket->server->protocol_http) {
+                    status = kiln_c99_node_http_request(socket, completion->bytes,
+                                                        (size_t)completion->bytes_len, exception);
+                } else {
+                    status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
                                                 exception);
+                }
                 if (status != KILN_C99_OK || socket->closing) return status;
                 read = (kiln_node_completion *)calloc(1, sizeof *read);
                 if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -7928,7 +8054,17 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             }
         }
         if (work->kind == KILN_REALM_OP_TCP_WRITE) {
+            kiln_node_completion *close;
             socket->write_request = 0;
+            if (socket->close_after_write) {
+                close = (kiln_node_completion *)calloc(1, sizeof *close);
+                if (close == NULL) return KILN_C99_OUT_OF_MEMORY;
+                close->kind = KILN_REALM_OP_CLOSE_RESOURCE;
+                close->socket = socket;
+                return kiln_c99_node_start(KILN_REALM_OP_CLOSE_RESOURCE, socket->resource, 0,
+                                           NULL, 0, NULL, 0, close,
+                                           &socket->close_request);
+            }
             return kiln_c99_node_emit(socket->host, socket->object, "drain",
                                       kiln_c99_undefined(), 0, 0, exception);
         }
@@ -7939,6 +8075,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
             socket->close_request = 0;
+            kiln_http1_decoder_free(socket->http_decoder);
+            socket->http_decoder = NULL;
             return kiln_c99_node_emit(socket->host, socket->object, "close",
                                       kiln_c99_undefined(), 0, 0, exception);
         }
@@ -7978,6 +8116,17 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (status != KILN_C99_OK) { free(server); return status; }
         *result = server->object;
         return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER) {
+        int status = kiln_c99_node_net(host, result, KILN_C99_METHOD_NODE_NET_CREATE_SERVER,
+                                       receiver, args, argc, depth, thrown);
+        if (status == KILN_C99_OK) {
+            kiln_node_server *server = (kiln_node_server *)kiln_c99_node_hidden_pointer(
+                *result, "@@node:server", 13);
+            if (server == NULL) return KILN_C99_CONTROL_ERROR;
+            server->protocol_http = 1;
+        }
+        return status;
     }
     if (code >= KILN_C99_METHOD_NODE_SERVER_LISTEN &&
         code <= KILN_C99_METHOD_NODE_SERVER_ADDRESS) {
@@ -8093,6 +8242,130 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
     }
 }
 
+static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *thrown) {
+    kiln_node_response *response = (kiln_node_response *)kiln_c99_node_hidden_pointer(
+        receiver, "@@node:response", 15);
+    (void)depth;
+    if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)
+        return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+    if (response == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ServerResponse");
+    if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
+        kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_value value = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
+        int status = kiln_c99_put(NULL, response->headers, name.ptr, name.len, value, 0, NULL);
+        *result = receiver;
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD) {
+        double status = kiln_c99_as_number(argc > 0 ? args[0] : kiln_c99_undefined());
+        if (!(status >= 100.0 && status <= 999.0 && floor(status) == status))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Invalid status code");
+        response->status = (uint16_t)status;
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
+        kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+        if (kiln_c99_reserve((void **)&response->body, &response->body_capacity,
+                             response->body_len + text.len, 1) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+        memcpy(response->body + response->body_len, text.ptr, text.len);
+        response->body_len += text.len;
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
+        kiln_node_completion *write;
+        kiln_object *headers;
+        const uint8_t **names;
+        const uint8_t **values;
+        size_t *name_lens;
+        size_t *value_lens;
+        uint8_t *encoded;
+        int64_t encoded_len;
+        size_t index;
+        int status;
+        if (response->ended) { *result = receiver; return KILN_C99_OK; }
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+            kiln_value text = kiln_c99_text(args[0]);
+            if (kiln_c99_reserve((void **)&response->body, &response->body_capacity,
+                                 response->body_len + text.len, 1) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            memcpy(response->body + response->body_len, text.ptr, text.len);
+            response->body_len += text.len;
+        }
+        headers = kiln_c99_object_of(response->headers);
+        names = (const uint8_t **)calloc(headers->count, sizeof *names);
+        name_lens = (size_t *)calloc(headers->count, sizeof *name_lens);
+        values = (const uint8_t **)calloc(headers->count, sizeof *values);
+        value_lens = (size_t *)calloc(headers->count, sizeof *value_lens);
+        if (headers->count != 0 &&
+            (names == NULL || name_lens == NULL || values == NULL || value_lens == NULL)) {
+            free(names);
+            free(name_lens);
+            free(values);
+            free(value_lens);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < headers->count; ++index) {
+            kiln_value value = kiln_c99_text(headers->properties[index].value);
+            names[index] = (const uint8_t *)headers->properties[index].key;
+            name_lens[index] = headers->properties[index].key_len;
+            values[index] = (const uint8_t *)value.ptr;
+            value_lens[index] = value.len;
+        }
+        encoded_len = kiln_http1_response_encode(
+            response->status, names, name_lens, values, value_lens, headers->count,
+            (const uint8_t *)response->body, response->body_len, 0, NULL, 0);
+        if (encoded_len < 0) {
+            free(names);
+            free(name_lens);
+            free(values);
+            free(value_lens);
+            return KILN_C99_CONTROL_ERROR;
+        }
+        encoded = (uint8_t *)malloc((size_t)encoded_len);
+        if (encoded == NULL) {
+            free(names);
+            free(name_lens);
+            free(values);
+            free(value_lens);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        encoded_len = kiln_http1_response_encode(
+            response->status, names, name_lens, values, value_lens, headers->count,
+            (const uint8_t *)response->body, response->body_len, 0, encoded,
+            (size_t)encoded_len);
+        free(names);
+        free(name_lens);
+        free(values);
+        free(value_lens);
+        if (encoded_len < 0) { free(encoded); return KILN_C99_CONTROL_ERROR; }
+        write = (kiln_node_completion *)calloc(1, sizeof *write);
+        if (write == NULL) { free(encoded); return KILN_C99_OUT_OF_MEMORY; }
+        write->kind = KILN_REALM_OP_TCP_WRITE;
+        write->socket = response->socket;
+        response->socket->closing = 1;
+        response->socket->close_after_write = 1;
+        status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, response->socket->resource, 0,
+                                     NULL, 0, encoded, (size_t)encoded_len, write,
+                                     &response->socket->write_request);
+        free(encoded);
+        if (status != KILN_C99_OK) return status;
+        free(response->body);
+        response->body = NULL;
+        response->body_len = 0;
+        response->body_capacity = 0;
+        response->ended = 1;
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
 
 
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
@@ -8108,6 +8381,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     if (code >= KILN_C99_METHOD_NODE_NET_CREATE_SERVER &&
         code <= KILN_C99_METHOD_NODE_SOCKET_DESTROY) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    if (code >= KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER &&
+        code <= KILN_C99_METHOD_NODE_RESPONSE_END) {
+        return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
      * `length` and writes an element through the handler's traps, which is how a copy-on-write

@@ -61,7 +61,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 6);
+    assert!(PROVIDER_ABI_VERSION == 7);
 };
 
 /// Native optimization and checking policy.
@@ -1641,6 +1641,19 @@ exports[1] = constructor;"#,
 exports[0] = kiln_c99_undefined();
 exports[1] = kiln_c99_undefined();
 exports[2] = create_server;"#,
+        ),
+        NodeBuiltin::Http => Some(
+            r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = kiln_c99_undefined();
+exports[1] = create_server;
+exports[2] = namespace;
+exports[3] = kiln_c99_undefined();
+exports[4] = kiln_c99_undefined();"#,
         ),
         _ => None,
     }
@@ -3483,7 +3496,7 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-2"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-6"
+            "kiln-native-number-provider-7"
         );
     }
 
@@ -3494,7 +3507,7 @@ mod tests {
         let project = TestDirectory::new("native-node-builtin-gate");
         let entry = project.path.join("main.mjs");
         fs::write(&entry, "export const marker = 1;\n").expect("write entry");
-        let builtin_path = NodeBuiltin::Http.virtual_path(&project.path);
+        let builtin_path = NodeBuiltin::Https.virtual_path(&project.path);
         let entry_program = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
@@ -3508,7 +3521,7 @@ mod tests {
                 local_count: 1,
                 functions: Vec::new(),
             },
-            dependencies: vec!["node:http".to_owned()],
+            dependencies: vec!["node:https".to_owned()],
             imports: Vec::new(),
             exports: vec![ExportBinding {
                 exported: "marker".to_owned(),
@@ -3522,7 +3535,7 @@ mod tests {
                 &project.path,
                 [(
                     entry.clone(),
-                    "node:http".to_owned(),
+                    "node:https".to_owned(),
                     NodeRequestKind::Import,
                     builtin_path,
                 )],
@@ -3543,7 +3556,7 @@ mod tests {
             validate_native_node_builtins(&graph)
                 .expect_err("unmaterialized builtin must fail")
                 .to_string(),
-            "native Node execution does not yet materialize the `node:http` builtin"
+            "native Node execution does not yet materialize the `node:https` builtin"
         );
     }
 
@@ -3589,7 +3602,7 @@ mod tests {
         );
         assert!(emitted.source.contains("exports[0] = constructor;"));
         assert!(emitted.source.contains("exports[1] = constructor;"));
-        assert!(native_builtin_body(NodeBuiltin::Http).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Https).is_none());
     }
 
     #[test]
@@ -3599,7 +3612,7 @@ mod tests {
         let body = native_builtin_body(NodeBuiltin::Net).expect("net materializes");
         assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
         assert!(body.contains("exports[2] = create_server;"));
-        assert!(native_builtin_body(NodeBuiltin::Http).is_none());
+        assert!(native_builtin_body(NodeBuiltin::Https).is_none());
     }
 
     #[test]
@@ -3693,6 +3706,109 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
         assert_eq!(rest, "native loopback\n");
+    }
+
+    #[test]
+    fn native_node_http_source_graph_serves_one_live_tokio_request() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpStream;
+        use std::process::{Command, Stdio};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:http integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-http-source");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:http";
+const server = createServer((request, response) => {
+  console.log(request.method, request.url, request.httpVersion);
+  response.setHeader("Content-Type", "text/plain");
+  response.writeHead(201);
+  response.end("hello");
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+"#,
+        )
+        .expect("write node:http fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        assert!(graph.modules().any(|node| matches!(
+            node.source,
+            ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Http)
+        )));
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native node:http graph builds");
+
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start native node:http server");
+        let stdout = child.stdout.take().expect("capture server stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut listening = String::new();
+        stdout
+            .read_line(&mut listening)
+            .expect("read ephemeral listening port");
+        let port: u16 = listening
+            .trim()
+            .parse()
+            .expect("server prints numeric port");
+        assert_ne!(port, 0);
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect HTTP client");
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write HTTP request");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("server closes complete HTTP response");
+        assert!(
+            response.starts_with("HTTP/1.1 201 Created\r\n"),
+            "{response:?}"
+        );
+        assert!(
+            response.contains("Content-Type: text/plain\r\n"),
+            "{response:?}"
+        );
+        assert!(response.contains("Content-Length: 5\r\n"), "{response:?}");
+        assert!(response.contains("Connection: close\r\n"), "{response:?}");
+        assert!(response.ends_with("\r\n\r\nhello"), "{response:?}");
+
+        let status = child
+            .wait()
+            .expect("server exits after listener and socket close");
+        let mut rest = String::new();
+        stdout
+            .read_to_string(&mut rest)
+            .expect("read request callback output");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert!(status.success(), "server failed: {stderr}");
+        assert_eq!(rest, "GET /health 1.1\n");
     }
 
     #[test]
