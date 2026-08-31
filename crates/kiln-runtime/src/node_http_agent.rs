@@ -131,7 +131,11 @@ impl HttpAgent {
         let pool = self.origins.get_mut(&origin)?;
         pool.idle.retain(|candidate| *candidate != resource);
         pool.busy.remove(&resource);
-        pool.waiting.pop_front()
+        let request = pool.waiting.pop_front();
+        if request.is_some() {
+            pool.connecting += 1;
+        }
+        request
     }
 }
 
@@ -198,6 +202,18 @@ mod tests {
             AgentFailure::Connect { request: 2 }
         );
         assert_eq!(agent.acquire(origin, 4), AgentDecision::Queued);
+    }
+
+    #[test]
+    fn a_closed_connection_promotes_the_oldest_waiter_to_retry() {
+        let mut agent = HttpAgent::new(1);
+        let origin = HttpOrigin::http("example.com", 80);
+        let resource = ResourceId::new(12);
+        assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
+        assert!(agent.connected(origin.clone(), resource, 1));
+        assert_eq!(agent.acquire(origin.clone(), 2), AgentDecision::Queued);
+        assert_eq!(agent.closed(resource), Some(2));
+        assert_eq!(agent.acquire(origin, 3), AgentDecision::Queued);
     }
 
     #[test]
