@@ -1655,7 +1655,7 @@ fn native_builtin_supports_export(
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
         NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
-        NodeBuiltin::Net => export_name == "createServer",
+        NodeBuiltin::Net => matches!(export_name, "connect" | "createConnection" | "createServer"),
         NodeBuiltin::Http => {
             matches!(export_name, "createServer" | "default" | "get" | "request")
         }
@@ -1691,9 +1691,10 @@ exports[0] = constructor;
 exports[1] = constructor;"#,
         ),
         NodeBuiltin::Net => Some(
-            r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER);
-exports[0] = kiln_c99_undefined();
-exports[1] = kiln_c99_undefined();
+            r#"kiln_value connect = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT);
+kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER);
+exports[0] = connect;
+exports[1] = connect;
 exports[2] = create_server;"#,
         ),
         NodeBuiltin::Http => Some(
@@ -3671,6 +3672,8 @@ mod tests {
 
         let body = native_builtin_body(NodeBuiltin::Net).expect("net materializes");
         assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
+        assert!(body.contains("exports[0] = connect;"));
+        assert!(body.contains("exports[1] = connect;"));
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_none());
     }
@@ -3766,6 +3769,146 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
         assert_eq!(rest, "native loopback\n");
+    }
+
+    #[test]
+    fn native_node_net_client_sends_final_bytes_and_reads_after_half_close() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:net client integration: no C compiler found");
+            return;
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback server");
+        let port = listener.local_addr().expect("read loopback address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept native client");
+            let mut request = String::new();
+            stream
+                .read_to_string(&mut request)
+                .expect("read through client EOF");
+            assert_eq!(request, "final bytes");
+            stream
+                .write_all(b"reply")
+                .expect("write reply after half-close");
+        });
+        let project = TestDirectory::new("kiln-native-node-net-client");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            format!(
+                r#"import {{ connect }} from "node:net";
+const socket = connect({port}, "127.0.0.1", () => socket.end("final bytes"));
+let reply = "";
+socket.setEncoding("utf8");
+socket.on("data", chunk => reply += chunk);
+socket.on("end", () => console.log(reply));
+"#
+            ),
+        )
+        .expect("write node:net client fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("client"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native node:net client builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native node:net client");
+        server.join().expect("loopback server completes");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"reply\n");
+    }
+
+    #[test]
+    fn native_node_http_server_responds_after_node_net_client_half_close() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native HTTP half-close integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-http-half-close");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            include_str!(
+                "../../../conformance/node/upstream-adapted/http-server-allow-half-open.mjs"
+            ),
+        )
+        .expect("write HTTP half-close fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native HTTP half-close fixture builds");
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run native HTTP half-close fixture");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll native fixture") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stuck native fixture");
+                break child.wait().expect("reap stuck native fixture");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("capture stdout")
+            .read_to_string(&mut stdout)
+            .expect("read stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert!(
+            status.success(),
+            "status={status} stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert_eq!(stdout, "pass\n");
     }
 
     #[test]

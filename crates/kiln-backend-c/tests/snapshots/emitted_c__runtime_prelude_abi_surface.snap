@@ -360,6 +360,7 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
+#define KILN_C99_METHOD_NODE_NET_CONNECT 336
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -470,6 +471,7 @@ typedef struct kiln_realm_http_request {
 typedef struct kiln_realm_http_response {
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+int kiln_realm_http_server_attach_with_options_active(
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);
 #define KILN_REALM_HTTP_AGENT_CONNECT 1

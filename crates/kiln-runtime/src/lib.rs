@@ -119,7 +119,11 @@ pub trait ActiveHttpRuntime {
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
     fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure;
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64>;
-    fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction>;
+    fn start_connection(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+    ) -> Vec<node_stream::StreamAction>;
     fn connection_started(
         &mut self,
         resource: ResourceId,
@@ -726,11 +730,20 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
     ) -> Vec<node_stream::StreamAction> {
+        self.start_http1_connection_with_options(resource, false)
+    }
+
+    pub fn start_http1_connection_with_options(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+    ) -> Vec<node_stream::StreamAction> {
         let (io, mut transport) = HttpTransportDriver::new(resource);
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let (response_sender, response_receiver) = mpsc::unbounded_channel();
         let task = self.local.spawn_local(hyper_http::event_connection(
             io,
+            allow_half_close,
             event_sender,
             response_receiver,
         ));
@@ -952,9 +965,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         connection.response_bodies.insert(id, body);
         connection.body_events.insert(id, body_event_receiver);
-        if connection.close_after_response.remove(&id) {
-            connection.transport.close_requested();
-        }
         true
     }
 
@@ -989,9 +999,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         connection.response_bodies.insert(id, body);
         connection.body_events.insert(id, body_event_receiver);
-        if connection.close_after_response.remove(&id) {
-            connection.transport.close_requested();
-        }
         true
     }
 
@@ -1276,8 +1283,12 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.http_agent.closed(resource)
     }
 
-    fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction> {
-        self.start_http1_connection(resource)
+    fn start_connection(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+    ) -> Vec<node_stream::StreamAction> {
+        self.start_http1_connection_with_options(resource, allow_half_close)
     }
 
     fn connection_started(
@@ -3437,9 +3448,26 @@ mod tests {
         let write_completion = runtime
             .next_host_completion()
             .expect("response write completes");
-        let write_actions = runtime
+        let mut write_actions = runtime
             .complete_http_connection(resource, write_completion)
             .expect("response write belongs to HTTP connection");
+        for _ in 0..8 {
+            if runtime
+                .take_http_events(resource)
+                .contains(&RuntimeHttpEvent::Closed)
+            {
+                write_actions.extend(runtime.close_http_connection(resource).unwrap_or_default());
+            }
+            write_actions.extend(runtime.poll_http_connection(resource).unwrap_or_default());
+            if write_actions.iter().any(|action| {
+                matches!(
+                    action,
+                    StreamAction::Start(AsyncHostOp::CloseResource { .. })
+                )
+            }) {
+                break;
+            }
+        }
         assert!(write_actions.iter().any(|action| matches!(
             action,
             StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
@@ -4400,7 +4428,7 @@ mod tests {
             },
             RequestId::new(2),
         ));
-        let after_write = runtime
+        let mut after_write = runtime
             .complete_http_connection(
                 resource,
                 Completion {
@@ -4410,6 +4438,23 @@ mod tests {
                 },
             )
             .expect("write completion belongs to connection");
+        for _ in 0..8 {
+            if runtime
+                .take_http_events(resource)
+                .contains(&RuntimeHttpEvent::Closed)
+            {
+                after_write.extend(runtime.close_http_connection(resource).unwrap_or_default());
+            }
+            after_write.extend(runtime.poll_http_connection(resource).unwrap_or_default());
+            if after_write.iter().any(|action| {
+                matches!(
+                    action,
+                    StreamAction::Start(AsyncHostOp::CloseResource { .. })
+                )
+            }) {
+                break;
+            }
+        }
         assert!(after_write.iter().any(|action| matches!(
             action,
             StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })

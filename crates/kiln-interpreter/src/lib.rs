@@ -1819,6 +1819,7 @@ enum ServerProtocol {
 struct NodeConnection {
     driver: StreamDriver,
     runtime_http: bool,
+    socket: Option<Rc<RefCell<NetSocketState>>>,
     request: Option<Value>,
     response: Option<Value>,
     client_requests: std::collections::BTreeMap<u64, Value>,
@@ -7647,6 +7648,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
+                    socket: None,
                     request: None,
                     response: None,
                     client_requests: std::collections::BTreeMap::new(),
@@ -7660,8 +7662,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                         message: "node:http requires the realm HTTP runtime".into(),
                     })?;
+                    let allow_half_close = state
+                        .borrow()
+                        .object
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .and_then(|server| server.borrow().get("httpAllowHalfOpen"))
+                        .is_some_and(|value| value.is_truthy());
                     unsafe {
-                        ActiveHttpRuntime::start_connection(&mut *runtime, accepted.resource.id)
+                        ActiveHttpRuntime::start_connection(
+                            &mut *runtime,
+                            accepted.resource.id,
+                            allow_half_close,
+                        )
                     }
                 } else {
                     stream.driver.start_reading()
@@ -8868,13 +8881,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .streams
             .iter()
             .find(|stream| stream.resource() == resource)
-            .and_then(|stream| {
-                stream
-                    .client_requests
-                    .values()
-                    .find_map(|request| node_http_client_request(request).ok())
-                    .and_then(|request| request.borrow().socket.clone())
-            })
+            .and_then(|stream| stream.socket.clone())
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "HTTP Agent connection lost its JavaScript socket".into(),
@@ -9410,6 +9417,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let mut connection = NodeConnection {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                             runtime_http: protocol == ServerProtocol::HttpClient,
+                            socket: Some(Rc::clone(&socket_state)),
                             request: Some(request.clone()),
                             response: None,
                             client_requests: std::collections::BTreeMap::new(),
@@ -25742,6 +25750,7 @@ fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     data.set("timeout", Value::Number(0.0));
     data.set("keepAliveTimeout", Value::Number(5_000.0));
     data.set("requestTimeout", Value::Number(300_000.0));
+    data.set("httpAllowHalfOpen", Value::Boolean(false));
     data.set("on", Value::Native(Native::NodeEventOn));
     data.set("once", Value::Native(Native::NodeEventOnce));
     data.set("emit", Value::Native(Native::NodeEventEmit));

@@ -205,7 +205,11 @@ where
     })
 }
 
-async fn serve_http1_service<I, F, Fut>(io: I, service: F) -> Result<(), hyper::Error>
+async fn serve_http1_service<I, F, Fut>(
+    io: I,
+    allow_half_close: bool,
+    service: F,
+) -> Result<(), hyper::Error>
 where
     I: AsyncRead + AsyncWrite + Unpin,
     F: Fn(Request<Incoming>) -> Fut,
@@ -214,6 +218,7 @@ where
     let service = service_fn(service);
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.auto_date_header(false);
+    builder.half_close(allow_half_close);
     builder.serve_connection(TokioIo::new(io), service).await
 }
 
@@ -225,6 +230,7 @@ pub(crate) type ConnectionFuture =
 /// and sends a response command after the request listener settles.
 pub(crate) fn event_connection<I>(
     io: I,
+    allow_half_close: bool,
     events: tokio::sync::mpsc::UnboundedSender<EngineEvent>,
     responses: tokio::sync::mpsc::UnboundedReceiver<ResponseCommand>,
 ) -> ConnectionFuture
@@ -238,7 +244,7 @@ where
     let next_id = std::rc::Rc::new(std::cell::Cell::new(1_u64));
     Box::pin(async move {
         let service_events = events.clone();
-        let result = serve_http1_service(io, move |request| {
+        let result = serve_http1_service(io, allow_half_close, move |request| {
             let id = next_id.get();
             next_id.set(id.wrapping_add(1).max(1));
             let events = service_events.clone();
@@ -362,7 +368,7 @@ mod tests {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::client::conn::http1;
-    use tokio::io::duplex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     #[test]
     fn hyper_http1_runs_on_the_owned_current_thread_runtime_without_ambient_date() {
@@ -377,6 +383,7 @@ mod tests {
             let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
             let server = tokio::task::spawn_local(event_connection(
                 server_io,
+                false,
                 event_sender,
                 response_receiver,
             ));
@@ -446,8 +453,12 @@ mod tests {
             let (io, mut realm) = http_transport::channel();
             let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
             let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
-            let server =
-                tokio::task::spawn_local(event_connection(io, event_sender, response_receiver));
+            let server = tokio::task::spawn_local(event_connection(
+                io,
+                false,
+                event_sender,
+                response_receiver,
+            ));
 
             realm.feed_read(b"GET / HTTP/1.1\r\nhost: kiln\r\n\r\n".to_vec());
             tokio::task::yield_now().await;
@@ -518,6 +529,7 @@ mod tests {
             let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
             let server = tokio::task::spawn_local(event_connection(
                 server_io,
+                false,
                 server_event_sender,
                 response_receiver,
             ));
@@ -624,6 +636,7 @@ mod tests {
             let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
             let server = tokio::task::spawn_local(event_connection(
                 server_io,
+                false,
                 server_event_sender,
                 response_receiver,
             ));
@@ -698,6 +711,154 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Hyper's public HTTP/1 server service serializes request dispatch until response headers exist"]
+    fn server_connection_serializes_pipelined_responses_in_request_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (mut client_io, server_io) = duplex(8192);
+            let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                false,
+                event_sender,
+                response_receiver,
+            ));
+
+            client_io
+                .write_all(
+                    b"GET /first HTTP/1.1\r\nHost: kiln\r\n\r\nGET /second HTTP/1.1\r\nHost: kiln\r\n\r\n",
+                )
+                .await
+                .expect("pipelined requests write");
+
+            let ids = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                let mut ids = Vec::new();
+                while ids.len() < 2 {
+                    match events.recv().await.expect("server event arrives") {
+                    EngineEvent::RequestHead { id, request } => {
+                        ids.push((id, request.target));
+                    }
+                    EngineEvent::RequestEnd { .. } => {}
+                    event => panic!("unexpected server event: {event:?}"),
+                    }
+                }
+                ids
+            })
+            .await
+            .expect("both pipelined request heads arrive");
+            assert_eq!(ids[0].1, "/first");
+            assert_eq!(ids[1].1, "/second");
+
+            for (id, body) in [(ids[1].0, b"second".as_slice()), (ids[0].0, b"first".as_slice())]
+            {
+                let mut response_body = crate::http_body::ResponseBodyDriver::default();
+                response_body.end(body.to_vec());
+                let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+                response_sender
+                    .send(ResponseCommand {
+                        id,
+                        status: 200,
+                        headers: vec![("content-length".into(), body.len().to_string())],
+                        body: response_body.body(body_events),
+                    })
+                    .expect("response command sends");
+            }
+
+            let mut response = vec![0; 512];
+            let length = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client_io.read(&mut response),
+            )
+            .await
+            .expect("pipelined response bytes arrive")
+            .expect("response reads");
+            let response = String::from_utf8(response[..length].to_vec()).expect("HTTP is ASCII");
+            assert!(
+                response.find("first").is_some_and(|first| {
+                    response
+                        .find("second")
+                        .is_some_and(|second| first < second)
+                }),
+                "responses were not serialized in request order: {response:?}"
+            );
+
+            drop(response_sender);
+            drop(client_io);
+            server.abort();
+        });
+    }
+
+    #[test]
+    fn server_connection_allows_response_after_client_half_close_when_enabled() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                true,
+                event_sender,
+                response_receiver,
+            ));
+            client_io
+                .write_all(b"GET /half HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("request writes");
+            client_io.shutdown().await.expect("client half closes");
+
+            let id = loop {
+                match events.recv().await.expect("request event arrives") {
+                    EngineEvent::RequestHead { id, request } => {
+                        assert_eq!(request.target, "/half");
+                        break id;
+                    }
+                    event => panic!("unexpected event before request head: {event:?}"),
+                }
+            };
+            assert!(matches!(
+                events.recv().await,
+                Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+            ));
+            let mut body = crate::http_body::ResponseBodyDriver::default();
+            body.end(b"half-open".to_vec());
+            let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+            response_sender
+                .send(ResponseCommand {
+                    id,
+                    status: 200,
+                    headers: vec![("content-length".into(), "9".into())],
+                    body: body.body(body_events),
+                })
+                .expect("response sends");
+
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client_io.read_to_end(&mut response),
+            )
+            .await
+            .expect("response completes after half close")
+            .expect("response reads");
+            let response = String::from_utf8(response).expect("HTTP is ASCII");
+            assert!(response.ends_with("half-open"), "response was {response:?}");
+            server
+                .await
+                .expect("server task joins")
+                .expect("server connection succeeds");
+        });
+    }
+
+    #[test]
     fn client_connection_reuses_one_real_tcp_socket_for_sequential_requests() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -724,6 +885,7 @@ mod tests {
             let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
             let server = tokio::task::spawn_local(event_connection(
                 server_io,
+                false,
                 server_event_sender,
                 response_receiver,
             ));

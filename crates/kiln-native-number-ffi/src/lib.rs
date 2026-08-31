@@ -877,7 +877,7 @@ mod realm {
             .copied()
             .collect::<Vec<_>>();
         for resource in resources {
-            for _ in 0..1 {
+            loop {
                 let actions = if in_context {
                     let Some(runtime) = active_runtime() else {
                         return INVALID_ARGUMENT;
@@ -1115,6 +1115,24 @@ mod realm {
                         let Some(runtime) = active_runtime() else {
                             return INVALID_ARGUMENT;
                         };
+                        // Hyper may publish `Closed` in the same poll that queued its final
+                        // response bytes. Drain those bytes before asking the transport to close
+                        // so shutdown is ordered after the final HostOps write.
+                        unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
+                    } else {
+                        realm.runtime.borrow_mut().poll_http_connection(resource)
+                    };
+                    let Some(actions) = actions else {
+                        return RUNTIME_ERROR;
+                    };
+                    let status = apply_http_actions(realm, resource, actions, in_context);
+                    if status != 0 {
+                        return status;
+                    }
+                    let actions = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
                         // SAFETY: this is the current realm's exclusively active runtime.
                         unsafe { &mut *runtime }.close_http_connection(resource)
                     } else {
@@ -1213,6 +1231,10 @@ mod realm {
                 }
                 Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
                     let status = run_in_runtime(realm, || work.run(host, thrown));
+                    if status != 0 {
+                        return status;
+                    }
+                    let status = checkpoint_http(realm, false);
                     if status != 0 {
                         return status;
                     }
@@ -1539,6 +1561,7 @@ mod realm {
     fn attach_http(
         resource: u64,
         role: HttpRole,
+        allow_half_close: bool,
         run: Option<RunHttpEvent>,
         drop: Option<DropWork>,
         work: *mut c_void,
@@ -1564,7 +1587,9 @@ mod realm {
             // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
             let runtime = unsafe { &mut *runtime };
             let actions = match role {
-                HttpRole::Server => runtime.start_http1_connection(resource),
+                HttpRole::Server => {
+                    runtime.start_http1_connection_with_options(resource, allow_half_close)
+                }
                 HttpRole::Client => runtime.start_http1_client_connection(resource),
             };
             realm.http_connections.borrow_mut().insert(
@@ -1585,7 +1610,25 @@ mod realm {
         drop: Option<DropWork>,
         work: *mut c_void,
     ) -> i32 {
-        attach_http(resource, HttpRole::Server, run, drop, work)
+        attach_http(resource, HttpRole::Server, false, run, drop, work)
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_server_attach_with_options_active(
+        resource: u64,
+        allow_half_close: i32,
+        run: Option<RunHttpEvent>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        attach_http(
+            resource,
+            HttpRole::Server,
+            allow_half_close != 0,
+            run,
+            drop,
+            work,
+        )
     }
 
     #[unsafe(no_mangle)]
@@ -1595,7 +1638,7 @@ mod realm {
         drop: Option<DropWork>,
         work: *mut c_void,
     ) -> i32 {
-        attach_http(resource, HttpRole::Client, run, drop, work)
+        attach_http(resource, HttpRole::Client, false, run, drop, work)
     }
 
     #[unsafe(no_mangle)]
