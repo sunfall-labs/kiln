@@ -528,7 +528,11 @@ fn measurement_kind(measurement: &Measurement) -> &'static str {
     } else if is_linked(measurement) {
         "linked interpreter"
     } else if measurement.workload == "daemon" {
-        "process lifecycle"
+        if measurement.id.ends_with("/startup") {
+            "process lifecycle"
+        } else {
+            "daemon request"
+        }
     } else if measurement.workload == "conformance" {
         "conformance"
     } else {
@@ -948,5 +952,13 @@ mod tests {
             executable_bytes: 1,
         });
         assert_eq!(measurement_kind(&native), "native linked graph");
+
+        let mut startup = measurement("daemon/startup", 1.0, 0);
+        startup.workload = "daemon".to_string();
+        assert_eq!(measurement_kind(&startup), "process lifecycle");
+
+        let mut warm_request = measurement("daemon/warm-run", 1.0, 0);
+        warm_request.workload = "daemon".to_string();
+        assert_eq!(measurement_kind(&warm_request), "daemon request");
     }
 }
