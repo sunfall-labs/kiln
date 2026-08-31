@@ -12,7 +12,7 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 7;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 8;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
