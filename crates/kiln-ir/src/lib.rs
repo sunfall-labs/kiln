@@ -84,6 +84,21 @@ pub enum BinaryOp {
     GreaterThanOrEqual,
 }
 
+/// Which kind of element a private definition installs.
+///
+/// A private name is not a property name with a reserved spelling: `#m` and `get #m` behave
+/// differently on both a read and a write, so the kind travels with the definition rather than
+/// being guessed from what the slot happens to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateKind {
+    /// `#m() {}` -- readable, and a write to it is a TypeError.
+    Method,
+    /// `get #x() {}` -- a read calls it; with no setter beside it a write is a TypeError.
+    Getter,
+    /// `set #x(v) {}` -- a write calls it; with no getter beside it a read is a TypeError.
+    Setter,
+}
+
 /// Stack bytecode instructions.
 ///
 /// Conditional jumps consume their condition.  The compiler uses [`Instruction::Dup`] before a
@@ -304,6 +319,17 @@ pub enum Instruction {
     GetPrivate(u32),
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
+    /// Install a private method or accessor half. Stack: `[target, function] -> [target]`.
+    ///
+    /// Separate from [`Instruction::DefineMethod`] because a private element has a *kind* and an
+    /// ordinary property does not: `get #x` reads through a call and `#m` refuses a write, and
+    /// storing either as a plain slot answers both questions wrongly and silently. An instance
+    /// element is installed on each instance rather than on the prototype, because the presence
+    /// of the name on the object *is* the brand check.
+    DefinePrivate {
+        name: u32,
+        kind: PrivateKind,
+    },
     /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
@@ -1488,6 +1514,13 @@ struct Compiler {
     private_scopes: Vec<u32>,
     /// The next unused class identity for `private_scopes`.
     next_private_scope: u32,
+    /// The private names each of those classes declares, innermost last.
+    ///
+    /// A private name is resolved lexically, like any other binding: `Outer.#x` written inside a
+    /// class nested in `Outer` names *Outer's* element. Keying every mention to the innermost
+    /// class made the nested mention a reservation no object carries, which the brand check then
+    /// reported as a class that did not declare its own field.
+    private_declarations: Vec<HashSet<String>>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
     /// A label written immediately before the statement now being compiled, waiting for that
@@ -1577,6 +1610,7 @@ impl Compiler {
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
+            private_declarations: Vec::new(),
             finalizers: Vec::new(),
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
@@ -1704,6 +1738,15 @@ impl Compiler {
     /// per name would have made those the same slot, which is a wrong answer -- and the one
     /// `#v in b` would have reported as a match.
     fn private_key(&self, name: &str) -> String {
+        // The innermost class that *declares* the name, which is not always the innermost class:
+        // a nested class does not shadow a name it never mentioned.
+        for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
+            if declared.contains(name) {
+                return private_key(self.private_scopes[depth], name);
+            }
+        }
+        // Undeclared anywhere. A syntax error in its own right, reported where the name is used
+        // rather than invented into some other class's scope.
         private_key(self.private_scopes.last().copied().unwrap_or(0), name)
     }
 
@@ -4385,8 +4428,16 @@ impl Compiler {
                 let flags = self.constant_index(Constant::String(flags.clone()));
                 self.code.push(Instruction::NewRegExp { pattern, flags });
             }
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 self.expression(object);
+                // `o?.#x` on a nullish `o` leaves the chain with `undefined`, exactly as an
+                // ordinary optional member read does. Without this the brand check ran on
+                // `null` and raised the TypeError the `?.` was written to avoid.
+                self.short_circuit_if_nullish(*optional, expression.span);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
@@ -4827,6 +4878,18 @@ impl Compiler {
         // class nested inside one -- names its private fields in this class's own scope.
         self.private_scopes.push(self.next_private_scope);
         self.next_private_scope += 1;
+        self.private_declarations.push(
+            class
+                .fields
+                .iter()
+                .map(|field| &field.key)
+                .chain(class.methods.iter().map(|method| &method.key))
+                .filter_map(|key| match key {
+                    ObjectKey::Private(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         // A derived class evaluates its parent once, into a binding its members capture.
         //
         // The name carries a character an identifier cannot contain, so it can never collide
@@ -4849,8 +4912,12 @@ impl Compiler {
         // `class_expression` invents one carrying a `%` that no identifier can contain. That
         // binding is scaffolding: `(class {}).name` is the empty string, and reporting the
         // scaffolding instead put `"%class0"` where the program could read it.
+        // A `%` carries the scaffolding binding an anonymous class expression is held in, which
+        // the program cannot spell and must never read back. What it *does* read back is the name
+        // a named evaluation supplied -- `var C = class {}` is `"C"` -- and the empty string only
+        // when nothing named it.
         let written_name = if name.starts_with('%') {
-            String::new()
+            class.inferred_name.clone().unwrap_or_default()
         } else {
             name.clone()
         };
@@ -4878,32 +4945,32 @@ impl Compiler {
             },
         };
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
-        // A private instance method is installed on each *instance*, not on the prototype: that
-        // is what carries the brand, and what makes `D.f()` on a sibling class a TypeError rather
-        // than a call. Modelled as a field whose value is the function, so the constructor
-        // prologue that already installs fields installs these too.
-        let private_methods: Vec<ClassField> = class
+        // A private instance method or accessor is installed on each *instance*, not on the
+        // prototype: that is what carries the brand, and what makes `D.f()` on a sibling class a
+        // TypeError rather than a call. The kind travels with it, because an accessor read is a
+        // call and a method write is a refusal -- neither of which a plain slot can express.
+        //
+        // Installed *before* the field initialisers rather than after, which is the order the
+        // language specifies and an observable one: a field initialiser may call `this.#m()`.
+        let private_elements: Vec<(String, PrivateKind, Function)> = class
             .methods
             .iter()
-            .filter(|method| {
-                !method.is_static
-                    && matches!(method.key, ObjectKey::Private(_))
-                    && matches!(method.kind, kiln_hir::MethodKind::Normal)
-            })
-            .map(|method| ClassField {
-                key: method.key.clone(),
-                value: Some(Expression {
-                    kind: ExpressionKind::Function(Box::new(method.function.clone())),
-                    span: method.function.span,
-                }),
-                is_static: false,
+            .filter(|method| !method.is_static)
+            .filter_map(|method| {
+                let ObjectKey::Private(name) = &method.key else {
+                    return None;
+                };
+                Some((
+                    name.clone(),
+                    private_kind(method.kind),
+                    method.function.clone(),
+                ))
             })
             .collect();
         let instance_fields: Vec<&ClassField> = class
             .fields
             .iter()
             .filter(|field| !field.is_static)
-            .chain(private_methods.iter())
             .collect();
         let Some(index) = self.compile_constructor(
             &constructor,
@@ -4912,6 +4979,7 @@ impl Compiler {
             // the parent. Without that, `class F extends Error {}` would construct an error with
             // no message.
             synthesized_derived,
+            &private_elements,
             &instance_fields,
         ) else {
             return;
@@ -4982,15 +5050,23 @@ impl Compiler {
 
             let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
-                // Installed on each instance by the constructor prologue instead.
-                ObjectKey::Private(_) if !method.is_static && !accessor => {
+                // Installed on each instance by the constructor prologue instead -- an accessor
+                // as much as a method, because both carry the brand and the brand is per object.
+                ObjectKey::Private(_) if !method.is_static => {
                     self.code.push(Instruction::Pop);
                     continue;
                 }
+                // A static private element lives on the constructor, and with its kind: a static
+                // private getter read as a slot answered with the getter *function*, which is a
+                // wrong answer rather than a missing feature.
                 ObjectKey::Private(name) => {
-                    self.push_constant(Constant::String(self.private_key(name)));
+                    let key = self.private_key(name);
+                    let name = self.constant_index(Constant::String(key));
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::DefineMethod);
+                    self.code.push(Instruction::DefinePrivate {
+                        name,
+                        kind: private_kind(method.kind),
+                    });
                 }
                 ObjectKey::Static(key) if !accessor => {
                     self.push_constant(Constant::String(key.clone()));
@@ -5028,6 +5104,9 @@ impl Compiler {
         self.private_scopes
             .pop()
             .expect("this class pushed its own private scope");
+        self.private_declarations
+            .pop()
+            .expect("this class pushed its own private names");
     }
 
     /// Push the parent constructor of the class currently being compiled.
@@ -5126,7 +5205,7 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
     ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[])
+        self.compile_constructor(function, span, forwards_to_super, &[], &[])
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -5139,6 +5218,7 @@ impl Compiler {
         function: &Function,
         span: Span,
         forwards_to_super: bool,
+        private_elements: &[(String, PrivateKind, Function)],
         fields: &[&ClassField],
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
@@ -5330,6 +5410,19 @@ impl Compiler {
         if forwards_to_super {
             self.load_super();
             self.code.push(Instruction::SuperForward);
+            self.code.push(Instruction::Pop);
+        }
+        // Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
+        // the language installs the elements that make that call possible before it runs any
+        // initialiser.
+        for (name, kind, function) in private_elements {
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let body = self.compile_function(function, span)?;
+            self.code.push(Instruction::LoadThis);
+            self.code.push(Instruction::MakeFunction(body));
+            self.code
+                .push(Instruction::DefinePrivate { name, kind: *kind });
             self.code.push(Instruction::Pop);
         }
         for field in fields {
@@ -5713,9 +5806,41 @@ impl Compiler {
         property: &ObjectKey,
         span: Span,
     ) {
+        // A private name has no computed half and no prototype to fall through to, so the general
+        // path below -- which exists to evaluate an object and a key exactly once each -- reduces
+        // to holding the receiver. Refusing it outright made `this.#n++` a compile error, which
+        // is the ordinary way a private counter is incremented.
         if let ObjectKey::Private(name) = property {
-            self.error(Some(span), format!("update of the private name `#{name}`"));
-            self.push_constant(Constant::Undefined);
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let receiver = format!("%upd{}", self.hidden_bindings);
+            let old_binding = format!("%old{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+
+            self.expression(object);
+            self.declare_hidden(&receiver, span);
+
+            // `ToNumeric` for the same reason the general path uses it: the value a postfix
+            // update yields is the conversion's result, and a BigInt must not narrow.
+            self.load_hidden(&receiver);
+            self.code.push(Instruction::GetPrivate(name));
+            self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
+            self.declare_hidden(&old_binding, span);
+
+            self.load_hidden(&receiver);
+            self.load_hidden(&old_binding);
+            self.code.push(Instruction::Unary(if increment {
+                UnaryOp::Increment
+            } else {
+                UnaryOp::Decrement
+            }));
+            self.code.push(Instruction::SetPrivate(name));
+            if !prefix {
+                self.code.push(Instruction::Pop);
+                self.load_hidden(&old_binding);
+            }
+            self.scopes.pop().expect("update scope was just pushed");
             return;
         }
 
@@ -6061,9 +6186,14 @@ impl Compiler {
             // receiver becomes `this`. Reached through `Apply` rather than a `CallPrivate`
             // instruction, because the shape `Apply` already takes -- receiver, callee,
             // arguments -- is exactly this one.
-            ExpressionKind::PrivateMember { object, name } => {
+            ExpressionKind::PrivateMember {
+                object,
+                name,
+                optional,
+            } => {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
+                self.short_circuit_if_nullish(*optional, span);
                 self.code.push(Instruction::Dup);
                 self.code.push(Instruction::GetPrivate(name));
                 self.array_literal(arguments, span);
@@ -7136,6 +7266,15 @@ fn short_circuit_jump(operator: AssignmentOperator) -> Instruction {
     }
 }
 
+/// The kind an installed private element carries, from the syntax that declared it.
+fn private_kind(kind: kiln_hir::MethodKind) -> PrivateKind {
+    match kind {
+        kiln_hir::MethodKind::Normal => PrivateKind::Method,
+        kiln_hir::MethodKind::Get => PrivateKind::Getter,
+        kiln_hir::MethodKind::Set => PrivateKind::Setter,
+    }
+}
+
 /// The reserved property name a private member is stored under.
 ///
 /// Reserved rather than ordinary, so nothing that enumerates own string properties can see it and
@@ -7608,6 +7747,7 @@ mod tests {
 
         inner.name = Some("m".to_owned());
         let class = kiln_hir::Class {
+            inferred_name: None,
             name: Some("C".to_owned()),
             superclass: None,
             constructor: None,
@@ -8320,6 +8460,7 @@ mod tests {
                 }],
             }),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Reader".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8387,6 +8528,7 @@ mod tests {
             }],
             rest: None,
             body: vec![statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Name".to_owned()),
                 superclass: None,
                 constructor: Some(constructor),
@@ -8428,6 +8570,7 @@ mod tests {
     fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
         let program = compile(&module(vec![
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Base".to_owned()),
                 superclass: None,
                 constructor: None,
@@ -8436,6 +8579,7 @@ mod tests {
                 span: Span::default(),
             }))),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                inferred_name: None,
                 name: Some("Derived".to_owned()),
                 superclass: Some(identifier("Base")),
                 constructor: Some(kiln_hir::Function {
@@ -8572,6 +8716,7 @@ mod tests {
         let program = compile(&module(vec![statement(StatementKind::Expression(
             Expression {
                 kind: ExpressionKind::Class(Box::new(kiln_hir::Class {
+                    inferred_name: None,
                     name: None,
                     superclass: None,
                     constructor: None,

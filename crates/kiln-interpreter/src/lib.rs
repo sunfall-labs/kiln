@@ -11,8 +11,8 @@ use kiln_host_abi::{
     RequestId,
 };
 use kiln_ir::{
-    BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, Strictness,
-    UnaryOp, Upvalue,
+    BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, PrivateKind, Program,
+    Strictness, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
     ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, LocaleCapability,
@@ -11627,6 +11627,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let Some(left) = self.catchable(reduced, current)? else {
                             continue;
                         };
+                        // `ToNumeric(lhs)` completes before the right operand is reduced at
+                        // all, for the operators that have no string reading to decide first.
+                        // A symbol has no number, so `Symbol() * f()` refuses *here* rather
+                        // than after calling `f`'s `valueOf` -- one observable call that the
+                        // language says does not happen. `+` and the relational operators are
+                        // deliberately absent: both choose between a string and a numeric
+                        // reading, which needs each side reduced before either is converted.
+                        if numeric_left_to_right(*operator) && matches!(left, Value::Symbol(_)) {
+                            self.catchable::<Value>(
+                                Err(ExecutionError::SymbolIsNotANumber),
+                                current,
+                            )?;
+                            continue;
+                        }
                         let reduced = self.as_primitive(&right, false, current);
                         let Some(right) = self.catchable(reduced, current)? else {
                             continue;
@@ -12376,23 +12390,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Own-only, and a miss is a TypeError. That own-only rule *is* the brand
                     // check: an object of another class does not carry the name, however much
                     // of the rest of the shape it shares.
-                    let found = match &target {
-                        Value::Object(object) => object.borrow().get_own(&name).cloned(),
-                        Value::Function(closure) => {
-                            closure.properties.borrow().get_own(&name).cloned()
-                        }
-                        _ => None,
-                    };
-                    let Some(value) = found else {
+                    let found = own_private_element(&target, &name);
+                    let Some((property, _)) = found else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
                                 "Cannot read private member #{} from an object whose class did not declare it",
-                                name.trim_start_matches(PRIVATE_KEY_PREFIX)
+                                private_display_name(&name)
                             ),
                             current,
                         )?;
                         continue;
+                    };
+                    // A getter is a *call*, on the object the name was read from. Handing back
+                    // the slot instead answered `class C { get #x() { return 7 } }` with the
+                    // getter function, which is the shape of a right answer and the content of
+                    // a wrong one.
+                    let value = match property {
+                        Property::Value(value) => value,
+                        Property::Accessor {
+                            get: Some(getter), ..
+                        } => {
+                            let called =
+                                self.call_value(&getter, target.clone(), Vec::new(), current);
+                            let Some(value) = self.catchable(called, current)? else {
+                                continue;
+                            };
+                            value
+                        }
+                        // Write-only. `undefined` would be a plausible reading and the wrong
+                        // one: the language refuses the read rather than inventing an absence.
+                        Property::Accessor { get: None, .. } => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "'#{}' was defined without a getter",
+                                    private_display_name(&name)
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
                     };
                     self.stack.push(value);
                 }
@@ -12400,26 +12438,113 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let present = match &target {
-                        Value::Object(object) => object.borrow().get_own(&name).is_some(),
-                        Value::Function(closure) => {
-                            closure.properties.borrow().get_own(&name).is_some()
-                        }
-                        _ => false,
-                    };
-                    if !present {
+                    let Some((property, attributes)) = own_private_element(&target, &name) else {
                         self.throw_error(
                             ErrorKind::Type,
                             format!(
                                 "Cannot write private member #{} to an object whose class did not declare it",
-                                name.trim_start_matches(PRIVATE_KEY_PREFIX)
+                                private_display_name(&name)
                             ),
                             current,
                         )?;
                         continue;
+                    };
+                    match property {
+                        Property::Accessor {
+                            set: Some(setter), ..
+                        } => {
+                            let called = self.call_value(
+                                &setter,
+                                target.clone(),
+                                vec![value.clone()],
+                                current,
+                            );
+                            if self.catchable(called, current)?.is_none() {
+                                continue;
+                            }
+                        }
+                        Property::Accessor { set: None, .. } => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "'#{}' was defined without a setter",
+                                    private_display_name(&name)
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
+                        // A private *method* is the one data element that refuses a write, and
+                        // the non-writable slot `DefinePrivate` gives it is what tells it apart
+                        // from a field. Silently succeeding here loses the assignment and
+                        // reports success, which is worse than the refusal it should have been.
+                        Property::Value(_) if !attributes.writable => {
+                            self.throw_error(
+                                ErrorKind::Type,
+                                format!(
+                                    "Private method '#{}' is not writable",
+                                    private_display_name(&name)
+                                ),
+                                current,
+                            )?;
+                            continue;
+                        }
+                        Property::Value(_) => {
+                            self.set_computed(
+                                &target,
+                                &Value::String(name),
+                                value.clone(),
+                                current,
+                            )?;
+                        }
                     }
-                    self.set_computed(&target, &Value::String(name), value.clone(), current)?;
                     self.stack.push(value);
+                }
+                Instruction::DefinePrivate { name, kind } => {
+                    let name = self.string_constant(*name, current)?;
+                    let function = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    define_function_name(
+                        &function,
+                        &Value::String(name.clone()),
+                        match kind {
+                            PrivateKind::Method => None,
+                            PrivateKind::Getter => Some("get"),
+                            PrivateKind::Setter => Some("set"),
+                        },
+                    );
+                    // Not writable, which is how a read of the slot later tells a method from a
+                    // field; configurable, so the second half of a `get`/`set` pair may merge
+                    // with the first rather than being refused by `redefinable`.
+                    let attributes = Attributes {
+                        writable: false,
+                        enumerable: false,
+                        configurable: true,
+                    };
+                    let install = |data: &mut ObjectData| match kind {
+                        PrivateKind::Method => {
+                            data.define_value(&name, function.clone(), attributes);
+                        }
+                        PrivateKind::Getter => {
+                            data.define_accessor(&name, Some(function.clone()), None, attributes);
+                        }
+                        PrivateKind::Setter => {
+                            data.define_accessor(&name, None, Some(function.clone()), attributes);
+                        }
+                    };
+                    match &target {
+                        Value::Object(object) => install(&mut object.borrow_mut()),
+                        // A static private element lands on the constructor, whose properties
+                        // live in its own store rather than in an object.
+                        Value::Function(closure) => install(&mut closure.properties.borrow_mut()),
+                        other => {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: other.type_name(),
+                            });
+                        }
+                    }
+                    self.stack.push(target);
                 }
                 Instruction::DefineAccessor { setter, enumerable } => {
                     let function = self.pop(current)?;
@@ -29793,6 +29918,30 @@ fn bigint_binary(
     }))
 }
 
+/// Whether this operator converts each operand as it reaches it, left to right.
+///
+/// These are the operators with no string reading to choose first: `ApplyStringOrNumericBinary`
+/// takes `ToNumeric(lval)` and then `ToNumeric(rval)`, so a refusal on the left is raised before
+/// the right operand is reduced at all. `+` is absent because a string on either side makes it
+/// concatenation, and the relational operators because two strings compare as text -- both have
+/// to reduce each side before they know which conversion they are performing.
+fn numeric_left_to_right(operator: BinaryOp) -> bool {
+    matches!(
+        operator,
+        BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Remainder
+            | BinaryOp::Exponentiate
+            | BinaryOp::BitwiseAnd
+            | BinaryOp::BitwiseOr
+            | BinaryOp::BitwiseXor
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight
+            | BinaryOp::UnsignedShiftRight
+    )
+}
+
 /// Whether this operator reduces its operands to numbers, which a symbol refuses to become.
 ///
 /// `+` is not on the list because it decides between two conversions -- a string on either side
@@ -37803,6 +37952,31 @@ fn has_prototype_property(closure: &Closure) -> bool {
 /// renames a function without replacing it.
 /// `SetFunctionName(function, key, prefix)`.
 ///
+/// The own private element under this reserved key, with the flags its slot carries.
+///
+/// Own-only on purpose: the presence of the name on the object *is* the brand check, so a
+/// prototype walk would hand one class's private member to another class's instance.
+fn own_private_element(target: &Value, key: &str) -> Option<(Property, Attributes)> {
+    let read = |data: &ObjectData| {
+        Some((
+            data.get_own_property(key)?.clone(),
+            data.get_own_attributes(key)?,
+        ))
+    };
+    match target {
+        Value::Object(object) => read(&object.borrow()),
+        Value::Function(closure) => read(&closure.properties.borrow()),
+        _ => None,
+    }
+}
+
+/// A private name as the program spelled it, without the scope-numbered reservation it is keyed
+/// under: `x` from `@@private:3:x`.
+fn private_display_name(key: &str) -> &str {
+    let reserved = key.strip_prefix(PRIVATE_KEY_PREFIX).unwrap_or(key);
+    reserved.split_once(':').map_or(reserved, |(_, name)| name)
+}
+
 /// A method, a getter and a setter are each created anonymous and named by the definition that
 /// installs them, which is also the only place a computed key is known. Nothing did it, so
 /// `class C { m() {} }` left `C.prototype.m.name` empty, `{ get x() {} }` reported `""` where the

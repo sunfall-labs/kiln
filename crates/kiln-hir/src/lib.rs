@@ -199,6 +199,16 @@ pub enum ObjectKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Class {
     pub name: Option<String>,
+    /// The name a *named evaluation* supplies to an anonymous class: `var C = class {}` reports
+    /// `"C"`.
+    ///
+    /// Separate from `name` because the two do different things. A written name becomes a
+    /// binding visible inside the class body -- `class A { m() { return A } }` resolves `A` from
+    /// inside `m`, and nowhere else -- while an inferred one is metadata and nothing more.
+    /// Folding it into `name` would invent a scope the program did not write, which is exactly
+    /// why the frontend refused to infer a class name at all and `var C = class {}` read back
+    /// the empty string that no engine produces.
+    pub inferred_name: Option<String>,
     pub superclass: Option<Expression>,
     /// `None` when the class declares no constructor; one is synthesized.
     pub constructor: Option<Function>,
@@ -734,6 +744,9 @@ pub enum ExpressionKind {
     PrivateMember {
         object: Box<Expression>,
         name: String,
+        /// Whether the access was written `?.#name`, which short-circuits the whole chain to
+        /// `undefined` on a nullish object rather than asking it for the name.
+        optional: bool,
     },
     /// `object.#name = value`, including the compound forms.
     ///
@@ -1909,6 +1922,7 @@ mod tests {
         };
         let class_expression = Expression {
             kind: ExpressionKind::Class(Box::new(Class {
+                inferred_name: None,
                 name: Some("require".into()),
                 superclass: Some(require_call("./ignored-superclass")),
                 constructor: Some(empty_function(vec![literal_statement(
