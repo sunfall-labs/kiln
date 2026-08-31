@@ -568,6 +568,9 @@ impl IrProgram {
                 parameter_count,
                 declared_length: parameter_count,
                 local_count: LOCAL_COUNT,
+                // Generated functions have no parameter-binding prologue; arguments already
+                // occupy their declared slots when the fuzz harness calls them.
+                prologue_end: 0,
                 code: std::mem::take(&mut builder.code),
                 upvalues: Vec::new(),
             });
