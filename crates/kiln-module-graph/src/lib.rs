@@ -24,8 +24,8 @@ use kiln_ir::{
     compile_commonjs, compile_module,
 };
 use kiln_module_resolver::{
-    ModuleResolver, NodeBuiltin, NodeModuleFormat, PathRole, ResolutionKind, ResolutionPolicy,
-    ResolvedModule, SUPPORTED_EXTENSIONS,
+    ModuleResolver, NodeBuiltin, NodeModuleFormat, NodeRequestKind, PathRole, ResolutionKind,
+    ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS,
 };
 use kiln_runtime::RealmRuntime;
 
@@ -942,7 +942,7 @@ impl ModuleGraph {
                             message: "JSON module has no captured source text".to_owned(),
                         })?;
                 let value =
-                    parse_json_module(&source).map_err(|error| ModuleGraphError::Execution {
+                    parse_json_module(source).map_err(|error| ModuleGraphError::Execution {
                         module: path.clone(),
                         error,
                     })?;
@@ -1344,14 +1344,19 @@ where
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
                         let mut dependency_sources = Vec::with_capacity(program.dependencies.len());
+                        let request = if source == ModuleSource::CommonJs {
+                            NodeRequestKind::Require
+                        } else {
+                            NodeRequestKind::Import
+                        };
                         for specifier in &program.dependencies {
-                            let resolved =
-                                self.resolver.resolve(specifier, &path).map_err(|error| {
-                                    ModuleGraphError::Resolve {
-                                        importer: path.clone(),
-                                        specifier: specifier.clone(),
-                                        error,
-                                    }
+                            let resolved = self
+                                .resolver
+                                .resolve_for_request(specifier, &path, request)
+                                .map_err(|error| ModuleGraphError::Resolve {
+                                    importer: path.clone(),
+                                    specifier: specifier.clone(),
+                                    error,
                                 })?;
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
@@ -1760,6 +1765,53 @@ mod tests {
             ModuleSource::CommonJs
         );
         assert_eq!(graph.module(&entry).unwrap().source, ModuleSource::Source);
+    }
+
+    #[test]
+    fn node_graph_selects_dual_package_exports_for_import_and_require() {
+        let project = TempProject::new();
+        let package_dir = project.root.join("node_modules/pkg");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"exports":{"import":"./esm.mjs","require":"./cjs.cjs"}}"#,
+        )
+        .expect("write dual package manifest");
+        project.write("node_modules/pkg/esm.mjs", "export default 'import';");
+        project.write("node_modules/pkg/cjs.cjs", "module.exports = 'require';");
+        project.write("bridge.cjs", "module.exports = require('pkg');");
+        let entry = project.write(
+            "main.mjs",
+            "import imported from 'pkg'; import required from './bridge.cjs'; console.log(imported, required);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build dual package graph");
+        assert_eq!(
+            graph
+                .module(&project.root.join("node_modules/pkg/esm.mjs"))
+                .expect("import target node")
+                .source,
+            ModuleSource::Source
+        );
+        assert_eq!(
+            graph
+                .module(&project.root.join("node_modules/pkg/cjs.cjs"))
+                .expect("require target node")
+                .source,
+            ModuleSource::CommonJs
+        );
+
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute dual package graph");
+        assert_eq!(host.output, ["import require"]);
     }
 
     struct OxcFrontend;

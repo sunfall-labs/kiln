@@ -675,10 +675,10 @@ fn sync_project_sources_with_override(
     // were measured on the 641-file workload: the warm no-op goes from ~34.8 ms to ~14.5 ms, and
     // `read_all` keeps the walk's order so `FileId` assignment stays reproducible.
     let mut texts = sources::read_all(root, &walk.files, source_override)?;
-    let resolution_entries = if let Some((entry, _)) = source_override {
+    let (resolution_entries, node_formats) = if let Some((entry, _)) = source_override {
         sources::include_reachable_dependencies(root, entry, &mut texts, node)?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let manifest = texts
         .iter()
@@ -703,8 +703,12 @@ fn sync_project_sources_with_override(
     // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
     // never re-walk the filesystem or mix snapshots.
     for attempt in 0..=1 {
-        let resolutions = ResolutionMap::new(resolution_root.clone(), resolution_entries.clone())
-            .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
+        let resolutions = ResolutionMap::with_node_formats(
+            resolution_root.clone(),
+            resolution_entries.clone(),
+            node_formats.clone(),
+        )
+        .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
         let plan = backend.begin_sync(files.clone(), resolutions)?;
         let needed = plan.paths.into_iter().collect::<HashSet<_>>();
         for (path, text) in &texts {
