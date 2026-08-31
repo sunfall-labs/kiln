@@ -260,6 +260,12 @@ pub enum Native {
     /// One variant with a payload for the reason `Temporal` has one: the six services answer
     /// to overlapping method names and the receiver decides what a name means.
     Intl(intl::Op),
+    /// The `Atomics` namespace, and one operation on it; the payload says which.
+    ///
+    /// A namespace rather than a constructor: there is nothing to make one of. Every operation
+    /// takes the view it works on as its first argument, which is why they share one variant.
+    Atomics,
+    AtomicsOp(AtomicsOp),
     /// The `node:fs/promises` namespace and its first asynchronous methods.
     NodeFsPromises,
     NodeFs,
@@ -1660,6 +1666,15 @@ impl Native {
                     .to_owned(),
                 ))
             }
+            // The tag `Object.prototype.toString` reads, and the operations themselves. Like
+            // `Math`, the namespace *is* the object: there is no prototype to hang either on.
+            (Self::Atomics, key) if key == WellKnown::ToStringTag.property_key() => {
+                Some(Value::String("Atomics".to_owned()))
+            }
+            (Self::Atomics, _) => AtomicsOp::ALL
+                .into_iter()
+                .find(|op| op.property_key() == name)
+                .map(|op| Value::Native(Self::AtomicsOp(op))),
             (Self::Json, "isRawJSON") => Some(Value::Native(Self::JsonIsRawJson)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
             (Self::SymbolConstructor, "for") => Some(Value::Native(Self::SymbolFor)),
@@ -3048,6 +3063,93 @@ fn helper_slot(state: &Rc<RefCell<ObjectData>>, key: &str) -> Value {
         .unwrap_or(Value::Undefined)
 }
 
+/// One operation the `Atomics` namespace publishes.
+///
+/// One variant with a payload rather than fourteen flat ones, for the reason `Temporal` has
+/// one: every read-modify-write shares a validation sequence whose *order* is observable, and
+/// only what it does with the two values it has differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicsOp {
+    Add,
+    And,
+    Or,
+    Xor,
+    Sub,
+    Exchange,
+    CompareExchange,
+    Load,
+    Store,
+    IsLockFree,
+    Pause,
+    Wait,
+    WaitAsync,
+    Notify,
+}
+
+impl AtomicsOp {
+    /// Every operation, in the order `Atomics` publishes them.
+    const ALL: [Self; 14] = [
+        Self::Add,
+        Self::And,
+        Self::CompareExchange,
+        Self::Exchange,
+        Self::IsLockFree,
+        Self::Load,
+        Self::Or,
+        Self::Pause,
+        Self::Store,
+        Self::Sub,
+        Self::Wait,
+        Self::WaitAsync,
+        Self::Notify,
+        Self::Xor,
+    ];
+
+    const fn property_key(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Sub => "sub",
+            Self::Exchange => "exchange",
+            Self::CompareExchange => "compareExchange",
+            Self::Load => "load",
+            Self::Store => "store",
+            Self::IsLockFree => "isLockFree",
+            Self::Pause => "pause",
+            Self::Wait => "wait",
+            Self::WaitAsync => "waitAsync",
+            Self::Notify => "notify",
+        }
+    }
+
+    const fn arity(self) -> f64 {
+        match self {
+            Self::IsLockFree | Self::Pause => 1.0,
+            Self::Load => 2.0,
+            Self::Add
+            | Self::And
+            | Self::Or
+            | Self::Xor
+            | Self::Sub
+            | Self::Exchange
+            | Self::Store
+            | Self::Notify => 3.0,
+            Self::CompareExchange | Self::Wait | Self::WaitAsync => 4.0,
+        }
+    }
+
+    /// Whether this operation may only be applied to a view a program can wait on.
+    ///
+    /// `Int32Array` and `BigInt64Array` and nothing else: waiting is defined in terms of a
+    /// waiter list keyed by a *word* in a buffer, and the specification only gives one for
+    /// those two widths.
+    const fn waitable(self) -> bool {
+        matches!(self, Self::Wait | Self::WaitAsync | Self::Notify)
+    }
+}
+
 /// Which element type a view reads its bytes as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypedKind {
@@ -4308,7 +4410,7 @@ impl Value {
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect)
+            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
@@ -4346,7 +4448,7 @@ impl Value {
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect)
+            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
@@ -5073,6 +5175,12 @@ pub enum ExecutionError {
     TypeErrorMessage {
         message: String,
     },
+    /// A `RangeError` with wording of its own, for the same reason as the pair around it: an
+    /// index outside a view is refused for several different reasons and the message is what
+    /// tells them apart.
+    RangeErrorMessage {
+        message: String,
+    },
     /// A `ReferenceError` with wording of its own, for the same reason as the pair above.
     ///
     /// Rare, because almost every reference error names an identifier the machine already has.
@@ -5433,7 +5541,9 @@ impl fmt::Display for ExecutionError {
             Self::GlobalOutOfBounds { index } => {
                 write!(formatter, "module slot {index} is out of bounds")
             }
-            Self::TypeErrorMessage { message } | Self::ReferenceErrorMessage { message } => {
+            Self::TypeErrorMessage { message }
+            | Self::RangeErrorMessage { message }
+            | Self::ReferenceErrorMessage { message } => {
                 write!(formatter, "{message}")
             }
             Self::Host {
@@ -5481,6 +5591,7 @@ impl ExecutionError {
             Self::TemporalFailure { kind, message } => (*kind, message.clone()),
             Self::IntlFailure { kind, message } => (*kind, message.clone()),
             Self::TypeErrorMessage { message } => (ErrorKind::Type, message.clone()),
+            Self::RangeErrorMessage { message } => (ErrorKind::Range, message.clone()),
             Self::ReferenceErrorMessage { message } => (ErrorKind::Reference, message.clone()),
             Self::BufferNotResizable => (
                 ErrorKind::Type,
@@ -10615,6 +10726,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
                         kiln_ir::Builtin::Math => Native::Math,
+                        kiln_ir::Builtin::Atomics => Native::Atomics,
                         kiln_ir::Builtin::Number => Native::NumberConstructor,
                         kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
                         kiln_ir::Builtin::ParseInt => Native::ParseInt,
@@ -13749,6 +13861,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let receiver = arguments.get(2).cloned().unwrap_or_else(|| target.clone());
                 self.read_computed_with_receiver(&target, &key, &receiver, instruction)
             }
+            Native::AtomicsOp(op) => self.atomics(op, arguments, instruction),
             Native::ReflectSet => {
                 let target = self.reflect_target(arguments.first(), "set")?;
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -20796,6 +20909,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor));
         globals.set_non_enumerable("String", Value::Native(Native::StringConstructor));
         globals.set_non_enumerable("Math", Value::Native(Native::Math));
+        globals.set_non_enumerable("Atomics", Value::Native(Native::Atomics));
         globals.set_non_enumerable("Promise", Value::Native(Native::PromiseConstructor));
         globals.set_non_enumerable("RegExp", Value::Native(Native::RegExpConstructor));
         globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor));
@@ -25397,6 +25511,305 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// One `Atomics` operation.
+    ///
+    /// On the machine rather than in [`call_native`] because the order the arguments are
+    /// converted in is observable and the corpus checks every step of it: the view is validated
+    /// before the index is coerced, the index before the value, and the buffer is looked at
+    /// *again* afterwards because a program's `valueOf` can detach it in between.
+    fn atomics(
+        &mut self,
+        op: AtomicsOp,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match op {
+            // Neither of these touches a view. `isLockFree` answers for a *width*, and the
+            // answer has to be the same every time a program asks, which is the only thing the
+            // specification requires of it.
+            AtomicsOp::IsLockFree => {
+                let size = self.as_number_argument(arguments.first(), instruction)?;
+                Ok(Value::Boolean(matches!(size, 1.0 | 2.0 | 4.0 | 8.0)))
+            }
+            // A hint to the processor that a spin-wait is in progress. There is nothing to hint
+            // to here, so the whole of it is the argument check: an iteration count has to be an
+            // integral Number if it is there at all.
+            AtomicsOp::Pause => {
+                match arguments.first() {
+                    None | Some(Value::Undefined) => {}
+                    Some(Value::Number(count)) if count.fract() == 0.0 && count.is_finite() => {}
+                    Some(_) => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "Atomics.pause: iterationNumber must be an integer".to_owned(),
+                        });
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            AtomicsOp::Wait | AtomicsOp::WaitAsync => self.atomics_wait(op, arguments, instruction),
+            AtomicsOp::Notify => self.atomics_notify(arguments, instruction),
+            _ => self.atomics_access(op, arguments, instruction),
+        }
+    }
+
+    /// `ValidateIntegerTypedArray`: the view an atomic operation may be applied to.
+    ///
+    /// A float view is refused because an atomic add on one is not defined, and a clamped one
+    /// because its writes saturate rather than wrap -- neither is an *unclamped integer* element
+    /// type. A waiting operation narrows that further to the two widths the specification gives
+    /// a waiter list for.
+    fn atomics_view(
+        &self,
+        arguments: &[Value],
+        op: AtomicsOp,
+    ) -> Result<Rc<TypedArrayData>, ExecutionError> {
+        let Some(Value::TypedArray(view)) = arguments.first() else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Atomics operations require a typed array".to_owned(),
+            });
+        };
+        if view.out_of_bounds() {
+            return Err(ExecutionError::BufferDetached);
+        }
+        let allowed = if op.waitable() {
+            matches!(view.kind, TypedKind::Int32 | TypedKind::BigInt64)
+        } else {
+            !matches!(
+                view.kind,
+                TypedKind::Uint8Clamped | TypedKind::Float32 | TypedKind::Float64
+            )
+        };
+        if !allowed {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Atomics.{} cannot be applied to a {}",
+                    op.property_key(),
+                    view.kind.name()
+                ),
+            });
+        }
+        Ok(Rc::clone(view))
+    }
+
+    /// `ValidateAtomicAccess`: the element an index reaches, or the `RangeError` it does not.
+    ///
+    /// `ToIndex` first -- which can run a program's `valueOf` -- and only then the bounds check,
+    /// because a program watching that conversion can see which of the two refused. The length
+    /// the check uses is the one read *before* the conversion: a `valueOf` that grows the buffer
+    /// does not widen the range of indices this call may reach, which is what makes the bound a
+    /// property of the operation rather than a race with it.
+    fn atomics_index(
+        &mut self,
+        view: &Rc<TypedArrayData>,
+        requested: Option<&Value>,
+        instruction: usize,
+    ) -> Result<usize, ExecutionError> {
+        let length = view.len();
+        let number = self.as_number_argument(requested, instruction)?;
+        let integer = if number.is_nan() { 0.0 } else { number.trunc() };
+        if !(0.0..=9_007_199_254_740_991.0).contains(&integer) {
+            return Err(ExecutionError::RangeErrorMessage {
+                message: format!("Invalid atomic access index {number}"),
+            });
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = integer as usize;
+        if index >= length {
+            return Err(ExecutionError::RangeErrorMessage {
+                message: format!("Invalid atomic access index {index}"),
+            });
+        }
+        Ok(index)
+    }
+
+    /// The operand of an atomic operation, in the view's own numeric tower.
+    ///
+    /// `ToIntegerOrInfinity` rather than `ToNumber` for a Number view: `Atomics.add(i32, 0, 1.5)`
+    /// adds one. The truncation happens here rather than in the write because `store` hands the
+    /// *converted* value back, which is how `Atomics.store(i32, 0, Infinity)` returns `Infinity`
+    /// after writing a zero.
+    fn atomics_operand(
+        &mut self,
+        kind: TypedKind,
+        value: Option<&Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if kind.is_big() {
+            return Ok(Value::BigInt(Rc::new(
+                self.as_big_int_argument(value, instruction)?,
+            )));
+        }
+        let number = self.as_number_argument(value, instruction)?;
+        Ok(Value::Number(Self::to_integer_or_infinity(number)))
+    }
+
+    /// A read-modify-write, a load, or a store: everything that reaches one element.
+    fn atomics_access(
+        &mut self,
+        op: AtomicsOp,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let view = self.atomics_view(arguments, op)?;
+        let index = self.atomics_index(&view, arguments.get(1), instruction)?;
+        let operand = match op {
+            AtomicsOp::Load => Value::Undefined,
+            _ => self.atomics_operand(view.kind, arguments.get(2), instruction)?,
+        };
+        // `compareExchange` converts both of its values, in the order it is given them, and only
+        // then looks at the buffer again.
+        let replacement = match op {
+            AtomicsOp::CompareExchange => {
+                Some(self.atomics_operand(view.kind, arguments.get(3), instruction)?)
+            }
+            _ => None,
+        };
+        // Read again, after every conversion: a `valueOf` above may have detached the buffer or
+        // shrunk it under the view, and the specification revalidates rather than writing into
+        // memory that is no longer there.
+        if view.out_of_bounds() || index >= view.len() {
+            return Err(ExecutionError::BufferDetached);
+        }
+        let old = view.get(index).unwrap_or(Value::Undefined);
+        match op {
+            AtomicsOp::Load => Ok(old),
+            AtomicsOp::Store => {
+                view.set(index, &operand)?;
+                // The value the *conversion* produced, not the one the buffer now holds: they
+                // differ whenever the write wrapped, and the specification returns the former.
+                Ok(operand)
+            }
+            AtomicsOp::CompareExchange => {
+                let expected = narrow_element(view.kind, &operand);
+                if same_value_zero(&old, &expected) {
+                    view.set(index, &replacement.unwrap_or(Value::Undefined))?;
+                }
+                Ok(old)
+            }
+            _ => {
+                let combined = atomics_combine(view.kind, op, &old, &operand);
+                view.set(index, &combined)?;
+                Ok(old)
+            }
+        }
+    }
+
+    /// `Atomics.wait` and `Atomics.waitAsync`.
+    ///
+    /// This realm has exactly one agent, so nothing can ever reach the waiter list while this
+    /// one is sitting on it: a wait that is not answered "not-equal" straight away always ends
+    /// in "timed-out". The synchronous spelling therefore sleeps out its timeout and the
+    /// asynchronous one schedules the answer, which is what a program can observe of either.
+    fn atomics_wait(
+        &mut self,
+        op: AtomicsOp,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let view = self.atomics_view(arguments, op)?;
+        if !view.buffer.shared {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Atomics.wait requires a SharedArrayBuffer".to_owned(),
+            });
+        }
+        let index = self.atomics_index(&view, arguments.get(1), instruction)?;
+        let expected = self.atomics_operand(view.kind, arguments.get(2), instruction)?;
+        let timeout = self.as_number_argument(arguments.get(3), instruction)?;
+        // `undefined` and `NaN` both mean "no limit"; anything else is clamped up to zero.
+        let timeout = if timeout.is_nan() {
+            f64::INFINITY
+        } else {
+            timeout.max(0.0)
+        };
+        if view.out_of_bounds() || index >= view.len() {
+            return Err(ExecutionError::BufferDetached);
+        }
+        let held = view.get(index).unwrap_or(Value::Undefined);
+        let answer = if same_value_zero(&held, &narrow_element(view.kind, &expected)) {
+            None
+        } else {
+            Some("not-equal")
+        };
+        if op == AtomicsOp::Wait {
+            let settled = match answer {
+                Some(answer) => answer,
+                None => {
+                    Self::atomics_sleep(timeout);
+                    "timed-out"
+                }
+            };
+            return Ok(Value::String(settled.to_owned()));
+        }
+        // `waitAsync` reports whether it had to wait at all, beside either the answer itself or
+        // the promise that will carry it.
+        let (asynchronous, value) = match answer {
+            Some(answer) => (false, Value::String(answer.to_owned())),
+            None if timeout == 0.0 => (false, Value::String("timed-out".to_owned())),
+            None => {
+                let promise = PromiseState::pending();
+                let timer = Timer {
+                    // The resolve half of the promise's own pair, called with the answer: a
+                    // timer carries its state in its arguments rather than in a closure.
+                    callback: Value::Settler(Rc::clone(&promise), false),
+                    arguments: vec![Value::String("timed-out".to_owned())],
+                };
+                let delay = duration_from_milliseconds(if timeout.is_finite() {
+                    timeout
+                } else {
+                    ATOMICS_UNBOUNDED_WAIT_MS
+                });
+                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                (true, Value::Promise(promise))
+            }
+        };
+        let mut result = ObjectData::default();
+        result.set("async", Value::Boolean(asynchronous));
+        result.set("value", value);
+        Ok(Value::Object(Rc::new(RefCell::new(result))))
+    }
+
+    /// Sleep out a wait that nothing will ever interrupt.
+    ///
+    /// A wait with no limit is a deadlock in a realm with one agent: the only code that could
+    /// call `notify` is the code that is blocked. Rather than hang the process on a program no
+    /// engine could have finished either, the wait is bounded -- a limit of this realm, and the
+    /// only place its single-agent shape shows through.
+    fn atomics_sleep(timeout: f64) {
+        let milliseconds = if timeout.is_finite() {
+            timeout.min(ATOMICS_UNBOUNDED_WAIT_MS)
+        } else {
+            ATOMICS_UNBOUNDED_WAIT_MS
+        };
+        if milliseconds > 0.0 {
+            std::thread::sleep(duration_from_milliseconds(milliseconds));
+        }
+    }
+
+    /// `Atomics.notify`: how many waiters were woken.
+    ///
+    /// Always none. One agent cannot be waiting and notifying at the same time, so the waiter
+    /// list this would read is empty whenever a program can ask -- but the validation in front
+    /// of it is real, and is most of what the operation is.
+    fn atomics_notify(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let view = self.atomics_view(arguments, AtomicsOp::Notify)?;
+        let index = self.atomics_index(&view, arguments.get(1), instruction)?;
+        let _ = index;
+        // `ToIntegerOrInfinity`, clamped up to zero, and converted even though nothing waits on
+        // the answer: the conversion can run a program's `valueOf`.
+        let count = match arguments.get(2) {
+            None | Some(Value::Undefined) => f64::INFINITY,
+            value => {
+                Self::to_integer_or_infinity(self.as_number_argument(value, instruction)?).max(0.0)
+            }
+        };
+        let _ = count;
+        Ok(Value::Number(0.0))
+    }
+
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
     /// assignment spelling. The write itself still goes through `set_computed` after the same
     /// descriptor probe used by `set_or_throw`, so setters and proxy traps run only once.
@@ -28211,6 +28624,9 @@ fn call_native(
         }
         Native::SetOperation(_) => {
             unreachable!("the set operations are dispatched by the interpreter")
+        }
+        Native::Atomics | Native::AtomicsOp(_) => {
+            unreachable!("the atomics operations are dispatched by the interpreter")
         }
         Native::ArrayCopy(_) => {
             unreachable!("the copying array methods are dispatched by the interpreter")
@@ -31096,6 +31512,58 @@ fn array_index(key: &Value) -> Option<usize> {
 fn canonical_index(name: &str) -> Option<usize> {
     let index: usize = name.parse().ok()?;
     (index.to_string() == name).then_some(index)
+}
+
+/// How long a wait with no limit is allowed to last before it reports a timeout.
+///
+/// See [`Vm::atomics_sleep`]: with one agent there is nothing that could ever end such a wait,
+/// so the choice is between a bound and hanging the process.
+const ATOMICS_UNBOUNDED_WAIT_MS: f64 = 100.0;
+
+/// `value` as the view's element type would hold it, wrapping the way a write does.
+///
+/// Atomic arithmetic is defined on the *stored* representation, so both operands are brought
+/// into it before they meet: without this, `Atomics.and(u8, 0, 257)` would and against 257
+/// rather than against the 1 the buffer would have held.
+fn narrow_element(kind: TypedKind, value: &Value) -> Value {
+    let mut slot = vec![0_u8; kind.width()];
+    kind.encode(value, &mut slot);
+    kind.decode(&slot)
+}
+
+/// What a read-modify-write leaves in the element it touched.
+///
+/// Both operands are narrowed first, so the bitwise operations see the two's-complement pattern
+/// the buffer holds rather than the number a program wrote; the result is narrowed again by the
+/// write itself, which is where an addition wraps.
+fn atomics_combine(kind: TypedKind, op: AtomicsOp, old: &Value, operand: &Value) -> Value {
+    let operand = narrow_element(kind, operand);
+    if let (Value::BigInt(old), Value::BigInt(operand)) = (old, &operand) {
+        let old = old.as_ref().clone();
+        let operand = operand.as_ref().clone();
+        return Value::BigInt(Rc::new(match op {
+            AtomicsOp::Add => old + operand,
+            AtomicsOp::Sub => old - operand,
+            AtomicsOp::And => old & operand,
+            AtomicsOp::Or => old | operand,
+            AtomicsOp::Xor => old ^ operand,
+            _ => operand,
+        }));
+    }
+    #[expect(clippy::cast_possible_truncation)]
+    let left = old.as_number() as i64;
+    #[expect(clippy::cast_possible_truncation)]
+    let right = operand.as_number() as i64;
+    #[expect(clippy::cast_precision_loss)]
+    let combined = match op {
+        AtomicsOp::Add => left.wrapping_add(right),
+        AtomicsOp::Sub => left.wrapping_sub(right),
+        AtomicsOp::And => left & right,
+        AtomicsOp::Or => left | right,
+        AtomicsOp::Xor => left ^ right,
+        _ => right,
+    } as f64;
+    Value::Number(combined)
 }
 
 /// A typed array integer index, accepting a numeric key or its canonical decimal spelling.
@@ -34469,6 +34937,9 @@ fn function_identity(value: &Value) -> Option<(String, f64)> {
     reason = "grouped by arity, not by implementation"
 )]
 const fn native_length(native: Native) -> Option<f64> {
+    if let Native::AtomicsOp(op) = native {
+        return Some(op.arity());
+    }
     use Native as N;
     Some(match native {
         // Not functions at all: internal markers that never reach a program, and the method
@@ -35479,6 +35950,23 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
             "unscopables",
         ],
         Value::Native(Native::IteratorConstructor) => &["from", "concat", "zip", "zipKeyed"],
+        Value::Native(Native::Atomics) => &[
+            "add",
+            "and",
+            "compareExchange",
+            "exchange",
+            "isLockFree",
+            "load",
+            "notify",
+            "or",
+            "pause",
+            "store",
+            "sub",
+            "wait",
+            "waitAsync",
+            "xor",
+            "@@toStringTag",
+        ],
         Value::Native(Native::Math) => &[
             "abs",
             "floor",
@@ -35915,6 +36403,7 @@ fn native_js_name(native: &Native) -> String {
         Native::IteratorZipReturn => "return".to_owned(),
         // The derivation strips a leading type name, which for these three takes a word that is
         // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
+        Native::AtomicsOp(op) => op.property_key().to_owned(),
         Native::WeakRefDeref => "deref".to_owned(),
         Native::DisposableStackUse => "use".to_owned(),
         Native::DisposableStackAdopt => "adopt".to_owned(),
@@ -35987,6 +36476,7 @@ const fn namespace_name(native: &Native) -> Option<&'static str> {
         Native::Intl(op) => intl::namespace_name(*op),
         Native::Temporal(op) => temporal::namespace_name(*op),
         Native::Reflect => Some("Reflect"),
+        Native::Atomics => Some("Atomics"),
         _ => None,
     }
 }
